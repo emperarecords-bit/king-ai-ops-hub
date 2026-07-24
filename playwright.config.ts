@@ -1,4 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
+import { config as loadEnv } from 'dotenv';
+
+// E2E credentials and APP_URL live in .env.local (never committed).
+loadEnv({ path: '.env.local' });
+loadEnv();
 
 const baseURL = process.env.APP_URL ?? 'http://localhost:3000';
 

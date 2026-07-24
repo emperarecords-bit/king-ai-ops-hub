@@ -2,13 +2,17 @@ import { expect, test } from '@playwright/test';
 
 /**
  * The Phase 1 critical flow: sign in → select project → submit a task → see it
- * stored with history. Provider execution is NOT exercised here (no live keys
- * in CI); the run path is covered by the engine unit tests with fakes.
+ * stored with history. Provider execution is NOT exercised here (creating a
+ * task never spends money; runs require the explicit start); the run path is
+ * covered by the engine unit tests with fakes and the golden transcripts.
  *
  * Requires:
  *  - dev server (playwright starts it via webServer)
  *  - Supabase env configured
- *  - a seeded account: E2E_EMAIL / E2E_PASSWORD (see README "E2E setup")
+ *  - E2E_EMAIL / E2E_PASSWORD in .env.local for a real auth account
+ *  - the seed run with E2E_EMAIL set, which creates the two sandbox
+ *    workspaces this spec uses (never the real ones) and a placeholder
+ *    profile that relinks to the auth account on its first sign-in
  */
 
 const email = process.env.E2E_EMAIL;
@@ -27,10 +31,10 @@ test.describe('critical flow', () => {
     // --- Project selector --------------------------------------------------
     await expect(page).toHaveURL(/\/projects/);
     await expect(page.getByText('Select a workspace')).toBeVisible();
-    await page.getByRole('link', { name: /AccurateBids/ }).click();
+    await page.getByRole('link', { name: /E2E Sandbox(?! B)/ }).click();
 
     // --- Dashboard ---------------------------------------------------------
-    await expect(page).toHaveURL(/\/p\/accuratebids/);
+    await expect(page).toHaveURL(/\/p\/e2e-sandbox/);
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
 
     // --- New task ----------------------------------------------------------
@@ -52,7 +56,7 @@ test.describe('critical flow', () => {
 
     // --- Isolation smoke: another workspace shows no trace of it -----------
     await page.goto('/projects');
-    await page.getByRole('link', { name: /KodiScan/ }).click();
+    await page.getByRole('link', { name: /E2E Sandbox B/ }).click();
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
     await expect(page.getByText(title)).toHaveCount(0);
   });
@@ -62,7 +66,7 @@ test.describe('critical flow', () => {
     await page.getByLabel('Email').fill(email!);
     await page.getByLabel('Password').fill(password!);
     await page.getByRole('button', { name: 'Sign in' }).click();
-    await page.getByRole('link', { name: /AccurateBids/ }).click();
+    await page.getByRole('link', { name: /E2E Sandbox(?! B)/ }).click();
     await page.getByRole('link', { name: 'Audit' }).click();
     await expect(page.getByRole('heading', { name: 'Audit log' })).toBeVisible();
     await expect(page.getByText('Append-only and hash-chained')).toBeVisible();

@@ -253,6 +253,79 @@ async function main() {
       .onConflictDoNothing();
   }
 
+  // E2E sandboxes: only when an E2E account is configured. Two workspaces so
+  // the isolation smoke has a second tenant; tiny budget; the E2E profile is
+  // a placeholder that upsertProfile relinks on the account's first sign-in.
+  const e2eEmail = process.env.E2E_EMAIL;
+  if (e2eEmail) {
+    console.log(`Seeding E2E sandboxes for ${e2eEmail}…`);
+    await db
+      .insert(schema.profiles)
+      .values({ id: randomUUID(), email: e2eEmail, displayName: 'E2E Test User' })
+      .onConflictDoNothing({ target: schema.profiles.email });
+    const e2eUser = (
+      await db.select().from(schema.profiles).where(eq(schema.profiles.email, e2eEmail)).limit(1)
+    )[0];
+    if (!e2eUser) throw new Error('Failed to upsert E2E profile.');
+
+    await db
+      .insert(schema.memberships)
+      .values({ orgId: org.id, userId: e2eUser.id, role: 'member' })
+      .onConflictDoNothing();
+
+    for (const sandbox of [
+      { key: 'e2e-sandbox', name: 'E2E Sandbox' },
+      { key: 'e2e-sandbox-b', name: 'E2E Sandbox B' },
+    ]) {
+      await db
+        .insert(schema.projects)
+        .values({
+          orgId: org.id,
+          key: sandbox.key,
+          name: sandbox.name,
+          description: 'Automated test workspace. Safe to clear.',
+        })
+        .onConflictDoNothing();
+      const proj = (
+        await db
+          .select()
+          .from(schema.projects)
+          .where(eq(schema.projects.key, sandbox.key))
+          .limit(1)
+      )[0];
+      if (!proj) throw new Error(`Failed to upsert ${sandbox.key}`);
+
+      for (const member of [e2eUser.id, owner.id]) {
+        await db
+          .insert(schema.projectMembers)
+          .values({ orgId: org.id, projectId: proj.id, userId: member, role: 'admin' })
+          .onConflictDoNothing();
+      }
+      await db
+        .insert(schema.spendLimits)
+        .values({ orgId: org.id, projectId: proj.id, monthlyLimitMicros: 5_000_000n }) // $5
+        .onConflictDoUpdate({
+          target: schema.spendLimits.projectId,
+          set: { monthlyLimitMicros: 5_000_000n, updatedAt: new Date() },
+        });
+      for (const agent of DEFAULT_AGENTS) {
+        await db
+          .insert(schema.agents)
+          .values({
+            orgId: org.id,
+            projectId: proj.id,
+            name: agent.name,
+            role: agent.role,
+            departmentId: engineering.id,
+            provider: agent.provider,
+            model: agent.model,
+            systemPrompt: agent.systemPrompt,
+          })
+          .onConflictDoNothing();
+      }
+    }
+  }
+
   console.log('Seed complete.');
   console.log(`Owner profile id: ${owner.id}`);
   if (!process.env.SEED_OWNER_ID) {
