@@ -20,6 +20,11 @@ const CONTEXT_SOURCE_LABEL: Record<ContextSource, string> = {
   retrieved: 'Retrieved by relevance',
   core_reference: 'Core reference (quota)',
   production_status: 'Production status',
+  objective_progress: 'Objective progress',
+  active_work: 'Active work',
+  blocker: 'Blockers',
+  recent_outcome: 'Recent outcomes',
+  pending_review: 'Pending reviews',
 };
 
 const SEVERITY_STYLE: Record<string, string> = {

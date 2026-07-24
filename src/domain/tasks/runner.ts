@@ -28,6 +28,7 @@ import {
   selectCoreReferences,
   selectProductionStatus,
 } from '@/domain/documents/documents';
+import { assembleProjectState } from '@/domain/state/project-state';
 import { writeAudit } from '@/domain/audit/audit';
 import { assertWithinBudget, recordUsage } from '@/domain/usage/usage';
 import { consumeRateLimit } from '@/domain/usage/rate-limit';
@@ -153,6 +154,13 @@ export async function startRun(
     coreRefs.forEach((c) => seen.add(c.relativePath));
     const productionStatus = await selectProductionStatus(tx, ctx, seen);
 
+    // Project State (O-15): operational Hub records for this workspace,
+    // preferring the attached objective. The current task is excluded from its
+    // own state. Tenant-scoped by the same I1 guard. Deduped by construction —
+    // these are Hub records, not documents, so they cannot collide with the
+    // document sources above.
+    const projectState = await assembleProjectState(tx, ctx, task.objectiveId, taskId);
+
     const contextItems = [
       ...knowledge,
       ...retrieved.map((r) => ({ title: `Document — ${r.relativePath}`, content: r.content })),
@@ -160,6 +168,7 @@ export async function startRun(
       ...(productionStatus
         ? [{ title: `Production status — ${productionStatus.relativePath}`, content: productionStatus.content }]
         : []),
+      ...(projectState.contextItem ? [projectState.contextItem] : []),
     ];
     const retrievedRefs: RetrievedDocRef[] = retrieved.map((r) => ({
       relativePath: r.relativePath,
@@ -184,6 +193,9 @@ export async function startRun(
       ...(productionStatus
         ? [{ source: 'production_status' as const, label: productionStatus.relativePath }]
         : []),
+      // Project State manifest entries (objective_progress / active_work /
+      // blocker / recent_outcome / pending_review) are already shaped.
+      ...projectState.manifest,
     ];
 
     const runInserted = await tx

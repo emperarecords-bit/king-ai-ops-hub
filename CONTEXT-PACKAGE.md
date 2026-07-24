@@ -22,18 +22,48 @@ of the whole assembly.
   interface, tenant isolation (I1), the approval gate. No embeddings, no
   vector search.
 
-## The five sources
+## The sources
 
 Assembled in `startRun` ([src/domain/tasks/runner.ts](src/domain/tasks/runner.ts)),
-in this order:
+in this order. Sources 1–5 are **documents & knowledge** (O-14); 6–10 are
+**operational state from Hub records** (O-15) — structured facts about work,
+never inferred from documents.
 
 | # | Source | Always? | Origin | How selected |
 |---|--------|---------|--------|--------------|
 | 1 | **Objective** | when the task has one | `loadObjectiveForRun` | The attached objective's title, description, open criteria — injected as owner intent (O-9). |
 | 2 | **Charter** | yes | `loadApprovedContext` | Every `active` knowledge item for the workspace (the auto-provisioned charter plus any curated knowledge). |
-| 3 | **Retrieved by relevance** | yes | `retrieveRelevant` (D-020) | Top-K task-specific chunks. **Unchanged by this sprint.** |
+| 3 | **Retrieved by relevance** | yes | `retrieveRelevant` (D-020) | Top-K task-specific chunks. **Unchanged.** |
 | 4 | **Core reference (quota)** | up to 2 | `selectCoreReferences` | Foundational docs by filename, in priority order, **deduped** against #3. |
 | 5 | **Production status** | if present | `selectProductionStatus` | The workspace's production-status doc, deduped against #3–4. |
+| 6 | **Objective progress** | when the task has an objective | `selectObjectiveProgress` | The objective's status, criteria-met count, and attached-task completion. |
+| 7 | **Active work** | if any | `selectRelatedTasks` | `running` + `pending` tasks, objective-attached first, bounded to 5. |
+| 8 | **Blockers** | if any | `selectRelatedTasks` | `failed` (with error) + `awaiting_approval` (blocked on a human) tasks, bounded to 5. |
+| 9 | **Recent outcomes** | if any | `selectRelatedTasks` | `completed` tasks with a **summarized** result (240 chars, never the full transcript), bounded to 5. |
+| 10 | **Pending reviews** | if any | `selectPendingReviews` | `pending` rows in `approvals`, bounded to 5. |
+
+### Operational-state model (O-15)
+
+No schema change — every field is derived from existing tables
+([src/domain/state/project-state.ts](src/domain/state/project-state.ts)):
+
+- A task's **operational class** comes from its `status`: `failed` /
+  `awaiting_approval` → *blocker*; `running` / `pending` → *active work*;
+  `completed` → *recent outcome*; `cancelled` → excluded.
+- **Owner** is the latest run's primary agent (employee); `unassigned` when no
+  run exists.
+- **Objective relationship** is `this objective` / `other objective` /
+  `unattached` from `tasks.objective_id`.
+- **Blocker detail** is the failed run's error, or "awaiting human approval".
+- **Outcome detail** is the run's consolidated result, whitespace-collapsed and
+  truncated — full transcripts are never injected.
+- **Priority** within bounds: blocked, then in-progress, then recently
+  completed, then pending; objective-attached preferred within each group.
+
+The five state sources are assembled into one **"Project state (Hub records)"**
+text block plus per-record manifest entries, so the model reads current
+structured status alongside the documents — and should not, for example,
+recommend building a tracker the Hub already maintains.
 
 ### Core-reference priority (deterministic)
 
@@ -85,16 +115,18 @@ panel falls back to it for pre-O-14 runs.
 ## Extending it (the point of writing this down)
 
 New context kinds slot in **without touching retrieval**: add a `ContextSource`
-value, a selector that returns chunks (tenant-scoped + `assertTenant`), a
-dedup step in the runner's assembly, a manifest mapping, and a panel label.
-Candidates already anticipated:
+value, a selector that returns records (tenant-scoped + tenancy re-assertion), a
+dedup/merge step in the runner's assembly, a manifest mapping, and a panel
+label. **Project state (O-15) was added exactly this way** — proof the pattern
+holds for non-document sources.
 
-- **Project state** — open objectives, at-risk milestones for the workspace.
-- **Task history** — prior runs on the same objective.
-- **Approvals** — pending decisions relevant to the task.
+Still anticipated, same shape:
 
-Each is a new source in the same shape; none requires a change to ranking,
-indexing, or the provider interface.
+- **Task history** — prior runs on the same objective, beyond the recent-outcome
+  summary (e.g. a decision timeline).
+- **Cross-objective dependencies** — blockers owned by another objective.
+
+None requires a change to ranking, indexing, or the provider interface.
 
 ## Related
 

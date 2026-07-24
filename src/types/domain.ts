@@ -120,6 +120,12 @@ export const CONTEXT_SOURCES = [
   'retrieved',
   'core_reference',
   'production_status',
+  // Project State (O-15): operational state from Hub records, not documents.
+  'objective_progress',
+  'active_work',
+  'blocker',
+  'recent_outcome',
+  'pending_review',
 ] as const;
 export type ContextSource = (typeof CONTEXT_SOURCES)[number];
 
