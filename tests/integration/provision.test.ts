@@ -81,7 +81,7 @@ afterAll(async () => {
 describe.skipIf(!available)('workspace provisioning', () => {
   it('stands up a fully staffed workspace in an existing org', async () => {
     const { projectKey } = await createWorkspace(ownerUser, {
-      name: 'Prov Test Workspace',
+      name: 'ZZ Fixture Prov Workspace',
       description: 'A test venture.',
     });
     const db = getDb();
@@ -117,12 +117,12 @@ describe.skipIf(!available)('workspace provisioning', () => {
   });
 
   it('key collisions get numbered suffixes', async () => {
-    const second = await createWorkspace(ownerUser, { name: 'Prov Test Workspace' });
-    expect(second.projectKey).toBe('prov-test-workspace-2');
+    const second = await createWorkspace(ownerUser, { name: 'ZZ Fixture Prov Workspace' });
+    expect(second.projectKey).toBe('zz-fixture-prov-workspace-2');
   });
 
   it('a brand-new user gets an org of their own, as owner, with departments', async () => {
-    const { projectKey } = await createWorkspace(freshUser, { name: 'My First Venture' });
+    const { projectKey } = await createWorkspace(freshUser, { name: 'ZZ Fixture First Venture' });
     const db = getDb();
     const m = await db
       .select({ orgId: memberships.orgId, role: memberships.role })

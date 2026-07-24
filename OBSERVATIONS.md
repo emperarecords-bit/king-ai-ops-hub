@@ -109,6 +109,61 @@ feel unfinished: the user cannot tell whether the save took effect. Deferred
 deliberately (Sprint 11 is validation, not polish) and recorded so it is
 fixed from evidence rather than taste.
 
+### O-7 · The observation system was lying, and the truth is more interesting
+
+**Observed.** With fixture workspaces excluded (O-3 fixed), the harvest lost
+most of its content — and what remained finally described reality. The
+corrections matter:
+
+| Reported before | Actually true |
+|---|---|
+| 6 pending approvals | **0** — all six were in legacy `insight-*` test fixtures |
+| 44 objectives created, 28 completed | **1 created, 1 completed** — the rest were fixtures |
+| 46 workspaces created | **1** |
+| 25 knowledge version events | **0 in real workspaces** |
+
+**Why it matters.** Every earlier claim about "what the owner does here" was
+measuring my test suite. Two prior reports carried those numbers. The lesson
+is not "fix the query" — it is that **an observation system needs its own
+correctness bar**, because a diagnostic that quietly measures the wrong
+population produces confident, wrong strategy. This is the first thing this
+sprint has proved, and it argues for the sprint's premise.
+
+### O-8 · The owner leaves immediately after getting a result
+
+**Observed.** Session reconstruction (30-minute gap = new session) over real
+workspaces only: 6 sessions, and **3 of them end at `run.completed`** — the
+single most common exit point. Sessions are short (0–36 min).
+
+**Why it matters.** This is the ChatGPT-substitution pattern, visible in
+data: *open the Hub → run one task → take the answer → leave.* Nothing pulls
+the user onward to approvals, objectives, or knowledge. Everything built
+after Sprint 5 — objectives, insights, briefing, knowledge — sits past the
+point where the session already ended.
+
+The executive question ("what makes someone open the Hub instead of
+ChatGPT?") now has a sharper form: **what happens in the 30 seconds after a
+result appears?** Today, nothing. That moment is the highest-leverage surface
+in the product and it is currently a dead end.
+
+### O-9 · Work happens here; planning happens elsewhere
+
+**Observed.** 14 of 15 real tasks have **no objective attached**. Meanwhile
+one objective exists, in a workspace where no tasks were run. The two halves
+of the product are being used by the same person in different places, and
+never together.
+
+**Why it matters.** The hierarchy (Objective → Task → Run) is the product's
+organizing idea, and in practice the owner enters at Task and never climbs.
+Either attaching work to an objective is too much friction at task-creation
+time, or objectives do not yet feel worth the ceremony. Both are fixable, but
+the fix must not be "require an objective" — that would push task creation
+out of the Hub entirely, which is the one workflow currently living here.
+
+**Also observed:** `partshunt-pro` holds an objective titled "general" with
+zero success criteria — created before D-017. Harmless, but it is the
+artifact of exactly the behavior D-017 now prevents.
+
 ---
 
 ## Open questions this file exists to answer
@@ -117,6 +172,26 @@ fixed from evidence rather than taste.
    real workspace — the thresholds are working as designed, staying silent.)
 2. What does the owner do repeatedly that the product makes hard?
 3. What does the owner do *outside* the Hub that should be inside it?
+   (First evidence: O-9 — planning. Objectives are created elsewhere, or not
+   at all.)
 4. Does "prepared while you were away" become a habit or wallpaper?
    (Untestable until standing work exists in a real workspace — currently
    zero.)
+5. **What should happen in the 30 seconds after a result appears?** (O-8.
+   Currently nothing, and it is where every session ends.)
+
+## Adoption baselines — 2026-07-24, first honest measurement
+
+The numbers future harvests should be compared against. All fixture-free.
+
+| Measure | Value |
+|---|---|
+| Real tasks, all time | 15 (14 unattached to any objective) |
+| Real completed runs | 11 reviewed · 0 unreviewed |
+| Real objectives | 1 created, 1 activated, 1 completed |
+| Standing work in real workspaces | 0 |
+| Insights fired, all time | 0 |
+| Sessions | 6 · median ~6 min · most common exit `run.completed` |
+| Pending approvals | 0 |
+| Total real spend | $0.26 |
+| Time saved (stated baselines, uncalibrated) | 5.3 h |

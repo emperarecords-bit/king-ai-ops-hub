@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
 import { AppError } from '@/lib/errors';
 import { getDb } from '@/db/client';
@@ -67,7 +68,7 @@ beforeAll(async () => {
   ]);
   const project = await db
     .insert(projects)
-    .values({ orgId, key: `stand-${randomUUID().slice(0, 8)}`, name: 'Standing Project' })
+    .values({ orgId, key: fixtureKey('stand'), name: 'Standing Project' })
     .returning({ id: projects.id });
   projectId = project[0]!.id;
   await db.insert(projectMembers).values([
