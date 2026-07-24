@@ -304,3 +304,50 @@ display name only.
 enforces against them. Recommend yes, with the change written to the audit
 log — the gate's value is that spending is deliberate, not that it is
 unchangeable.
+
+---
+
+### O-13 · RESOLVED — Episode 1 retrieval failure (root cause + live acceptance)
+
+**Reported.** The Creative Director could not find the Episode 1 script even
+though `2026-07-22_KingdomCore_S01E01_Screenplay.md` (16 chunks) was indexed
+and active.
+
+**Root cause.** Raw task text was passed to `websearch_to_tsquery`, producing
+an overly restrictive AND query (`review & episod & 1 & continu`) that
+returned zero chunks — no single chunk held all four stems, so nothing was
+retrieved or injected.
+
+**Fix (commit 0c5b868).** `expandDocumentQuery()` OR-joins lexemes and
+normalizes episode references (Episode 1 / Episode One / Ep 1 / E01 / S01E01 /
+Season 1 Episode 1 → the `s01e01` lexeme + `%S01E01%` filename pattern);
+`retrieveRelevant()` boosts episode-filename matches so an "Episode 1" request
+pulls the whole S01E01 material. No embeddings, no other retrieval changes.
+
+**Live acceptance (2026-07-24, kingdom-core owner, task verbatim "Review
+Episode 1 for continuity.", provider=both).** All criteria met:
+
+| Criterion | Result |
+|---|---|
+| S01E01 screenplay retrieved | ✅ chunks 0, 14, 15 (of 5 retrieved) |
+| Context injected into prompt | ✅ response cites SEED-A/B/C, 22:00 runtime, previz 21:59.96, Scene 3 |
+| Provenance in Documents Used | ✅ `runs.retrieved_documents` populated |
+| Real continuity review (not "provide the script") | ✅ detailed, specific to the material |
+| Workspace isolation | ✅ 5/5 retrieved docs scoped to kingdom-core |
+| No unrelated episode outranks E01 | ✅ 0 other-episode screenplays retrieved |
+
+Documents Used: S01E01_Screenplay ch0 (0.039), ch14 (0.036),
+S01E01_Storyboard_ShotList ch17 (0.033), S01E01_Screenplay ch15 (0.029),
+S01E01_SceneDump ch0 (0.025). Review step returned `revise`; one revision ran;
+consolidated normally.
+
+**Status: retrieval bug RESOLVED.** Per directive, no embeddings or further
+retrieval changes added.
+
+**One non-blocking observation (not a failure).** All 5 slots filled with
+S01E01-specific docs; broader Season-1 canon/character references
+(Character_Arc_Tracker, Dialogue_Bible) did not make the top 5 because the
+episode-filename boost prioritizes the referenced episode's own material. The
+hard acceptance criteria all pass; if canon breadth becomes desirable later,
+the lever is retrieval depth (raise K) or a small canon-doc quota — a future
+decision, deliberately not made now.
