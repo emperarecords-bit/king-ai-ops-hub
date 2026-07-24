@@ -15,6 +15,7 @@ import {
   setObjectiveStatus,
 } from '@/domain/objectives/objectives';
 import { listAssignableEmployees } from '@/domain/agents/agents';
+import { suggestSuccessCriteria } from '@/domain/objectives/suggest';
 import { createSchedule, setScheduleEnabled } from '@/domain/standing/standing';
 
 export interface ObjectiveFormState {
@@ -72,6 +73,37 @@ export async function submitObjective(
     return { error: toPublicMessage(err) };
   }
   redirect(`/p/${projectKey}/objectives/${objectiveId}`);
+}
+
+export interface SuggestionState {
+  suggestions: Array<{ label: string; target: number; unit: string }>;
+  error: string | null;
+}
+
+/**
+ * Proposes success criteria for the objective being drafted. The result is a
+ * SUGGESTION rendered into editable fields — nothing is stored until the
+ * human submits the form.
+ */
+export async function suggestCriteria(
+  _prev: SuggestionState,
+  formData: FormData,
+): Promise<SuggestionState> {
+  const projectKey = String(formData.get('projectKey') ?? '');
+  try {
+    const ctx = await requireTenant(projectKey);
+    const suggestions = await suggestSuccessCriteria(ctx, {
+      title: String(formData.get('title') ?? ''),
+      description: String(formData.get('description') ?? ''),
+    });
+    if (suggestions.length === 0) {
+      return { suggestions: [], error: 'No usable suggestions came back — write them yourself.' };
+    }
+    return { suggestions, error: null };
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('suggestCriteria failed', { err });
+    return { suggestions: [], error: toPublicMessage(err) };
+  }
 }
 
 export interface MutationState {

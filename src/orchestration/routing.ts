@@ -14,8 +14,14 @@ import { type ProviderId } from '@/types/provider';
  * or injected task content could escalate its own spend (SPRINT-03-PLAN §2.3).
  */
 
+/**
+ * Executive decision 2026-07-24: the flagship tier uses models whose pricing
+ * is verifiable on the vendor's public page. gpt-5.2 was delisted, so the
+ * OpenAI flagship moved to gpt-5.4 ($2.50/$15, verified). gpt-5.2 remains
+ * callable via per-agent configuration; it is simply not a platform default.
+ */
 const FLAGSHIP_MODELS: Readonly<Record<ProviderId, string>> = {
-  openai: 'gpt-5.2',
+  openai: 'gpt-5.4',
   anthropic: 'claude-opus-4-8',
 };
 

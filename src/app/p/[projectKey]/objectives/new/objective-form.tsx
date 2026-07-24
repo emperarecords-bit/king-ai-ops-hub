@@ -1,9 +1,15 @@
 'use client';
 
-import { useActionState, useState } from 'react';
-import { submitObjective, type ObjectiveFormState } from '../actions';
+import { useActionState, useRef, useState } from 'react';
+import {
+  submitObjective,
+  suggestCriteria,
+  type ObjectiveFormState,
+  type SuggestionState,
+} from '../actions';
 
 const initialState: ObjectiveFormState = { error: null };
+const initialSuggestions: SuggestionState = { suggestions: [], error: null };
 
 interface Option {
   id: string;
@@ -23,7 +29,17 @@ export function ObjectiveForm({
   employees: Option[];
 }) {
   const [state, formAction, pending] = useActionState(submitObjective, initialState);
+  const [suggestState, suggestAction, suggesting] = useActionState(
+    suggestCriteria,
+    initialSuggestions,
+  );
   const [criteriaRows, setCriteriaRows] = useState(1);
+  const titleRef = useRef<HTMLInputElement>(null);
+  const descriptionRef = useRef<HTMLTextAreaElement>(null);
+
+  // Suggestions are defaults in editable fields, never committed values.
+  const suggested = suggestState.suggestions;
+  const rowCount = Math.max(criteriaRows, suggested.length);
 
   return (
     <form action={formAction} className="space-y-5">
@@ -34,6 +50,7 @@ export function ObjectiveForm({
           What are you trying to achieve?
         </label>
         <input
+          ref={titleRef}
           id="title"
           name="title"
           required
@@ -47,41 +64,84 @@ export function ObjectiveForm({
         <label htmlFor="description" className="mb-1 block text-sm text-[var(--muted)]">
           Description (optional)
         </label>
-        <textarea id="description" name="description" rows={3} maxLength={4000} className={inputCls} />
+        <textarea
+          ref={descriptionRef}
+          id="description"
+          name="description"
+          rows={3}
+          maxLength={4000}
+          className={inputCls}
+        />
       </div>
 
       <fieldset>
         <legend className="mb-1 text-sm text-[var(--muted)]">
-          Success criteria — the objective cannot complete until each is met or explicitly waived
+          Success criteria — at least one is required to activate; the objective cannot complete
+          until each is met or explicitly waived
         </legend>
         <div className="space-y-2">
-          {Array.from({ length: criteriaRows }, (_, i) => (
-            <div key={i} className="grid grid-cols-[1fr_110px_90px] gap-2">
-              <input
-                name="criterionLabel"
-                maxLength={200}
-                placeholder={i === 0 ? 'e.g. "100 beta users signed up"' : 'Another criterion…'}
-                className={inputCls}
-              />
-              <input
-                name="criterionTarget"
-                type="number"
-                step="any"
-                placeholder="Target"
-                className={inputCls}
-              />
-              <input name="criterionUnit" maxLength={50} placeholder="Unit" className={inputCls} />
-              <input type="hidden" name="criterionMetric" value="" />
-            </div>
-          ))}
+          {Array.from({ length: rowCount }, (_, i) => {
+            const s = suggested[i];
+            return (
+              <div key={`${i}-${s?.label ?? ''}`} className="grid grid-cols-[1fr_110px_90px] gap-2">
+                <input
+                  name="criterionLabel"
+                  maxLength={200}
+                  defaultValue={s?.label ?? ''}
+                  placeholder={i === 0 ? 'e.g. "100 beta users signed up"' : 'Another criterion…'}
+                  className={inputCls}
+                />
+                <input
+                  name="criterionTarget"
+                  type="number"
+                  step="any"
+                  defaultValue={s?.target ?? ''}
+                  placeholder="Target"
+                  className={inputCls}
+                />
+                <input
+                  name="criterionUnit"
+                  maxLength={50}
+                  defaultValue={s?.unit ?? ''}
+                  placeholder="Unit"
+                  className={inputCls}
+                />
+                <input type="hidden" name="criterionMetric" value="" />
+              </div>
+            );
+          })}
         </div>
-        <button
-          type="button"
-          onClick={() => setCriteriaRows((n) => Math.min(n + 1, 20))}
-          className="mt-2 text-xs text-[var(--accent)] hover:underline"
-        >
-          + Add criterion
-        </button>
+        <div className="mt-2 flex items-center gap-4">
+          <button
+            type="button"
+            onClick={() => setCriteriaRows((n) => Math.min(n + 1, 20))}
+            className="text-xs text-[var(--accent)] hover:underline"
+          >
+            + Add criterion
+          </button>
+          <button
+            type="button"
+            disabled={suggesting}
+            onClick={() => {
+              const data = new FormData();
+              data.set('projectKey', projectKey);
+              data.set('title', titleRef.current?.value ?? '');
+              data.set('description', descriptionRef.current?.value ?? '');
+              suggestAction(data);
+            }}
+            className="text-xs text-[var(--accent)] hover:underline disabled:opacity-50"
+          >
+            {suggesting ? 'Thinking…' : 'Suggest criteria'}
+          </button>
+          {suggested.length > 0 ? (
+            <span className="text-xs text-[var(--muted)]">
+              Suggested — edit freely; nothing is saved until you create.
+            </span>
+          ) : null}
+        </div>
+        {suggestState.error ? (
+          <p className="mt-1 text-xs text-[var(--danger)]">{suggestState.error}</p>
+        ) : null}
       </fieldset>
 
       <div className="grid gap-4 sm:grid-cols-2">

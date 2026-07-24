@@ -39,10 +39,13 @@ test.describe('company knowledge', () => {
     await editor.fill('Version two supersedes it.');
     await item.getByRole('button', { name: 'Save version' }).click();
 
-    // The active item is now v2 with the new body...
+    // The active item is now v2 with the new body. Scoped to the rendered
+    // paragraph: the revise editor stays open after saving and still holds
+    // the same text, so an unscoped match finds two elements (noted as minor
+    // friction in OBSERVATIONS.md O-6).
     const revised = page.locator('li').filter({ hasText: title }).first();
     await expect(revised.getByText('v2')).toBeVisible();
-    await expect(page.getByText('Version two supersedes it.')).toBeVisible();
+    await expect(revised.locator('p', { hasText: 'Version two supersedes it.' })).toBeVisible();
 
     // ...and v1 is archived into history, not deleted and not still active.
     await expect(page.getByText('Version one of the rule.')).toHaveCount(0);

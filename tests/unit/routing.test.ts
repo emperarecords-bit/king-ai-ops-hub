@@ -8,13 +8,13 @@ describe('model tier routing (D-014)', () => {
   });
 
   it('flagship tier overrides to the flagship model per provider', () => {
-    expect(resolveModelForTier('flagship', 'openai', 'gpt-5.4-mini')).toBe('gpt-5.2');
+    expect(resolveModelForTier('flagship', 'openai', 'gpt-5.4-mini')).toBe('gpt-5.4');
     expect(resolveModelForTier('flagship', 'anthropic', 'claude-sonnet-5')).toBe('claude-opus-4-8');
   });
 
   it('flagship override ignores whatever the agent had configured', () => {
     // Even a mis-configured agent cannot escape the tier mapping.
-    expect(resolveModelForTier('flagship', 'openai', 'gpt-5.2')).toBe('gpt-5.2');
+    expect(resolveModelForTier('flagship', 'openai', 'gpt-5.4')).toBe('gpt-5.4');
     expect(resolveModelForTier('flagship', 'anthropic', 'claude-haiku-4-5-20251001')).toBe(
       'claude-opus-4-8',
     );

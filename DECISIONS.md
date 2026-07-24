@@ -292,3 +292,47 @@ form and employee profiles.
 
 **Revisit if.** Real usage shows single-employee objectives dominate so
 heavily that the sponsoring-department attribute is ceremony.
+
+---
+
+## D-017 — Activation requires a measurable definition of success
+
+**Decision.** (Executive, 2026-07-24.) An objective may be **created** with no
+success criteria, but it cannot become **active** without at least one. To
+keep the gate from becoming friction, the creation form offers AI-suggested
+criteria: the model proposes, the human edits, and nothing is stored until
+the human submits.
+
+**Why.** Real usage found the gap the tests could not: both objectives the
+owner created outside of tests had zero criteria, and one completed instantly
+(OBSERVATIONS.md O-1). The completion gate — the spine of the objectives
+model — is vacuous when there is nothing to satisfy. Drafting is allowed to
+be unfinished; committing the company to an objective is not.
+
+**Note on the suggester.** It is a proposal surface, not an authority: Zod-
+validated, standard-tier, budget-gated, consults only that workspace's
+knowledge, and stores nothing. A model helping write the definition of
+success never gets to *decide* the definition of success.
+
+**Revisit if.** Owners routinely create one throwaway criterion to satisfy
+the gate — that would mean the gate is being paid, not met, and the honest
+fix is a lighter object than an objective.
+
+---
+
+## D-018 — Platform defaults use models with verifiable public pricing
+
+**Decision.** (Executive, 2026-07-24.) The flagship tier moves to `gpt-5.4`
+($2.50/$15, verified). `gpt-5.2` remains callable through per-agent
+configuration but is no longer a platform default, because it was delisted
+from OpenAI's public pricing page and its rate can no longer be confirmed.
+
+**Why.** Cost accounting is a load-bearing feature here — budgets refuse
+runs, and insights reason about cost per outcome. A default whose price
+cannot be verified quietly corrupts all of it. Sprint 10's verification found
+the mini tier under-billed 3× and Sonnet over-billed 50%; the lesson
+generalizes: if we cannot check the price, we do not make it a default.
+
+**Revisit if.** A delisted model is the only one that can do a job. Then it
+becomes an explicit per-agent choice with an unverified-pricing warning,
+never a default.

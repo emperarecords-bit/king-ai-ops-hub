@@ -95,6 +95,19 @@ describe.skipIf(!available)('objective completion gate', () => {
     expect(detail.progress.percent).toBe(0);
   });
 
+  it('an objective with NO criteria cannot be activated (executive decision 2026-07-24)', async () => {
+    const bare = await withTenant(ctx, (tx) =>
+      createObjective(tx, ctx, { title: 'Vague ambition', successCriteria: [] }),
+    );
+    await expect(
+      withTenant(ctx, (tx) => setObjectiveStatus(tx, ctx, bare, 'active')),
+    ).rejects.toThrow(/at least one success criterion/i);
+
+    // Drafts may still EXIST without criteria — thinking can be unfinished.
+    const detail = await withTenant(ctx, (tx) => getObjective(tx, ctx, bare));
+    expect(detail.status).toBe('draft');
+  });
+
   it('cannot jump from draft to completed', async () => {
     await expect(
       withTenant(ctx, (tx) => setObjectiveStatus(tx, ctx, objectiveId, 'completed')),

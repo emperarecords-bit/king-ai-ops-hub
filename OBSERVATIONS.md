@@ -98,6 +98,17 @@ still count toward the briefing's "needs attention" and the harvest's
 friction signals *forever*. **Failure signals should age out** (e.g. 30-day
 window) or the dashboard slowly fills with settled history.
 
+### O-6 · The knowledge revise editor stays open after saving (minor friction)
+
+**Observed.** After saving a new version, the editor remains open holding the
+text just submitted, beside the newly rendered version. Found while writing
+the knowledge E2E — the duplicate text broke a strict locator.
+
+**Why it matters.** Small, but it is the kind of thing that makes a screen
+feel unfinished: the user cannot tell whether the save took effect. Deferred
+deliberately (Sprint 11 is validation, not polish) and recorded so it is
+fixed from evidence rather than taste.
+
 ---
 
 ## Open questions this file exists to answer

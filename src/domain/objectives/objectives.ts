@@ -319,6 +319,16 @@ export async function setObjectiveStatus(
     throw new ConflictError(`An objective cannot go from ${detail.status} to ${next}.`);
   }
 
+  // Executive decision 2026-07-24: activation requires a measurable
+  // definition of success. Drafts may exist without criteria — thinking is
+  // allowed to be unfinished — but an ACTIVE objective with nothing to
+  // satisfy makes the completion gate vacuous (OBSERVATIONS.md O-1).
+  if (next === 'active' && detail.successCriteria.length === 0) {
+    throw new ConflictError(
+      'An objective needs at least one success criterion before it can become active — otherwise "complete" means nothing. Add how you will know this succeeded.',
+    );
+  }
+
   // THE completion gate (SPRINT-03-PLAN §5.3): every criterion met or waived.
   if (next === 'completed') {
     const unmet = detail.successCriteria.filter((c) => c.status === 'unmet');
