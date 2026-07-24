@@ -14,6 +14,36 @@ export function LoginForm() {
 
   return (
     <form action={formAction} className="space-y-4">
+      {/* Segmented mode switch — sign-up must be discoverable at a glance,
+          not a footnote (Sprint 3 M3 UX fix; the owner missed the old link). */}
+      <div
+        role="tablist"
+        aria-label="Sign in or create account"
+        className="grid grid-cols-2 rounded-md border border-[var(--border)] p-1"
+      >
+        {(
+          [
+            ['sign-in', 'Sign in'],
+            ['sign-up', 'Create account'],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            role="tab"
+            aria-selected={mode === value}
+            onClick={() => setMode(value)}
+            className={
+              mode === value
+                ? 'rounded bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[#0b0e14]'
+                : 'rounded px-3 py-1.5 text-sm text-[var(--muted)] hover:text-[var(--foreground)]'
+            }
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       <div>
         <label htmlFor="email" className="mb-1 block text-sm text-[var(--muted)]">
           Email
@@ -54,14 +84,6 @@ export function LoginForm() {
         className="w-full rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#0b0e14] transition-colors hover:bg-[var(--accent-strong)] disabled:opacity-50"
       >
         {pending ? 'Working…' : mode === 'sign-in' ? 'Sign in' : 'Create account'}
-      </button>
-
-      <button
-        type="button"
-        onClick={() => setMode(mode === 'sign-in' ? 'sign-up' : 'sign-in')}
-        className="w-full text-center text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
-      >
-        {mode === 'sign-in' ? 'Need an account? Sign up' : 'Have an account? Sign in'}
       </button>
     </form>
   );

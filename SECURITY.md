@@ -176,5 +176,7 @@ screen; the old value is overwritten, never soft-deleted.
 
 ## 7. Reporting
 
-This is a single-owner system. If you find a flaw, open an issue titled
+This system is currently operated single-owner but designed multi-tenant (the
+schema, RLS policies, and adversary A3 all assume multiple users). If you find
+a flaw, open an issue titled
 `SECURITY:` and do not include a working exploit payload in the description.

@@ -4,13 +4,20 @@ import type { NextConfig } from 'next';
  * Content-Security-Policy.
  *
  * `'unsafe-inline'` on style-src is required by Next's inlined critical CSS.
- * script-src stays strict: no inline scripts, no eval, no third-party origins.
- * connect-src is 'self' only — the browser never talks to a model provider; all
- * provider traffic originates from the Node server.
+ * script-src: Next bootstraps hydration through inline scripts, so a bare
+ * 'self' silently kills ALL client-side JS (React never hydrates; the app
+ * degrades to no-JS form fallbacks — found live in Sprint 3 M3). Development
+ * therefore allows inline/eval (eval is also needed by HMR source maps).
+ * Production must switch to nonce-based CSP before any deployment — tracked
+ * as a deployment blocker alongside the others in decision #9; still
+ * third-party-free either way. connect-src stays 'self': the browser never
+ * talks to a model provider; all provider traffic originates from the server.
  */
+const isDev = process.env.NODE_ENV !== 'production';
+
 const csp = [
   "default-src 'self'",
-  "script-src 'self'",
+  isDev ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'" : "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",

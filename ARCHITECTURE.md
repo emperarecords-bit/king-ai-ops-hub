@@ -21,7 +21,7 @@ answerable to them.
 |---|-----------|-------------|
 | I1 | No data crosses a project boundary — context, messages, artifacts, secrets, memory | `TenantContext` required on every repository call + Postgres RLS |
 | I2 | Provider API keys never reach the browser | Keys read only in `src/lib/env.server.ts`, which throws if imported client-side; `server-only` guard |
-| I3 | Model output is untrusted input | All model output parsed through Zod before it can influence control flow; rendered as text, never as HTML |
+| I3 | Model output is untrusted input | Any structured model output is validated against a strict schema or protocol (Zod for action proposals and review issues; a fail-safe protocol line for verdicts) before it can influence control flow; rendered as text, never as HTML |
 | I4 | No consequential action executes without human approval | `approvals` table + `requiresApproval()` policy gate; the executor refuses any action lacking an `approved` record |
 | I5 | Agent loops are bounded | Orchestration engine is a fixed-length state machine (max 4 steps), not a while-loop |
 | I6 | The audit trail cannot be altered | Append-only table, `UPDATE`/`DELETE` blocked by trigger, hash-chained rows |
@@ -132,7 +132,7 @@ export interface AIProvider {
   readonly id: ProviderId;                       // 'openai' | 'anthropic'
   execute(request: AgentRequest): Promise<AgentResponse>;
   stream?(request: AgentRequest): AsyncIterable<AgentEvent>;
-  estimateCost?(usage: TokenUsage): Money;
+  estimateCost?(model: string, usage: TokenUsage): Money;
   listModels(): readonly ModelDescriptor[];
 }
 ```

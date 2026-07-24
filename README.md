@@ -29,9 +29,10 @@ not a conversation loop. See [ARCHITECTURE.md](ARCHITECTURE.md) §6.
 
 ## Stack
 
-Next.js 16 · TypeScript 5.9 (strict) · PostgreSQL 17 · Supabase Auth ·
-Drizzle ORM · Zod 4 · OpenAI SDK v6 · Anthropic SDK · Vitest 4 · Playwright ·
-Tailwind 4 · Docker for local Postgres.
+Next.js 16 · TypeScript 5.9 (strict) · PostgreSQL 17 (`postgres` driver) ·
+Supabase Auth · Drizzle ORM · Zod 4 · OpenAI SDK v6 · Anthropic SDK ·
+Vitest 4 · Playwright · Tailwind 4 · `server-only` guards · Docker for local
+Postgres.
 
 ## Local setup
 

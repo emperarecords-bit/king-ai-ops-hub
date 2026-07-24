@@ -126,7 +126,9 @@ a pending approval; never an executed action.
 
 ## Deliberately not planned
 
-- Autonomous background agents with no human in the loop
+- Autonomous agents that take or select consequential actions without a human
+  in the loop (scheduled *read-only* reporting agents, e.g. a cost auditor,
+  are compatible with this exclusion)
 - Any workflow where a model's output selects the next model call without a bound
 - Shared context across projects, in any form, including "just for search"
 

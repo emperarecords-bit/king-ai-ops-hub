@@ -259,3 +259,36 @@ content could escalate its own spend.
 
 **Revisit if.** More than two tiers earn their keep (e.g., a "budget" Haiku
 tier), or per-department default tiers arrive with the Departments UI.
+
+---
+
+## D-015 — The platform presents as an AI workforce; employees are agents enriched, not replaced
+
+**Decision.** (Executive direction + design review, 2026-07-24 — see
+[DESIGN-REVIEW-WORKFORCE.md](DESIGN-REVIEW-WORKFORCE.md).) The product
+presents itself as an AI workforce management platform: users assign work to
+**employees** organized in **departments**; providers and models are
+implementation details resolved per employee. Physically, employees are the
+existing `agents` table progressively enriched (title, department,
+responsibilities, reporting line — additive columns); the engine, providers,
+tenancy, approvals, and audit are unchanged. **Department → Employee is an
+assignment dimension across the objective hierarchy**
+(`Company → Project → Objective → Milestone → Task → Run`), not a containment
+level within it: tasks get an assigned employee, objectives get a sponsoring
+department and accountable employee as attributes, never parents.
+
+**Why.** Cross-functional objectives are the norm ("launch the beta" spans
+Engineering, Marketing, Finance); strict containment would fragment them into
+per-employee shards or force ownership fictions. The assignment-dimension
+reading keeps OBJECTIVES.md's schema verbatim and matches how the
+organizations this models actually operate. Renaming `agents` at the DB level
+was rejected: the word "employee" is a presentation concern, and a table
+rename buys migration risk with zero behavior.
+
+**Consequences.** Sprint 3 M4 ships `departments` as an org-scoped reference
+table (not an enum); ONBOARDING.md is written in workforce vocabulary; a
+dedicated Workforce UX sprint (Phase 2.75) delivers the assignee-first task
+form and employee profiles.
+
+**Revisit if.** Real usage shows single-employee objectives dominate so
+heavily that the sponsoring-department attribute is ceremony.
