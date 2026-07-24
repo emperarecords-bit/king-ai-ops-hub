@@ -336,3 +336,37 @@ generalizes: if we cannot check the price, we do not make it a default.
 **Revisit if.** A delisted model is the only one that can do a job. Then it
 becomes an explicit per-agent choice with an unverified-pricing warning,
 never a default.
+
+---
+
+## D-019 — Behavioral continuation is the primary product metric
+
+**Decision.** (Executive, 2026-07-24.) The platform's success measure is no
+longer capability delivered or work executed. It is **the share of work that
+naturally stays inside the Hub** — measured by session length, whether a
+session completes its workflow here, why sessions end, and which offered
+follow-up actions get accepted rather than ignored. These outrank task
+counts, run counts, and API spend as roadmap inputs.
+
+The primary product question becomes: **how does finishing one task become
+the start of the next workflow?** Not "what capability is missing."
+
+**Why.** O-8 measured it: sessions are short and the most common exit point
+is `run.completed` — the user takes the answer and leaves. Everything built
+after Sprint 5 (objectives, briefing, insights, knowledge) sits *past* the
+moment the session already ended. Capability added beyond that point cannot
+be reached, so capability is no longer the constraint; continuation is.
+
+**Engineering consequence — instrument the feature, not the aftermath.**
+"Which follow-up actions are accepted or ignored" is unmeasurable today
+because no follow-up is ever offered. When Sprint 12 builds that surface,
+each suggestion must record that it was *shown*, not only that it was taken
+— an acceptance rate without a denominator is the same class of error as
+O-7, where the observation system confidently measured the wrong population.
+A follow-up feature that ships without its own denominator is incomplete.
+
+**Revisit if.** Sessions lengthen but outcomes do not improve. Time-in-app is
+a proxy, and a proxy optimized directly becomes a target worth gaming — the
+Hub should end a session quickly when the work is genuinely done. The
+measure that survives that failure mode is *workflow completion inside the
+Hub*, not raw duration.

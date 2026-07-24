@@ -238,6 +238,65 @@ async function main() {
     for (const e of exits) console.log(`    ${String(e.action).padEnd(28)} ${e.n}`);
   }
 
+  section('ADOPTION: DID THE SESSION FINISH ITS WORK HERE? (D-019)');
+  // The primary metric per D-019. A session ended CONTINUING if its last
+  // action closes a loop (a decision made, an objective advanced, knowledge
+  // captured); it ended ABANDONED if it stopped at a delivered result with
+  // nothing done about it. The distinction is the product question: does
+  // finishing one task start the next workflow?
+  const TERMINAL_GOOD = [
+    'approval.decided',
+    'objective.completed',
+    'objective.criterion_met',
+    'objective.criterion_waived',
+    'milestone.status_changed',
+    'knowledge.created_active',
+    'knowledge.activated',
+    'knowledge.version_created',
+    'standing_work.created',
+  ];
+  const ABANDONED_AT = ['run.completed', 'run.failed', 'task.created', 'run.started'];
+  const quality = await sql`
+    with acts as (
+      select a.created_at, a.action,
+             lag(a.created_at) over (order by a.created_at) as prev
+      from audit_logs a
+      left join projects p on p.id = a.project_id
+      where a.project_id is null or ${NOT_FIXTURE}
+    ),
+    marked as (
+      select *, case when prev is null or created_at - prev > interval '30 minutes'
+                     then 1 else 0 end as is_new from acts
+    ),
+    numbered as (select *, sum(is_new) over (order by created_at) as session_id from marked),
+    sessions as (
+      select session_id,
+             count(*) as actions,
+             extract(epoch from (max(created_at) - min(created_at))) / 60.0 as minutes,
+             (array_agg(action order by created_at desc))[1] as last_action
+      from numbered group by session_id
+    )
+    select count(*) as total,
+           count(*) filter (where last_action = any(${sql.array(TERMINAL_GOOD)})) as continued,
+           count(*) filter (where last_action = any(${sql.array(ABANDONED_AT)})) as abandoned,
+           round(avg(minutes)::numeric, 1) as avg_minutes,
+           round((percentile_cont(0.5) within group (order by minutes))::numeric, 1) as median_minutes,
+           round(avg(actions)::numeric, 1) as avg_actions
+    from sessions`;
+  const q = quality[0]!;
+  const total = Number(q.total);
+  const continued = Number(q.continued);
+  const abandoned = Number(q.abandoned);
+  const pct = (n: number) => (total > 0 ? `${Math.round((n / total) * 100)}%` : 'n/a');
+  console.log(`  sessions:               ${total}`);
+  console.log(`  finished work here:     ${continued} (${pct(continued)})   ← the number that matters`);
+  console.log(`  left at a result:       ${abandoned} (${pct(abandoned)})`);
+  console.log(`  length:                 median ${q.median_minutes ?? 0} min · avg ${q.avg_minutes ?? 0} min`);
+  console.log(`  actions per session:    ${q.avg_actions ?? 0}`);
+  console.log(
+    `\n  Follow-up acceptance is NOT measurable yet: nothing is offered after a\n  result, so there is no denominator. Whatever Sprint 12 builds there must\n  record that a suggestion was SHOWN, not only that it was taken (D-019).`,
+  );
+
   section('ADOPTION: WHICH WORKFLOWS ESCAPE THE HUB?');
   // Each row is a place where a workflow STARTED here and finished somewhere
   // else — or never finished at all. That gap is the product question.
