@@ -39,6 +39,12 @@ export async function middleware(request: NextRequest) {
   const isPublic = pathname === '/login' || pathname.startsWith('/auth');
 
   if (!user && !isPublic) {
+    // API callers get a JSON 401 (a login-page redirect would arrive as a 200
+    // HTML body to a fetch() and mask the real condition). Route handlers
+    // still run requireTenant — this is presentation, not the security gate.
+    if (pathname.startsWith('/api/')) {
+      return Response.json({ error: 'Not signed in.' }, { status: 401 });
+    }
     const redirect = request.nextUrl.clone();
     redirect.pathname = '/login';
     redirect.search = '';

@@ -69,6 +69,12 @@ export interface StepRecord {
 export interface RunSink {
   onStep(record: StepRecord): Promise<void>;
   onMalformedOutput(stepNumber: number, reasons: readonly string[]): Promise<void>;
+  /**
+   * Live text deltas for the step currently executing. Optional: when present
+   * AND the provider implements stream(), calls stream; otherwise execute().
+   * Purely observational — the run's stored results never depend on it.
+   */
+  onDelta?(kind: StepKind, text: string): void;
 }
 
 export interface EngineResult {
@@ -98,6 +104,7 @@ async function callWithRetry(
   system: string,
   perCallTimeoutMs: number,
   deadline: number,
+  onDelta?: (text: string) => void,
 ): Promise<AgentResponse> {
   let lastError: ProviderError | null = null;
 
@@ -114,7 +121,30 @@ async function callWithRetry(
       maxOutputTokens: agent.maxOutputTokens,
       timeoutMs: Math.min(perCallTimeoutMs, budget),
     };
+    // Track whether THIS attempt already surfaced text to the observer: a
+    // retry after visible partial output would duplicate it downstream, so a
+    // mid-stream failure is terminal even for retryable error kinds.
+    let emitted = false;
     try {
+      if (onDelta && agent.provider.stream) {
+        let response: AgentResponse | null = null;
+        for await (const event of agent.provider.stream(request)) {
+          if (event.kind === 'delta') {
+            emitted = true;
+            onDelta(event.text);
+          } else {
+            response = event.response;
+          }
+        }
+        if (!response) {
+          throw new ProviderError(
+            agent.provider.id,
+            'unknown',
+            'Stream ended without a final response.',
+          );
+        }
+        return response;
+      }
       return await agent.provider.execute(request);
     } catch (err) {
       const providerError =
@@ -126,7 +156,7 @@ async function callWithRetry(
               err instanceof Error ? err.message : 'Unknown provider failure.',
             );
       lastError = providerError;
-      if (!providerError.retryable || attempt === MAX_RETRIES_PER_CALL) {
+      if (emitted || !providerError.retryable || attempt === MAX_RETRIES_PER_CALL) {
         throw providerError;
       }
       const backoff = Math.min(2 ** attempt * 1_000, 8_000) * (0.5 + Math.random() * 0.5);
@@ -203,6 +233,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
       primarySystem,
       input.perCallTimeoutMs,
       input.runDeadline,
+      sink.onDelta && ((text) => sink.onDelta!('primary', text)),
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Primary call failed.';
@@ -250,6 +281,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
         reviewSystem,
         input.perCallTimeoutMs,
         input.runDeadline,
+        sink.onDelta && ((text) => sink.onDelta!('review', text)),
       );
       const parsedReview = parseReviewDetail(reviewResponse.text);
       verdict = parsedReview.detail.verdict;
@@ -296,6 +328,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
           primarySystem,
           input.perCallTimeoutMs,
           input.runDeadline,
+          sink.onDelta && ((text) => sink.onDelta!('revision', text)),
         );
         await record({
           kind: 'revision',

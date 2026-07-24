@@ -14,7 +14,7 @@ import {
   type StepRecord,
 } from '@/orchestration/engine';
 import { resolveModelForTier } from '@/orchestration/routing';
-import { type ModelTier } from '@/types/domain';
+import { type ModelTier, type StepKind } from '@/types/domain';
 import { findAgentForRole, type AgentRow } from '@/domain/agents/agents';
 import { loadApprovedContext } from '@/domain/projects/context';
 import { writeAudit } from '@/domain/audit/audit';
@@ -44,6 +44,16 @@ export interface RunOutcome {
   readonly failureReason: string | null;
 }
 
+/**
+ * Optional live observers for a run in progress (SSE). Observational only:
+ * nothing persisted depends on them, and a disconnected observer never fails
+ * the run — callbacks are fire-and-forget.
+ */
+export interface RunLiveEvents {
+  delta?(kind: StepKind, text: string): void;
+  step?(record: StepRecord): void;
+}
+
 function toEngineAgent(row: AgentRow, tier: ModelTier): EngineAgent {
   return {
     agentId: row.id,
@@ -71,7 +81,11 @@ export function resolveProviderPair(selection: 'openai' | 'anthropic' | 'both', 
   };
 }
 
-export async function startRun(ctx: TenantContext, taskId: string): Promise<RunOutcome> {
+export async function startRun(
+  ctx: TenantContext,
+  taskId: string,
+  live?: RunLiveEvents,
+): Promise<RunOutcome> {
   const env = serverEnv();
 
   // ---- Preflight, one transaction -----------------------------------------
@@ -218,6 +232,13 @@ export async function startRun(ctx: TenantContext, taskId: string): Promise<RunO
         });
       }
     });
+    // Notify AFTER the step is durably persisted; observer errors are the
+    // observer's problem, never the run's.
+    try {
+      live?.step?.(record);
+    } catch {
+      /* observational only */
+    }
   };
 
   const persistMalformed = async (stepNumber: number, reasons: readonly string[]): Promise<void> => {
@@ -240,7 +261,19 @@ export async function startRun(ctx: TenantContext, taskId: string): Promise<RunO
       perCallTimeoutMs: env.PROVIDER_TIMEOUT_MS,
       runDeadline: Date.now() + env.RUN_TIMEOUT_MS,
     },
-    { onStep: persistStep, onMalformedOutput: persistMalformed },
+    {
+      onStep: persistStep,
+      onMalformedOutput: persistMalformed,
+      onDelta: live?.delta
+        ? (kind, text) => {
+            try {
+              live.delta!(kind, text);
+            } catch {
+              /* observational only */
+            }
+          }
+        : undefined,
+    },
   );
 
   // ---- Finalize ------------------------------------------------------------

@@ -1,5 +1,6 @@
 import Anthropic, { APIError } from '@anthropic-ai/sdk';
 import {
+  type AgentEvent,
   type AgentRequest,
   type AgentResponse,
   type AIProvider,
@@ -55,6 +56,22 @@ export class AnthropicProvider implements AIProvider {
     }
   }
 
+  private baseParams(request: AgentRequest, withTemperature: boolean) {
+    return {
+      model: request.model,
+      system: request.system,
+      messages: request.turns.map((t) => ({ role: t.role, content: t.content })),
+      ...(withTemperature ? { temperature: request.temperature } : {}),
+      max_tokens: request.maxOutputTokens,
+    };
+  }
+
+  private isTemperatureDeprecated(err: unknown): boolean {
+    return (
+      err instanceof APIError && err.status === 400 && /temperature.*deprecated/i.test(err.message)
+    );
+  }
+
   /**
    * Sends the request, omitting `temperature` for models known to reject it.
    * On the first "temperature is deprecated" 400 for a model, records the
@@ -63,18 +80,8 @@ export class AnthropicProvider implements AIProvider {
   private async createMessage(request: AgentRequest): Promise<Anthropic.Message> {
     const send = (withTemperature: boolean) =>
       this.client.messages.create(
-        {
-          model: request.model,
-          system: request.system,
-          messages: request.turns.map((t) => ({ role: t.role, content: t.content })),
-          ...(withTemperature ? { temperature: request.temperature } : {}),
-          max_tokens: request.maxOutputTokens,
-          stream: false,
-        },
-        {
-          timeout: request.timeoutMs,
-          signal: request.signal,
-        },
+        { ...this.baseParams(request, withTemperature), stream: false },
+        { timeout: request.timeoutMs, signal: request.signal },
       );
 
     if (this.noTemperatureModels.has(request.model)) {
@@ -83,15 +90,76 @@ export class AnthropicProvider implements AIProvider {
     try {
       return await send(true);
     } catch (err) {
-      if (
-        err instanceof APIError &&
-        err.status === 400 &&
-        /temperature.*deprecated/i.test(err.message)
-      ) {
+      if (this.isTemperatureDeprecated(err)) {
         this.noTemperatureModels.add(request.model);
         return send(false);
       }
       throw err;
+    }
+  }
+
+  /**
+   * Streaming variant: yields text deltas, then exactly one 'done' event whose
+   * response matches what execute() would have returned. Usage comes from
+   * message_start (input) and message_delta (output) events.
+   */
+  async *stream(request: AgentRequest): AsyncIterable<AgentEvent> {
+    const startedAt = Date.now();
+    try {
+      const open = (withTemperature: boolean) =>
+        this.client.messages.create(
+          { ...this.baseParams(request, withTemperature), stream: true },
+          { timeout: request.timeoutMs, signal: request.signal },
+        );
+
+      let stream: Awaited<ReturnType<typeof open>>;
+      if (this.noTemperatureModels.has(request.model)) {
+        stream = await open(false);
+      } else {
+        try {
+          stream = await open(true);
+        } catch (err) {
+          if (this.isTemperatureDeprecated(err)) {
+            this.noTemperatureModels.add(request.model);
+            stream = await open(false);
+          } else {
+            throw err;
+          }
+        }
+      }
+
+      let text = '';
+      let model = request.model;
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let stopReason = 'unknown';
+
+      for await (const event of stream) {
+        if (event.type === 'message_start') {
+          model = event.message.model;
+          inputTokens = event.message.usage.input_tokens;
+        } else if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+          text += event.delta.text;
+          yield { kind: 'delta', text: event.delta.text };
+        } else if (event.type === 'message_delta') {
+          outputTokens = event.usage.output_tokens;
+          if (event.delta.stop_reason) stopReason = event.delta.stop_reason.toLowerCase();
+        }
+      }
+
+      yield {
+        kind: 'done',
+        response: {
+          provider: 'anthropic',
+          model,
+          text,
+          usage: { inputTokens, outputTokens },
+          stopReason,
+          latencyMs: Date.now() - startedAt,
+        },
+      };
+    } catch (err) {
+      throw this.mapError(err);
     }
   }
 
