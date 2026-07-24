@@ -9,7 +9,14 @@ import { type TenantContext } from '@/types/domain';
 import { getDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { memberships, organizations, profiles, projectMembers, projects } from '@/db/schema';
-import { chunkText, linkFolder, refreshIndex, retrieveRelevant } from '@/domain/documents/documents';
+import {
+  chunkText,
+  linkFolder,
+  refreshIndex,
+  retrieveRelevant,
+  selectCoreReferences,
+  selectProductionStatus,
+} from '@/domain/documents/documents';
 
 /**
  * Project Folder ingestion + retrieval (D-020). The test that matters most is
@@ -141,6 +148,47 @@ describe.skipIf(!available)('project folder', () => {
       retrieveRelevant(tx, ctxB, 'kubernetes deployment replicas', 5),
     );
     expect(ownHits[0]?.relativePath).toBe('infra.md');
+  });
+
+  it('O-14: core-reference quota picks Character + Story Bible, deduped, by priority', async () => {
+    const folder = await mkdtemp(join(tmpdir(), 'kaoh-docs-core-'));
+    try {
+      await writeFile(join(folder, 'Character_Bible.md'), 'The cast and their canonical traits.');
+      await writeFile(join(folder, 'Season1_Story_Bible.md'), 'The season arc and world rules.');
+      await writeFile(join(folder, 'Dialogue_Bible.md'), 'How each character speaks.');
+      await writeFile(join(folder, 'Season1_Production_Status.md'), 'Episodes 1-3 locked; 4 in review.');
+      const ctxD = await makeWorkspace(ctxA.userId);
+      await withTenant(ctxD, (tx) => linkFolder(tx, ctxD, folder));
+      await withTenant(ctxD, (tx) => refreshIndex(tx, ctxD));
+
+      // Nothing excluded: quota of 2 → Character Bible then Story Bible (priority).
+      const core = await withTenant(ctxD, (tx) =>
+        selectCoreReferences(tx, ctxD, new Set(), 2),
+      );
+      expect(core.map((c) => c.relativePath)).toEqual(['Character_Bible.md', 'Season1_Story_Bible.md']);
+      expect(core[0]!.coreType).toBe('Character Bible');
+
+      // Dedup: if the Character Bible was already retrieved, the quota skips it
+      // and moves to the next priority.
+      const deduped = await withTenant(ctxD, (tx) =>
+        selectCoreReferences(tx, ctxD, new Set(['Character_Bible.md']), 2),
+      );
+      expect(deduped.map((c) => c.relativePath)).not.toContain('Character_Bible.md');
+      expect(deduped[0]!.relativePath).toBe('Season1_Story_Bible.md');
+
+      // Production status is found by its specific pattern.
+      const prod = await withTenant(ctxD, (tx) => selectProductionStatus(tx, ctxD, new Set()));
+      expect(prod?.relativePath).toBe('Season1_Production_Status.md');
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
+  });
+
+  it('O-14 ISOLATION: core-reference quota never crosses workspaces', async () => {
+    // Workspace A has the pricing/coffee docs (no bibles). Ask A for core refs;
+    // it must not surface any workspace built with bible files.
+    const core = await withTenant(ctxA, (tx) => selectCoreReferences(tx, ctxA, new Set(), 2));
+    expect(core).toEqual([]);
   });
 
   it('REGRESSION: the Episode 1 retrieval failure is fixed', async () => {

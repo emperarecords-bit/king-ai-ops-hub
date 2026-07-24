@@ -10,7 +10,12 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { type RetrievedDocRef, type ReviewDetail, type SuccessCriterion } from '@/types/domain';
+import {
+  type ContextManifestEntry,
+  type RetrievedDocRef,
+  type ReviewDetail,
+  type SuccessCriterion,
+} from '@/types/domain';
 import {
   actionTypeEnum,
   agentRoleEnum,
@@ -536,6 +541,8 @@ export const runs = pgTable(
     consolidatedResult: text('consolidated_result'),
     /** Project-folder chunks retrieved for this run (D-020 transparency). */
     retrievedDocuments: jsonb('retrieved_documents').$type<RetrievedDocRef[]>(),
+    /** The full assembled context package, grouped by why each part was included (O-14). */
+    contextManifest: jsonb('context_manifest').$type<ContextManifestEntry[]>(),
     errorMessage: text('error_message'),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp('finished_at', { withTimezone: true }),

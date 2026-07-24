@@ -449,6 +449,150 @@ export async function retrieveRelevant(
   }));
 }
 
+/**
+ * Foundational workspace references, in priority order (O-14). Filename
+ * regexes are deterministic and explainable — no embeddings. The core quota
+ * reserves 1–2 of these so an "Episode 1" retrieval that fills every slot with
+ * episode-specific docs still carries the canon the review should honour.
+ */
+export const CORE_REFERENCE_TYPES: ReadonlyArray<{ name: string; test: RegExp }> = [
+  { name: 'Character Bible', test: /character[ _-]?bible/i },
+  { name: 'Story Bible', test: /story[ _-]?bible/i },
+  { name: 'Dialogue Bible', test: /dialogue[ _-]?bible/i },
+  { name: 'Character Arc Tracker', test: /character[ _-]?arc[ _-]?tracker/i },
+];
+// POSIX alternation for the DB pre-filter; JS RegExps above assign priority.
+const CORE_REFERENCE_POSIX =
+  '(character[ _-]?bible|story[ _-]?bible|dialogue[ _-]?bible|character[ _-]?arc[ _-]?tracker)';
+// Specific on purpose: matches "Season1_Production_Status", not an unrelated
+// "...event-as-status" file that merely ends in "status".
+const PRODUCTION_STATUS_POSIX = 'production[ _-]?status';
+
+export interface CoreReferenceChunk extends RetrievedChunk {
+  /** Which foundational type this is, for the manifest detail. */
+  coreType: string;
+}
+
+function coreTypeOf(relativePath: string): string {
+  return CORE_REFERENCE_TYPES.find((t) => t.test.test(relativePath))?.name ?? 'Core reference';
+}
+
+/** Shared tenancy re-assertion for the prompt-feeding document reads (I1). */
+function assertTenant(
+  rows: ReadonlyArray<{ orgId: string; projectId: string }>,
+  ctx: TenantContext,
+  where: string,
+): void {
+  for (const r of rows) {
+    if (r.projectId !== ctx.projectId || r.orgId !== ctx.orgId) {
+      log.error(`TENANT VIOLATION in ${where}`, {
+        expectedProject: ctx.projectId,
+        gotProject: r.projectId,
+      });
+      throw new TenantViolationError(
+        `Document chunk from project ${r.projectId} surfaced for ${ctx.projectId}`,
+      );
+    }
+  }
+}
+
+/**
+ * Selects up to `limit` foundational reference documents NOT already present
+ * in the retrieved set (dedup, requirement #3). One representative chunk
+ * (chunk 0, the overview) per document. Deterministic: ordered by the priority
+ * of CORE_REFERENCE_TYPES, then path. Tenant-scoped + I1 re-assertion.
+ */
+export async function selectCoreReferences(
+  tx: DbTx,
+  ctx: TenantContext,
+  exclude: ReadonlySet<string>,
+  limit = 2,
+): Promise<CoreReferenceChunk[]> {
+  const rows = await tx
+    .select({
+      documentId: documentChunks.documentId,
+      relativePath: documents.relativePath,
+      chunkIndex: documentChunks.chunkIndex,
+      content: documentChunks.content,
+      orgId: documentChunks.orgId,
+      projectId: documentChunks.projectId,
+    })
+    .from(documentChunks)
+    .innerJoin(documents, eq(documentChunks.documentId, documents.id))
+    .where(
+      and(
+        eq(documentChunks.projectId, ctx.projectId),
+        eq(documentChunks.orgId, ctx.orgId),
+        eq(documents.status, 'active'),
+        eq(documentChunks.chunkIndex, 0),
+        sql`${documents.relativePath} ~* ${CORE_REFERENCE_POSIX}`,
+      ),
+    );
+  assertTenant(rows, ctx, 'selectCoreReferences');
+
+  const priority = (p: string): number => {
+    const i = CORE_REFERENCE_TYPES.findIndex((t) => t.test.test(p));
+    return i === -1 ? CORE_REFERENCE_TYPES.length : i;
+  };
+
+  return rows
+    .filter((r) => !exclude.has(r.relativePath))
+    .sort((a, b) => priority(a.relativePath) - priority(b.relativePath) || a.relativePath.localeCompare(b.relativePath))
+    .slice(0, limit)
+    .map((r) => ({
+      documentId: r.documentId,
+      relativePath: r.relativePath,
+      chunkIndex: r.chunkIndex,
+      content: r.content,
+      rank: 0,
+      coreType: coreTypeOf(r.relativePath),
+    }));
+}
+
+/**
+ * Selects the workspace's production-status document (chunk 0) if one exists
+ * and is not already retrieved. Optional by nature — returns null when absent.
+ */
+export async function selectProductionStatus(
+  tx: DbTx,
+  ctx: TenantContext,
+  exclude: ReadonlySet<string>,
+): Promise<RetrievedChunk | null> {
+  const rows = await tx
+    .select({
+      documentId: documentChunks.documentId,
+      relativePath: documents.relativePath,
+      chunkIndex: documentChunks.chunkIndex,
+      content: documentChunks.content,
+      orgId: documentChunks.orgId,
+      projectId: documentChunks.projectId,
+    })
+    .from(documentChunks)
+    .innerJoin(documents, eq(documentChunks.documentId, documents.id))
+    .where(
+      and(
+        eq(documentChunks.projectId, ctx.projectId),
+        eq(documentChunks.orgId, ctx.orgId),
+        eq(documents.status, 'active'),
+        eq(documentChunks.chunkIndex, 0),
+        sql`${documents.relativePath} ~* ${PRODUCTION_STATUS_POSIX}`,
+      ),
+    )
+    .orderBy(documents.relativePath)
+    .limit(1);
+  assertTenant(rows, ctx, 'selectProductionStatus');
+
+  const r = rows.find((row) => !exclude.has(row.relativePath));
+  if (!r) return null;
+  return {
+    documentId: r.documentId,
+    relativePath: r.relativePath,
+    chunkIndex: r.chunkIndex,
+    content: r.content,
+    rank: 0,
+  };
+}
+
 export interface DocumentListRow {
   id: string;
   relativePath: string;

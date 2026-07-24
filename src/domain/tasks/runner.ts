@@ -14,11 +14,20 @@ import {
   type StepRecord,
 } from '@/orchestration/engine';
 import { resolveModelForTier } from '@/orchestration/routing';
-import { type ModelTier, type RetrievedDocRef, type StepKind } from '@/types/domain';
+import {
+  type ContextManifestEntry,
+  type ModelTier,
+  type RetrievedDocRef,
+  type StepKind,
+} from '@/types/domain';
 import { findAgentForRole, type AgentRow } from '@/domain/agents/agents';
 import { loadApprovedContext } from '@/domain/projects/context';
 import { loadObjectiveForRun } from '@/domain/objectives/objectives';
-import { retrieveRelevant } from '@/domain/documents/documents';
+import {
+  retrieveRelevant,
+  selectCoreReferences,
+  selectProductionStatus,
+} from '@/domain/documents/documents';
 import { writeAudit } from '@/domain/audit/audit';
 import { assertWithinBudget, recordUsage } from '@/domain/usage/usage';
 import { consumeRateLimit } from '@/domain/usage/rate-limit';
@@ -133,23 +142,49 @@ export async function startRun(
     // Owner intent that frames the work (closes O-9); tenant-scoped, null when
     // the task serves no live objective.
     const objective = await loadObjectiveForRun(tx, ctx, task.objectiveId);
-    // Project Folder retrieval (D-020): top-K chunks relevant to THIS task,
-    // scoped to this workspace by the same I1 guard as knowledge. Retrieved
-    // documents join the prompt as additional context and are recorded on the
-    // run for transparency.
+    // Balanced context package (O-14, CONTEXT-PACKAGE.md). Retrieval is
+    // unchanged (D-020); we ADD a small quota of foundational references and a
+    // production-status doc that relevance alone would crowd out, dedup them
+    // against what retrieval already surfaced, and record WHY each part was
+    // included. Every read below is tenant-scoped by the same I1 guard.
     const retrieved = await retrieveRelevant(tx, ctx, task.input, 5);
+    const seen = new Set(retrieved.map((r) => r.relativePath));
+    const coreRefs = await selectCoreReferences(tx, ctx, seen, 2);
+    coreRefs.forEach((c) => seen.add(c.relativePath));
+    const productionStatus = await selectProductionStatus(tx, ctx, seen);
+
     const contextItems = [
       ...knowledge,
-      ...retrieved.map((r) => ({
-        title: `Document — ${r.relativePath}`,
-        content: r.content,
-      })),
+      ...retrieved.map((r) => ({ title: `Document — ${r.relativePath}`, content: r.content })),
+      ...coreRefs.map((r) => ({ title: `Core reference — ${r.relativePath}`, content: r.content })),
+      ...(productionStatus
+        ? [{ title: `Production status — ${productionStatus.relativePath}`, content: productionStatus.content }]
+        : []),
     ];
     const retrievedRefs: RetrievedDocRef[] = retrieved.map((r) => ({
       relativePath: r.relativePath,
       chunkIndex: r.chunkIndex,
       rank: r.rank,
     }));
+
+    // The manifest is the explainable record of the assembled package.
+    const contextManifest: ContextManifestEntry[] = [
+      ...(objective ? [{ source: 'objective' as const, label: objective.title }] : []),
+      ...knowledge.map((k) => ({ source: 'charter' as const, label: k.title })),
+      ...retrieved.map((r) => ({
+        source: 'retrieved' as const,
+        label: r.relativePath,
+        detail: `chunk ${r.chunkIndex} · relevance ${r.rank.toFixed(3)}`,
+      })),
+      ...coreRefs.map((r) => ({
+        source: 'core_reference' as const,
+        label: r.relativePath,
+        detail: r.coreType,
+      })),
+      ...(productionStatus
+        ? [{ source: 'production_status' as const, label: productionStatus.relativePath }]
+        : []),
+    ];
 
     const runInserted = await tx
       .insert(runs)
@@ -161,6 +196,7 @@ export async function startRun(
         primaryAgentId: primaryRow.id,
         reviewerAgentId: reviewerRow?.id ?? null,
         retrievedDocuments: retrievedRefs.length > 0 ? retrievedRefs : null,
+        contextManifest: contextManifest.length > 0 ? contextManifest : null,
       })
       .returning({ id: runs.id });
     const runId = runInserted[0]!.id;

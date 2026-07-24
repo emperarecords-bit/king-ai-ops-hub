@@ -4,6 +4,7 @@ import {
   FLAGSHIP_CATEGORIES,
   MODEL_TIERS,
   type MessageRole,
+  type ContextManifestEntry,
   type RetrievedDocRef,
   type ReviewDetail,
   type ReviewVerdict,
@@ -245,6 +246,7 @@ export interface RunRow {
   consolidatedResult: string | null;
   errorMessage: string | null;
   retrievedDocuments: RetrievedDocRef[] | null;
+  contextManifest: ContextManifestEntry[] | null;
   startedAt: Date;
   finishedAt: Date | null;
 }
@@ -257,6 +259,7 @@ export async function listRuns(tx: DbTx, ctx: TenantContext, taskId: string): Pr
       consolidatedResult: runs.consolidatedResult,
       errorMessage: runs.errorMessage,
       retrievedDocuments: runs.retrievedDocuments,
+      contextManifest: runs.contextManifest,
       startedAt: runs.startedAt,
       finishedAt: runs.finishedAt,
     })

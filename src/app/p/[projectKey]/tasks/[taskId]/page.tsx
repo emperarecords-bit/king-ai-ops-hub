@@ -1,4 +1,5 @@
 import { notFound } from 'next/navigation';
+import { CONTEXT_SOURCES, type ContextSource } from '@/types/domain';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { getTask, listMessages, listRuns, listRunSteps } from '@/domain/tasks/tasks';
@@ -11,6 +12,14 @@ const ROLE_LABEL: Record<string, string> = {
   assistant: 'Primary',
   reviewer: 'Reviewer',
   system: 'System',
+};
+
+const CONTEXT_SOURCE_LABEL: Record<ContextSource, string> = {
+  objective: 'Objective',
+  charter: 'Workspace charter & knowledge',
+  retrieved: 'Retrieved by relevance',
+  core_reference: 'Core reference (quota)',
+  production_status: 'Production status',
 };
 
 const SEVERITY_STYLE: Record<string, string> = {
@@ -50,6 +59,13 @@ export default async function TaskDetailPage({
   const reviewStep = steps.find((s) => s.kind === 'review' && s.verdictDetail != null);
   const reviewIssues = reviewStep?.verdictDetail?.issues ?? [];
 
+  // Group the context manifest by source, in the canonical order, for the panel.
+  const manifest = latestRun?.contextManifest ?? [];
+  const contextGroups = CONTEXT_SOURCES.map((source) => ({
+    source,
+    entries: manifest.filter((e) => e.source === source),
+  })).filter((g) => g.entries.length > 0);
+
   return (
     <div>
       <PageHeader
@@ -82,12 +98,35 @@ export default async function TaskDetailPage({
         </Card>
       ) : null}
 
-      {latestRun?.retrievedDocuments && latestRun.retrievedDocuments.length > 0 ? (
-        <Card title="Documents used" className="mb-6">
-          <p className="mb-2 text-sm text-[var(--muted)]">
-            These project-folder documents were automatically retrieved for this task, most
-            relevant first.
+      {contextGroups.length > 0 ? (
+        <Card title="Context used" className="mb-6">
+          <p className="mb-3 text-sm text-[var(--muted)]">
+            The balanced context package assembled for this task, grouped by why each part was
+            included.
           </p>
+          <div className="space-y-4">
+            {contextGroups.map((group) => (
+              <div key={group.source}>
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-[var(--accent)]">
+                  {CONTEXT_SOURCE_LABEL[group.source] ?? group.source}
+                </h3>
+                <ul className="space-y-1">
+                  {group.entries.map((e, i) => (
+                    <li key={i} className="flex flex-wrap items-center gap-3 text-sm">
+                      <span className="font-mono text-xs">{e.label}</span>
+                      {e.detail ? (
+                        <span className="text-xs text-[var(--muted)]">{e.detail}</span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </Card>
+      ) : latestRun?.retrievedDocuments && latestRun.retrievedDocuments.length > 0 ? (
+        // Pre-O-14 runs: only the retrieval provenance was recorded.
+        <Card title="Documents used" className="mb-6">
           <ul className="space-y-1">
             {latestRun.retrievedDocuments.map((d, i) => (
               <li key={i} className="flex items-center gap-3 text-sm">

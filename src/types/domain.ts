@@ -108,6 +108,29 @@ export interface RetrievedDocRef {
   rank: number;
 }
 
+/**
+ * Why a piece of context was included in a run's prompt (O-14). The panel
+ * groups the assembled package by this so inclusion is explainable, and new
+ * sources (project state, task history, approvals) slot in without touching
+ * retrieval. See CONTEXT-PACKAGE.md.
+ */
+export const CONTEXT_SOURCES = [
+  'objective',
+  'charter',
+  'retrieved',
+  'core_reference',
+  'production_status',
+] as const;
+export type ContextSource = (typeof CONTEXT_SOURCES)[number];
+
+export interface ContextManifestEntry {
+  source: ContextSource;
+  /** Document path, objective title, or knowledge-item title. */
+  label: string;
+  /** e.g. 'chunk 0 · relevance 0.039' or the core-reference type name. */
+  detail?: string;
+}
+
 /** Company Knowledge (KNOWLEDGE-DESIGN.md, D-011). K1: project scope only. */
 export const KNOWLEDGE_SCOPES = ['org', 'project', 'department', 'employee'] as const;
 export type KnowledgeScope = (typeof KNOWLEDGE_SCOPES)[number];
