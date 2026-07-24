@@ -29,6 +29,8 @@ export const createTaskSchema = z
     reviewEnabled: z.boolean(),
     modelTier: z.enum(MODEL_TIERS).default('standard'),
     flagshipCategory: z.enum(FLAGSHIP_CATEGORIES).nullable().default(null),
+    /** Optional attachment into the work hierarchy (D-010). */
+    objectiveId: z.string().uuid().nullable().default(null),
   })
   .refine((v) => v.modelTier !== 'flagship' || v.flagshipCategory != null, {
     message: 'Flagship runs must declare a category from the reserved list.',
@@ -65,6 +67,7 @@ export async function createTask(
       reviewEnabled,
       modelTier: parsed.data.modelTier,
       flagshipCategory: parsed.data.flagshipCategory,
+      objectiveId: parsed.data.objectiveId,
       status: 'pending',
       createdBy: ctx.userId,
     })
@@ -82,6 +85,7 @@ export async function createTask(
       reviewEnabled,
       modelTier: parsed.data.modelTier,
       flagshipCategory: parsed.data.flagshipCategory,
+      objectiveId: parsed.data.objectiveId,
     },
   });
 

@@ -89,6 +89,14 @@ export class RateLimitedError extends AppError {
   }
 }
 
+/** The request is well-formed but the entity's current state forbids it. */
+export class ConflictError extends AppError {
+  constructor(publicMessage: string) {
+    super('conflict', publicMessage);
+    this.name = 'ConflictError';
+  }
+}
+
 /** A user-facing rendering of any thrown value, with no internals leaked. */
 export function toPublicMessage(err: unknown): string {
   if (err instanceof AppError) return err.publicMessage;

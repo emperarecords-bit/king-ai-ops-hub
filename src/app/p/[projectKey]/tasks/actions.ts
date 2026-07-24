@@ -25,6 +25,7 @@ const formSchema = z
     reviewEnabled: z.boolean(),
     flagship: z.boolean(),
     flagshipCategory: z.enum(FLAGSHIP_CATEGORIES).nullable(),
+    objectiveId: z.string().uuid().nullable(),
   })
   .refine((v) => !v.flagship || v.flagshipCategory != null, {
     message: 'Flagship runs must declare a category from the reserved list.',
@@ -32,6 +33,7 @@ const formSchema = z
 
 export async function submitTask(_prev: TaskFormState, formData: FormData): Promise<TaskFormState> {
   const rawCategory = formData.get('flagshipCategory');
+  const rawObjective = formData.get('objectiveId');
   const parsed = formSchema.safeParse({
     projectKey: formData.get('projectKey'),
     title: formData.get('title'),
@@ -40,6 +42,7 @@ export async function submitTask(_prev: TaskFormState, formData: FormData): Prom
     reviewEnabled: formData.get('reviewEnabled') === 'on',
     flagship: formData.get('flagship') === 'on',
     flagshipCategory: rawCategory ? String(rawCategory) : null,
+    objectiveId: rawObjective ? String(rawObjective) : null,
   });
   if (!parsed.success) {
     return { error: parsed.error.issues[0]?.message ?? 'Invalid input.' };
@@ -57,6 +60,7 @@ export async function submitTask(_prev: TaskFormState, formData: FormData): Prom
         reviewEnabled: parsed.data.reviewEnabled,
         modelTier: parsed.data.flagship ? 'flagship' : 'standard',
         flagshipCategory: parsed.data.flagship ? parsed.data.flagshipCategory : null,
+        objectiveId: parsed.data.objectiveId,
       }),
     );
   } catch (err) {

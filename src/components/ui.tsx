@@ -101,6 +101,17 @@ export function NavLink({ href, children }: { href: string; children: React.Reac
   );
 }
 
+export function ProgressBar({ percent }: { percent: number }) {
+  return (
+    <div className="h-2 w-full overflow-hidden rounded bg-[var(--background)]">
+      <div
+        className="h-full rounded bg-[var(--accent)] transition-all"
+        style={{ width: `${Math.min(100, Math.max(0, percent))}%` }}
+      />
+    </div>
+  );
+}
+
 /** Pre-wrapped monospace block for model output. Text nodes only. */
 export function ModelText({ content }: { content: string }) {
   return (

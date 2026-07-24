@@ -1,0 +1,152 @@
+'use server';
+
+import { revalidatePath } from 'next/cache';
+import { redirect } from 'next/navigation';
+import { z } from 'zod';
+import { AppError, toPublicMessage } from '@/lib/errors';
+import { log } from '@/lib/log';
+import { requireTenant } from '@/domain/auth/guard';
+import { withTenant } from '@/db/tenant';
+import {
+  addMilestone,
+  createObjective,
+  setCriterionStatus,
+  setMilestoneStatus,
+  setObjectiveStatus,
+} from '@/domain/objectives/objectives';
+
+export interface ObjectiveFormState {
+  error: string | null;
+}
+
+/**
+ * Criteria arrive as parallel form arrays (label[i], metric[i], target[i],
+ * unit[i]); rows with an empty label are treated as blank rows and dropped.
+ */
+function parseCriteria(formData: FormData) {
+  const labels = formData.getAll('criterionLabel').map(String);
+  const metrics = formData.getAll('criterionMetric').map(String);
+  const targets = formData.getAll('criterionTarget').map(String);
+  const units = formData.getAll('criterionUnit').map(String);
+  const out: Array<{ label: string; metric: string; target: number; unit: string }> = [];
+  for (let i = 0; i < labels.length; i += 1) {
+    const label = labels[i]?.trim() ?? '';
+    if (!label) continue;
+    const target = Number(targets[i] ?? '');
+    out.push({
+      label,
+      metric: (metrics[i]?.trim() || label.toLowerCase().replaceAll(/\s+/g, '_')).slice(0, 100),
+      target: Number.isFinite(target) ? target : 1,
+      unit: units[i]?.trim() ?? '',
+    });
+  }
+  return out;
+}
+
+export async function submitObjective(
+  _prev: ObjectiveFormState,
+  formData: FormData,
+): Promise<ObjectiveFormState> {
+  const projectKey = String(formData.get('projectKey') ?? '');
+  const title = String(formData.get('title') ?? '');
+  const description = String(formData.get('description') ?? '');
+  const dept = String(formData.get('sponsoringDepartmentId') ?? '');
+  const employee = String(formData.get('accountableAgentId') ?? '');
+
+  let objectiveId: string;
+  try {
+    const ctx = await requireTenant(projectKey);
+    objectiveId = await withTenant(ctx, (tx) =>
+      createObjective(tx, ctx, {
+        title,
+        description,
+        successCriteria: parseCriteria(formData),
+        sponsoringDepartmentId: z.string().uuid().safeParse(dept).success ? dept : null,
+        accountableAgentId: z.string().uuid().safeParse(employee).success ? employee : null,
+      }),
+    );
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('createObjective failed', { err });
+    return { error: toPublicMessage(err) };
+  }
+  redirect(`/p/${projectKey}/objectives/${objectiveId}`);
+}
+
+export interface MutationState {
+  error: string | null;
+}
+
+async function objectiveMutation(
+  formData: FormData,
+  fn: (ctx: Awaited<ReturnType<typeof requireTenant>>, objectiveId: string) => Promise<void>,
+): Promise<MutationState> {
+  const projectKey = String(formData.get('projectKey') ?? '');
+  const objectiveId = String(formData.get('objectiveId') ?? '');
+  if (!projectKey || !z.string().uuid().safeParse(objectiveId).success) {
+    return { error: 'Invalid request.' };
+  }
+  try {
+    const ctx = await requireTenant(projectKey);
+    await fn(ctx, objectiveId);
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('objective mutation failed', { err, objectiveId });
+    return { error: toPublicMessage(err) };
+  }
+  revalidatePath(`/p/${projectKey}/objectives/${objectiveId}`);
+  revalidatePath(`/p/${projectKey}/objectives`);
+  return { error: null };
+}
+
+export async function changeObjectiveStatus(
+  _prev: MutationState,
+  formData: FormData,
+): Promise<MutationState> {
+  const next = String(formData.get('next') ?? '');
+  const parsed = z.enum(['active', 'completed', 'cancelled']).safeParse(next);
+  if (!parsed.success) return { error: 'Invalid status.' };
+  return objectiveMutation(formData, (ctx, objectiveId) =>
+    withTenant(ctx, (tx) => setObjectiveStatus(tx, ctx, objectiveId, parsed.data)),
+  );
+}
+
+export async function changeCriterionStatus(
+  _prev: MutationState,
+  formData: FormData,
+): Promise<MutationState> {
+  const index = Number(formData.get('index'));
+  const status = String(formData.get('status') ?? '');
+  const parsedStatus = z.enum(['met', 'waived', 'unmet']).safeParse(status);
+  if (!Number.isInteger(index) || index < 0 || !parsedStatus.success) {
+    return { error: 'Invalid request.' };
+  }
+  return objectiveMutation(formData, (ctx, objectiveId) =>
+    withTenant(ctx, (tx) => setCriterionStatus(tx, ctx, objectiveId, index, parsedStatus.data)),
+  );
+}
+
+export async function submitMilestone(
+  _prev: MutationState,
+  formData: FormData,
+): Promise<MutationState> {
+  const title = String(formData.get('title') ?? '');
+  return objectiveMutation(formData, (ctx, objectiveId) =>
+    withTenant(ctx, async (tx) => {
+      await addMilestone(tx, ctx, objectiveId, { title });
+    }),
+  );
+}
+
+export async function changeMilestoneStatus(
+  _prev: MutationState,
+  formData: FormData,
+): Promise<MutationState> {
+  const milestoneId = String(formData.get('milestoneId') ?? '');
+  const status = String(formData.get('status') ?? '');
+  const parsedStatus = z.enum(['planned', 'active', 'completed', 'cancelled']).safeParse(status);
+  if (!z.string().uuid().safeParse(milestoneId).success || !parsedStatus.success) {
+    return { error: 'Invalid request.' };
+  }
+  return objectiveMutation(formData, (ctx) =>
+    withTenant(ctx, (tx) => setMilestoneStatus(tx, ctx, milestoneId, parsedStatus.data)),
+  );
+}

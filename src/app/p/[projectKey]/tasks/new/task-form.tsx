@@ -16,13 +16,42 @@ const FLAGSHIP_CATEGORY_OPTIONS = [
   ['release_review', 'Final release review'],
 ] as const;
 
-export function TaskForm({ projectKey }: { projectKey: string }) {
+export function TaskForm({
+  projectKey,
+  objectives = [],
+  preselectedObjectiveId = null,
+}: {
+  projectKey: string;
+  objectives?: Array<{ id: string; title: string }>;
+  preselectedObjectiveId?: string | null;
+}) {
   const [state, formAction, pending] = useActionState(submitTask, initialState);
   const [flagship, setFlagship] = useState(false);
 
   return (
     <form action={formAction} className="space-y-5">
       <input type="hidden" name="projectKey" value={projectKey} />
+
+      {objectives.length > 0 ? (
+        <div>
+          <label htmlFor="objectiveId" className="mb-1 block text-sm text-[var(--muted)]">
+            Objective this work advances (optional)
+          </label>
+          <select
+            id="objectiveId"
+            name="objectiveId"
+            defaultValue={preselectedObjectiveId ?? ''}
+            className="w-full rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]"
+          >
+            <option value="">— standalone task —</option>
+            {objectives.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.title}
+              </option>
+            ))}
+          </select>
+        </div>
+      ) : null}
 
       <div>
         <label htmlFor="title" className="mb-1 block text-sm text-[var(--muted)]">
