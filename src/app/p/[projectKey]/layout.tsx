@@ -44,6 +44,7 @@ export default async function ProjectLayout({
           <NavLink href={`${base}/providers`}>Providers</NavLink>
           <NavLink href={`${base}/usage`}>Usage</NavLink>
           <NavLink href={`${base}/audit`}>Audit</NavLink>
+          <NavLink href={`${base}/settings`}>Settings</NavLink>
         </div>
       </header>
       <main className="mx-auto max-w-6xl p-6">{children}</main>
