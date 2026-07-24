@@ -164,6 +164,34 @@ out of the Hub entirely, which is the one workflow currently living here.
 zero success criteria — created before D-017. Harmless, but it is the
 artifact of exactly the behavior D-017 now prevents.
 
+### O-10 · The owner could not find "Suggest criteria"
+
+**Observed.** Asked directly: *"where is the suggested criteria button?"* It
+is on the new-objective form, below the first criterion row, styled as a
+plain inline text link beside "+ Add criterion" — below the fold at 720px,
+same weight as its neighbor, with nothing indicating it does work for you.
+The amber **Create objective** button directly beneath it is the loudest
+element on the screen.
+
+**Why it matters.** D-017 made success criteria mandatory for activation;
+suggestions were the friction relief that made the requirement fair. **An
+invisible relief leaves only the requirement.** The predicted failure modes
+are exactly what the harvest would later show as adoption problems —
+objectives filled with throwaway criteria, or objectives not created at all
+(which is already O-9's pattern).
+
+This is also a general lesson about how this product has been built: it was
+implemented, tested, and reported as "delivered" without anyone checking
+whether it could be *found*. Feature completeness and feature discoverability
+are being measured by the same green checkmark, and they are not the same
+thing.
+
+**Recommended fix** (not applied — Sprint 11 is validation): promote it to a
+real button beside the criteria heading, label it for its outcome
+("Suggest criteria from the title"), disable it until a title exists so its
+dependency is self-evident, and move it above the criterion rows so it is
+seen before the manual path is taken.
+
 ---
 
 ## Open questions this file exists to answer
