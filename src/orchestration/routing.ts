@@ -4,7 +4,7 @@ import { type ProviderId } from '@/types/provider';
 /**
  * Model tier routing (SPRINT-03-PLAN.md §4, D-014).
  *
- * `standard` keeps each agent's configured model (seeded: gpt-5.2-mini /
+ * `standard` keeps each agent's configured model (seeded: gpt-5.4-mini /
  * claude-sonnet-5). `flagship` overrides to the flagship model for the agent's
  * provider, preserving the cross-vendor review pairing (D-005) in both tiers.
  *

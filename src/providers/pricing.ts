@@ -29,9 +29,11 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPricing>> = {
     outputMicrosPerM: 10_000_000n, // $10.00 / M output
     maxOutputTokens: 65_536,
   },
-  'gpt-5.2-mini': {
+  'gpt-5.4-mini': {
     provider: 'openai',
-    displayName: 'GPT-5.2 mini',
+    displayName: 'GPT-5.4 mini',
+    // Mini-tier list price; carried from the gpt-5-mini rate — verify against
+    // the vendor pricing page (tracked as Medium debt in SPRINT-02-REPORT §6).
     inputMicrosPerM: 250_000n, // $0.25 / M
     outputMicrosPerM: 2_000_000n, // $2.00 / M
     maxOutputTokens: 65_536,

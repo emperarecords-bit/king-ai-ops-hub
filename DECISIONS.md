@@ -234,7 +234,9 @@ application, not its existence.
 ## D-014 — Two model tiers, chosen by humans, resolved in code
 
 **Decision.** Every task runs at one of two tiers: **standard**
-(each agent's configured model — seeded as GPT-5.2 mini / Claude Sonnet 5) or
+(each agent's configured model — seeded as GPT-5.4 mini / Claude Sonnet 5; the
+executive memo named "GPT-5.2 Mini", which does not exist — the mini tier is
+versioned separately, and the account's newest mini was substituted) or
 **flagship** (GPT-5.2 / Claude Opus 4.8, overriding the agent's model per
 provider). The tier is selected by a human on the task form; flagship requires
 declaring a category from the approved reserved list (architecture, security,

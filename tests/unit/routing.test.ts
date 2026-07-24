@@ -3,12 +3,12 @@ import { resolveModelForTier } from '@/orchestration/routing';
 
 describe('model tier routing (D-014)', () => {
   it('standard tier keeps the agent-configured model', () => {
-    expect(resolveModelForTier('standard', 'openai', 'gpt-5.2-mini')).toBe('gpt-5.2-mini');
+    expect(resolveModelForTier('standard', 'openai', 'gpt-5.4-mini')).toBe('gpt-5.4-mini');
     expect(resolveModelForTier('standard', 'anthropic', 'claude-sonnet-5')).toBe('claude-sonnet-5');
   });
 
   it('flagship tier overrides to the flagship model per provider', () => {
-    expect(resolveModelForTier('flagship', 'openai', 'gpt-5.2-mini')).toBe('gpt-5.2');
+    expect(resolveModelForTier('flagship', 'openai', 'gpt-5.4-mini')).toBe('gpt-5.2');
     expect(resolveModelForTier('flagship', 'anthropic', 'claude-sonnet-5')).toBe('claude-opus-4-8');
   });
 
