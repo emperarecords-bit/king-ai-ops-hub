@@ -1,20 +1,34 @@
 import Link from 'next/link';
-import { listMyProjects, requireUser } from '@/domain/auth/guard';
+import { listMyProjectsWithOrgRoles } from '@/domain/auth/guard';
+import { morningBriefing } from '@/domain/briefing/briefing';
 import { signOut } from '@/app/login/actions';
-import { EmptyState } from '@/components/ui';
+import { Card, EmptyState } from '@/components/ui';
 
-export default async function ProjectSelectorPage() {
-  const user = await requireUser();
-  const projects = await listMyProjects();
+/**
+ * The Morning Briefing (Sprint 6). The first page after sign-in opens with
+ * answers: what happened overnight, what matters now, what needs a decision —
+ * across every workspace, decisions first.
+ */
+export default async function MorningBriefingPage() {
+  const { user, projects, orgRoles } = await listMyProjectsWithOrgRoles();
+  const briefing = await morningBriefing(user.id, projects, orgRoles);
+  const { totals, workspaces } = briefing;
+
+  const hour = new Date().getUTCHours();
+  const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+  const needsAttention = totals.runsFailed + totals.objectivesAtRisk + totals.budgetAlerts;
 
   return (
-    <main className="mx-auto max-w-3xl p-8">
-      <div className="mb-8 flex items-center justify-between">
+    <main className="mx-auto max-w-4xl p-8">
+      <div className="mb-8 flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold">Select a workspace</h1>
+          <h1 className="text-2xl font-bold">{greeting}</h1>
           <p className="mt-1 text-sm text-[var(--muted)]">
-            Signed in as {user.email}. Each workspace is fully isolated — context, memory, tasks,
-            and secrets never cross.
+            {totals.pendingApprovals > 0
+              ? `${totals.pendingApprovals} decision${totals.pendingApprovals === 1 ? '' : 's'} waiting on you.`
+              : totals.workingNow > 0
+                ? 'Nothing needs you right now — your team is working.'
+                : 'All caught up.'}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -35,28 +49,104 @@ export default async function ProjectSelectorPage() {
         </div>
       </div>
 
-      {projects.length === 0 ? (
+      {workspaces.length === 0 ? (
         <EmptyState>
           Welcome! Create your first workspace — it arrives already staffed with an AI team, a
           budget, and its own isolated memory.
         </EmptyState>
       ) : (
-        <ul className="grid gap-4 sm:grid-cols-2">
-          {projects.map((p) => (
-            <li key={p.projectId}>
-              <Link
-                href={`/p/${p.key}`}
-                className="block rounded-lg border border-[var(--border)] bg-[var(--surface)] p-5 transition-colors hover:border-[var(--accent)]"
+        <>
+          <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <Card title="Decisions waiting">
+              <p
+                className={`text-3xl font-bold ${totals.pendingApprovals > 0 ? 'text-[var(--accent)]' : ''}`}
               >
-                <h2 className="font-semibold">{p.name}</h2>
-                <p className="mt-1 line-clamp-2 text-sm text-[var(--muted)]">{p.description}</p>
-                <p className="mt-3 text-xs uppercase tracking-wide text-[var(--muted)]">
-                  {p.projectRole}
+                {totals.pendingApprovals}
+              </p>
+            </Card>
+            <Card title="Completed (24h)">
+              <p className="text-3xl font-bold">{totals.runsCompleted}</p>
+              {totals.reviewInterventions > 0 ? (
+                <p className="mt-1 text-xs text-[var(--muted)]">
+                  {totals.reviewInterventions} changed by review — worth reading
                 </p>
-              </Link>
-            </li>
-          ))}
-        </ul>
+              ) : null}
+            </Card>
+            <Card title="Needs attention">
+              <p
+                className={`text-3xl font-bold ${needsAttention > 0 ? 'text-[var(--danger)]' : ''}`}
+              >
+                {needsAttention}
+              </p>
+              <p className="mt-1 text-xs text-[var(--muted)]">
+                failed · at-risk · budget
+              </p>
+            </Card>
+            <Card title="Working now">
+              <p className="text-3xl font-bold">{totals.workingNow}</p>
+            </Card>
+          </div>
+
+          <ul className="space-y-3">
+            {workspaces.map((w) => {
+              const quiet =
+                w.pendingApprovals === 0 &&
+                w.runsFailed === 0 &&
+                w.objectivesAtRisk === 0 &&
+                w.runsCompleted === 0 &&
+                w.workingNow === 0;
+              return (
+                <li key={w.projectKey}>
+                  <div className="flex items-center justify-between gap-4 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4 transition-colors hover:border-[var(--accent)]">
+                    <Link href={`/p/${w.projectKey}`} className="min-w-0 flex-1">
+                      <p className="font-semibold">{w.projectName}</p>
+                      <p className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--muted)]">
+                        {quiet ? <span>quiet</span> : null}
+                        {w.workingNow > 0 ? (
+                          <span className="text-[var(--accent-strong)]">
+                            {w.workingNow} working now
+                          </span>
+                        ) : null}
+                        {w.runsCompleted > 0 ? <span>{w.runsCompleted} done overnight</span> : null}
+                        {w.reviewInterventions > 0 ? (
+                          <span>{w.reviewInterventions} review catch{w.reviewInterventions === 1 ? '' : 'es'}</span>
+                        ) : null}
+                        {w.runsFailed > 0 ? (
+                          <span className="text-[var(--danger)]">{w.runsFailed} failed</span>
+                        ) : null}
+                        {w.objectivesAtRisk > 0 ? (
+                          <span className="text-[var(--danger)]">
+                            {w.objectivesAtRisk} objective{w.objectivesAtRisk === 1 ? '' : 's'} at risk
+                          </span>
+                        ) : null}
+                        {w.spentPct >= 80 ? (
+                          <span className="text-[var(--danger)]">budget {w.spentPct}%</span>
+                        ) : null}
+                        {w.activeObjectives > 0 && w.objectivesAtRisk === 0 ? (
+                          <span>
+                            {w.activeObjectives} objective{w.activeObjectives === 1 ? '' : 's'} in motion
+                          </span>
+                        ) : null}
+                      </p>
+                    </Link>
+                    {w.pendingApprovals > 0 ? (
+                      <Link
+                        href={`/p/${w.projectKey}/approvals`}
+                        className="shrink-0 rounded-md bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[#0b0e14] hover:bg-[var(--accent-strong)]"
+                      >
+                        Decide {w.pendingApprovals}
+                      </Link>
+                    ) : null}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+          <p className="mt-6 text-xs text-[var(--muted)]">
+            Signed in as {user.email}. Workspaces are fully isolated — the briefing counts across
+            them, but content never crosses.
+          </p>
+        </>
       )}
     </main>
   );

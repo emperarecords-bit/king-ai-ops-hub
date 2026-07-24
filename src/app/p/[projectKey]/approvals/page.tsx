@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
-import { listApprovals } from '@/domain/approvals/approvals';
+import { expireStaleApprovals, listApprovals } from '@/domain/approvals/approvals';
 import { Card, EmptyState, PageHeader, StatusBadge } from '@/components/ui';
 import { DecisionForm } from './decision-form';
 
@@ -13,7 +13,10 @@ export default async function ApprovalsPage({
   const { projectKey } = await params;
   const ctx = await requireTenant(projectKey);
 
-  const approvals = await withTenant(ctx, (tx) => listApprovals(tx, ctx));
+  const approvals = await withTenant(ctx, async (tx) => {
+    await expireStaleApprovals(tx, ctx); // A5: the queue never lies
+    return listApprovals(tx, ctx);
+  });
   const pending = approvals.filter((a) => a.status === 'pending');
   const decided = approvals.filter((a) => a.status !== 'pending');
 

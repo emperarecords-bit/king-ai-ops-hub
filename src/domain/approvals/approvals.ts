@@ -1,4 +1,4 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, lt } from 'drizzle-orm';
 import { type ActionType, type ApprovalStatus, type TenantContext } from '@/types/domain';
 import { AppError, NotFoundError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
@@ -24,6 +24,37 @@ export interface ApprovalRow {
   decisionNote: string | null;
   expiresAt: Date;
   createdAt: Date;
+}
+
+/**
+ * A5 sweep: mark past-due pending approvals expired so queue counts and the
+ * briefing tell the truth. Explicit call (not a side effect of reading) —
+ * invoked by the approvals page and the morning briefing. Each expiry is
+ * audited; a stale proposal silently becoming decidable again is exactly what
+ * the expiry exists to prevent.
+ */
+export async function expireStaleApprovals(tx: DbTx, ctx: TenantContext): Promise<number> {
+  const expired = await tx
+    .update(approvals)
+    .set({ status: 'expired', updatedAt: new Date() })
+    .where(
+      and(
+        eq(approvals.projectId, ctx.projectId),
+        eq(approvals.orgId, ctx.orgId),
+        eq(approvals.status, 'pending'),
+        lt(approvals.expiresAt, new Date()),
+      ),
+    )
+    .returning({ id: approvals.id });
+
+  for (const row of expired) {
+    await writeAudit(tx, ctx, {
+      action: 'approval.expired',
+      entityType: 'approval',
+      entityId: row.id,
+    });
+  }
+  return expired.length;
 }
 
 export async function listApprovals(

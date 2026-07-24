@@ -96,3 +96,19 @@ export async function listMyProjects(): Promise<ProjectAccessRecord[]> {
   const user = await requireUser();
   return findAccessibleProjects(user.id);
 }
+
+/** Projects plus the caller's role in each org — the morning briefing input. */
+export async function listMyProjectsWithOrgRoles(): Promise<{
+  user: AuthenticatedUser;
+  projects: ProjectAccessRecord[];
+  orgRoles: Map<string, NonNullable<Awaited<ReturnType<typeof findOrgRole>>>>;
+}> {
+  const user = await requireUser();
+  const projects = await findAccessibleProjects(user.id);
+  const orgRoles = new Map<string, NonNullable<Awaited<ReturnType<typeof findOrgRole>>>>();
+  for (const orgId of new Set(projects.map((p) => p.orgId))) {
+    const role = await findOrgRole(user.id, orgId);
+    if (role) orgRoles.set(orgId, role);
+  }
+  return { user, projects, orgRoles };
+}

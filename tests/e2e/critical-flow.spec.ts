@@ -28,10 +28,11 @@ test.describe('critical flow', () => {
     await page.getByLabel('Password').fill(password!);
     await page.getByRole('button', { name: 'Sign in' }).click();
 
-    // --- Project selector --------------------------------------------------
+    // --- Morning briefing (the post-login home) -----------------------------
     await expect(page).toHaveURL(/\/projects/);
-    await expect(page.getByText('Select a workspace')).toBeVisible();
-    await page.getByRole('link', { name: /E2E Sandbox(?! B)/ }).click();
+    await expect(page.getByText(/Good (morning|afternoon|evening)/)).toBeVisible();
+    await expect(page.getByText('Decisions waiting')).toBeVisible();
+    await page.getByRole('link', { name: /E2E Sandbox(?! B)/ }).first().click();
 
     // --- Dashboard ---------------------------------------------------------
     await expect(page).toHaveURL(/\/p\/e2e-sandbox/);

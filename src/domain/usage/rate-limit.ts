@@ -28,4 +28,13 @@ export async function consumeRateLimit(
   if (rows.length === 0) {
     throw new RateLimitedError();
   }
+
+  // A7 hygiene: stale windows for THIS scope die with the successful consume.
+  // Targeted (indexed by scope_key) and piggybacked, so the table stays
+  // bounded without a scheduler.
+  await tx.execute(sql`
+    delete from rate_limit_buckets
+    where scope_key = ${scopeKey}
+      and window_start < ${new Date(windowStart.getTime() - 60 * 60_000).toISOString()}
+  `);
 }
