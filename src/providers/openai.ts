@@ -87,6 +87,15 @@ export class OpenAIProvider implements AIProvider {
         return new ProviderError('openai', 'auth', 'OpenAI rejected the API key.');
       }
       if (status === 429) {
+        // insufficient_quota also arrives as 429 but is NOT retryable: it means
+        // the account has no API credit balance, and retrying just burns time.
+        if (err.code === 'insufficient_quota') {
+          return new ProviderError(
+            'openai',
+            'auth',
+            'OpenAI account has no API credits (insufficient_quota). Add credits under platform.openai.com Billing.',
+          );
+        }
         return new ProviderError('openai', 'rate_limited', 'OpenAI rate limit hit.');
       }
       if (status === 400 || status === 404 || status === 422) {

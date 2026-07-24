@@ -90,6 +90,15 @@ export class AnthropicProvider implements AIProvider {
         return new ProviderError('anthropic', 'overloaded', 'Anthropic is overloaded.');
       }
       if (status === 400 || status === 404 || status === 422) {
+        // Anthropic reports an empty credit balance as a 400. Same treatment
+        // as OpenAI's insufficient_quota: non-retryable, say what to do.
+        if (/credit balance/i.test(err.message)) {
+          return new ProviderError(
+            'anthropic',
+            'auth',
+            'Anthropic account has no API credits. Add credits under console.anthropic.com Billing.',
+          );
+        }
         return new ProviderError(
           'anthropic',
           'invalid_request',
