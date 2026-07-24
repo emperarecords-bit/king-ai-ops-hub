@@ -268,3 +268,39 @@ The numbers future harvests should be compared against. All fixture-free.
 | Pending approvals | 0 |
 | Total real spend | $0.26 |
 | Time saved (stated baselines, uncalibrated) | 5.3 h |
+
+### O-12 · Workspaces cannot be edited at all
+
+**Observed.** Owner asked how to edit a workspace. There is no way. Creating
+one (`/projects/new`) is the only workspace-level operation in the product:
+no rename, no description change, no archive, no delete, and no UI for the
+monthly budget — the approved $30–100 limits were applied by a script and are
+invisible and unchangeable in the app.
+
+Everything *inside* a workspace is editable — employees, knowledge,
+providers, objectives — which makes the gap harder to notice and stranger
+once noticed. A `kingdom-core` workspace exists with a name the owner may
+well want to change, and nothing to change it with.
+
+**Why it matters.** Sprint 5 built the front door (create a workspace) and
+nothing built the door back. It is the same shape as O-10 and O-11: a
+capability was declared complete when its happy path worked, and the ordinary
+follow-on action — *change my mind about what I just made* — was never
+considered. Three findings of the same kind now, which suggests the pattern
+is systemic rather than incidental: **features are being scoped to creation
+and not to ownership.**
+
+Note this is not merely cosmetic. A workspace name is on every screen, in the
+briefing, and in the URL. Being unable to correct it is the kind of small
+permanence that makes software feel like it belongs to someone else.
+
+**Recommended fix.** A workspace settings screen: name, description, monthly
+budget, archive. Archive rather than delete — runs, usage, and audit rows
+reference the project, and the audit trail is append-only by design (I6). The
+key should stay immutable (it is in every URL and audit row); rename the
+display name only.
+
+**Also worth deciding:** whether the owner can change a budget the platform
+enforces against them. Recommend yes, with the change written to the audit
+log — the gate's value is that spending is deliberate, not that it is
+unchangeable.
