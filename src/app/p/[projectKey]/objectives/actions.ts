@@ -14,6 +14,8 @@ import {
   setMilestoneStatus,
   setObjectiveStatus,
 } from '@/domain/objectives/objectives';
+import { listAssignableEmployees } from '@/domain/agents/agents';
+import { createSchedule, setScheduleEnabled } from '@/domain/standing/standing';
 
 export interface ObjectiveFormState {
   error: string | null;
@@ -133,6 +135,48 @@ export async function submitMilestone(
     withTenant(ctx, async (tx) => {
       await addMilestone(tx, ctx, objectiveId, { title });
     }),
+  );
+}
+
+export async function submitSchedule(
+  _prev: MutationState,
+  formData: FormData,
+): Promise<MutationState> {
+  const assigneeId = String(formData.get('assigneeAgentId') ?? '');
+  if (!z.string().uuid().safeParse(assigneeId).success) {
+    return { error: 'Pick who should perform the standing work.' };
+  }
+  const weekdayRaw = formData.get('weekday');
+  const monthdayRaw = formData.get('monthday');
+  return objectiveMutation(formData, (ctx, objectiveId) =>
+    withTenant(ctx, async (tx) => {
+      const employees = await listAssignableEmployees(tx, ctx);
+      const assignee = employees.find((e) => e.id === assigneeId);
+      if (!assignee) throw new Error('Assignee is not an active employee here.');
+      await createSchedule(tx, ctx, {
+        title: String(formData.get('title') ?? ''),
+        input: String(formData.get('input') ?? ''),
+        objectiveId,
+        providerSelection: assignee.provider,
+        reviewEnabled: formData.get('reviewEnabled') === 'on',
+        cadence: String(formData.get('cadence') ?? 'weekly') as 'daily' | 'weekly' | 'monthly',
+        atHour: Number(formData.get('atHour') ?? 6),
+        weekday: weekdayRaw != null && weekdayRaw !== '' ? Number(weekdayRaw) : null,
+        monthday: monthdayRaw != null && monthdayRaw !== '' ? Number(monthdayRaw) : null,
+      });
+    }),
+  );
+}
+
+export async function toggleSchedule(
+  _prev: MutationState,
+  formData: FormData,
+): Promise<MutationState> {
+  const scheduleId = String(formData.get('scheduleId') ?? '');
+  const enabled = String(formData.get('enabled') ?? '') === 'true';
+  if (!z.string().uuid().safeParse(scheduleId).success) return { error: 'Invalid request.' };
+  return objectiveMutation(formData, (ctx) =>
+    withTenant(ctx, (tx) => setScheduleEnabled(tx, ctx, scheduleId, enabled)),
   );
 }
 

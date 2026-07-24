@@ -3,6 +3,8 @@ import { notFound } from 'next/navigation';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { getObjective } from '@/domain/objectives/objectives';
+import { listAssignableEmployees } from '@/domain/agents/agents';
+import { listSchedules } from '@/domain/standing/standing';
 import { NotFoundError } from '@/lib/errors';
 import { Card, EmptyState, PageHeader, ProgressBar, StatusBadge } from '@/components/ui';
 import {
@@ -11,6 +13,13 @@ import {
   MilestoneStatusButton,
   ObjectiveStatusButtons,
 } from './mutation-forms';
+import { AddStandingWorkForm, ToggleScheduleButton } from './standing-forms';
+
+const CADENCE_LABEL: Record<string, string> = {
+  daily: 'Every day',
+  weekly: 'Every week',
+  monthly: 'Every month',
+};
 
 const CRITERION_STYLE: Record<string, string> = {
   unmet: 'border-[var(--border)]',
@@ -27,8 +36,14 @@ export default async function ObjectiveDetailPage({
   const ctx = await requireTenant(projectKey);
 
   let o;
+  let schedules;
+  let employees;
   try {
-    o = await withTenant(ctx, (tx) => getObjective(tx, ctx, objectiveId));
+    ({ o, schedules, employees } = await withTenant(ctx, async (tx) => ({
+      o: await getObjective(tx, ctx, objectiveId),
+      schedules: await listSchedules(tx, ctx, objectiveId),
+      employees: await listAssignableEmployees(tx, ctx),
+    })));
   } catch (err) {
     if (err instanceof NotFoundError) notFound();
     throw err;
@@ -133,6 +148,58 @@ export default async function ObjectiveDetailPage({
           </ul>
         )}
         {open ? <AddMilestoneForm projectKey={projectKey} objectiveId={o.id} /> : null}
+      </Card>
+
+      <Card title="Standing work" className="mb-6">
+        {schedules.length === 0 ? (
+          <p className="text-sm text-[var(--muted)]">
+            Nothing recurring yet. Standing work keeps producing toward this objective while
+            you&apos;re away — every result still cross-checked, budgeted, and gated by your
+            approval.
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {schedules.map((s) => (
+              <li
+                key={s.id}
+                className="flex items-center justify-between gap-3 rounded-md border border-[var(--border)] p-3 text-sm"
+              >
+                <div>
+                  <span className={`font-medium ${s.enabled ? '' : 'text-[var(--muted)] line-through'}`}>
+                    {s.title}
+                  </span>
+                  <span className="ml-2 text-xs text-[var(--muted)]">
+                    {CADENCE_LABEL[s.cadence] ?? s.cadence} ·{' '}
+                    {s.enabled
+                      ? `next ${s.nextRunAt.toISOString().slice(0, 16).replace('T', ' ')} UTC`
+                      : 'paused'}
+                    {s.lastRunAt
+                      ? ` · last ${s.lastRunAt.toISOString().slice(0, 10)}`
+                      : ' · never run'}
+                  </span>
+                </div>
+                {open ? (
+                  <ToggleScheduleButton
+                    projectKey={projectKey}
+                    objectiveId={o.id}
+                    scheduleId={s.id}
+                    enabled={s.enabled}
+                  />
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        )}
+        {open && employees.length > 0 ? (
+          <AddStandingWorkForm
+            projectKey={projectKey}
+            objectiveId={o.id}
+            employees={employees.map((e) => ({
+              id: e.id,
+              name: e.departmentName ? `${e.name} (${e.departmentName})` : e.name,
+            }))}
+          />
+        ) : null}
       </Card>
 
       <Card title="Work toward this objective" className="mb-6">

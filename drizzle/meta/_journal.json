@@ -36,6 +36,13 @@
       "when": 1784873208836,
       "tag": "0004_knowledge_k1",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1784874393291,
+      "tag": "0005_standing_work",
+      "breakpoints": true
     }
   ]
 }

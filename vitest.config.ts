@@ -19,6 +19,13 @@ export default defineConfig({
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
       '@tests': fileURLToPath(new URL('./tests', import.meta.url)),
+      // `server-only` throws outside Next's server runtime. Tests exercise the
+      // server layer by definition, so resolve it to the same empty module
+      // Next uses under the react-server condition. The guard still protects
+      // the real build — this only affects the test runner.
+      'server-only': fileURLToPath(
+        new URL('./node_modules/server-only/empty.js', import.meta.url),
+      ),
     },
   },
 });

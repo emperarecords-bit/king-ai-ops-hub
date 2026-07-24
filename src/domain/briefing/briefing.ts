@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, sql } from 'drizzle-orm';
 import { type TenantContext } from '@/types/domain';
 import { withTenant } from '@/db/tenant';
 import { approvals, objectives, runs, runSteps, tasks } from '@/db/schema';
@@ -18,9 +18,20 @@ import { projectSpendLimit, spentThisPeriodMicros } from '@/domain/usage/usage';
 
 const OVERNIGHT_HOURS = 24;
 
+/** A standing-work result produced while the owner was away. */
+export interface PreparedItem {
+  taskId: string;
+  title: string;
+  projectKey: string;
+  status: string;
+  finishedAt: Date | null;
+}
+
 export interface WorkspaceBriefing {
   projectKey: string;
   projectName: string;
+  /** Standing-work results from the last 24h — the "while you were away" list. */
+  prepared: PreparedItem[];
   /** Decisions waiting on the owner right now. */
   pendingApprovals: number;
   oldestPendingApprovalAt: Date | null;
@@ -104,6 +115,26 @@ async function briefWorkspace(
       .where(and(eq(objectives.projectId, ctx.projectId), eq(objectives.status, 'active')));
     const objectivesAtRisk = activeObjectiveRows.filter((o) => Number(o.tasksOpen) === 0).length;
 
+    // Continuous Operations: what standing work produced while you were away.
+    const preparedRows = await tx
+      .select({
+        taskId: tasks.id,
+        title: tasks.title,
+        status: tasks.status,
+        finishedAt: runs.finishedAt,
+      })
+      .from(tasks)
+      .leftJoin(runs, eq(runs.taskId, tasks.id))
+      .where(
+        and(
+          eq(tasks.projectId, ctx.projectId),
+          isNotNull(tasks.scheduleId),
+          gte(tasks.createdAt, since),
+        ),
+      )
+      .orderBy(desc(tasks.createdAt))
+      .limit(10);
+
     const spent = await spentThisPeriodMicros(tx, ctx.projectId);
     const limit = await projectSpendLimit(tx, ctx.projectId);
     const spentPct = limit > 0n ? Number((spent * 100n) / limit) : 100;
@@ -113,6 +144,13 @@ async function briefWorkspace(
     return {
       projectKey: project.key,
       projectName: project.name,
+      prepared: preparedRows.map((r) => ({
+        taskId: r.taskId,
+        title: r.title,
+        projectKey: project.key,
+        status: r.status,
+        finishedAt: r.finishedAt,
+      })),
       pendingApprovals: Number(pending?.count ?? 0),
       oldestPendingApprovalAt: pending?.oldest ? new Date(pending.oldest) : null,
       runsCompleted: Number(runsAgg?.completed ?? 0),

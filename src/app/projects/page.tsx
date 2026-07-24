@@ -87,6 +87,32 @@ export default async function MorningBriefingPage() {
             </Card>
           </div>
 
+          {workspaces.some((w) => w.prepared.length > 0) ? (
+            <Card title="Prepared while you were away" className="mb-8 border-[var(--accent)]">
+              <ul className="space-y-1">
+                {workspaces
+                  .flatMap((w) => w.prepared)
+                  .map((p) => (
+                    <li key={p.taskId}>
+                      <Link
+                        href={`/p/${p.projectKey}/tasks/${p.taskId}`}
+                        className="flex items-center justify-between gap-3 rounded px-2 py-1.5 text-sm hover:bg-[var(--surface-raised)]"
+                      >
+                        <span>{p.title}</span>
+                        <span className="text-xs text-[var(--muted)]">
+                          {p.status === 'awaiting_approval'
+                            ? 'needs your decision'
+                            : p.status === 'failed'
+                              ? 'failed'
+                              : 'ready to read'}
+                        </span>
+                      </Link>
+                    </li>
+                  ))}
+              </ul>
+            </Card>
+          ) : null}
+
           <ul className="space-y-3">
             {workspaces.map((w) => {
               const quiet =

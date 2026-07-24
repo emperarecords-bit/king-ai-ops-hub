@@ -4,6 +4,7 @@ import {
   AGENT_ROLES,
   APPROVAL_STATUSES,
   ARTIFACT_KINDS,
+  CADENCES,
   CONTEXT_ITEM_STATUSES,
   FLAGSHIP_CATEGORIES,
   KNOWLEDGE_KINDS,
@@ -51,3 +52,4 @@ export const knowledgeScopeEnum = pgEnum('knowledge_scope', KNOWLEDGE_SCOPES);
 export const knowledgeKindEnum = pgEnum('knowledge_kind', KNOWLEDGE_KINDS);
 export const knowledgeStatusEnum = pgEnum('knowledge_status', KNOWLEDGE_STATUSES);
 export const knowledgeSourceEnum = pgEnum('knowledge_source', KNOWLEDGE_SOURCES);
+export const cadenceEnum = pgEnum('cadence', CADENCES);

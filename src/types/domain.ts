@@ -82,6 +82,14 @@ export type AgentRole = (typeof AGENT_ROLES)[number];
 export const CONTEXT_ITEM_STATUSES = ['pending', 'approved', 'archived'] as const;
 export type ContextItemStatus = (typeof CONTEXT_ITEM_STATUSES)[number];
 
+/**
+ * Standing work cadences (Sprint 8, Continuous Operations). Schedules are
+ * human-authored; each tick creates exactly one gated task+run — recurrence
+ * can never compound into an unbounded loop.
+ */
+export const CADENCES = ['daily', 'weekly', 'monthly'] as const;
+export type Cadence = (typeof CADENCES)[number];
+
 /** Company Knowledge (KNOWLEDGE-DESIGN.md, D-011). K1: project scope only. */
 export const KNOWLEDGE_SCOPES = ['org', 'project', 'department', 'employee'] as const;
 export type KnowledgeScope = (typeof KNOWLEDGE_SCOPES)[number];

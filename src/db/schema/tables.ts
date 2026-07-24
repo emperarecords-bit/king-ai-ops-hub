@@ -16,6 +16,7 @@ import {
   agentRoleEnum,
   approvalStatusEnum,
   artifactKindEnum,
+  cadenceEnum,
   contextItemStatusEnum,
   flagshipCategoryEnum,
   knowledgeKindEnum,
@@ -355,6 +356,53 @@ export const milestones = pgTable(
   ],
 );
 
+/**
+ * Standing work (Sprint 8, Continuous Operations): human-authored recurring
+ * assignments. Each due tick creates exactly ONE ordinary task+run through
+ * the existing engine — budget gate, rate limits, review, approval queue all
+ * apply unchanged. A schedule can never fan out or self-modify; disabling is
+ * the kill switch and deletion is not offered (history references it).
+ */
+export const taskSchedules = pgTable(
+  'task_schedules',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    objectiveId: uuid('objective_id').references(() => objectives.id, { onDelete: 'set null' }),
+    title: text('title').notNull(),
+    /** The recurring brief, verbatim — same injection posture as task input. */
+    input: text('input').notNull(),
+    providerSelection: providerSelectionEnum('provider_selection').notNull(),
+    reviewEnabled: boolean('review_enabled').notNull().default(true),
+    modelTier: modelTierEnum('model_tier').notNull().default('standard'),
+    flagshipCategory: flagshipCategoryEnum('flagship_category'),
+    cadence: cadenceEnum('cadence').notNull(),
+    /** UTC hour 0–23 the run is due. */
+    atHour: integer('at_hour').notNull().default(6),
+    /** 0=Sunday…6=Saturday; weekly cadence only. */
+    weekday: integer('weekday'),
+    /** 1–28; monthly cadence only (capped so every month qualifies). */
+    monthday: integer('monthday'),
+    nextRunAt: timestamp('next_run_at', { withTimezone: true }).notNull(),
+    lastRunAt: timestamp('last_run_at', { withTimezone: true }),
+    enabled: boolean('enabled').notNull().default(true),
+    createdBy: uuid('created_by')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'restrict' }),
+    ...timestamps,
+  },
+  (t) => [
+    index('task_schedules_due_idx').on(t.enabled, t.nextRunAt),
+    index('task_schedules_org_project_idx').on(t.orgId, t.projectId),
+    index('task_schedules_objective_idx').on(t.objectiveId),
+  ],
+);
+
 // ---------------------------------------------------------------------------
 // Execution
 // ---------------------------------------------------------------------------
@@ -380,6 +428,8 @@ export const tasks = pgTable(
     /** Optional attachment into the work hierarchy (D-010); dark until Sprint 4. */
     objectiveId: uuid('objective_id').references(() => objectives.id, { onDelete: 'set null' }),
     milestoneId: uuid('milestone_id').references(() => milestones.id, { onDelete: 'set null' }),
+    /** Set when this task was created by standing work (Sprint 8). */
+    scheduleId: uuid('schedule_id').references(() => taskSchedules.id, { onDelete: 'set null' }),
     status: taskStatusEnum('status').notNull().default('pending'),
     createdBy: uuid('created_by')
       .notNull()
