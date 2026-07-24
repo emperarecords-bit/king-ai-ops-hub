@@ -16,7 +16,9 @@ import {
   approvalStatusEnum,
   artifactKindEnum,
   contextItemStatusEnum,
+  flagshipCategoryEnum,
   messageRoleEnum,
+  modelTierEnum,
   orgRoleEnum,
   projectRoleEnum,
   providerIdEnum,
@@ -218,6 +220,9 @@ export const tasks = pgTable(
     input: text('input').notNull(),
     providerSelection: providerSelectionEnum('provider_selection').notNull(),
     reviewEnabled: boolean('review_enabled').notNull().default(true),
+    /** D-014: human-selected routing tier; flagship requires a stated category. */
+    modelTier: modelTierEnum('model_tier').notNull().default('standard'),
+    flagshipCategory: flagshipCategoryEnum('flagship_category'),
     status: taskStatusEnum('status').notNull().default('pending'),
     createdBy: uuid('created_by')
       .notNull()

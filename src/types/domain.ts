@@ -66,6 +66,29 @@ export type AgentRole = (typeof AGENT_ROLES)[number];
 export const CONTEXT_ITEM_STATUSES = ['pending', 'approved', 'archived'] as const;
 export type ContextItemStatus = (typeof CONTEXT_ITEM_STATUSES)[number];
 
+/**
+ * Model routing tiers (SPRINT-03-PLAN.md §4, D-014). `standard` uses each
+ * agent's configured model; `flagship` overrides to the flagship model for the
+ * agent's provider. Selected per task by a human, never by a model.
+ */
+export const MODEL_TIERS = ['standard', 'flagship'] as const;
+export type ModelTier = (typeof MODEL_TIERS)[number];
+
+/**
+ * The approved reserved list for flagship spend. A flagship task must declare
+ * one, so every flagship dollar is attributable to a stated reason.
+ */
+export const FLAGSHIP_CATEGORIES = [
+  'architecture',
+  'security',
+  'database_design',
+  'major_refactoring',
+  'product_strategy',
+  'complex_reasoning',
+  'release_review',
+] as const;
+export type FlagshipCategory = (typeof FLAGSHIP_CATEGORIES)[number];
+
 export const ARTIFACT_KINDS = ['text', 'markdown', 'json', 'file'] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 

@@ -13,6 +13,8 @@ import {
   type EngineAgent,
   type StepRecord,
 } from '@/orchestration/engine';
+import { resolveModelForTier } from '@/orchestration/routing';
+import { type ModelTier } from '@/types/domain';
 import { findAgentForRole, type AgentRow } from '@/domain/agents/agents';
 import { loadApprovedContext } from '@/domain/projects/context';
 import { writeAudit } from '@/domain/audit/audit';
@@ -42,11 +44,12 @@ export interface RunOutcome {
   readonly failureReason: string | null;
 }
 
-function toEngineAgent(row: AgentRow): EngineAgent {
+function toEngineAgent(row: AgentRow, tier: ModelTier): EngineAgent {
   return {
     agentId: row.id,
     provider: getProvider(row.provider),
-    model: row.model,
+    // D-014: flagship tier overrides the configured model per provider.
+    model: resolveModelForTier(tier, row.provider, row.model),
     systemPrompt: row.systemPrompt,
     temperature: row.temperatureMilli / 1000,
     maxOutputTokens: row.maxOutputTokens,
@@ -148,6 +151,8 @@ export async function startRun(ctx: TenantContext, taskId: string): Promise<RunO
         taskId,
         primaryProvider: primaryRow.provider,
         reviewerProvider: reviewerRow?.provider ?? null,
+        modelTier: task.modelTier,
+        flagshipCategory: task.flagshipCategory,
       },
     });
 
@@ -229,8 +234,8 @@ export async function startRun(ctx: TenantContext, taskId: string): Promise<RunO
     {
       taskInput: task.input,
       contextItems,
-      primary: toEngineAgent(primaryRow),
-      reviewer: reviewerRow ? toEngineAgent(reviewerRow) : null,
+      primary: toEngineAgent(primaryRow, task.modelTier),
+      reviewer: reviewerRow ? toEngineAgent(reviewerRow, task.modelTier) : null,
       perCallTimeoutMs: env.PROVIDER_TIMEOUT_MS,
       runDeadline: Date.now() + env.RUN_TIMEOUT_MS,
     },

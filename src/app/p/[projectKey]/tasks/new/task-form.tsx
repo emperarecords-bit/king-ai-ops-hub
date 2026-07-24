@@ -1,12 +1,24 @@
 'use client';
 
-import { useActionState } from 'react';
+import { useActionState, useState } from 'react';
 import { submitTask, type TaskFormState } from '../actions';
 
 const initialState: TaskFormState = { error: null };
 
+/** Mirrors FLAGSHIP_CATEGORIES in src/types/domain.ts (approved reserved list). */
+const FLAGSHIP_CATEGORY_OPTIONS = [
+  ['architecture', 'Architecture'],
+  ['security', 'Security'],
+  ['database_design', 'Database design'],
+  ['major_refactoring', 'Major refactoring'],
+  ['product_strategy', 'Product strategy'],
+  ['complex_reasoning', 'Complex reasoning'],
+  ['release_review', 'Final release review'],
+] as const;
+
 export function TaskForm({ projectKey }: { projectKey: string }) {
   const [state, formAction, pending] = useActionState(submitTask, initialState);
+  const [flagship, setFlagship] = useState(false);
 
   return (
     <form action={formAction} className="space-y-5">
@@ -74,6 +86,42 @@ export function TaskForm({ projectKey }: { projectKey: string }) {
         />
         Enable cross-provider review (the other vendor reviews; one revision allowed)
       </label>
+
+      <div className="rounded-md border border-[var(--border)] p-3">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="flagship"
+            checked={flagship}
+            onChange={(e) => setFlagship(e.target.checked)}
+            className="accent-[var(--accent)]"
+          />
+          Use flagship models (GPT-5.2 + Opus — reserved for complex work, ~5× cost)
+        </label>
+        {flagship ? (
+          <div className="mt-3">
+            <label htmlFor="flagshipCategory" className="mb-1 block text-sm text-[var(--muted)]">
+              Reason (required — flagship spend is always attributable)
+            </label>
+            <select
+              id="flagshipCategory"
+              name="flagshipCategory"
+              required
+              defaultValue=""
+              className="w-full rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]"
+            >
+              <option value="" disabled>
+                Select a category…
+              </option>
+              {FLAGSHIP_CATEGORY_OPTIONS.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
+      </div>
 
       {state.error ? (
         <p role="alert" className="rounded-md bg-[#3a2026] px-3 py-2 text-sm text-[var(--danger)]">

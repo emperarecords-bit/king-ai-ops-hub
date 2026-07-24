@@ -1,6 +1,8 @@
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import {
+  FLAGSHIP_CATEGORIES,
+  MODEL_TIERS,
   type MessageRole,
   type ReviewVerdict,
   type StepKind,
@@ -18,14 +20,23 @@ import { writeAudit } from '@/domain/audit/audit';
  * never talks to a provider.
  */
 
-export const createTaskSchema = z.object({
-  title: z.string().trim().min(1, 'Title is required').max(200),
-  input: z.string().trim().min(1, 'Task input is required').max(32_000),
-  providerSelection: z.enum(PROVIDER_SELECTIONS),
-  reviewEnabled: z.boolean(),
-});
+export const createTaskSchema = z
+  .object({
+    title: z.string().trim().min(1, 'Title is required').max(200),
+    input: z.string().trim().min(1, 'Task input is required').max(32_000),
+    providerSelection: z.enum(PROVIDER_SELECTIONS),
+    reviewEnabled: z.boolean(),
+    modelTier: z.enum(MODEL_TIERS).default('standard'),
+    flagshipCategory: z.enum(FLAGSHIP_CATEGORIES).nullable().default(null),
+  })
+  .refine((v) => v.modelTier !== 'flagship' || v.flagshipCategory != null, {
+    message: 'Flagship runs must declare a category from the reserved list.',
+  })
+  .refine((v) => v.modelTier === 'flagship' || v.flagshipCategory == null, {
+    message: 'A category only applies to flagship runs.',
+  });
 
-export type CreateTaskInput = z.infer<typeof createTaskSchema>;
+export type CreateTaskInput = z.input<typeof createTaskSchema>;
 
 export async function createTask(
   tx: DbTx,
@@ -51,6 +62,8 @@ export async function createTask(
       input: parsed.data.input,
       providerSelection: parsed.data.providerSelection,
       reviewEnabled,
+      modelTier: parsed.data.modelTier,
+      flagshipCategory: parsed.data.flagshipCategory,
       status: 'pending',
       createdBy: ctx.userId,
     })
@@ -66,6 +79,8 @@ export async function createTask(
       title: parsed.data.title,
       providerSelection: parsed.data.providerSelection,
       reviewEnabled,
+      modelTier: parsed.data.modelTier,
+      flagshipCategory: parsed.data.flagshipCategory,
     },
   });
 

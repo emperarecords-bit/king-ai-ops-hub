@@ -228,3 +228,32 @@ procedure.
 
 **Revisit if.** Never. If the gate itself becomes ceremony, fix the gate's
 application, not its existence.
+
+---
+
+## D-014 — Two model tiers, chosen by humans, resolved in code
+
+**Decision.** Every task runs at one of two tiers: **standard**
+(each agent's configured model — seeded as GPT-5.2 mini / Claude Sonnet 5) or
+**flagship** (GPT-5.2 / Claude Opus 4.8, overriding the agent's model per
+provider). The tier is selected by a human on the task form; flagship requires
+declaring a category from the approved reserved list (architecture, security,
+database design, major refactoring, product strategy, complex reasoning,
+release review), stored on the task and audited. Resolution is a pure function
+(`src/orchestration/routing.ts`) preserving cross-vendor review (D-005) in
+both tiers.
+
+**Why.** Executive decision (2026-07-23): flagship models for every task is
+the wrong default — most work doesn't need them, and the cost difference is
+roughly 5×. The category requirement makes every flagship dollar attributable
+to a stated reason. Keeping resolution in code (not per-agent duplication)
+means no "flagship agent" rows to drift, and the future auto-router slots in
+behind the same function.
+
+**Security constraint that must survive into any auto-router:** routing is
+deterministic and content-independent of model output. No model's judgment may
+select the flagship tier — only rules or a human — otherwise injected task
+content could escalate its own spend.
+
+**Revisit if.** More than two tiers earn their keep (e.g., a "budget" Haiku
+tier), or per-department default tiers arrive with the Departments UI.
