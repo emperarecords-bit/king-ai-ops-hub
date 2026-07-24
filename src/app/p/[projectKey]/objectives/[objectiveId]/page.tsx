@@ -6,6 +6,7 @@ import { getObjective } from '@/domain/objectives/objectives';
 import { listAssignableEmployees } from '@/domain/agents/agents';
 import { listSchedules } from '@/domain/standing/standing';
 import { NotFoundError } from '@/lib/errors';
+import { formatMoney } from '@/lib/money';
 import { Card, EmptyState, PageHeader, ProgressBar, StatusBadge } from '@/components/ui';
 import {
   AddMilestoneForm,
@@ -173,8 +174,8 @@ export default async function ObjectiveDetailPage({
                     {s.enabled
                       ? `next ${s.nextRunAt.toISOString().slice(0, 16).replace('T', ' ')} UTC`
                       : 'paused'}
-                    {s.lastRunAt
-                      ? ` · last ${s.lastRunAt.toISOString().slice(0, 10)}`
+                    {s.producedCount > 0
+                      ? ` · ${s.producedCount} produced for ${formatMoney({ usdMicros: s.spentMicros })}`
                       : ' · never run'}
                   </span>
                 </div>

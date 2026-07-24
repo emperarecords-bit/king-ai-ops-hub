@@ -4,10 +4,25 @@ import { morningBriefing } from '@/domain/briefing/briefing';
 import { signOut } from '@/app/login/actions';
 import { Card, EmptyState } from '@/components/ui';
 
+const SEVERITY_RANK: Record<string, number> = {
+  critical: 0,
+  attention: 1,
+  opportunity: 2,
+  positive: 3,
+};
+
+const SEVERITY_BORDER: Record<string, string> = {
+  critical: 'border-l-[var(--danger)]',
+  attention: 'border-l-[var(--accent)]',
+  opportunity: 'border-l-[var(--info)]',
+  positive: 'border-l-[var(--success)]',
+};
+
 /**
- * The Morning Briefing (Sprint 6). The first page after sign-in opens with
- * answers: what happened overnight, what matters now, what needs a decision —
- * across every workspace, decisions first.
+ * The Morning Briefing (Sprint 6, extended Sprint 9). The first page after
+ * sign-in opens with answers: what matters (composite management insights),
+ * what was prepared overnight, and what needs a decision — across every
+ * workspace, consequence first.
  */
 export default async function MorningBriefingPage() {
   const { user, projects, orgRoles } = await listMyProjectsWithOrgRoles();
@@ -17,6 +32,16 @@ export default async function MorningBriefingPage() {
   const hour = new Date().getUTCHours();
   const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
   const needsAttention = totals.runsFailed + totals.objectivesAtRisk + totals.budgetAlerts;
+
+  // Insights across all workspaces, most consequential first, capped so the
+  // briefing stays a briefing (P5: clarity over completeness).
+  const allInsights = workspaces
+    .flatMap((w) => w.insights.map((insight) => ({ insight, workspaceName: w.projectName })))
+    .sort(
+      (a, b) =>
+        (SEVERITY_RANK[a.insight.severity] ?? 9) - (SEVERITY_RANK[b.insight.severity] ?? 9),
+    )
+    .slice(0, 6);
 
   return (
     <main className="mx-auto max-w-4xl p-8">
@@ -86,6 +111,51 @@ export default async function MorningBriefingPage() {
               <p className="text-3xl font-bold">{totals.workingNow}</p>
             </Card>
           </div>
+
+          {allInsights.length > 0 ? (
+            <section className="mb-8">
+              <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--muted)]">
+                What matters
+              </h2>
+              <ul className="space-y-2">
+                {allInsights.map(({ insight, workspaceName }) => (
+                  <li
+                    key={insight.key}
+                    className={`rounded-lg border-l-4 border border-[var(--border)] bg-[var(--surface)] p-4 ${SEVERITY_BORDER[insight.severity]}`}
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="min-w-0">
+                        <p className="text-sm">
+                          <span className="text-[var(--muted)]">{workspaceName} · </span>
+                          {insight.headline}
+                        </p>
+                        <p className="mt-1 text-sm text-[var(--muted)]">{insight.action}</p>
+                      </div>
+                      <Link
+                        href={insight.href}
+                        className="shrink-0 rounded-md border border-[var(--border)] px-3 py-1.5 text-xs hover:border-[var(--accent)]"
+                      >
+                        Open
+                      </Link>
+                    </div>
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-xs text-[var(--muted)] hover:text-[var(--foreground)]">
+                        Why this says that
+                      </summary>
+                      <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-[var(--muted)] sm:grid-cols-3">
+                        {Object.entries(insight.evidence).map(([label, value]) => (
+                          <div key={label}>
+                            <dt className="inline">{label.replace(/([A-Z])/g, ' $1').toLowerCase()}: </dt>
+                            <dd className="inline font-medium text-[var(--foreground)]">{value}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    </details>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
 
           {workspaces.some((w) => w.prepared.length > 0) ? (
             <Card title="Prepared while you were away" className="mb-8 border-[var(--accent)]">

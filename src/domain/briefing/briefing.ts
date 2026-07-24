@@ -4,6 +4,7 @@ import { withTenant } from '@/db/tenant';
 import { approvals, objectives, runs, runSteps, tasks } from '@/db/schema';
 import { type ProjectAccessRecord } from '@/db/system';
 import { expireStaleApprovals } from '@/domain/approvals/approvals';
+import { computeInsights, type Insight } from '@/domain/insights/insights';
 import { projectSpendLimit, spentThisPeriodMicros } from '@/domain/usage/usage';
 
 /**
@@ -32,6 +33,8 @@ export interface WorkspaceBriefing {
   projectName: string;
   /** Standing-work results from the last 24h — the "while you were away" list. */
   prepared: PreparedItem[];
+  /** Composite management insights for this workspace, ranked by consequence. */
+  insights: Insight[];
   /** Decisions waiting on the owner right now. */
   pendingApprovals: number;
   oldestPendingApprovalAt: Date | null;
@@ -70,7 +73,8 @@ async function briefWorkspace(
   return withTenant(ctx, async (tx) => {
     await expireStaleApprovals(tx, ctx); // the briefing never reports ghosts
 
-    const since = new Date(Date.now() - OVERNIGHT_HOURS * 60 * 60 * 1000);
+    const now = new Date();
+    const since = new Date(now.getTime() - OVERNIGHT_HOURS * 60 * 60 * 1000);
 
     const pendingRows = await tx
       .select({
@@ -139,11 +143,15 @@ async function briefWorkspace(
     const limit = await projectSpendLimit(tx, ctx.projectId);
     const spentPct = limit > 0n ? Number((spent * 100n) / limit) : 100;
 
+    // Management insights: composite signals, not activity counters.
+    const insights = await computeInsights(tx, ctx, project.key, now);
+
     const pending = pendingRows[0];
     const runsAgg = runRows[0];
     return {
       projectKey: project.key,
       projectName: project.name,
+      insights,
       prepared: preparedRows.map((r) => ({
         taskId: r.taskId,
         title: r.title,

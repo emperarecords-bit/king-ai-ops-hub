@@ -1,4 +1,4 @@
-import { and, asc, eq, lte } from 'drizzle-orm';
+import { and, asc, eq, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
   CADENCES,
@@ -12,7 +12,7 @@ import { AppError, NotFoundError, ValidationError } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { type DbTx, getDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
-import { projectMembers, taskSchedules } from '@/db/schema';
+import { projectMembers, taskSchedules, tasks, usageEvents } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 import { createTask } from '@/domain/tasks/tasks';
 import { startRun } from '@/domain/tasks/runner';
@@ -72,6 +72,10 @@ export interface ScheduleRow {
   nextRunAt: Date;
   lastRunAt: Date | null;
   enabled: boolean;
+  /** Lifetime spend of the work this schedule produced, USD micros. */
+  spentMicros: bigint;
+  /** Results produced to date. */
+  producedCount: number;
 }
 
 const rowSelection = {
@@ -86,6 +90,18 @@ const rowSelection = {
   nextRunAt: taskSchedules.nextRunAt,
   lastRunAt: taskSchedules.lastRunAt,
   enabled: taskSchedules.enabled,
+  // Per-schedule cost attribution: recurring spend must be visible per
+  // schedule, not folded into a workspace total (Sprint 8 debt).
+  // Table-qualified: Drizzle renders ${taskSchedules.id} unqualified inside
+  // raw SQL, which is ambiguous against the subquery's own columns.
+  spentMicros: sql<string>`coalesce((
+    select sum(u.cost_micros) from ${usageEvents} u
+    join ${tasks} t on t.id = u.task_id
+    where t.schedule_id = task_schedules.id
+  ), 0)`,
+  producedCount: sql<string>`(
+    select count(*) from ${tasks} t where t.schedule_id = task_schedules.id
+  )`,
 };
 
 export async function listSchedules(
@@ -97,11 +113,17 @@ export async function listSchedules(
     eq(taskSchedules.projectId, ctx.projectId),
     eq(taskSchedules.orgId, ctx.orgId),
   );
-  return tx
+  const rows = await tx
     .select(rowSelection)
     .from(taskSchedules)
     .where(objectiveId ? and(base, eq(taskSchedules.objectiveId, objectiveId)) : base)
     .orderBy(asc(taskSchedules.nextRunAt));
+
+  return rows.map((r) => ({
+    ...r,
+    spentMicros: BigInt(r.spentMicros),
+    producedCount: Number(r.producedCount),
+  }));
 }
 
 export async function createSchedule(
