@@ -1,0 +1,26 @@
+# Local Postgres for development and integration tests.
+#
+# Port 5433 on purpose — 5432 is very often already taken by a system Postgres or
+# a `supabase start` stack, and a silent connection to the wrong database is a
+# genuinely bad afternoon.
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: king-ai-hub-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: king
+      POSTGRES_PASSWORD: king
+      POSTGRES_DB: king_ai_hub
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U king -d king_ai_hub"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

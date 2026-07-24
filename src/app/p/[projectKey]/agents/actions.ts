@@ -1,0 +1,58 @@
+'use server';
+
+import { revalidatePath } from 'next/cache';
+import { z } from 'zod';
+import { AppError, toPublicMessage } from '@/lib/errors';
+import { log } from '@/lib/log';
+import { requireTenant } from '@/domain/auth/guard';
+import { withTenant } from '@/db/tenant';
+import { updateAgent } from '@/domain/agents/agents';
+
+export interface AgentFormState {
+  error: string | null;
+  saved: boolean;
+}
+
+const patchSchema = z.object({
+  projectKey: z.string().min(1),
+  agentId: z.string().uuid(),
+  model: z.string().min(1).max(100),
+  systemPrompt: z.string().min(1).max(8000),
+  temperatureMilli: z.coerce.number().int().min(0).max(1000),
+  maxOutputTokens: z.coerce.number().int().min(1).max(65_536),
+  enabled: z.boolean(),
+});
+
+export async function saveAgent(_prev: AgentFormState, formData: FormData): Promise<AgentFormState> {
+  const parsed = patchSchema.safeParse({
+    projectKey: formData.get('projectKey'),
+    agentId: formData.get('agentId'),
+    model: formData.get('model'),
+    systemPrompt: formData.get('systemPrompt'),
+    temperatureMilli: formData.get('temperatureMilli'),
+    maxOutputTokens: formData.get('maxOutputTokens'),
+    enabled: formData.get('enabled') === 'on',
+  });
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0]?.message ?? 'Invalid input.', saved: false };
+  }
+
+  try {
+    const ctx = await requireTenant(parsed.data.projectKey);
+    await withTenant(ctx, (tx) =>
+      updateAgent(tx, ctx, parsed.data.agentId, {
+        model: parsed.data.model,
+        systemPrompt: parsed.data.systemPrompt,
+        temperatureMilli: parsed.data.temperatureMilli,
+        maxOutputTokens: parsed.data.maxOutputTokens,
+        enabled: parsed.data.enabled,
+      }),
+    );
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('updateAgent failed', { err });
+    return { error: toPublicMessage(err), saved: false };
+  }
+
+  revalidatePath(`/p/${parsed.data.projectKey}/agents`);
+  return { error: null, saved: true };
+}
