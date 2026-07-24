@@ -17,6 +17,12 @@ import { costForUsage, modelsForProvider } from './pricing';
 export class AnthropicProvider implements AIProvider {
   readonly id = 'anthropic' as const;
   private readonly client: Anthropic;
+  /**
+   * Models that rejected `temperature` as deprecated (Claude 5 family).
+   * Learned adaptively: first request retries once without it, later requests
+   * skip it up front. Process-lifetime cache only — cheap and self-healing.
+   */
+  private readonly noTemperatureModels = new Set<string>();
 
   constructor(apiKey: string) {
     // maxRetries: 0 — retry policy belongs to the engine, once, uniformly.
@@ -26,20 +32,7 @@ export class AnthropicProvider implements AIProvider {
   async execute(request: AgentRequest): Promise<AgentResponse> {
     const startedAt = Date.now();
     try {
-      const message = await this.client.messages.create(
-        {
-          model: request.model,
-          system: request.system,
-          messages: request.turns.map((t) => ({ role: t.role, content: t.content })),
-          temperature: request.temperature,
-          max_tokens: request.maxOutputTokens,
-          stream: false,
-        },
-        {
-          timeout: request.timeoutMs,
-          signal: request.signal,
-        },
-      );
+      const message = await this.createMessage(request);
 
       const text = message.content
         .filter((block): block is Anthropic.TextBlock => block.type === 'text')
@@ -59,6 +52,46 @@ export class AnthropicProvider implements AIProvider {
       };
     } catch (err) {
       throw this.mapError(err);
+    }
+  }
+
+  /**
+   * Sends the request, omitting `temperature` for models known to reject it.
+   * On the first "temperature is deprecated" 400 for a model, records the
+   * model and retries once without the parameter.
+   */
+  private async createMessage(request: AgentRequest): Promise<Anthropic.Message> {
+    const send = (withTemperature: boolean) =>
+      this.client.messages.create(
+        {
+          model: request.model,
+          system: request.system,
+          messages: request.turns.map((t) => ({ role: t.role, content: t.content })),
+          ...(withTemperature ? { temperature: request.temperature } : {}),
+          max_tokens: request.maxOutputTokens,
+          stream: false,
+        },
+        {
+          timeout: request.timeoutMs,
+          signal: request.signal,
+        },
+      );
+
+    if (this.noTemperatureModels.has(request.model)) {
+      return send(false);
+    }
+    try {
+      return await send(true);
+    } catch (err) {
+      if (
+        err instanceof APIError &&
+        err.status === 400 &&
+        /temperature.*deprecated/i.test(err.message)
+      ) {
+        this.noTemperatureModels.add(request.model);
+        return send(false);
+      }
+      throw err;
     }
   }
 
