@@ -13,6 +13,12 @@ const ROLE_LABEL: Record<string, string> = {
   system: 'System',
 };
 
+const SEVERITY_STYLE: Record<string, string> = {
+  critical: 'bg-[#3a2026] text-[var(--danger)]',
+  major: 'bg-[#3a3220] text-[#e5c07b]',
+  minor: 'bg-[#22303a] text-[#7bb8e5]',
+};
+
 export default async function TaskDetailPage({
   params,
   searchParams,
@@ -41,6 +47,8 @@ export default async function TaskDetailPage({
 
   const { task, msgs, latestRun, steps } = data;
   const canRun = task.status === 'pending' || task.status === 'failed';
+  const reviewStep = steps.find((s) => s.kind === 'review' && s.verdictDetail != null);
+  const reviewIssues = reviewStep?.verdictDetail?.issues ?? [];
 
   return (
     <div>
@@ -70,6 +78,39 @@ export default async function TaskDetailPage({
       {latestRun?.errorMessage ? (
         <Card title="Run error" className="mb-6 border-[var(--danger)]">
           <p className="text-sm text-[var(--danger)]">{latestRun.errorMessage}</p>
+        </Card>
+      ) : null}
+
+      {reviewStep?.verdictDetail ? (
+        <Card title="Review" className="mb-6">
+          <div className="mb-3 flex items-center gap-3 text-sm">
+            <StatusBadge status={reviewStep.verdictDetail.verdict} />
+            {reviewStep.provider ? <ProviderBadge provider={reviewStep.provider} /> : null}
+            <span className="text-[var(--muted)]">
+              {reviewIssues.length === 0
+                ? 'No issues raised.'
+                : `${reviewIssues.length} issue${reviewIssues.length === 1 ? '' : 's'} raised`}
+            </span>
+          </div>
+          {reviewIssues.length > 0 ? (
+            <ul className="space-y-2">
+              {reviewIssues.map((issue, i) => (
+                <li key={i} className="rounded-md border border-[var(--border)] p-3 text-sm">
+                  <div className="mb-1 flex items-center gap-2">
+                    <span
+                      className={`rounded px-2 py-0.5 text-xs font-semibold uppercase ${SEVERITY_STYLE[issue.severity] ?? ''}`}
+                    >
+                      {issue.severity}
+                    </span>
+                    <span className="font-medium">{issue.summary}</span>
+                  </div>
+                  {issue.detail ? (
+                    <p className="text-[var(--muted)]">{issue.detail}</p>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </Card>
       ) : null}
 

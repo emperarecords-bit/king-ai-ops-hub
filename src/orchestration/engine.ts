@@ -1,4 +1,4 @@
-import { type ReviewVerdict, type StepKind } from '@/types/domain';
+import { type ReviewDetail, type ReviewVerdict, type StepKind } from '@/types/domain';
 import {
   type AgentRequest,
   type AgentResponse,
@@ -13,7 +13,8 @@ import {
   buildReviewUserTurn,
   buildRevisionUserTurn,
   type ContextItemForPrompt,
-  parseVerdict,
+  parseReviewDetail,
+  stripIssuesBlock,
 } from './prompts';
 import { extractProposedActions, type ProposedAction, stripActionBlock } from './actions';
 
@@ -58,6 +59,8 @@ export interface StepRecord {
   readonly agentId: string | null;
   readonly response: AgentResponse | null;
   readonly verdict: ReviewVerdict | null;
+  /** Structured review outcome (review steps only). */
+  readonly verdictDetail: ReviewDetail | null;
   readonly succeeded: boolean;
   readonly errorMessage: string | null;
 }
@@ -155,7 +158,7 @@ export function consolidate(args: {
 
   if (args.verdict != null && args.reviewText != null) {
     sections.push(
-      `---\n**Review summary** (verdict: ${args.verdict})\n\n${stripActionBlock(args.reviewText)}`,
+      `---\n**Review summary** (verdict: ${args.verdict})\n\n${stripIssuesBlock(stripActionBlock(args.reviewText))}`,
     );
     if (args.revisionText != null) {
       sections.push('*The result above incorporates one revision addressing this review.*');
@@ -208,6 +211,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
       agentId: input.primary.agentId,
       response: null,
       verdict: null,
+      verdictDetail: null,
       succeeded: false,
       errorMessage: message,
     });
@@ -224,6 +228,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
     agentId: input.primary.agentId,
     response: primaryResponse,
     verdict: null,
+    verdictDetail: null,
     succeeded: true,
     errorMessage: null,
   });
@@ -246,12 +251,18 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
         input.perCallTimeoutMs,
         input.runDeadline,
       );
-      verdict = parseVerdict(reviewResponse.text);
+      const parsedReview = parseReviewDetail(reviewResponse.text);
+      verdict = parsedReview.detail.verdict;
+      if (parsedReview.malformedReasons.length > 0) {
+        // stepNumber not yet advanced for this step; report against the next.
+        await sink.onMalformedOutput(stepNumber + 1, parsedReview.malformedReasons);
+      }
       await record({
         kind: 'review',
         agentId: input.reviewer.agentId,
         response: reviewResponse,
         verdict,
+        verdictDetail: parsedReview.detail,
         succeeded: true,
         errorMessage: null,
       });
@@ -263,6 +274,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
         agentId: input.reviewer.agentId,
         response: null,
         verdict: null,
+        verdictDetail: null,
         succeeded: false,
         errorMessage: message,
       });
@@ -290,6 +302,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
           agentId: input.primary.agentId,
           response: revisionResponse,
           verdict: null,
+          verdictDetail: null,
           succeeded: true,
           errorMessage: null,
         });
@@ -300,6 +313,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
           agentId: input.primary.agentId,
           response: null,
           verdict: null,
+          verdictDetail: null,
           succeeded: false,
           errorMessage: message,
         });
@@ -320,6 +334,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
     agentId: null,
     response: null,
     verdict: null,
+    verdictDetail: null,
     succeeded: true,
     errorMessage: null,
   });

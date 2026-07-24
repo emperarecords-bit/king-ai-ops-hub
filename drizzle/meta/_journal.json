@@ -15,6 +15,13 @@
       "when": 1784856279548,
       "tag": "0001_model_tiers",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784858470161,
+      "tag": "0002_verdict_detail",
+      "breakpoints": true
     }
   ]
 }

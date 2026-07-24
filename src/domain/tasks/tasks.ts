@@ -4,6 +4,7 @@ import {
   FLAGSHIP_CATEGORIES,
   MODEL_TIERS,
   type MessageRole,
+  type ReviewDetail,
   type ReviewVerdict,
   type StepKind,
   type TaskStatus,
@@ -226,6 +227,7 @@ export interface RunStepRow {
   provider: ProviderId | null;
   model: string | null;
   verdict: ReviewVerdict | null;
+  verdictDetail: ReviewDetail | null;
   succeeded: boolean;
   errorMessage: string | null;
   latencyMs: number | null;
@@ -240,6 +242,7 @@ export async function listRunSteps(tx: DbTx, ctx: TenantContext, runId: string):
       provider: runSteps.provider,
       model: runSteps.model,
       verdict: runSteps.verdict,
+      verdictDetail: runSteps.verdictDetail,
       succeeded: runSteps.succeeded,
       errorMessage: runSteps.errorMessage,
       latencyMs: runSteps.latencyMs,

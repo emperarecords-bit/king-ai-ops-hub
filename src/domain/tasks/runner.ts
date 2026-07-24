@@ -185,6 +185,7 @@ export async function startRun(ctx: TenantContext, taskId: string): Promise<RunO
           provider: record.response?.provider ?? agentRow?.provider ?? null,
           model: record.response?.model ?? agentRow?.model ?? null,
           verdict: record.verdict,
+          verdictDetail: record.verdictDetail,
           succeeded: record.succeeded,
           errorMessage: record.errorMessage,
           latencyMs: record.response?.latencyMs ?? null,

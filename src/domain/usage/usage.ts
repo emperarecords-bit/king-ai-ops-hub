@@ -3,7 +3,7 @@ import { type TenantContext } from '@/types/domain';
 import { type ProviderId, type TokenUsage } from '@/types/provider';
 import { BudgetExceededError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
-import { spendLimits, usageEvents } from '@/db/schema';
+import { runSteps, spendLimits, usageEvents } from '@/db/schema';
 import { costForUsage, PRICING_VERSION } from '@/providers/pricing';
 
 /**
@@ -110,6 +110,57 @@ export async function usageSummary(tx: DbTx, projectId: string): Promise<UsageSu
     costMicros: BigInt(r.costMicros),
     events: Number(r.events),
   }));
+}
+
+/**
+ * The review-value metric (SPRINT-03-PLAN A9): how often the cross-provider
+ * reviewer changes the outcome. A high revise+reject share is the number that
+ * justifies the review step's cost; near-zero suggests review adds little for
+ * this project's task mix.
+ */
+export interface ReviewStats {
+  reviewedRuns: number;
+  approvals: number;
+  revisions: number;
+  rejections: number;
+  /** revise+reject over all reviewed runs, 0..1. Null when nothing reviewed. */
+  interventionRate: number | null;
+}
+
+export async function reviewStats(tx: DbTx, projectId: string): Promise<ReviewStats> {
+  const rows = await tx
+    .select({
+      verdict: runSteps.verdict,
+      count: sql<string>`count(*)`,
+    })
+    .from(runSteps)
+    .where(
+      and(
+        eq(runSteps.projectId, projectId),
+        eq(runSteps.kind, 'review'),
+        eq(runSteps.succeeded, true),
+        gte(runSteps.createdAt, currentPeriodStart()),
+      ),
+    )
+    .groupBy(runSteps.verdict);
+
+  let approvals = 0;
+  let revisions = 0;
+  let rejections = 0;
+  for (const r of rows) {
+    const n = Number(r.count);
+    if (r.verdict === 'approve') approvals += n;
+    else if (r.verdict === 'revise') revisions += n;
+    else if (r.verdict === 'reject') rejections += n;
+  }
+  const reviewedRuns = approvals + revisions + rejections;
+  return {
+    reviewedRuns,
+    approvals,
+    revisions,
+    rejections,
+    interventionRate: reviewedRuns === 0 ? null : (revisions + rejections) / reviewedRuns,
+  };
 }
 
 export async function projectSpendLimit(tx: DbTx, projectId: string): Promise<bigint> {

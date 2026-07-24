@@ -3,6 +3,7 @@ import { withTenant } from '@/db/tenant';
 import {
   currentPeriodStart,
   projectSpendLimit,
+  reviewStats,
   spentThisPeriodMicros,
   usageSummary,
 } from '@/domain/usage/usage';
@@ -17,10 +18,11 @@ export default async function UsagePage({
   const { projectKey } = await params;
   const ctx = await requireTenant(projectKey);
 
-  const { summary, spent, limit } = await withTenant(ctx, async (tx) => ({
+  const { summary, spent, limit, reviews } = await withTenant(ctx, async (tx) => ({
     summary: await usageSummary(tx, ctx.projectId),
     spent: await spentThisPeriodMicros(tx, ctx.projectId),
     limit: await projectSpendLimit(tx, ctx.projectId),
+    reviews: await reviewStats(tx, ctx.projectId),
   }));
 
   const period = currentPeriodStart().toISOString().slice(0, 7);
@@ -32,7 +34,7 @@ export default async function UsagePage({
         subtitle={`Current period: ${period} (UTC calendar month). Costs are exact integer micros computed against the versioned pricing table at the moment of use.`}
       />
 
-      <div className="mb-6 grid gap-4 sm:grid-cols-2">
+      <div className="mb-6 grid gap-4 sm:grid-cols-3">
         <Card title="Spent this period">
           <p className="text-3xl font-bold">{formatMoney({ usdMicros: spent })}</p>
         </Card>
@@ -41,6 +43,22 @@ export default async function UsagePage({
           <p className="mt-1 text-sm text-[var(--muted)]">
             Runs are refused before the first token once the limit is reached.
           </p>
+        </Card>
+        <Card title="Review value">
+          {reviews.interventionRate == null ? (
+            <p className="text-sm text-[var(--muted)]">No reviewed runs this period yet.</p>
+          ) : (
+            <>
+              <p className="text-3xl font-bold">
+                {Math.round(reviews.interventionRate * 100)}%
+              </p>
+              <p className="mt-1 text-sm text-[var(--muted)]">
+                of {reviews.reviewedRuns} reviewed run{reviews.reviewedRuns === 1 ? '' : 's'}{' '}
+                changed by review · {reviews.approvals} approved, {reviews.revisions} revised,{' '}
+                {reviews.rejections} rejected
+              </p>
+            </>
+          )}
         </Card>
       </div>
 

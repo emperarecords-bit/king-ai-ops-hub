@@ -1,4 +1,5 @@
-import { type ReviewVerdict } from '@/types/domain';
+import { z } from 'zod';
+import { REVIEW_SEVERITIES, type ReviewDetail, type ReviewVerdict } from '@/types/domain';
 
 /**
  * Prompt assembly for each step of the run. Two hard rules:
@@ -57,6 +58,9 @@ export function buildPrimaryUserTurn(
   return `${contextBlock}\n\n${wrapUntrusted('Task', taskInput)}\n\nComplete the task.`;
 }
 
+export const ISSUES_BLOCK_OPEN = '```review-issues';
+export const ISSUES_BLOCK_CLOSE = '```';
+
 export function buildReviewSystem(agentSystemPrompt: string): string {
   return `${agentSystemPrompt}\n${SHARED_RULES}
 You are reviewing another model's response. Start your reply with exactly one line:
@@ -64,7 +68,12 @@ VERDICT: approve | revise | reject
 - approve: the response is correct and complete as-is.
 - revise: the response is salvageable but has specific problems the author should fix. List them.
 - reject: the response is fundamentally wrong or unsafe. Explain why.
-Then give your reasoning.`;
+Then give your reasoning in prose.
+Finally, if you found concrete problems, end your reply with a single fenced block listing them:
+${ISSUES_BLOCK_OPEN}
+[{"severity": "critical|major|minor", "summary": "<one line>", "detail": "<optional specifics>"}]
+${ISSUES_BLOCK_CLOSE}
+List at most 20 issues. If the verdict is approve and there are no issues, omit the block.`;
 }
 
 export function buildReviewUserTurn(taskInput: string, primaryResponse: string): string {
@@ -84,4 +93,52 @@ export function parseVerdict(reviewText: string): ReviewVerdict {
   const match = reviewText.match(/^\s*VERDICT:\s*(approve|revise|reject)\b/im);
   if (!match) return 'revise';
   return match[1]!.toLowerCase() as ReviewVerdict;
+}
+
+const reviewIssueSchema = z.object({
+  severity: z.enum(REVIEW_SEVERITIES),
+  summary: z.string().trim().min(1).max(500),
+  detail: z.string().trim().max(2_000).optional(),
+});
+const issuesArraySchema = z.array(reviewIssueSchema).max(20);
+
+export interface ParsedReview {
+  readonly detail: ReviewDetail;
+  /** Non-empty when an issues block existed but failed validation (TB-4). */
+  readonly malformedReasons: readonly string[];
+}
+
+/**
+ * Full structured parse of a review reply: verdict line + optional fenced
+ * issues block. Model output is untrusted (SECURITY.md T2): a malformed block
+ * degrades to zero issues and is reported, never thrown.
+ */
+export function parseReviewDetail(reviewText: string): ParsedReview {
+  const verdict = parseVerdict(reviewText);
+  const block = reviewText.match(/```review-issues\s*\n([\s\S]*?)\n?```/);
+  if (!block) {
+    return { detail: { verdict, issues: [] }, malformedReasons: [] };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(block[1]!);
+  } catch {
+    return {
+      detail: { verdict, issues: [] },
+      malformedReasons: ['review-issues block is not valid JSON'],
+    };
+  }
+  const validated = issuesArraySchema.safeParse(parsed);
+  if (!validated.success) {
+    return {
+      detail: { verdict, issues: [] },
+      malformedReasons: validated.error.issues.map((i) => `review-issues: ${i.path.join('.')}: ${i.message}`),
+    };
+  }
+  return { detail: { verdict, issues: validated.data }, malformedReasons: [] };
+}
+
+/** Remove the issues block for human-facing rendering of the review text. */
+export function stripIssuesBlock(text: string): string {
+  return text.replace(/```review-issues\s*\n[\s\S]*?\n?```/g, '').trimEnd();
 }

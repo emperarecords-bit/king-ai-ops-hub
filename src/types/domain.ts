@@ -26,6 +26,22 @@ export type MessageRole = (typeof MESSAGE_ROLES)[number];
 export const REVIEW_VERDICTS = ['approve', 'revise', 'reject'] as const;
 export type ReviewVerdict = (typeof REVIEW_VERDICTS)[number];
 
+export const REVIEW_SEVERITIES = ['critical', 'major', 'minor'] as const;
+export type ReviewSeverity = (typeof REVIEW_SEVERITIES)[number];
+
+/** One concrete problem a reviewer found, extracted from the issues block. */
+export interface ReviewIssue {
+  readonly severity: ReviewSeverity;
+  readonly summary: string;
+  readonly detail?: string;
+}
+
+/** Structured review outcome stored on the review step (run_steps.verdict_detail). */
+export interface ReviewDetail {
+  readonly verdict: ReviewVerdict;
+  readonly issues: readonly ReviewIssue[];
+}
+
 /**
  * The closed set of consequential actions a model may PROPOSE. Executing any of
  * them requires a human approval row. Anything outside this enum is not

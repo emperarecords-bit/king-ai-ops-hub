@@ -10,6 +10,7 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { type ReviewDetail } from '@/types/domain';
 import {
   actionTypeEnum,
   agentRoleEnum,
@@ -289,6 +290,8 @@ export const runSteps = pgTable(
     provider: providerIdEnum('provider'),
     model: text('model'),
     verdict: reviewVerdictEnum('verdict'),
+    /** Structured review outcome: { verdict, issues: [{severity, summary, detail?}] } */
+    verdictDetail: jsonb('verdict_detail').$type<ReviewDetail>(),
     succeeded: boolean('succeeded').notNull(),
     errorMessage: text('error_message'),
     latencyMs: integer('latency_ms'),
