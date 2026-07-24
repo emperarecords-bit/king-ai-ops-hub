@@ -82,30 +82,6 @@ export function TaskForm({
         />
       </div>
 
-      <fieldset>
-        <legend className="mb-2 text-sm text-[var(--muted)]">Provider</legend>
-        <div className="flex gap-4">
-          {(
-            [
-              ['openai', 'OpenAI'],
-              ['anthropic', 'Anthropic'],
-              ['both', 'Both (cross-review)'],
-            ] as const
-          ).map(([value, label]) => (
-            <label key={value} className="flex items-center gap-2 text-sm">
-              <input
-                type="radio"
-                name="providerSelection"
-                value={value}
-                defaultChecked={value === 'both'}
-                className="accent-[var(--accent)]"
-              />
-              {label}
-            </label>
-          ))}
-        </div>
-      </fieldset>
-
       <label className="flex items-center gap-2 text-sm">
         <input
           type="checkbox"
@@ -113,7 +89,8 @@ export function TaskForm({
           defaultChecked
           className="accent-[var(--accent)]"
         />
-        Enable cross-provider review (the other vendor reviews; one revision allowed)
+        Cross-check this work (a second employee from a rival vendor reviews it; one revision
+        allowed)
       </label>
 
       <div className="rounded-md border border-[var(--border)] p-3">
@@ -125,7 +102,7 @@ export function TaskForm({
             onChange={(e) => setFlagship(e.target.checked)}
             className="accent-[var(--accent)]"
           />
-          Use flagship models (GPT-5.2 + Opus — reserved for complex work, ~5× cost)
+          Assign senior staff (reserved for complex work · ~5× cost)
         </label>
         {flagship ? (
           <div className="mt-3">
@@ -151,6 +128,37 @@ export function TaskForm({
           </div>
         ) : null}
       </div>
+
+      <details className="rounded-md border border-[var(--border)] p-3">
+        <summary className="cursor-pointer text-xs text-[var(--muted)] hover:text-[var(--foreground)]">
+          Advanced: vendor routing
+        </summary>
+        <fieldset className="mt-3">
+          <legend className="mb-2 text-sm text-[var(--muted)]">
+            Which vendor leads (the cross-check always uses the other one)
+          </legend>
+          <div className="flex gap-4">
+            {(
+              [
+                ['both', 'Default (OpenAI leads, Anthropic checks)'],
+                ['openai', 'OpenAI only'],
+                ['anthropic', 'Anthropic only'],
+              ] as const
+            ).map(([value, label]) => (
+              <label key={value} className="flex items-center gap-2 text-sm">
+                <input
+                  type="radio"
+                  name="providerSelection"
+                  value={value}
+                  defaultChecked={value === 'both'}
+                  className="accent-[var(--accent)]"
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      </details>
 
       {state.error ? (
         <p role="alert" className="rounded-md bg-[#3a2026] px-3 py-2 text-sm text-[var(--danger)]">
