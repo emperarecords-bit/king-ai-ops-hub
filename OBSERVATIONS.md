@@ -192,6 +192,51 @@ real button beside the criteria heading, label it for its outcome
 dependency is self-evident, and move it above the criterion rows so it is
 seen before the manual path is taken.
 
+### O-11 · Suggested criteria are plausible but not measurable — three of four had target 0
+
+**Observed.** First real use of the feature (2026-07-24, objective *"connect
+all ai to this hub"* in `king-ai-ops-hub`). It produced four criteria. Three
+carried `target: 0`, and one tried to express a deadline:
+
+| Label | Unit | Target |
+|---|---|---|
+| Number of AI chat sources connected to the hub | count | **0** |
+| Number of project/workspace integrations connected | count | **0** |
+| Percentage … searchable and viewable in one place | % | 100 ✓ |
+| **Date** by which the first end-to-end connection works | date | **0** |
+
+**Why it matters — this is correctness, not taste.** D-017's completion gate
+is only as meaningful as the criteria it enforces. "Connected sources ≥ 0" is
+satisfied by doing nothing; the gate becomes ceremony. And the fourth row is
+a deadline forced through a `target: number` schema that cannot represent a
+date, so it degraded to 0 rather than failing loudly.
+
+Three distinct defects behind it:
+
+1. **No positivity constraint.** The Zod schema accepts any finite number.
+   A count or percentage target of 0 is almost never a real goal and should
+   be rejected at validation, not stored.
+2. **The schema has no date type.** The model reached for a real and common
+   criterion kind ("done by X") and the schema quietly mangled it. Either
+   support a date criterion or instruct the suggester that deadlines are not
+   success criteria.
+3. **Metric slugs are derived, not designed.** One key came out as
+   `number_of_project/workspace_integrations_connected_to_the_hub` — a
+   slash inside an identifier, and otherwise just the label lowercased. The
+   `metric` field currently carries no information the label doesn't, but is
+   the field a future `source: "usage"` binding would join on.
+
+**Also observed:** the objective is still in **draft**. Whether that is
+because the criteria looked wrong, or because activation is a separate step
+the owner did not notice, is the next thing worth learning — it is the
+difference between a quality problem and a discoverability problem (cf.
+O-10).
+
+**Recommended fix.** Reject non-positive targets for `count`/`%` units;
+either add a `deadline` criterion type or teach the suggester that dates are
+not criteria; constrain `metric` to `^[a-z0-9_]+$` and generate it properly.
+Small, and it protects the one invariant the objective model exists to hold.
+
 ---
 
 ## Open questions this file exists to answer
