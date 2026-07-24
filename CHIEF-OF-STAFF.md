@@ -149,13 +149,37 @@ owner did not already know. Building it earlier produces a confident essay
 about six data points — the exact failure mode that would destroy trust in
 the role permanently.
 
-## 9. The open question for the owner
+## 9. Voice — DECIDED (2026-07-24)
 
-**Does the CoS speak weekly, or only when it has something worth saying?**
-A fixed weekly note builds a ritual but risks filler; an event-driven note
-("something changed that you should know about") preserves signal but may go
-quiet for weeks. My recommendation is *event-driven with a weekly floor*: it
-speaks when the insight layer produces something new, and at minimum
-summarizes the week even if the summary is "nothing changed, here's where the
-money went." That decision shapes CoS-1's shape and is worth making before it
-is built, not after.
+**Event-driven, with a guaranteed weekly strategic review.** The CoS speaks
+when something changes that the owner should know about, and regardless
+delivers one weekly review even if that review is "nothing changed; here is
+where the money went and what is still open."
+
+**And a sharper mandate than originally scoped:** the CoS focuses on
+*relationships, not isolated facts*. Its job is to explain **why the
+organization is behaving the way it is** and **where executive attention has
+the greatest impact** — not to restate the insight list in prose.
+
+That mandate changes what layer 3 must do. Layer 2 (Sprint 9) produces
+independent findings; the CoS's value is in the *joins between them*:
+
+| Isolated facts (layer 2 already says this) | Relationship (what the CoS must say) |
+|---|---|
+| Objective A closes criteria cheaply; objective B does not | "B's work runs without the pricing knowledge A uses — the gap is knowledge, not effort" |
+| Review interventions rose; a knowledge item was archived | "Quality fell in the same week the pricing standard was retired; the two are probably connected" |
+| Two approvals pending; one objective stalled | "You are the only thing between this objective and its next milestone — 20 minutes of decisions unblocks a week of work" |
+| Standing work produces; results go unopened | "The daily cadence outruns your reading; weekly would cost a third and lose nothing" |
+
+**Design consequences.**
+1. The digest handed to layer 3 must include *time series*, not just current
+   state — a relationship usually needs a "since when."
+2. Its output should end with **one** recommendation ranked by impact, not a
+   list. Where executive attention has the greatest impact is a singular
+   question.
+3. CoS-3 (trend awareness) moves up in importance: relationships across time
+   are the substance of the role, not a later refinement.
+4. The grounding check (§4.1) extends: a claimed *relationship* must name the
+   two facts it joins, both traceable to layer 2 evidence. Correlation stated
+   as cause is the failure mode to watch — the CoS should say "in the same
+   week as," not "because of," unless the causal link is structural.

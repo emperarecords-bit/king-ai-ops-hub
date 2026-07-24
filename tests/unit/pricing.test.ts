@@ -10,6 +10,22 @@ describe('pricing table', () => {
     }
   });
 
+  it('Claude Sonnet 5 introductory pricing expires 2026-09-01 — fail loudly, not silently', () => {
+    // Verified 2026-07-24: $2/$10 introductory through Aug 31, then $3/$15.
+    // This test starts failing the day the rate changes, which is the point:
+    // silent under-billing after a vendor price rise is the worst outcome for
+    // a budget gate. When it fails, update MODEL_PRICING and this expectation.
+    const introEnds = Date.UTC(2026, 8, 1); // 2026-09-01T00:00:00Z
+    const sonnet = MODEL_PRICING['claude-sonnet-5']!;
+    if (Date.now() < introEnds) {
+      expect(sonnet.inputMicrosPerM).toBe(2_000_000n);
+      expect(sonnet.outputMicrosPerM).toBe(10_000_000n);
+    } else {
+      expect(sonnet.inputMicrosPerM).toBe(3_000_000n);
+      expect(sonnet.outputMicrosPerM).toBe(15_000_000n);
+    }
+  });
+
   it('prices known models exactly', () => {
     // claude-opus-4-8: $5/M in, $25/M out
     const cost = costForUsage('anthropic', 'claude-opus-4-8', {

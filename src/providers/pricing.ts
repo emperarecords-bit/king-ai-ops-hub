@@ -10,7 +10,14 @@ import { usageCost } from '@/lib/money';
  * Rates checked against vendor pricing pages, 2026-07.
  */
 
-export const PRICING_VERSION = '2026-07-23';
+/**
+ * Rates VERIFIED against the vendors' live pricing pages on 2026-07-24
+ * (developers.openai.com/api/docs/pricing, platform.claude.com pricing).
+ * Two corrections landed with that verification — see the model notes below.
+ * usage_events store this version, so historical costs stay explainable even
+ * though rows written before it were priced with the earlier, wrong table.
+ */
+export const PRICING_VERSION = '2026-07-24';
 
 interface ModelPricing {
   readonly provider: ProviderId;
@@ -25,17 +32,28 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPricing>> = {
   'gpt-5.2': {
     provider: 'openai',
     displayName: 'GPT-5.2',
-    inputMicrosPerM: 1_250_000n, // $1.25 / M input
-    outputMicrosPerM: 10_000_000n, // $10.00 / M output
+    // DELISTED from the public pricing page as of 2026-07-24 (still callable
+    // on this account). These are its last-known rates and could not be
+    // re-verified — see SPRINT-10-REPORT §4 for the open decision to move the
+    // flagship tier to a currently-listed model.
+    inputMicrosPerM: 1_250_000n, // $1.25 / M — UNVERIFIED
+    outputMicrosPerM: 10_000_000n, // $10.00 / M — UNVERIFIED
     maxOutputTokens: 65_536,
   },
   'gpt-5.4-mini': {
     provider: 'openai',
     displayName: 'GPT-5.4 mini',
-    // Mini-tier list price; carried from the gpt-5-mini rate — verify against
-    // the vendor pricing page (tracked as Medium debt in SPRINT-02-REPORT §6).
-    inputMicrosPerM: 250_000n, // $0.25 / M
-    outputMicrosPerM: 2_000_000n, // $2.00 / M
+    // CORRECTED 2026-07-24: was carried from the gpt-5-mini rate ($0.25/$2.00),
+    // which UNDER-billed this model by 3x on input and 2.25x on output.
+    inputMicrosPerM: 750_000n, // $0.75 / M — verified
+    outputMicrosPerM: 4_500_000n, // $4.50 / M — verified
+    maxOutputTokens: 65_536,
+  },
+  'gpt-5.4': {
+    provider: 'openai',
+    displayName: 'GPT-5.4',
+    inputMicrosPerM: 2_500_000n, // $2.50 / M — verified
+    outputMicrosPerM: 15_000_000n, // $15.00 / M — verified
     maxOutputTokens: 65_536,
   },
   // --- Anthropic -----------------------------------------------------------
@@ -49,8 +67,12 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPricing>> = {
   'claude-sonnet-5': {
     provider: 'anthropic',
     displayName: 'Claude Sonnet 5',
-    inputMicrosPerM: 3_000_000n, // $3.00 / M
-    outputMicrosPerM: 15_000_000n, // $15.00 / M
+    // CORRECTED 2026-07-24: introductory pricing runs through 2026-08-31; the
+    // table previously used the post-introductory rate and OVER-billed by 50%.
+    // On 2026-09-01 these become 3_000_000n / 15_000_000n — a unit test fails
+    // from that date until the change is made, so it cannot be forgotten.
+    inputMicrosPerM: 2_000_000n, // $2.00 / M — verified (introductory)
+    outputMicrosPerM: 10_000_000n, // $10.00 / M — verified (introductory)
     maxOutputTokens: 64_000,
   },
   'claude-haiku-4-5-20251001': {
