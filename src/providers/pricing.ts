@@ -81,13 +81,30 @@ export function modelsForProvider(provider: ProviderId): ReadonlyArray<{
 }
 
 /**
- * Cost for a usage record. Unknown models are priced at the most expensive
- * known rate for the provider — over-counting an unknown model is safer for a
- * budget gate than counting zero.
+ * Cost for a usage record. Providers echo dated snapshot names (e.g.
+ * `gpt-5.4-mini-2026-03-17` for `gpt-5.4-mini`), so an exact miss falls back
+ * to the longest known key that prefixes the reported name. Truly unknown
+ * models are priced at the most expensive known rate for the provider —
+ * over-counting an unknown model is safer for a budget gate than counting
+ * zero.
  */
 export function costForUsage(provider: ProviderId, model: string, usage: TokenUsage): Money {
-  const pricing = MODEL_PRICING[model] ?? mostExpensiveFor(provider);
+  const pricing =
+    MODEL_PRICING[model] ?? prefixMatch(provider, model) ?? mostExpensiveFor(provider);
   return usageCost(usage, pricing.inputMicrosPerM, pricing.outputMicrosPerM);
+}
+
+function prefixMatch(provider: ProviderId, model: string): ModelPricing | undefined {
+  // ONLY `${id}-<date>` qualifies. A looser startsWith would let e.g.
+  // gpt-5.2-pro-2025-12-11 match gpt-5.2 and UNDER-bill a pricier model —
+  // the one direction a budget gate must never fail in.
+  const entry = Object.entries(MODEL_PRICING).find(
+    ([id, p]) =>
+      p.provider === provider &&
+      model.startsWith(`${id}-`) &&
+      /^\d{4}-\d{2}-\d{2}$/.test(model.slice(id.length + 1)),
+  );
+  return entry?.[1];
 }
 
 function mostExpensiveFor(provider: ProviderId): ModelPricing {
