@@ -9,6 +9,7 @@ import {
   type TenantContext,
 } from '@/types/domain';
 import { ConflictError, NotFoundError, ValidationError } from '@/lib/errors';
+import { METRIC_PATTERN, slugifyMetric } from '@/lib/slug';
 import { type DbTx } from '@/db/client';
 import { agents, departments, milestones, objectives, tasks } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
@@ -23,10 +24,29 @@ import { writeAudit } from '@/domain/audit/audit';
  * daylight.
  */
 
+/**
+ * A criterion must be checkable by a human later (O-11). Negative targets are
+ * rejected outright; zero is allowed because "zero critical defects" is a
+ * legitimate goal, but the SUGGESTER may not propose it for growth units —
+ * see domain/objectives/suggest.ts.
+ *
+ * `metric` is a machine identifier, not a sentence: it is the field a future
+ * `source: "usage"` binding joins on, so it is normalized to a slug rather
+ * than trusted as typed.
+ */
 const criterionInputSchema = z.object({
   label: z.string().trim().min(1, 'Criterion label is required').max(200),
-  metric: z.string().trim().min(1).max(100),
-  target: z.number().finite(),
+  metric: z
+    .string()
+    .trim()
+    .min(1)
+    .max(100)
+    .transform(slugifyMetric)
+    .refine((m) => METRIC_PATTERN.test(m), 'Metric must be a lowercase identifier.'),
+  target: z
+    .number()
+    .finite()
+    .min(0, 'A target cannot be negative — state the threshold that counts as success.'),
   unit: z.string().trim().max(50).default(''),
 });
 

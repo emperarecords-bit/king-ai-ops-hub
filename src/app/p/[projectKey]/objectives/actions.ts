@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation';
 import { z } from 'zod';
 import { AppError, toPublicMessage } from '@/lib/errors';
 import { log } from '@/lib/log';
+import { slugifyMetric } from '@/lib/slug';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import {
@@ -38,7 +39,9 @@ function parseCriteria(formData: FormData) {
     const target = Number(targets[i] ?? '');
     out.push({
       label,
-      metric: (metrics[i]?.trim() || label.toLowerCase().replaceAll(/\s+/g, '_')).slice(0, 100),
+      // slugifyMetric, not a naive whitespace replace: labels contain slashes
+      // and punctuation, and this field is an identifier (O-11).
+      metric: slugifyMetric(metrics[i]?.trim() || label),
       target: Number.isFinite(target) ? target : 1,
       unit: units[i]?.trim() ?? '',
     });
