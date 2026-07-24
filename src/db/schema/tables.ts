@@ -10,13 +10,15 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { type ReviewDetail, type SuccessCriterion } from '@/types/domain';
+import { type RetrievedDocRef, type ReviewDetail, type SuccessCriterion } from '@/types/domain';
 import {
   actionTypeEnum,
   agentRoleEnum,
   approvalStatusEnum,
   artifactKindEnum,
   cadenceEnum,
+  documentKindEnum,
+  documentStatusEnum,
   contextItemStatusEnum,
   flagshipCategoryEnum,
   knowledgeKindEnum,
@@ -100,6 +102,8 @@ export const projects = pgTable(
     key: text('key').notNull(),
     name: text('name').notNull(),
     description: text('description').notNull().default(''),
+    /** Linked local Project Folder (D-020). Null until the owner links one. */
+    documentFolderPath: text('document_folder_path'),
     archived: boolean('archived').notNull().default(false),
     ...timestamps,
   },
@@ -256,6 +260,71 @@ export const knowledgeItems = pgTable(
     index('knowledge_org_project_status_idx').on(t.orgId, t.projectId, t.status),
     index('knowledge_project_kind_idx').on(t.projectId, t.kind),
     index('knowledge_supersedes_idx').on(t.supersedes),
+  ],
+);
+
+/**
+ * Project Folder documents (D-020). One row per indexed file. We store the
+ * extracted TEXT and a content hash, never the binary — refresh re-reads from
+ * the source folder, so no file content lands in a blob store, and an
+ * unchanged sha256 lets refresh skip a file cheaply.
+ */
+export const documents = pgTable(
+  'documents',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    /** Path relative to the linked folder root — the human-facing identity. */
+    relativePath: text('relative_path').notNull(),
+    kind: documentKindEnum('kind').notNull(),
+    sha256: text('sha256').notNull(),
+    sizeBytes: integer('size_bytes').notNull(),
+    /** Chunk count at last successful index; 0 for an empty or failed file. */
+    chunkCount: integer('chunk_count').notNull().default(0),
+    status: documentStatusEnum('status').notNull().default('active'),
+    errorMessage: text('error_message'),
+    indexedAt: timestamp('indexed_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('documents_project_path_uq').on(t.projectId, t.relativePath),
+    index('documents_org_project_status_idx').on(t.orgId, t.projectId, t.status),
+  ],
+);
+
+/**
+ * The searchable unit. Each chunk carries a Postgres `tsvector` (generated in
+ * the migration, not here — Drizzle has no first-class tsvector column) that
+ * retrieval ranks with ts_rank. Isolation is by org_id+project_id like every
+ * tenant table (D-008); the retrieval read re-asserts tenancy exactly as
+ * loadApprovedContext does.
+ */
+export const documentChunks = pgTable(
+  'document_chunks',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    documentId: uuid('document_id')
+      .notNull()
+      .references(() => documents.id, { onDelete: 'cascade' }),
+    /** 0-based position within the document, for stable ordering + display. */
+    chunkIndex: integer('chunk_index').notNull(),
+    content: text('content').notNull(),
+    ...timestamps,
+  },
+  (t) => [
+    index('document_chunks_org_project_idx').on(t.orgId, t.projectId),
+    index('document_chunks_document_idx').on(t.documentId),
   ],
 );
 
@@ -465,6 +534,8 @@ export const runs = pgTable(
     }),
     /** Deterministic consolidation output. Null until the run finishes. */
     consolidatedResult: text('consolidated_result'),
+    /** Project-folder chunks retrieved for this run (D-020 transparency). */
+    retrievedDocuments: jsonb('retrieved_documents').$type<RetrievedDocRef[]>(),
     errorMessage: text('error_message'),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp('finished_at', { withTimezone: true }),

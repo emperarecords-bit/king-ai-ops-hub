@@ -14,9 +14,11 @@ import {
   type StepRecord,
 } from '@/orchestration/engine';
 import { resolveModelForTier } from '@/orchestration/routing';
-import { type ModelTier, type StepKind } from '@/types/domain';
+import { type ModelTier, type RetrievedDocRef, type StepKind } from '@/types/domain';
 import { findAgentForRole, type AgentRow } from '@/domain/agents/agents';
 import { loadApprovedContext } from '@/domain/projects/context';
+import { loadObjectiveForRun } from '@/domain/objectives/objectives';
+import { retrieveRelevant } from '@/domain/documents/documents';
 import { writeAudit } from '@/domain/audit/audit';
 import { assertWithinBudget, recordUsage } from '@/domain/usage/usage';
 import { consumeRateLimit } from '@/domain/usage/rate-limit';
@@ -127,7 +129,27 @@ export async function startRun(
     }
 
     // Isolation invariant I1: ONLY this project's approved context.
-    const contextItems = await loadApprovedContext(tx, ctx);
+    const knowledge = await loadApprovedContext(tx, ctx);
+    // Owner intent that frames the work (closes O-9); tenant-scoped, null when
+    // the task serves no live objective.
+    const objective = await loadObjectiveForRun(tx, ctx, task.objectiveId);
+    // Project Folder retrieval (D-020): top-K chunks relevant to THIS task,
+    // scoped to this workspace by the same I1 guard as knowledge. Retrieved
+    // documents join the prompt as additional context and are recorded on the
+    // run for transparency.
+    const retrieved = await retrieveRelevant(tx, ctx, task.input, 5);
+    const contextItems = [
+      ...knowledge,
+      ...retrieved.map((r) => ({
+        title: `Document — ${r.relativePath}`,
+        content: r.content,
+      })),
+    ];
+    const retrievedRefs: RetrievedDocRef[] = retrieved.map((r) => ({
+      relativePath: r.relativePath,
+      chunkIndex: r.chunkIndex,
+      rank: r.rank,
+    }));
 
     const runInserted = await tx
       .insert(runs)
@@ -138,6 +160,7 @@ export async function startRun(
         status: 'running',
         primaryAgentId: primaryRow.id,
         reviewerAgentId: reviewerRow?.id ?? null,
+        retrievedDocuments: retrievedRefs.length > 0 ? retrievedRefs : null,
       })
       .returning({ id: runs.id });
     const runId = runInserted[0]!.id;
@@ -170,10 +193,10 @@ export async function startRun(
       },
     });
 
-    return { task, runId, primaryRow, reviewerRow, contextItems };
+    return { task, runId, primaryRow, reviewerRow, contextItems, objective };
   });
 
-  const { task, runId, primaryRow, reviewerRow, contextItems } = preflight;
+  const { task, runId, primaryRow, reviewerRow, contextItems, objective } = preflight;
 
   // ---- Engine execution ----------------------------------------------------
   // Each step commits its own transaction: a mid-run crash must not erase the
@@ -256,6 +279,7 @@ export async function startRun(
     {
       taskInput: task.input,
       contextItems,
+      objective,
       primary: toEngineAgent(primaryRow, task.modelTier),
       reviewer: reviewerRow ? toEngineAgent(reviewerRow, task.modelTier) : null,
       perCallTimeoutMs: env.PROVIDER_TIMEOUT_MS,

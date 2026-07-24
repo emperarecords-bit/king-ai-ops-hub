@@ -6,6 +6,8 @@ import {
   ARTIFACT_KINDS,
   CADENCES,
   CONTEXT_ITEM_STATUSES,
+  DOCUMENT_KINDS,
+  DOCUMENT_STATUSES,
   FLAGSHIP_CATEGORIES,
   KNOWLEDGE_KINDS,
   KNOWLEDGE_SCOPES,
@@ -53,3 +55,5 @@ export const knowledgeKindEnum = pgEnum('knowledge_kind', KNOWLEDGE_KINDS);
 export const knowledgeStatusEnum = pgEnum('knowledge_status', KNOWLEDGE_STATUSES);
 export const knowledgeSourceEnum = pgEnum('knowledge_source', KNOWLEDGE_SOURCES);
 export const cadenceEnum = pgEnum('cadence', CADENCES);
+export const documentKindEnum = pgEnum('document_kind', DOCUMENT_KINDS);
+export const documentStatusEnum = pgEnum('document_status', DOCUMENT_STATUSES);

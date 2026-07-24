@@ -90,6 +90,24 @@ export type ContextItemStatus = (typeof CONTEXT_ITEM_STATUSES)[number];
 export const CADENCES = ['daily', 'weekly', 'monthly'] as const;
 export type Cadence = (typeof CADENCES)[number];
 
+/**
+ * Project Folder documents (D-020, DESIGN-REVIEW-PROJECT-FOLDER). A document
+ * is indexed from a linked local folder; `active` documents are retrievable,
+ * `archived` are files that vanished from the folder since the last refresh.
+ */
+export const DOCUMENT_KINDS = ['markdown', 'text', 'pdf', 'docx'] as const;
+export type DocumentKind = (typeof DOCUMENT_KINDS)[number];
+
+export const DOCUMENT_STATUSES = ['active', 'archived', 'failed'] as const;
+export type DocumentStatus = (typeof DOCUMENT_STATUSES)[number];
+
+/** Provenance: which document chunks fed a given run (transparency, D-020). */
+export interface RetrievedDocRef {
+  relativePath: string;
+  chunkIndex: number;
+  rank: number;
+}
+
 /** Company Knowledge (KNOWLEDGE-DESIGN.md, D-011). K1: project scope only. */
 export const KNOWLEDGE_SCOPES = ['org', 'project', 'department', 'employee'] as const;
 export type KnowledgeScope = (typeof KNOWLEDGE_SCOPES)[number];

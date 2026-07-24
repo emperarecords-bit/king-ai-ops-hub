@@ -218,6 +218,49 @@ export interface ObjectiveTaskRow {
   createdAt: Date;
 }
 
+/**
+ * The compact objective view the runner injects into a task's prompt so an
+ * employee works with its goal in view (closes the O-9 disconnect). Returns
+ * null when the id is absent or the objective is closed — a completed or
+ * cancelled objective is not live intent. Tenant-scoped like every read here.
+ */
+export interface ObjectiveForRun {
+  title: string;
+  description: string;
+  openCriteria: string[];
+}
+
+export async function loadObjectiveForRun(
+  tx: DbTx,
+  ctx: TenantContext,
+  objectiveId: string | null,
+): Promise<ObjectiveForRun | null> {
+  if (!objectiveId) return null;
+  const rows = await tx
+    .select({
+      title: objectives.title,
+      description: objectives.description,
+      status: objectives.status,
+      successCriteria: objectives.successCriteria,
+    })
+    .from(objectives)
+    .where(
+      and(
+        eq(objectives.id, objectiveId),
+        eq(objectives.projectId, ctx.projectId),
+        eq(objectives.orgId, ctx.orgId),
+      ),
+    )
+    .limit(1);
+  const row = rows[0];
+  if (!row || row.status === 'completed' || row.status === 'cancelled') return null;
+  return {
+    title: row.title,
+    description: row.description,
+    openCriteria: row.successCriteria.filter((c) => c.status === 'unmet').map((c) => c.label),
+  };
+}
+
 export interface ObjectiveDetail {
   id: string;
   title: string;

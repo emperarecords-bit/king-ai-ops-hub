@@ -45,9 +45,17 @@ export function buildPrimarySystem(agentSystemPrompt: string): string {
   return `${agentSystemPrompt}\n${SHARED_RULES}`;
 }
 
+/** The objective a task serves — owner intent that frames the work. */
+export interface ObjectiveForPrompt {
+  readonly title: string;
+  readonly description: string;
+  readonly openCriteria: readonly string[];
+}
+
 export function buildPrimaryUserTurn(
   taskInput: string,
   contextItems: readonly ContextItemForPrompt[],
+  objective?: ObjectiveForPrompt | null,
 ): string {
   const contextBlock =
     contextItems.length === 0
@@ -55,7 +63,20 @@ export function buildPrimaryUserTurn(
       : contextItems
           .map((item) => wrapUntrusted(`Context — ${item.title}`, item.content))
           .join('\n\n');
-  return `${contextBlock}\n\n${wrapUntrusted('Task', taskInput)}\n\nComplete the task.`;
+
+  // The objective is owner-authored intent, not an untrusted document — it is
+  // the frame the task serves, so it leads. Description is free text, but at
+  // the same trust level as the task brief itself (also owner-written).
+  const objectiveBlock = objective
+    ? `Objective this task serves: ${objective.title}` +
+      (objective.description ? `\n${objective.description}` : '') +
+      (objective.openCriteria.length > 0
+        ? `\nStill to satisfy: ${objective.openCriteria.join('; ')}`
+        : '') +
+      '\n\n'
+    : '';
+
+  return `${objectiveBlock}${contextBlock}\n\n${wrapUntrusted('Task', taskInput)}\n\nComplete the task.`;
 }
 
 export const ISSUES_BLOCK_OPEN = '```review-issues';

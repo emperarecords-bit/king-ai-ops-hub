@@ -82,6 +82,25 @@ export default async function TaskDetailPage({
         </Card>
       ) : null}
 
+      {latestRun?.retrievedDocuments && latestRun.retrievedDocuments.length > 0 ? (
+        <Card title="Documents used" className="mb-6">
+          <p className="mb-2 text-sm text-[var(--muted)]">
+            These project-folder documents were automatically retrieved for this task, most
+            relevant first.
+          </p>
+          <ul className="space-y-1">
+            {latestRun.retrievedDocuments.map((d, i) => (
+              <li key={i} className="flex items-center gap-3 text-sm">
+                <span className="font-mono text-xs">{d.relativePath}</span>
+                <span className="text-xs text-[var(--muted)]">
+                  chunk {d.chunkIndex} · relevance {d.rank.toFixed(3)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      ) : null}
+
       {reviewStep?.verdictDetail ? (
         <Card title="Review" className="mb-6">
           <div className="mb-3 flex items-center gap-3 text-sm">

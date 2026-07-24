@@ -13,6 +13,7 @@ import {
   buildReviewUserTurn,
   buildRevisionUserTurn,
   type ContextItemForPrompt,
+  type ObjectiveForPrompt,
   parseReviewDetail,
   stripIssuesBlock,
 } from './prompts';
@@ -46,6 +47,7 @@ export interface EngineAgent {
 export interface EngineInput {
   readonly taskInput: string;
   readonly contextItems: readonly ContextItemForPrompt[];
+  readonly objective?: ObjectiveForPrompt | null;
   readonly primary: EngineAgent;
   /** Absent → review disabled for this run. */
   readonly reviewer: EngineAgent | null;
@@ -222,7 +224,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
 
   // --- Step 1: PRIMARY ------------------------------------------------------
   const primarySystem = buildPrimarySystem(input.primary.systemPrompt);
-  const primaryUserTurn = buildPrimaryUserTurn(input.taskInput, input.contextItems);
+  const primaryUserTurn = buildPrimaryUserTurn(input.taskInput, input.contextItems, input.objective);
   const primaryTurns: Turn[] = [{ role: 'user', content: primaryUserTurn }];
 
   let primaryResponse: AgentResponse;
