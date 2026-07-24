@@ -1,0 +1,8 @@
+Deploys go through CI, then staging, then a manual production gate.
+
+---
+**Review summary** (verdict: revise)
+
+Seems thin. It skips staging and the production gate entirely.
+
+*The result above incorporates one revision addressing this review.*
