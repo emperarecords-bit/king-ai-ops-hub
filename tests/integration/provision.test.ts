@@ -5,10 +5,10 @@ import { getDb } from '@/db/client';
 import {
   agents,
   departments,
+  knowledgeItems,
   memberships,
   organizations,
   profiles,
-  projectContextItems,
   projects,
   spendLimits,
 } from '@/db/schema';
@@ -106,12 +106,14 @@ describe.skipIf(!available)('workspace provisioning', () => {
     expect(budget).toHaveLength(1);
     expect(budget[0]!.monthlyLimitMicros).toBe(25_000_000n);
 
+    // The charter is company knowledge now (K1), active from creation.
     const charter = await db
       .select()
-      .from(projectContextItems)
-      .where(eq(projectContextItems.projectId, project!.id));
+      .from(knowledgeItems)
+      .where(eq(knowledgeItems.projectId, project!.id));
     expect(charter).toHaveLength(1);
-    expect(charter[0]!.status).toBe('approved');
+    expect(charter[0]!.status).toBe('active');
+    expect(charter[0]!.approvedBy).toBe(ownerUser.id);
   });
 
   it('key collisions get numbered suffixes', async () => {

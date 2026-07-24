@@ -212,17 +212,34 @@ async function main() {
         });
     }
 
-    await db
-      .insert(schema.projectContextItems)
-      .values({
+    // Charter as company knowledge (K1). Insert-if-absent by (project, title):
+    // knowledge is versioned, so a blind upsert would be wrong — revisions go
+    // through reviseKnowledge, never the seed.
+    const existingCharter = await db
+      .select({ id: schema.knowledgeItems.id })
+      .from(schema.knowledgeItems)
+      .where(
+        and(
+          eq(schema.knowledgeItems.projectId, project.id),
+          eq(schema.knowledgeItems.title, 'Project charter'),
+        ),
+      )
+      .limit(1);
+    if (existingCharter.length === 0) {
+      await db.insert(schema.knowledgeItems).values({
         orgId: org.id,
         projectId: project.id,
+        scope: 'project',
+        kind: 'fact',
         title: 'Project charter',
-        content: `${p.name}: ${p.description} This context item is approved and will be loaded into prompts for this project only.`,
-        status: 'approved',
+        body: `${p.name}: ${p.description} This charter is company knowledge, consulted by every employee before work in this project only.`,
+        status: 'active',
+        source: 'manual',
         createdBy: owner.id,
-      })
-      .onConflictDoNothing();
+        approvedBy: owner.id,
+        approvedAt: new Date(),
+      });
+    }
   }
 
   // E2E sandboxes: only when an E2E account is configured. Two workspaces so

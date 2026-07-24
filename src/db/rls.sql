@@ -50,7 +50,7 @@ grant select, insert, update on
   organizations, memberships, projects, project_members,
   agents, departments, project_context_items, integration_secrets,
   tasks, runs, run_steps, artifacts, approvals,
-  objectives, milestones,
+  objectives, milestones, knowledge_items,
   usage_events, spend_limits, rate_limit_buckets, profiles
 to app_server;
 
@@ -159,7 +159,7 @@ begin
     'agents', 'project_context_items', 'integration_secrets',
     'tasks', 'runs', 'run_steps', 'messages',
     'artifacts', 'approvals', 'usage_events', 'spend_limits',
-    'objectives', 'milestones'
+    'objectives', 'milestones', 'knowledge_items'
   ]
   loop
     execute format('alter table %I enable row level security', t);

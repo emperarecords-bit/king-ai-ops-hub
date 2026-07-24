@@ -3,13 +3,18 @@ import { type TenantContext } from '@/types/domain';
 import { TenantViolationError } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { type DbTx } from '@/db/client';
-import { projectContextItems } from '@/db/schema';
+import { knowledgeItems } from '@/db/schema';
 import { type ContextItemForPrompt } from '@/orchestration/prompts';
 
 /**
- * Loads the ONLY context that may enter a prompt: this project's APPROVED
- * items. This is the highest-risk read in the system (invariant I1), so on top
- * of the WHERE clause and RLS it re-asserts tenancy on every returned row and
+ * Loads the ONLY context that may enter a prompt: this project's ACTIVE
+ * knowledge (K1 — KNOWLEDGE-DESIGN.md §4; formerly approved context items,
+ * migrated in by migration 0004). Draft and archived items are never
+ * injected; supersede archives predecessors atomically, so "active" always
+ * means "the newest approved version".
+ *
+ * This is the highest-risk read in the system (invariant I1), so on top of
+ * the WHERE clause and RLS it re-asserts tenancy on every returned row and
  * treats a mismatch as a fire alarm.
  */
 export async function loadApprovedContext(
@@ -18,17 +23,18 @@ export async function loadApprovedContext(
 ): Promise<ContextItemForPrompt[]> {
   const rows = await tx
     .select({
-      projectId: projectContextItems.projectId,
-      orgId: projectContextItems.orgId,
-      title: projectContextItems.title,
-      content: projectContextItems.content,
+      projectId: knowledgeItems.projectId,
+      orgId: knowledgeItems.orgId,
+      title: knowledgeItems.title,
+      content: knowledgeItems.body,
     })
-    .from(projectContextItems)
+    .from(knowledgeItems)
     .where(
       and(
-        eq(projectContextItems.projectId, ctx.projectId),
-        eq(projectContextItems.orgId, ctx.orgId),
-        eq(projectContextItems.status, 'approved'),
+        eq(knowledgeItems.projectId, ctx.projectId),
+        eq(knowledgeItems.orgId, ctx.orgId),
+        eq(knowledgeItems.scope, 'project'),
+        eq(knowledgeItems.status, 'active'),
       ),
     );
 
@@ -39,7 +45,7 @@ export async function loadApprovedContext(
         gotProject: row.projectId,
       });
       throw new TenantViolationError(
-        `Context row from project ${row.projectId} surfaced for ${ctx.projectId}`,
+        `Knowledge row from project ${row.projectId} surfaced for ${ctx.projectId}`,
       );
     }
   }

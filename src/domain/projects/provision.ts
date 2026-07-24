@@ -8,9 +8,9 @@ import { withTenant } from '@/db/tenant';
 import {
   agents,
   departments,
+  knowledgeItems,
   memberships,
   organizations,
-  projectContextItems,
   projectMembers,
   projects,
   spendLimits,
@@ -169,13 +169,20 @@ export async function createWorkspace(
       monthlyLimitMicros: DEFAULT_WORKSPACE_BUDGET_MICROS,
     });
 
-    await tx.insert(projectContextItems).values({
+    // The charter is the workspace's first knowledge item (K1) — active
+    // immediately: the human founder is the approver.
+    await tx.insert(knowledgeItems).values({
       orgId: ctx.orgId,
       projectId: ctx.projectId,
+      scope: 'project',
+      kind: 'fact',
       title: 'Workspace charter',
-      content: `${name}: ${description || 'No description yet.'} This charter is approved context, loaded into every prompt for this workspace only.`,
-      status: 'approved',
+      body: `${name}: ${description || 'No description yet.'} This charter is company knowledge, consulted by every employee before work in this workspace only.`,
+      status: 'active',
+      source: 'manual',
       createdBy: ctx.userId,
+      approvedBy: ctx.userId,
+      approvedAt: new Date(),
     });
 
     await writeAudit(tx, ctx, {

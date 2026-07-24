@@ -18,6 +18,10 @@ import {
   artifactKindEnum,
   contextItemStatusEnum,
   flagshipCategoryEnum,
+  knowledgeKindEnum,
+  knowledgeScopeEnum,
+  knowledgeSourceEnum,
+  knowledgeStatusEnum,
   messageRoleEnum,
   milestoneStatusEnum,
   modelTierEnum,
@@ -207,6 +211,51 @@ export const projectContextItems = pgTable(
     ...timestamps,
   },
   (t) => [index('context_items_org_project_status_idx').on(t.orgId, t.projectId, t.status)],
+);
+
+/**
+ * Company Knowledge (KNOWLEDGE-DESIGN.md, D-011): versioned, never edited —
+ * a change is a new row with `supersedes` lineage, and activating a version
+ * archives its predecessor in the same transaction. Only `active` items are
+ * ever injected into prompts; `draft` is the quarantine state for anything
+ * model-proposed (same posture as pending context was).
+ *
+ * K1 uses scope='project' only. The org/department/employee scope columns
+ * exist now so K2–K4 are policy + code changes, not migrations. project_id is
+ * nullable ONLY for the future org scope (K4); RLS keeps such rows invisible
+ * until an explicit org policy ships.
+ */
+export const knowledgeItems = pgTable(
+  'knowledge_items',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }),
+    scope: knowledgeScopeEnum('scope').notNull().default('project'),
+    departmentId: uuid('department_id').references(() => departments.id, { onDelete: 'set null' }),
+    agentId: uuid('agent_id').references(() => agents.id, { onDelete: 'set null' }),
+    kind: knowledgeKindEnum('kind').notNull().default('fact'),
+    title: text('title').notNull(),
+    body: text('body').notNull(),
+    version: integer('version').notNull().default(1),
+    supersedes: uuid('supersedes'),
+    status: knowledgeStatusEnum('status').notNull().default('draft'),
+    source: knowledgeSourceEnum('source').notNull().default('manual'),
+    sourceRef: uuid('source_ref'),
+    createdBy: uuid('created_by')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'restrict' }),
+    approvedBy: uuid('approved_by').references(() => profiles.id, { onDelete: 'set null' }),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    index('knowledge_org_project_status_idx').on(t.orgId, t.projectId, t.status),
+    index('knowledge_project_kind_idx').on(t.projectId, t.kind),
+    index('knowledge_supersedes_idx').on(t.supersedes),
+  ],
 );
 
 export const integrationSecrets = pgTable(

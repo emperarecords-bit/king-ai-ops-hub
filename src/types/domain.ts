@@ -82,6 +82,28 @@ export type AgentRole = (typeof AGENT_ROLES)[number];
 export const CONTEXT_ITEM_STATUSES = ['pending', 'approved', 'archived'] as const;
 export type ContextItemStatus = (typeof CONTEXT_ITEM_STATUSES)[number];
 
+/** Company Knowledge (KNOWLEDGE-DESIGN.md, D-011). K1: project scope only. */
+export const KNOWLEDGE_SCOPES = ['org', 'project', 'department', 'employee'] as const;
+export type KnowledgeScope = (typeof KNOWLEDGE_SCOPES)[number];
+
+export const KNOWLEDGE_KINDS = [
+  'standard',
+  'policy',
+  'decision',
+  'playbook',
+  'persona',
+  'template',
+  'brand',
+  'fact',
+] as const;
+export type KnowledgeKind = (typeof KNOWLEDGE_KINDS)[number];
+
+export const KNOWLEDGE_STATUSES = ['draft', 'active', 'archived'] as const;
+export type KnowledgeStatus = (typeof KNOWLEDGE_STATUSES)[number];
+
+export const KNOWLEDGE_SOURCES = ['manual', 'promoted_artifact', 'promoted_context'] as const;
+export type KnowledgeSource = (typeof KNOWLEDGE_SOURCES)[number];
+
 /** Objectives (OBJECTIVES.md, D-010). Dark schema in Sprint 3; UI in Sprint 4. */
 export const OBJECTIVE_STATUSES = ['draft', 'active', 'completed', 'cancelled'] as const;
 export type ObjectiveStatus = (typeof OBJECTIVE_STATUSES)[number];

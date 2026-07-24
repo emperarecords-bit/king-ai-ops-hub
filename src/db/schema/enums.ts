@@ -6,6 +6,10 @@ import {
   ARTIFACT_KINDS,
   CONTEXT_ITEM_STATUSES,
   FLAGSHIP_CATEGORIES,
+  KNOWLEDGE_KINDS,
+  KNOWLEDGE_SCOPES,
+  KNOWLEDGE_SOURCES,
+  KNOWLEDGE_STATUSES,
   MESSAGE_ROLES,
   MILESTONE_STATUSES,
   MODEL_TIERS,
@@ -43,3 +47,7 @@ export const modelTierEnum = pgEnum('model_tier', MODEL_TIERS);
 export const flagshipCategoryEnum = pgEnum('flagship_category', FLAGSHIP_CATEGORIES);
 export const objectiveStatusEnum = pgEnum('objective_status', OBJECTIVE_STATUSES);
 export const milestoneStatusEnum = pgEnum('milestone_status', MILESTONE_STATUSES);
+export const knowledgeScopeEnum = pgEnum('knowledge_scope', KNOWLEDGE_SCOPES);
+export const knowledgeKindEnum = pgEnum('knowledge_kind', KNOWLEDGE_KINDS);
+export const knowledgeStatusEnum = pgEnum('knowledge_status', KNOWLEDGE_STATUSES);
+export const knowledgeSourceEnum = pgEnum('knowledge_source', KNOWLEDGE_SOURCES);
