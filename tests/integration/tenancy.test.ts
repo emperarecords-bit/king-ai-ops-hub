@@ -182,30 +182,17 @@ describe.skipIf(!available)('tenant isolation under RLS', () => {
     await expect(admin`delete from audit_logs where id = ${auditId}`).rejects.toThrow(/append-only/);
   });
 
-  it('every tenant table has RLS enabled — no table ships without it', async () => {
+  it('EVERY public table has RLS enabled — a migration cannot ship one without it', async () => {
     if (!admin) throw new Error('unavailable');
-    const tenantTables = [
-      'agents',
-      'project_context_items',
-      'integration_secrets',
-      'tasks',
-      'runs',
-      'run_steps',
-      'messages',
-      'artifacts',
-      'approvals',
-      'usage_events',
-      'spend_limits',
-      'audit_logs',
-      'projects',
-      'project_members',
-      'memberships',
-      'organizations',
-      'profiles',
-    ];
+    // Dynamic on purpose (SECURITY.md T1 residual risk): a hand-maintained
+    // list silently exempts whatever someone forgets to add to it.
     const rows = await admin`
-      select relname from pg_class
-      where relname = any(${tenantTables}) and relrowsecurity = false
+      select c.relname
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = 'public'
+        and c.relkind = 'r'
+        and c.relrowsecurity = false
     `;
     expect(rows.map((r) => r.relname)).toEqual([]);
   });

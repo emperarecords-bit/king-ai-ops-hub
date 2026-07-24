@@ -10,7 +10,7 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { type ReviewDetail } from '@/types/domain';
+import { type ReviewDetail, type SuccessCriterion } from '@/types/domain';
 import {
   actionTypeEnum,
   agentRoleEnum,
@@ -19,7 +19,9 @@ import {
   contextItemStatusEnum,
   flagshipCategoryEnum,
   messageRoleEnum,
+  milestoneStatusEnum,
   modelTierEnum,
+  objectiveStatusEnum,
   orgRoleEnum,
   projectRoleEnum,
   providerIdEnum,
@@ -125,6 +127,30 @@ export const projectMembers = pgTable(
   ],
 );
 
+/**
+ * Departments (D-012, D-015): the stable organizational structure of the AI
+ * workforce. Org-scoped (not per-project) — an employee's department is the
+ * same in every workspace. A table, not an enum: the set grows (Sales, Legal,
+ * Research…) and will eventually accept custom entries.
+ */
+export const departments = pgTable(
+  'departments',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    /** URL-safe stable identifier, e.g. 'engineering'. */
+    key: text('key').notNull(),
+    name: text('name').notNull(),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('departments_org_key_uq').on(t.orgId, t.key),
+    index('departments_org_idx').on(t.orgId),
+  ],
+);
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -141,6 +167,10 @@ export const agents = pgTable(
       .references(() => projects.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
     role: agentRoleEnum('role').notNull().default('primary'),
+    /** D-015: every employee belongs to a department. Nullable until backfilled. */
+    departmentId: uuid('department_id').references(() => departments.id, {
+      onDelete: 'set null',
+    }),
     provider: providerIdEnum('provider').notNull(),
     model: text('model').notNull(),
     systemPrompt: text('system_prompt').notNull(),
@@ -203,6 +233,80 @@ export const integrationSecrets = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Work hierarchy (OBJECTIVES.md, D-010/D-015) — dark in Sprint 3, UI Sprint 4.
+// Containment: Project → Objective → Milestone → Task. Department/Employee is
+// an ASSIGNMENT dimension (sponsoring_department_id, accountable_agent_id),
+// never a parent.
+// ---------------------------------------------------------------------------
+
+export const objectives = pgTable(
+  'objectives',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    description: text('description').notNull().default(''),
+    status: objectiveStatusEnum('status').notNull().default('draft'),
+    /** Single-ordinal priority; lower = more important (OBJECTIVES.md). */
+    priority: integer('priority').notNull().default(100),
+    sponsoringDepartmentId: uuid('sponsoring_department_id').references(() => departments.id, {
+      onDelete: 'set null',
+    }),
+    accountableAgentId: uuid('accountable_agent_id').references(() => agents.id, {
+      onDelete: 'set null',
+    }),
+    /**
+     * SPRINT-03-PLAN §5.3: completion is gated on every criterion being met
+     * or human-waived; post-activation changes are audit events.
+     */
+    successCriteria: jsonb('success_criteria')
+      .$type<SuccessCriterion[]>()
+      .notNull()
+      .default([]),
+    createdBy: uuid('created_by')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'restrict' }),
+    ...timestamps,
+  },
+  (t) => [
+    index('objectives_org_project_idx').on(t.orgId, t.projectId),
+    index('objectives_project_status_idx').on(t.projectId, t.status),
+  ],
+);
+
+export const milestones = pgTable(
+  'milestones',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    objectiveId: uuid('objective_id')
+      .notNull()
+      .references(() => objectives.id, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    description: text('description').notNull().default(''),
+    status: milestoneStatusEnum('status').notNull().default('planned'),
+    /** Ordering within the objective. */
+    position: integer('position').notNull().default(0),
+    targetDate: timestamp('target_date', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    index('milestones_org_project_idx').on(t.orgId, t.projectId),
+    index('milestones_objective_position_idx').on(t.objectiveId, t.position),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Execution
 // ---------------------------------------------------------------------------
 
@@ -224,6 +328,9 @@ export const tasks = pgTable(
     /** D-014: human-selected routing tier; flagship requires a stated category. */
     modelTier: modelTierEnum('model_tier').notNull().default('standard'),
     flagshipCategory: flagshipCategoryEnum('flagship_category'),
+    /** Optional attachment into the work hierarchy (D-010); dark until Sprint 4. */
+    objectiveId: uuid('objective_id').references(() => objectives.id, { onDelete: 'set null' }),
+    milestoneId: uuid('milestone_id').references(() => milestones.id, { onDelete: 'set null' }),
     status: taskStatusEnum('status').notNull().default('pending'),
     createdBy: uuid('created_by')
       .notNull()

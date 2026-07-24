@@ -7,7 +7,9 @@ import {
   CONTEXT_ITEM_STATUSES,
   FLAGSHIP_CATEGORIES,
   MESSAGE_ROLES,
+  MILESTONE_STATUSES,
   MODEL_TIERS,
+  OBJECTIVE_STATUSES,
   ORG_ROLES,
   PROJECT_ROLES,
   REVIEW_VERDICTS,
@@ -39,3 +41,5 @@ export const contextItemStatusEnum = pgEnum('context_item_status', CONTEXT_ITEM_
 export const artifactKindEnum = pgEnum('artifact_kind', ARTIFACT_KINDS);
 export const modelTierEnum = pgEnum('model_tier', MODEL_TIERS);
 export const flagshipCategoryEnum = pgEnum('flagship_category', FLAGSHIP_CATEGORIES);
+export const objectiveStatusEnum = pgEnum('objective_status', OBJECTIVE_STATUSES);
+export const milestoneStatusEnum = pgEnum('milestone_status', MILESTONE_STATUSES);

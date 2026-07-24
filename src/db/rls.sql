@@ -48,8 +48,9 @@ grant usage on schema app to app_server;
 -- Table privileges: deliberately NOT "grant all".
 grant select, insert, update on
   organizations, memberships, projects, project_members,
-  agents, project_context_items, integration_secrets,
+  agents, departments, project_context_items, integration_secrets,
   tasks, runs, run_steps, artifacts, approvals,
+  objectives, milestones,
   usage_events, spend_limits, rate_limit_buckets, profiles
 to app_server;
 
@@ -157,7 +158,8 @@ begin
   foreach t in array array[
     'agents', 'project_context_items', 'integration_secrets',
     'tasks', 'runs', 'run_steps', 'messages',
-    'artifacts', 'approvals', 'usage_events', 'spend_limits'
+    'artifacts', 'approvals', 'usage_events', 'spend_limits',
+    'objectives', 'milestones'
   ]
   loop
     execute format('alter table %I enable row level security', t);
@@ -172,6 +174,15 @@ begin
   end loop;
 end
 $$;
+
+-- departments: org-scoped, like organizations — an employee's department is
+-- the same in every workspace, so the predicate is org membership, not project.
+alter table departments enable row level security;
+alter table departments force row level security;
+drop policy if exists departments_org on departments;
+create policy departments_org on departments
+  using (org_id = app.current_org_id())
+  with check (org_id = app.current_org_id());
 
 -- audit_logs: org-scoped (org-level events have null project_id). Insert must
 -- still match the current org.

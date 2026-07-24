@@ -82,6 +82,29 @@ export type AgentRole = (typeof AGENT_ROLES)[number];
 export const CONTEXT_ITEM_STATUSES = ['pending', 'approved', 'archived'] as const;
 export type ContextItemStatus = (typeof CONTEXT_ITEM_STATUSES)[number];
 
+/** Objectives (OBJECTIVES.md, D-010). Dark schema in Sprint 3; UI in Sprint 4. */
+export const OBJECTIVE_STATUSES = ['draft', 'active', 'completed', 'cancelled'] as const;
+export type ObjectiveStatus = (typeof OBJECTIVE_STATUSES)[number];
+
+export const MILESTONE_STATUSES = ['planned', 'active', 'completed', 'cancelled'] as const;
+export type MilestoneStatus = (typeof MILESTONE_STATUSES)[number];
+
+/**
+ * One measurable success criterion on an objective (SPRINT-03-PLAN §5.3).
+ * An objective cannot complete while any criterion is 'unmet'; criteria are
+ * met or explicitly waived by a human, and both transitions are audited.
+ */
+export interface SuccessCriterion {
+  readonly label: string;
+  readonly metric: string;
+  readonly target: number;
+  readonly unit: string;
+  readonly source: 'manual' | 'usage' | `integration:${string}`;
+  readonly status: 'unmet' | 'met' | 'waived';
+  readonly verifiedBy: string | null;
+  readonly verifiedAt: string | null;
+}
+
 /**
  * Model routing tiers (SPRINT-03-PLAN.md §4, D-014). `standard` uses each
  * agent's configured model; `flagship` overrides to the flagship model for the

@@ -157,6 +157,33 @@ async function main() {
     .values({ orgId: org.id, userId: owner.id, role: 'owner' })
     .onConflictDoNothing();
 
+  // Departments (D-012/D-015): stable org-level structure of the AI workforce.
+  console.log('Seeding departments…');
+  const DEPARTMENTS = [
+    ['engineering', 'Engineering'],
+    ['marketing', 'Marketing'],
+    ['finance', 'Finance'],
+    ['operations', 'Operations'],
+    ['support', 'Support'],
+    ['sales', 'Sales'],
+    ['legal', 'Legal'],
+    ['research', 'Research'],
+  ] as const;
+  for (const [key, name] of DEPARTMENTS) {
+    await db
+      .insert(schema.departments)
+      .values({ orgId: org.id, key, name })
+      .onConflictDoNothing();
+  }
+  const engineering = (
+    await db
+      .select()
+      .from(schema.departments)
+      .where(eq(schema.departments.key, 'engineering'))
+      .limit(1)
+  )[0];
+  if (!engineering) throw new Error('Failed to upsert engineering department.');
+
   for (const p of PROJECTS) {
     console.log(`Seeding project ${p.name}…`);
     await db
@@ -189,6 +216,7 @@ async function main() {
     for (const agent of DEFAULT_AGENTS) {
       // Default agents are seed-managed: model and prompt reset on re-run
       // (standard-tier defaults, D-014). Rename an agent to opt it out.
+      // All defaults are Engineering employees until specialized roles exist.
       await db
         .insert(schema.agents)
         .values({
@@ -196,13 +224,19 @@ async function main() {
           projectId: project.id,
           name: agent.name,
           role: agent.role,
+          departmentId: engineering.id,
           provider: agent.provider,
           model: agent.model,
           systemPrompt: agent.systemPrompt,
         })
         .onConflictDoUpdate({
           target: [schema.agents.projectId, schema.agents.name],
-          set: { model: agent.model, systemPrompt: agent.systemPrompt, updatedAt: new Date() },
+          set: {
+            model: agent.model,
+            systemPrompt: agent.systemPrompt,
+            departmentId: engineering.id,
+            updatedAt: new Date(),
+          },
         });
     }
 
