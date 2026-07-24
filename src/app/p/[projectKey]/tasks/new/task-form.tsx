@@ -16,14 +16,22 @@ const FLAGSHIP_CATEGORY_OPTIONS = [
   ['release_review', 'Final release review'],
 ] as const;
 
+export interface EmployeeChoice {
+  id: string;
+  name: string;
+  departmentName: string | null;
+}
+
 export function TaskForm({
   projectKey,
   objectives = [],
   preselectedObjectiveId = null,
+  employees = [],
 }: {
   projectKey: string;
   objectives?: Array<{ id: string; title: string }>;
   preselectedObjectiveId?: string | null;
+  employees?: EmployeeChoice[];
 }) {
   const [state, formAction, pending] = useActionState(submitTask, initialState);
   const [flagship, setFlagship] = useState(false);
@@ -31,6 +39,33 @@ export function TaskForm({
   return (
     <form action={formAction} className="space-y-5">
       <input type="hidden" name="projectKey" value={projectKey} />
+
+      <fieldset>
+        <legend className="mb-2 text-sm text-[var(--muted)]">Who should perform this work?</legend>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {employees.map((e, i) => (
+            <label
+              key={e.id}
+              className="flex cursor-pointer items-center gap-2 rounded-md border border-[var(--border)] px-3 py-2 text-sm has-[:checked]:border-[var(--accent)]"
+            >
+              <input
+                type="radio"
+                name="assigneeAgentId"
+                value={e.id}
+                defaultChecked={i === 0}
+                required
+                className="accent-[var(--accent)]"
+              />
+              <span>
+                <span className="font-medium">{e.name}</span>
+                {e.departmentName ? (
+                  <span className="ml-1 text-xs text-[var(--muted)]">{e.departmentName}</span>
+                ) : null}
+              </span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
 
       {objectives.length > 0 ? (
         <div>
@@ -128,37 +163,6 @@ export function TaskForm({
           </div>
         ) : null}
       </div>
-
-      <details className="rounded-md border border-[var(--border)] p-3">
-        <summary className="cursor-pointer text-xs text-[var(--muted)] hover:text-[var(--foreground)]">
-          Advanced: vendor routing
-        </summary>
-        <fieldset className="mt-3">
-          <legend className="mb-2 text-sm text-[var(--muted)]">
-            Which vendor leads (the cross-check always uses the other one)
-          </legend>
-          <div className="flex gap-4">
-            {(
-              [
-                ['both', 'Default (OpenAI leads, Anthropic checks)'],
-                ['openai', 'OpenAI only'],
-                ['anthropic', 'Anthropic only'],
-              ] as const
-            ).map(([value, label]) => (
-              <label key={value} className="flex items-center gap-2 text-sm">
-                <input
-                  type="radio"
-                  name="providerSelection"
-                  value={value}
-                  defaultChecked={value === 'both'}
-                  className="accent-[var(--accent)]"
-                />
-                {label}
-              </label>
-            ))}
-          </div>
-        </fieldset>
-      </details>
 
       {state.error ? (
         <p role="alert" className="rounded-md bg-[#3a2026] px-3 py-2 text-sm text-[var(--danger)]">

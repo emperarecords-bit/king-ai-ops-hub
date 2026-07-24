@@ -1,9 +1,9 @@
-import { and, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import { type AgentRole, type TenantContext } from '@/types/domain';
 import { type ProviderId } from '@/types/provider';
 import { NotFoundError, ValidationError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
-import { agents } from '@/db/schema';
+import { agents, departments } from '@/db/schema';
 import { knownModel } from '@/providers/pricing';
 import { writeAudit } from '@/domain/audit/audit';
 
@@ -34,6 +34,42 @@ export async function listAgents(tx: DbTx, ctx: TenantContext): Promise<AgentRow
     })
     .from(agents)
     .where(and(eq(agents.projectId, ctx.projectId), eq(agents.orgId, ctx.orgId)));
+}
+
+export interface AssignableEmployee {
+  id: string;
+  name: string;
+  departmentName: string | null;
+  provider: ProviderId;
+}
+
+/**
+ * Enabled primary-role employees — the "Who should do this work?" picker
+ * (Sprint 5, assignee-first). The pick determines the leading vendor; the
+ * cross-check counterpart is derived per D-005.
+ */
+export async function listAssignableEmployees(
+  tx: DbTx,
+  ctx: TenantContext,
+): Promise<AssignableEmployee[]> {
+  return tx
+    .select({
+      id: agents.id,
+      name: agents.name,
+      departmentName: departments.name,
+      provider: agents.provider,
+    })
+    .from(agents)
+    .leftJoin(departments, eq(agents.departmentId, departments.id))
+    .where(
+      and(
+        eq(agents.projectId, ctx.projectId),
+        eq(agents.orgId, ctx.orgId),
+        eq(agents.role, 'primary'),
+        eq(agents.enabled, true),
+      ),
+    )
+    .orderBy(asc(agents.name));
 }
 
 /** The enabled agent for (role, provider), or null. Engine input resolution. */

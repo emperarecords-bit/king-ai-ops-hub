@@ -17,20 +17,28 @@ export default async function ProjectSelectorPage() {
             and secrets never cross.
           </p>
         </div>
-        <form action={signOut}>
-          <button
-            type="submit"
-            className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--muted)] hover:text-[var(--foreground)]"
+        <div className="flex items-center gap-2">
+          <Link
+            href="/projects/new"
+            className="rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#0b0e14] hover:bg-[var(--accent-strong)]"
           >
-            Sign out
-          </button>
-        </form>
+            + New workspace
+          </Link>
+          <form action={signOut}>
+            <button
+              type="submit"
+              className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--muted)] hover:text-[var(--foreground)]"
+            >
+              Sign out
+            </button>
+          </form>
+        </div>
       </div>
 
       {projects.length === 0 ? (
         <EmptyState>
-          No workspaces yet. Run the seed script (npm run db:seed) with your account email, or ask
-          the owner to add you to a project.
+          Welcome! Create your first workspace — it arrives already staffed with an AI team, a
+          budget, and its own isolated memory.
         </EmptyState>
       ) : (
         <ul className="grid gap-4 sm:grid-cols-2">

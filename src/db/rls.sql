@@ -175,6 +175,37 @@ begin
 end
 $$;
 
+-- Provisioning INSERT policies (Sprint 5, "The Front Door") -------------------
+-- Workspace/org creation happens BEFORE the row being created has members, so
+-- the membership-based USING predicates above can never admit these inserts.
+-- Permissive policies OR together per command: these add the create paths
+-- without widening any read.
+
+-- Any authenticated user may create an organization (they immediately insert
+-- their own owner membership in the same transaction).
+drop policy if exists organizations_insert on organizations;
+create policy organizations_insert on organizations
+  for insert with check (app.current_user_id() is not null);
+
+-- You may only ever INSERT a membership row for YOURSELF (org bootstrap).
+-- Adding others is a future multi-user flow with its own policy.
+drop policy if exists memberships_self_insert on memberships;
+create policy memberships_self_insert on memberships
+  for insert with check (user_id = app.current_user_id());
+
+-- Org owners/admins may create projects in their org.
+drop policy if exists projects_insert on projects;
+create policy projects_insert on projects
+  for insert with check (
+    org_id = app.current_org_id()
+    and exists (
+      select 1 from memberships m
+      where m.org_id = projects.org_id
+        and m.user_id = app.current_user_id()
+        and m.role in ('owner', 'admin')
+    )
+  );
+
 -- departments: org-scoped, like organizations — an employee's department is
 -- the same in every workspace, so the predicate is org membership, not project.
 alter table departments enable row level security;

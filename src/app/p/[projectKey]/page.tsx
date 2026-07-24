@@ -63,6 +63,38 @@ export default async function DashboardPage({
         }
       />
 
+      {objectives.length === 0 || tasks.length === 0 ? (
+        <Card title="Getting started" className="mb-6 border-[var(--accent)]">
+          <ol className="space-y-2 text-sm">
+            {(
+              [
+                ['Meet your team', `${base}/agents`, agents.length > 0 && tasks.length > 0],
+                ['Define your first objective', `${base}/objectives/new`, objectives.length > 0],
+                ['Assign your first work', `${base}/tasks/new`, tasks.length > 0],
+              ] as const
+            ).map(([label, href, done], i) => (
+              <li key={label}>
+                <Link
+                  href={href}
+                  className="flex items-center gap-3 rounded-md px-2 py-1.5 hover:bg-[var(--surface-raised)]"
+                >
+                  <span
+                    className={`flex h-5 w-5 items-center justify-center rounded-full text-xs font-bold ${done ? 'bg-[var(--success)] text-[#0b0e14]' : 'border border-[var(--border)] text-[var(--muted)]'}`}
+                  >
+                    {done ? '✓' : i + 1}
+                  </span>
+                  <span className={done ? 'text-[var(--muted)] line-through' : ''}>{label}</span>
+                </Link>
+              </li>
+            ))}
+          </ol>
+          <p className="mt-3 text-xs text-[var(--muted)]">
+            Your team proposes; you approve. Nothing consequential ever happens without your
+            sign-off.
+          </p>
+        </Card>
+      ) : null}
+
       <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card title="Needs your decision">
           <p className="text-2xl font-bold">{pendingApprovals.length}</p>

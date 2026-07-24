@@ -1,5 +1,6 @@
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
+import { listAssignableEmployees } from '@/domain/agents/agents';
 import { listObjectives } from '@/domain/objectives/objectives';
 import { Card, PageHeader } from '@/components/ui';
 import { TaskForm } from './task-form';
@@ -15,7 +16,10 @@ export default async function NewTaskPage({
   const { objective } = await searchParams;
   const ctx = await requireTenant(projectKey);
 
-  const objectives = await withTenant(ctx, (tx) => listObjectives(tx, ctx));
+  const { objectives, employees } = await withTenant(ctx, async (tx) => ({
+    objectives: await listObjectives(tx, ctx),
+    employees: await listAssignableEmployees(tx, ctx),
+  }));
   const openObjectives = objectives
     .filter((o) => o.status === 'active' || o.status === 'draft')
     .map((o) => ({ id: o.id, title: o.title }));
@@ -33,6 +37,7 @@ export default async function NewTaskPage({
           preselectedObjectiveId={
             openObjectives.some((o) => o.id === objective) ? objective! : null
           }
+          employees={employees}
         />
       </Card>
     </div>
