@@ -39,7 +39,7 @@ export default async function ProjectLayout({
           <NavLink href={`${base}/tasks/new`}>New task</NavLink>
           <NavLink href={`${base}/approvals`}>Approvals</NavLink>
           <NavLink href={`${base}/artifacts`}>Artifacts</NavLink>
-          <NavLink href={`${base}/agents`}>Agents</NavLink>
+          <NavLink href={`${base}/agents`}>Employees</NavLink>
           <NavLink href={`${base}/providers`}>Providers</NavLink>
           <NavLink href={`${base}/usage`}>Usage</NavLink>
           <NavLink href={`${base}/audit`}>Audit</NavLink>

@@ -38,7 +38,7 @@ test.describe('critical flow', () => {
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
 
     // --- New task ----------------------------------------------------------
-    await page.getByRole('link', { name: '+ New task' }).click();
+    await page.getByRole('link', { name: '+ Assign work' }).click();
     const title = `E2E task ${Date.now()}`;
     await page.getByLabel('Title').fill(title);
     await page
