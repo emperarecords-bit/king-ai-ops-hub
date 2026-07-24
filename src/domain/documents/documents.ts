@@ -282,12 +282,103 @@ export interface RetrievedChunk {
   rank: number;
 }
 
+const WORD_NUMBERS: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8,
+  nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14,
+  fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20,
+};
+
+// A task brief is a natural-language instruction, not a search query. Matching
+// AND across all its words (the websearch_to_tsquery default) is why "Review
+// Episode 1 for continuity" retrieved nothing: no single chunk held all of
+// review+episode+1+continuity. We OR the terms instead, and expand episode
+// references so "Episode 1" also matches "S01E01" / "E01" in the material.
+const MAX_PLAIN_TOKENS = 40;
+
+export interface ExpandedQuery {
+  /** OR-joined lexemes for to_tsquery('english', …). Empty ⇒ nothing to search. */
+  tsquery: string;
+  /** ILIKE patterns for referenced episodes, e.g. '%S01E01%'. */
+  episodePatterns: string[];
+}
+
 /**
- * The retrieval read (invariant I1). Ranks this project's chunks against the
- * task text with ts_rank and returns the top K. Like loadApprovedContext it
- * re-asserts tenancy on every row and treats a mismatch as a fire alarm — this
- * is a prompt-feeding read, so isolation is enforced in depth, not just by the
- * WHERE clause and RLS.
+ * Normalizes a task brief into an OR query plus episode filename patterns.
+ * Treats Episode 1 / Episode One / Ep 1 / E01 / S01E01 / Season 1 Episode 1 as
+ * equivalent (deliverables #5, #6).
+ */
+export function expandDocumentQuery(text: string): ExpandedQuery {
+  const lower = text.toLowerCase();
+  const tokens = new Set<string>();
+  const episodes = new Map<string, { season: number | null; ep: number }>();
+
+  // Plain content words — to_tsquery stems them; Postgres drops stopwords.
+  let plain = 0;
+  for (const w of lower.match(/[a-z0-9]+/g) ?? []) {
+    if (plain >= MAX_PLAIN_TOKENS) break;
+    if (w.length >= 2 || /^\d+$/.test(w)) {
+      tokens.add(w);
+      plain += 1;
+    }
+  }
+
+  const addEpisode = (season: number | null, ep: number): void => {
+    if (ep < 1 || ep > 999) return;
+    const e2 = String(ep).padStart(2, '0');
+    const s2 = String(season ?? 1).padStart(2, '0');
+    tokens.add('episode');
+    tokens.add(String(ep));
+    tokens.add(`e${e2}`);
+    tokens.add(`s${s2}e${e2}`);
+    if (season != null) {
+      tokens.add('season');
+      tokens.add(String(season));
+    }
+    // Keyed by episode number so "Episode 1" and "S01E01" don't double-count;
+    // an explicit season wins over an inferred one.
+    const key = `e${e2}`;
+    const prior = episodes.get(key);
+    episodes.set(key, { season: season ?? prior?.season ?? null, ep });
+  };
+
+  // "episode one" / "season two" → digits, so the patterns below catch them.
+  const normalized = lower.replace(
+    /\b(episode|ep|season|s)\s+([a-z]+)\b/g,
+    (m, kw, word) => (WORD_NUMBERS[word] ? `${kw} ${WORD_NUMBERS[word]}` : m),
+  );
+
+  // Most specific first. S01E01 / S1E1.
+  for (const m of normalized.matchAll(/\bs(\d{1,2})e(\d{1,3})\b/g)) {
+    addEpisode(Number(m[1]), Number(m[2]));
+  }
+  // Season X … Episode Y (same clause).
+  for (const m of normalized.matchAll(/\bseason\s*(\d{1,2})\b[^.\n]*?\bep(?:isode)?\.?\s*(\d{1,3})\b/g)) {
+    addEpisode(Number(m[1]), Number(m[2]));
+  }
+  // Episode Y / Ep Y / Ep.Y (no season).
+  for (const m of normalized.matchAll(/\bep(?:isode)?\.?\s*(\d{1,3})\b/g)) {
+    addEpisode(null, Number(m[1]));
+  }
+  // Bare E01 / E1.
+  for (const m of normalized.matchAll(/\be(\d{1,3})\b/g)) {
+    addEpisode(null, Number(m[1]));
+  }
+
+  const episodePatterns = [...episodes.values()].map(
+    (e) => `%S${String(e.season ?? 1).padStart(2, '0')}E${String(e.ep).padStart(2, '0')}%`,
+  );
+
+  return { tsquery: [...tokens].join(' | '), episodePatterns };
+}
+
+/**
+ * The retrieval read (invariant I1). Expands the task brief (OR + episode
+ * normalization), ranks this project's chunks with ts_rank, and boosts chunks
+ * from a document whose filename matches a referenced episode so a request for
+ * "Episode 1" pulls the whole S01E01 material — not just whichever chunk
+ * happens to repeat the words. Like loadApprovedContext it re-asserts tenancy
+ * on every row and treats a mismatch as a fire alarm — this is a prompt-feeding
+ * read, so isolation is enforced in depth, not just by the WHERE clause + RLS.
  */
 export async function retrieveRelevant(
   tx: DbTx,
@@ -295,11 +386,21 @@ export async function retrieveRelevant(
   queryText: string,
   limit = 5,
 ): Promise<RetrievedChunk[]> {
-  const cleaned = queryText.trim();
-  if (cleaned.length === 0) return [];
+  const { tsquery, episodePatterns } = expandDocumentQuery(queryText);
+  if (tsquery.length === 0) return [];
 
-  // websearch_to_tsquery tolerates arbitrary user text (no syntax errors on
-  // punctuation), which matters because the "query" is a raw task brief.
+  const q = sql`to_tsquery('english', ${tsquery})`;
+  // OR of per-pattern ILIKEs; constant false when no episode was referenced
+  // (an empty ANY(...) is a SQL syntax error, and Drizzle inlines arrays as
+  // IN-lists rather than a single array param).
+  const filenameMatch =
+    episodePatterns.length === 0
+      ? sql`false`
+      : sql.join(
+          episodePatterns.map((p) => sql`${documents.relativePath} ilike ${p}`),
+          sql` or `,
+        );
+
   const rows = await tx
     .select({
       documentId: documentChunks.documentId,
@@ -308,7 +409,8 @@ export async function retrieveRelevant(
       content: documentChunks.content,
       orgId: documentChunks.orgId,
       projectId: documentChunks.projectId,
-      rank: sql<number>`ts_rank(document_chunks.search, websearch_to_tsquery('english', ${cleaned}))`,
+      rank: sql<number>`ts_rank(document_chunks.search, ${q})`,
+      episodeHit: sql<boolean>`(${filenameMatch})`,
     })
     .from(documentChunks)
     .innerJoin(documents, eq(documentChunks.documentId, documents.id))
@@ -317,10 +419,13 @@ export async function retrieveRelevant(
         eq(documentChunks.projectId, ctx.projectId),
         eq(documentChunks.orgId, ctx.orgId),
         eq(documents.status, 'active'),
-        sql`document_chunks.search @@ websearch_to_tsquery('english', ${cleaned})`,
+        sql`(document_chunks.search @@ ${q} or ${filenameMatch})`,
       ),
     )
-    .orderBy(sql`ts_rank(document_chunks.search, websearch_to_tsquery('english', ${cleaned})) desc`)
+    .orderBy(
+      sql`(case when ${filenameMatch} then 1 else 0 end) desc`,
+      sql`ts_rank(document_chunks.search, ${q}) desc`,
+    )
     .limit(limit);
 
   for (const r of rows) {

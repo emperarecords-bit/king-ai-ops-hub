@@ -142,4 +142,39 @@ describe.skipIf(!available)('project folder', () => {
     );
     expect(ownHits[0]?.relativePath).toBe('infra.md');
   });
+
+  it('REGRESSION: the Episode 1 retrieval failure is fixed', async () => {
+    // Reproduces the reported bug: a screenplay whose episode identifier lives
+    // in a header, and a task brief whose instruction words ("Review",
+    // "continuity") never co-occur with the identifier in one chunk. Under the
+    // old AND query this returned zero rows and the script was never injected.
+    const folderC = await mkdtemp(join(tmpdir(), 'kaoh-docs-c-'));
+    try {
+      await writeFile(
+        join(folderC, '2026-07-22_KingdomCore_S01E01_Screenplay.md'),
+        '# KINGDOM CORE\n\n## Episode 1 — "The Summoning"\n\n**Episode:** S01E01\n**Season:** 1\n\nElias draws the sword. The courtyard falls silent.\n\nFADE OUT.',
+      );
+      await writeFile(
+        join(folderC, '2026-07-23_KingdomCore_S01E02_Screenplay.md'),
+        '# KINGDOM CORE\n\n## Episode 2 — "The Oath"\n\n**Episode:** S01E02\n**Season:** 1\n\nRowan kneels before the throne.',
+      );
+      const ctxC = await makeWorkspace(ctxA.userId);
+      await withTenant(ctxC, (tx) => linkFolder(tx, ctxC, folderC));
+      await withTenant(ctxC, (tx) => refreshIndex(tx, ctxC));
+
+      const hits = await withTenant(ctxC, (tx) =>
+        retrieveRelevant(tx, ctxC, 'Review Episode 1 for continuity.', 5),
+      );
+      const paths = hits.map((h) => h.relativePath);
+      // The E01 screenplay is retrieved...
+      expect(paths).toContain('2026-07-22_KingdomCore_S01E01_Screenplay.md');
+      // ...and E01 material outranks the E02 screenplay for an "Episode 1" query.
+      const firstE01 = paths.findIndex((p) => p.includes('S01E01'));
+      const firstE02 = paths.findIndex((p) => p.includes('S01E02'));
+      expect(firstE01).toBeGreaterThanOrEqual(0);
+      if (firstE02 !== -1) expect(firstE01).toBeLessThan(firstE02);
+    } finally {
+      await rm(folderC, { recursive: true, force: true });
+    }
+  });
 });
