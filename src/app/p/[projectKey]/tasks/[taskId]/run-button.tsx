@@ -1,7 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useActionState, useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { cancelTaskAction } from '../actions';
 
 const KIND_LABEL: Record<string, string> = {
   primary: 'Primary',
@@ -162,5 +163,38 @@ export function RunButton({
         </p>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Ends a task that should not have been created, or is no longer wanted.
+ * Deliberately quiet: cancelling is rare next to running, and a prominent
+ * destructive-looking control beside the primary action invites misclicks.
+ */
+export function CancelTaskButton({
+  projectKey,
+  taskId,
+}: {
+  projectKey: string;
+  taskId: string;
+}) {
+  const [state, formAction, pending] = useActionState(cancelTaskAction, { error: null });
+  return (
+    <form action={formAction} className="inline">
+      <input type="hidden" name="projectKey" value={projectKey} />
+      <input type="hidden" name="taskId" value={taskId} />
+      <button
+        type="submit"
+        disabled={pending}
+        className="rounded-md border border-[var(--border)] px-3 py-2 text-sm text-[var(--muted)] hover:border-[var(--danger)] hover:text-[var(--danger)] disabled:opacity-50"
+      >
+        {pending ? 'Cancelling…' : 'Cancel task'}
+      </button>
+      {state.error ? (
+        <p role="alert" className="mt-1 text-xs text-[var(--danger)]">
+          {state.error}
+        </p>
+      ) : null}
+    </form>
   );
 }

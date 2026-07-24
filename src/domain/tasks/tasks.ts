@@ -11,7 +11,7 @@ import {
   type TenantContext,
 } from '@/types/domain';
 import { PROVIDER_SELECTIONS, type ProviderId, type ProviderSelection } from '@/types/provider';
-import { NotFoundError, ValidationError } from '@/lib/errors';
+import { ConflictError, NotFoundError, ValidationError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { messages, runs, runSteps, tasks } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
@@ -165,6 +165,43 @@ export async function setTaskStatus(
     )
     .returning({ id: tasks.id });
   if (updated.length === 0) throw new NotFoundError('Task');
+}
+
+/**
+ * Cancels a task the owner no longer wants (LIFECYCLE-AUDIT). Cancelling is
+ * the *end* of a task's life, not a delete: its messages, costs, and audit
+ * rows stay, because money may already have been spent and history is
+ * append-only (I6, I7).
+ *
+ * A `running` task cannot be cancelled here. The engine holds an in-flight
+ * provider call with its own deadline, and flipping the row underneath it
+ * would leave the run writing steps to a task that claims to be finished.
+ * Runs are bounded by RUN_TIMEOUT_MS; waiting is correct.
+ */
+export async function cancelTask(tx: DbTx, ctx: TenantContext, taskId: string): Promise<void> {
+  const task = await getTask(tx, ctx, taskId);
+  if (task.status === 'running') {
+    throw new ConflictError(
+      'This task is running. Wait for it to finish — runs are time-bounded — then cancel it.',
+    );
+  }
+  if (task.status === 'cancelled') {
+    throw new ConflictError('This task is already cancelled.');
+  }
+
+  await tx
+    .update(tasks)
+    .set({ status: 'cancelled', updatedAt: new Date() })
+    .where(
+      and(eq(tasks.id, taskId), eq(tasks.projectId, ctx.projectId), eq(tasks.orgId, ctx.orgId)),
+    );
+
+  await writeAudit(tx, ctx, {
+    action: 'task.cancelled',
+    entityType: 'task',
+    entityId: taskId,
+    detail: { title: task.title, from: task.status },
+  });
 }
 
 export interface MessageRow {

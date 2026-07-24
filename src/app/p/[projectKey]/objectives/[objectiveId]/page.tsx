@@ -9,9 +9,12 @@ import { NotFoundError } from '@/lib/errors';
 import { formatMoney } from '@/lib/money';
 import { Card, EmptyState, PageHeader, ProgressBar, StatusBadge } from '@/components/ui';
 import {
+  AddCriterionForm,
   AddMilestoneForm,
   CriterionButtons,
+  CriterionEditor,
   MilestoneStatusButton,
+  ObjectiveDetailsEditor,
   ObjectiveStatusButtons,
 } from './mutation-forms';
 import { AddStandingWorkForm, ToggleScheduleButton } from './standing-forms';
@@ -80,24 +83,37 @@ export default async function ObjectiveDetailPage({
         <ProgressBar percent={o.progress.percent} />
       </div>
 
-      {o.description ? (
-        <Card className="mb-6">
-          <p className="whitespace-pre-wrap text-sm">{o.description}</p>
+      {o.description || open ? (
+        <Card title="Detail" className="mb-6">
+          <div className="flex items-start justify-between gap-4">
+            <p className="whitespace-pre-wrap text-sm">
+              {o.description || (
+                <span className="text-[var(--muted)]">No description.</span>
+              )}
+            </p>
+            {open ? (
+              <ObjectiveDetailsEditor
+                projectKey={projectKey}
+                objectiveId={o.id}
+                title={o.title}
+                description={o.description}
+              />
+            ) : null}
+          </div>
         </Card>
       ) : null}
 
       <Card title="Success criteria" className="mb-6">
         {o.successCriteria.length === 0 ? (
           <EmptyState>
-            No success criteria. Without them, completion is a judgment call — consider adding
-            measurable ones on the next objective.
+            No success criteria yet. An objective needs at least one to activate — add one below.
           </EmptyState>
         ) : (
           <ul className="space-y-2">
             {o.successCriteria.map((c, i) => (
               <li
                 key={i}
-                className={`flex items-center justify-between gap-3 rounded-md border p-3 text-sm ${CRITERION_STYLE[c.status] ?? ''}`}
+                className={`flex flex-wrap items-center justify-between gap-3 rounded-md border p-3 text-sm ${CRITERION_STYLE[c.status] ?? ''}`}
               >
                 <div>
                   <span className="font-medium">{c.label}</span>
@@ -109,17 +125,32 @@ export default async function ObjectiveDetailPage({
                   </span>
                 </div>
                 {open ? (
-                  <CriterionButtons
-                    projectKey={projectKey}
-                    objectiveId={o.id}
-                    index={i}
-                    status={c.status}
-                  />
+                  <div className="flex items-center gap-2">
+                    <CriterionButtons
+                      projectKey={projectKey}
+                      objectiveId={o.id}
+                      index={i}
+                      status={c.status}
+                    />
+                    <CriterionEditor
+                      projectKey={projectKey}
+                      objectiveId={o.id}
+                      index={i}
+                      label={c.label}
+                      target={c.target}
+                      unit={c.unit}
+                      // The last criterion of an ACTIVE objective cannot go:
+                      // it would leave the objective past its activation gate
+                      // with nothing left to satisfy.
+                      canRemove={o.status !== 'active' || o.successCriteria.length > 1}
+                    />
+                  </div>
                 ) : null}
               </li>
             ))}
           </ul>
         )}
+        {open ? <AddCriterionForm projectKey={projectKey} objectiveId={o.id} /> : null}
       </Card>
 
       <Card title="Milestones" className="mb-6">

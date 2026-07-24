@@ -9,15 +9,19 @@ import { slugifyMetric } from '@/lib/slug';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import {
+  addCriterion,
   addMilestone,
   createObjective,
+  removeCriterion,
   setCriterionStatus,
   setMilestoneStatus,
   setObjectiveStatus,
+  updateCriterion,
+  updateObjectiveDetails,
 } from '@/domain/objectives/objectives';
 import { listAssignableEmployees } from '@/domain/agents/agents';
 import { suggestSuccessCriteria } from '@/domain/objectives/suggest';
-import { createSchedule, setScheduleEnabled } from '@/domain/standing/standing';
+import { createSchedule, setScheduleEnabled, updateSchedule } from '@/domain/standing/standing';
 
 export interface ObjectiveFormState {
   error: string | null;
@@ -212,6 +216,97 @@ export async function toggleSchedule(
   if (!z.string().uuid().safeParse(scheduleId).success) return { error: 'Invalid request.' };
   return objectiveMutation(formData, (ctx) =>
     withTenant(ctx, (tx) => setScheduleEnabled(tx, ctx, scheduleId, enabled)),
+  );
+}
+
+/** Reads the label/target/unit trio that criterion edit and add both submit. */
+function criterionFields(formData: FormData) {
+  const targetRaw = formData.get('target');
+  return {
+    label: String(formData.get('label') ?? ''),
+    target: Number(targetRaw ?? 0),
+    unit: String(formData.get('unit') ?? ''),
+  };
+}
+
+export async function editCriterion(
+  _prev: MutationState,
+  formData: FormData,
+): Promise<MutationState> {
+  const index = Number(formData.get('index'));
+  if (!Number.isInteger(index) || index < 0) return { error: 'Invalid request.' };
+  const fields = criterionFields(formData);
+  if (!Number.isFinite(fields.target)) return { error: 'Target must be a number.' };
+  return objectiveMutation(formData, (ctx, objectiveId) =>
+    withTenant(ctx, (tx) => updateCriterion(tx, ctx, objectiveId, index, fields)),
+  );
+}
+
+export async function submitCriterion(
+  _prev: MutationState,
+  formData: FormData,
+): Promise<MutationState> {
+  const fields = criterionFields(formData);
+  if (!Number.isFinite(fields.target)) return { error: 'Target must be a number.' };
+  return objectiveMutation(formData, (ctx, objectiveId) =>
+    withTenant(ctx, (tx) => addCriterion(tx, ctx, objectiveId, fields)),
+  );
+}
+
+export async function deleteCriterion(
+  _prev: MutationState,
+  formData: FormData,
+): Promise<MutationState> {
+  const index = Number(formData.get('index'));
+  if (!Number.isInteger(index) || index < 0) return { error: 'Invalid request.' };
+  return objectiveMutation(formData, (ctx, objectiveId) =>
+    withTenant(ctx, (tx) => removeCriterion(tx, ctx, objectiveId, index)),
+  );
+}
+
+export async function editObjectiveDetails(
+  _prev: MutationState,
+  formData: FormData,
+): Promise<MutationState> {
+  return objectiveMutation(formData, (ctx, objectiveId) =>
+    withTenant(ctx, (tx) =>
+      updateObjectiveDetails(tx, ctx, objectiveId, {
+        title: String(formData.get('title') ?? ''),
+        description: String(formData.get('description') ?? ''),
+      }),
+    ),
+  );
+}
+
+export async function editSchedule(
+  _prev: MutationState,
+  formData: FormData,
+): Promise<MutationState> {
+  const scheduleId = String(formData.get('scheduleId') ?? '');
+  const assigneeId = String(formData.get('assigneeAgentId') ?? '');
+  if (!z.string().uuid().safeParse(scheduleId).success) return { error: 'Invalid request.' };
+  if (!z.string().uuid().safeParse(assigneeId).success) {
+    return { error: 'Pick who should perform the standing work.' };
+  }
+  const weekdayRaw = formData.get('weekday');
+  const monthdayRaw = formData.get('monthday');
+  return objectiveMutation(formData, (ctx, objectiveId) =>
+    withTenant(ctx, async (tx) => {
+      const employees = await listAssignableEmployees(tx, ctx);
+      const assignee = employees.find((e) => e.id === assigneeId);
+      if (!assignee) throw new Error('Assignee is not an active employee here.');
+      await updateSchedule(tx, ctx, scheduleId, {
+        title: String(formData.get('title') ?? ''),
+        input: String(formData.get('input') ?? ''),
+        objectiveId,
+        providerSelection: assignee.provider,
+        reviewEnabled: formData.get('reviewEnabled') === 'on',
+        cadence: String(formData.get('cadence') ?? 'weekly') as 'daily' | 'weekly' | 'monthly',
+        atHour: Number(formData.get('atHour') ?? 6),
+        weekday: weekdayRaw != null && weekdayRaw !== '' ? Number(weekdayRaw) : null,
+        monthday: monthdayRaw != null && monthdayRaw !== '' ? Number(monthdayRaw) : null,
+      });
+    }),
   );
 }
 

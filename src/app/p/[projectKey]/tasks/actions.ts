@@ -9,7 +9,7 @@ import { log } from '@/lib/log';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { listAssignableEmployees } from '@/domain/agents/agents';
-import { createTask } from '@/domain/tasks/tasks';
+import { cancelTask, createTask } from '@/domain/tasks/tasks';
 import { startRun } from '@/domain/tasks/runner';
 
 export interface TaskFormState {
@@ -99,5 +99,33 @@ export async function runTask(_prev: RunActionState, formData: FormData): Promis
   }
 
   revalidatePath(`/p/${projectKey}/tasks/${taskId}`);
+  return { error: null };
+}
+
+/**
+ * Ends a task the owner no longer wants (LIFECYCLE-AUDIT). Cancelling is not
+ * deletion: messages, costs, and audit rows stay, because money may already
+ * have been spent and history is append-only.
+ */
+export async function cancelTaskAction(
+  _prev: RunActionState,
+  formData: FormData,
+): Promise<RunActionState> {
+  const projectKey = String(formData.get('projectKey') ?? '');
+  const taskId = String(formData.get('taskId') ?? '');
+  if (!projectKey || !z.string().uuid().safeParse(taskId).success) {
+    return { error: 'Invalid request.' };
+  }
+
+  try {
+    const ctx = await requireTenant(projectKey);
+    await withTenant(ctx, (tx) => cancelTask(tx, ctx, taskId));
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('cancelTask failed', { err, taskId });
+    return { error: toPublicMessage(err) };
+  }
+
+  revalidatePath(`/p/${projectKey}/tasks/${taskId}`);
+  revalidatePath(`/p/${projectKey}`);
   return { error: null };
 }

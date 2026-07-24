@@ -382,9 +382,7 @@ export async function setCriterionStatus(
   status: 'met' | 'waived' | 'unmet',
 ): Promise<void> {
   const detail = await getObjective(tx, ctx, objectiveId);
-  if (detail.status === 'completed' || detail.status === 'cancelled') {
-    throw new ConflictError('Criteria on a closed objective cannot change.');
-  }
+  assertOpenForCriteriaChange(detail.status);
   const current = detail.successCriteria[criterionIndex];
   if (!current) throw new NotFoundError('Success criterion');
 
@@ -407,6 +405,196 @@ export async function setCriterionStatus(
     entityType: 'objective',
     entityId: objectiveId,
     detail: { criterion: current.label, index: criterionIndex },
+  });
+}
+
+/**
+ * Criteria editing (LIFECYCLE-AUDIT, critical gap). Until now a criterion's
+ * content was frozen at creation and only its status could move — so a
+ * criterion generated wrong (O-11: three targets of 0) was permanent, and the
+ * only escape was waiving a bug as though it had been a goal.
+ *
+ * The rule that keeps D-017 honest while allowing correction: **changing what
+ * is measured invalidates any verification of it.** Editing the target or
+ * unit resets the criterion to `unmet`; editing only the label (a typo, a
+ * clarification) preserves status, because the measure did not change. Both
+ * are audited with before and after.
+ */
+export const editCriterionSchema = z.object({
+  label: z.string().trim().min(1, 'Criterion label is required').max(200),
+  target: z.number().finite().min(0, 'A target cannot be negative.'),
+  unit: z.string().trim().max(50).default(''),
+});
+
+export async function updateCriterion(
+  tx: DbTx,
+  ctx: TenantContext,
+  objectiveId: string,
+  criterionIndex: number,
+  input: z.input<typeof editCriterionSchema>,
+): Promise<void> {
+  const parsed = editCriterionSchema.safeParse(input);
+  if (!parsed.success) throw new ValidationError(parsed.error.issues.map((i) => i.message));
+
+  const detail = await getObjective(tx, ctx, objectiveId);
+  assertOpenForCriteriaChange(detail.status);
+  const current = detail.successCriteria[criterionIndex];
+  if (!current) throw new NotFoundError('Success criterion');
+
+  const measureChanged = current.target !== parsed.data.target || current.unit !== parsed.data.unit;
+
+  const updated: SuccessCriterion = {
+    ...current,
+    label: parsed.data.label,
+    metric: slugifyMetric(parsed.data.label),
+    target: parsed.data.target,
+    unit: parsed.data.unit,
+    // A verification of the old measure says nothing about the new one.
+    status: measureChanged ? 'unmet' : current.status,
+    verifiedBy: measureChanged ? null : current.verifiedBy,
+    verifiedAt: measureChanged ? null : current.verifiedAt,
+  };
+
+  const next = [...detail.successCriteria];
+  next[criterionIndex] = updated;
+  await writeCriteria(tx, ctx, objectiveId, next);
+
+  await writeAudit(tx, ctx, {
+    action: 'objective.criterion_edited',
+    entityType: 'objective',
+    entityId: objectiveId,
+    detail: {
+      index: criterionIndex,
+      from: { label: current.label, target: current.target, unit: current.unit },
+      to: { label: updated.label, target: updated.target, unit: updated.unit },
+      statusReset: measureChanged && current.status !== 'unmet',
+    },
+  });
+}
+
+export async function addCriterion(
+  tx: DbTx,
+  ctx: TenantContext,
+  objectiveId: string,
+  input: z.input<typeof editCriterionSchema>,
+): Promise<void> {
+  const parsed = editCriterionSchema.safeParse(input);
+  if (!parsed.success) throw new ValidationError(parsed.error.issues.map((i) => i.message));
+
+  const detail = await getObjective(tx, ctx, objectiveId);
+  assertOpenForCriteriaChange(detail.status);
+  if (detail.successCriteria.length >= 20) {
+    throw new ConflictError('An objective can hold at most 20 success criteria.');
+  }
+
+  const added: SuccessCriterion = {
+    label: parsed.data.label,
+    metric: slugifyMetric(parsed.data.label),
+    target: parsed.data.target,
+    unit: parsed.data.unit,
+    source: 'manual',
+    status: 'unmet',
+    verifiedBy: null,
+    verifiedAt: null,
+  };
+  await writeCriteria(tx, ctx, objectiveId, [...detail.successCriteria, added]);
+
+  await writeAudit(tx, ctx, {
+    action: 'objective.criterion_added',
+    entityType: 'objective',
+    entityId: objectiveId,
+    detail: { label: added.label, target: added.target, unit: added.unit },
+  });
+}
+
+export async function removeCriterion(
+  tx: DbTx,
+  ctx: TenantContext,
+  objectiveId: string,
+  criterionIndex: number,
+): Promise<void> {
+  const detail = await getObjective(tx, ctx, objectiveId);
+  assertOpenForCriteriaChange(detail.status);
+  const current = detail.successCriteria[criterionIndex];
+  if (!current) throw new NotFoundError('Success criterion');
+
+  // An active objective with no criteria would sit past D-017's activation
+  // gate with nothing left to satisfy — the exact state that rule exists to
+  // prevent. Draft objectives may empty out; they cannot activate that way.
+  if (detail.status === 'active' && detail.successCriteria.length === 1) {
+    throw new ConflictError(
+      'An active objective needs at least one success criterion. Add its replacement first, or cancel the objective.',
+    );
+  }
+
+  const next = detail.successCriteria.filter((_, i) => i !== criterionIndex);
+  await writeCriteria(tx, ctx, objectiveId, next);
+
+  await writeAudit(tx, ctx, {
+    action: 'objective.criterion_removed',
+    entityType: 'objective',
+    entityId: objectiveId,
+    detail: {
+      label: current.label,
+      target: current.target,
+      unit: current.unit,
+      hadStatus: current.status,
+    },
+  });
+}
+
+function assertOpenForCriteriaChange(status: ObjectiveStatus): void {
+  if (status === 'completed' || status === 'cancelled') {
+    throw new ConflictError('Criteria on a closed objective cannot change.');
+  }
+}
+
+async function writeCriteria(
+  tx: DbTx,
+  ctx: TenantContext,
+  objectiveId: string,
+  criteria: SuccessCriterion[],
+): Promise<void> {
+  await tx
+    .update(objectives)
+    .set({ successCriteria: criteria, updatedAt: new Date() })
+    .where(and(eq(objectives.id, objectiveId), eq(objectives.projectId, ctx.projectId)));
+}
+
+/** Title and description are content, not state — correcting them is not a status change. */
+export const editObjectiveSchema = z.object({
+  title: z.string().trim().min(1, 'Title is required').max(200),
+  description: z.string().trim().max(4_000).default(''),
+});
+
+export async function updateObjectiveDetails(
+  tx: DbTx,
+  ctx: TenantContext,
+  objectiveId: string,
+  input: z.input<typeof editObjectiveSchema>,
+): Promise<void> {
+  const parsed = editObjectiveSchema.safeParse(input);
+  if (!parsed.success) throw new ValidationError(parsed.error.issues.map((i) => i.message));
+
+  const detail = await getObjective(tx, ctx, objectiveId);
+  if (detail.status === 'completed' || detail.status === 'cancelled') {
+    throw new ConflictError('A closed objective cannot be rewritten.');
+  }
+
+  await tx
+    .update(objectives)
+    .set({
+      title: parsed.data.title,
+      description: parsed.data.description,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(objectives.id, objectiveId), eq(objectives.projectId, ctx.projectId)));
+
+  await writeAudit(tx, ctx, {
+    action: 'objective.details_edited',
+    entityType: 'objective',
+    entityId: objectiveId,
+    detail: { title: { from: detail.title, to: parsed.data.title } },
   });
 }
 

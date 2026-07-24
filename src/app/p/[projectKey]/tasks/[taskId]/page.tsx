@@ -4,7 +4,7 @@ import { withTenant } from '@/db/tenant';
 import { getTask, listMessages, listRuns, listRunSteps } from '@/domain/tasks/tasks';
 import { NotFoundError } from '@/lib/errors';
 import { Card, ModelText, PageHeader, ProviderBadge, StatusBadge } from '@/components/ui';
-import { RunButton } from './run-button';
+import { CancelTaskButton, RunButton } from './run-button';
 
 const ROLE_LABEL: Record<string, string> = {
   user: 'You',
@@ -59,13 +59,14 @@ export default async function TaskDetailPage({
       />
 
       {canRun ? (
-        <div className="mb-6">
+        <div className="mb-6 flex flex-wrap items-start gap-3">
           <RunButton
             projectKey={projectKey}
             taskId={task.id}
             autorun={autorun === '1' && task.status === 'pending'}
             label={task.status === 'failed' ? 'Retry run' : 'Start run'}
           />
+          <CancelTaskButton projectKey={projectKey} taskId={task.id} />
         </div>
       ) : null}
 

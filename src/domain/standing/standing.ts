@@ -199,6 +199,98 @@ export async function setScheduleEnabled(
   });
 }
 
+/**
+ * Editing standing work (LIFECYCLE-AUDIT). Previously pause/resume were the
+ * only controls, so changing a cadence or fixing a brief meant creating a
+ * second schedule and pausing the first — the accumulation of half-dead
+ * objects that makes a system feel unmanaged.
+ *
+ * Changing the cadence recomputes `nextRunAt` from now, so a schedule cannot
+ * be edited into firing immediately (or into the past). Editing does not
+ * resume a paused schedule: resuming stays a separate, deliberate act.
+ */
+export const editScheduleSchema = createScheduleSchema;
+
+export async function updateSchedule(
+  tx: DbTx,
+  ctx: TenantContext,
+  scheduleId: string,
+  input: z.input<typeof editScheduleSchema>,
+): Promise<void> {
+  if (ctx.projectRole !== 'admin') {
+    throw new AppError('forbidden', 'Only project admins can change standing work.');
+  }
+  const parsed = editScheduleSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message));
+  }
+  const d = parsed.data;
+
+  const existing = await tx
+    .select({
+      title: taskSchedules.title,
+      cadence: taskSchedules.cadence,
+      atHour: taskSchedules.atHour,
+      weekday: taskSchedules.weekday,
+      monthday: taskSchedules.monthday,
+    })
+    .from(taskSchedules)
+    .where(
+      and(
+        eq(taskSchedules.id, scheduleId),
+        eq(taskSchedules.projectId, ctx.projectId),
+        eq(taskSchedules.orgId, ctx.orgId),
+      ),
+    )
+    .limit(1);
+  const before = existing[0];
+  if (!before) throw new NotFoundError('Standing work');
+
+  const timingChanged =
+    before.cadence !== d.cadence ||
+    before.atHour !== d.atHour ||
+    before.weekday !== d.weekday ||
+    before.monthday !== d.monthday;
+
+  await tx
+    .update(taskSchedules)
+    .set({
+      title: d.title,
+      input: d.input,
+      objectiveId: d.objectiveId,
+      providerSelection: d.providerSelection,
+      reviewEnabled: d.reviewEnabled,
+      modelTier: d.modelTier,
+      flagshipCategory: d.flagshipCategory,
+      cadence: d.cadence,
+      atHour: d.atHour,
+      weekday: d.weekday,
+      monthday: d.monthday,
+      // Only recompute when timing actually moved: rewriting a brief should
+      // not silently postpone tomorrow's run.
+      ...(timingChanged ? { nextRunAt: computeNextRunAt(d, new Date()) } : {}),
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(taskSchedules.id, scheduleId),
+        eq(taskSchedules.projectId, ctx.projectId),
+        eq(taskSchedules.orgId, ctx.orgId),
+      ),
+    );
+
+  await writeAudit(tx, ctx, {
+    action: 'standing_work.updated',
+    entityType: 'task_schedule',
+    entityId: scheduleId,
+    detail: {
+      title: { from: before.title, to: d.title },
+      cadence: { from: before.cadence, to: d.cadence },
+      rescheduled: timingChanged,
+    },
+  });
+}
+
 export interface TickResult {
   due: number;
   started: number;
