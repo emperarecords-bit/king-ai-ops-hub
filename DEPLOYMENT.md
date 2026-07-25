@@ -447,10 +447,37 @@ restore to a clean DB + backup bucket) confirmed: cloud document rows + chunks
 restore intact and queryable, the restored DB sha256 matches the backed-up
 object's sha256, and **zero cross-tenant object references** after restore.
 
-**Not yet done — requires owner prerequisites** (see the acceptance report,
-[O23-ACCEPTANCE.md](O23-ACCEPTANCE.md), for the ranked list): validation against
-the owner's *managed* bucket + credentials, the staging deploy, the full
-KingdomCore signed-in model run, and the physical-phone pass.
+**Live managed-bucket acceptance (2026-07-25) — DONE.** Validated on the real
+staging deploy (`king-ai-ops-hub-staging.fly.dev`, private Tigris bucket),
+observed server-side — no simulated results:
+- `/api/health` → `storage: driver=s3` healthy; anonymous object GET → **403**.
+- Managed S3 suite (`npm run test:s3` pointed at the live Tigris bucket) → **7/7**.
+- Full authenticated flow: Supabase sign-in → org + workspace → Markdown upload →
+  tenant-partitioned key `org/<id>/project/<id>/…` → durable index job `done` in
+  **1 attempt** → document `active` → real multi-model run (OpenAI → Anthropic
+  review → revision → consolidate) retrieved it with
+  `retrieved_documents.source = cloud_upload`, and the model used the unique fact.
+- Human-in-the-loop: decision **suggested** (Accept/Reject/Defer), not auto-applied.
+
+**Deployment findings — apply to any new environment:**
+1. **DB memory ≥ 1 GB (launch requirement).** Fly Postgres at the 256 MB default
+   thrashes under the app pool + 2 s worker polling + health checks → primary
+   fails its own health check → cluster reports **"no active leader"** → app 503.
+   Scaled the staging DB to 1 GB; it recovered immediately. Do not deploy on 256 MB.
+2. **Tigris credentials use `AWS_*` names.** `fly storage create` injects
+   `AWS_ENDPOINT_URL_S3 / AWS_REGION / BUCKET_NAME / AWS_ACCESS_KEY_ID /
+   AWS_SECRET_ACCESS_KEY`. Fly secrets are **write-only** (can't be read back to
+   copy into `S3_*`), so the S3 reader + env validator accept `AWS_*` as a
+   fallback for the `S3_*` contract. `STORAGE_DRIVER=s3` lives in `fly.toml [env]`.
+3. **`fly postgres connect` defaults to the `postgres` DB** — pass
+   `--database <appdb>` to reach the `app` schema / RLS functions.
+4. Set role passwords in psql and the matching `fly secret` **from one place**;
+   hand-copying drifted repeatedly (four failed migrate attempts on auth).
+
+**Still owner-gated (operational sign-off, not architecture):** the managed
+backup/restore drill (§11.6 against the live PG + Tigris), the physical-phone
+pass, and a live UI unsupported-file upload. Minor: the "Context used" panel does
+not render a `cloud_upload` badge though the API records the provenance correctly.
 
 ### 11.4 Storage security controls
 
