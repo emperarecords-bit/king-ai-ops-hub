@@ -76,7 +76,10 @@ export async function middleware(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const { pathname } = request.nextUrl;
-  const isPublic = pathname === '/login' || pathname.startsWith('/auth');
+  // /api/health is an unauthenticated liveness probe for the load balancer
+  // (O-21) — it exposes only aggregate up/down, never tenant data.
+  const isPublic =
+    pathname === '/login' || pathname.startsWith('/auth') || pathname === '/api/health';
 
   if (!user && !isPublic) {
     // API callers get a JSON 401 (a login-page redirect would arrive as a 200

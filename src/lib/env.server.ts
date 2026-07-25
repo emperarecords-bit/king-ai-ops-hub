@@ -11,6 +11,8 @@ import { z } from 'zod';
  */
 
 const serverEnvSchema = z.object({
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  APP_URL: z.string().url().optional(),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   OPENAI_API_KEY: z.string().min(1, 'OPENAI_API_KEY is required'),
   ANTHROPIC_API_KEY: z.string().min(1, 'ANTHROPIC_API_KEY is required'),
@@ -34,6 +36,32 @@ export type ServerEnv = z.infer<typeof serverEnvSchema>;
 
 let cached: ServerEnv | null = null;
 
+// Values that must never reach production — placeholders from .env.example and
+// obviously-fake secrets. In production these fail fast rather than boot with a
+// broken or insecure config.
+const PLACEHOLDER_PATTERNS = [/replace-me/i, /your-/i, /example\.com/i, /changeme/i, /dev_only/i, /^sk-\.\.\./i];
+
+function assertProductionSafe(env: ServerEnv): void {
+  if (env.NODE_ENV !== 'production') return;
+  const offenders: string[] = [];
+  const check = (name: string, value: string) => {
+    if (PLACEHOLDER_PATTERNS.some((re) => re.test(value))) offenders.push(name);
+  };
+  check('OPENAI_API_KEY', env.OPENAI_API_KEY);
+  check('ANTHROPIC_API_KEY', env.ANTHROPIC_API_KEY);
+  check('APP_ENCRYPTION_KEY', env.APP_ENCRYPTION_KEY);
+  check('DATABASE_URL', env.DATABASE_URL);
+  // A superuser / dev password in the DB URL means RLS is not the enforced net.
+  if (/:(king|postgres|app_server_dev_only)@/.test(env.DATABASE_URL)) {
+    offenders.push('DATABASE_URL (must use the non-superuser app_server role in production)');
+  }
+  if (offenders.length > 0) {
+    throw new Error(
+      `Refusing to start in production with placeholder/insecure config: ${offenders.join(', ')}`,
+    );
+  }
+}
+
 export function serverEnv(): ServerEnv {
   if (cached) return cached;
   const parsed = serverEnvSchema.safeParse(process.env);
@@ -42,6 +70,7 @@ export function serverEnv(): ServerEnv {
     const missing = parsed.error.issues.map((i) => i.path.join('.')).join(', ');
     throw new Error(`Server environment invalid or incomplete: ${missing}`);
   }
+  assertProductionSafe(parsed.data);
   cached = parsed.data;
   return cached;
 }

@@ -2,7 +2,8 @@ import { z } from 'zod';
 import { AppError, toPublicMessage } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { requireTenant } from '@/domain/auth/guard';
-import { startRun } from '@/domain/tasks/runner';
+import { withTenant } from '@/db/tenant';
+import { claimJobForTask, enqueueRun, runClaimedJob } from '@/domain/jobs/jobs';
 
 /**
  * POST — start a run and stream its progress as Server-Sent Events.
@@ -54,9 +55,12 @@ export async function POST(
       };
 
       try {
-        const outcome = await startRun(ctx, taskId, {
-          delta: (kind, text) => send('delta', { kind, text }),
-          step: (record) =>
+        // Durable execution (O-21): enqueue + claim this task's job, then run
+        // it inline with live events. If a worker already claimed it, we don't
+        // double-run — report that it's executing elsewhere.
+        const live = {
+          delta: (kind: string, text: string) => send('delta', { kind, text }),
+          step: (record: { stepNumber: number; kind: string; succeeded: boolean; verdict: string | null; errorMessage: string | null }) =>
             send('step', {
               stepNumber: record.stepNumber,
               kind: record.kind,
@@ -64,8 +68,15 @@ export async function POST(
               verdict: record.verdict,
               errorMessage: record.errorMessage,
             }),
-        });
-        send('done', outcome);
+        };
+        await withTenant(ctx, (tx) => enqueueRun(tx, ctx, taskId));
+        const job = await claimJobForTask(ctx, taskId);
+        if (!job) {
+          send('run_error', { message: 'This run is already executing (a worker claimed it). Refresh to see progress.' });
+        } else {
+          const outcome = await runClaimedJob(job, live as never);
+          send('done', outcome ?? { status: 'failed' });
+        }
       } catch (err) {
         if (!(err instanceof AppError)) log.error('streamed run failed', { err, taskId });
         send('run_error', { message: toPublicMessage(err) });

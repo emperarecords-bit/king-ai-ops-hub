@@ -165,6 +165,14 @@ export const EXTRACTION_STATUSES = ['succeeded', 'failed', 'empty'] as const;
 export type ExtractionStatus = (typeof EXTRACTION_STATUSES)[number];
 
 /**
+ * Durable run-job lifecycle (O-21). A job is a request to execute a task's run.
+ * Persisted so execution survives a browser close, terminal exit, or process
+ * restart, and so a claim is atomic (no duplicate provider sequence).
+ */
+export const RUN_JOB_STATUSES = ['queued', 'running', 'done', 'failed'] as const;
+export type RunJobStatus = (typeof RUN_JOB_STATUSES)[number];
+
+/**
  * Task dependency edge kinds (O-18). Both are FORWARD edges meaning the
  * prerequisite must complete before the dependent — `blocks` is the harder
  * phrasing, `prerequisite` the softer, stored identically as

@@ -520,3 +520,25 @@ confidence high); it was absent from a subsequent run's Decision Memory before
 approval and present after admin acceptance. extraction status 'succeeded'.
 
 **Status: human-in-the-loop memory capture shipped.**
+
+---
+
+### O-21 · Cloud deployment readiness
+
+**Delivered (verified).** Durable run execution (Postgres job queue + worker;
+atomic claim, idempotent enqueue, restart recovery to a failed-recoverable
+state — no duplicate provider billing); config layer that refuses to boot in
+production with placeholder/superuser secrets; advisory-locked migrations
+verified to apply 0000-0012 to a CLEAN db with the full 265-test suite passing;
+storage-boundary fix so a disconnected folder reports unavailable instead of
+archiving everything; StorageAdapter seam; /api/health (process/db/migrations/
+worker); run correlation id in logs; Dockerfile (standalone) + fly.toml (one
+supported path); mobile-viewport pass (no horizontal overflow, nav wraps).
+
+**Owner-dependent (documented, not done here).** The live Fly deploy + real
+phone pass need the owner's Fly account. Deferred launch risks enumerated in
+DEPLOYMENT.md §9 — chief among them: production MUST connect as app_server (not
+the dev superuser) for RLS to be enforced, and the cloud Project Library
+ingestion adapter is designed but not built.
+
+**Status: deployable, not yet launched.**

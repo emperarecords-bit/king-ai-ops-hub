@@ -10,7 +10,7 @@ import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { listAssignableEmployees } from '@/domain/agents/agents';
 import { cancelTask, createTask } from '@/domain/tasks/tasks';
-import { startRun } from '@/domain/tasks/runner';
+import { claimJobForTask, enqueueRun, runClaimedJob } from '@/domain/jobs/jobs';
 
 export interface TaskFormState {
   error: string | null;
@@ -92,9 +92,15 @@ export async function runTask(_prev: RunActionState, formData: FormData): Promis
 
   try {
     const ctx = await requireTenant(projectKey);
-    await startRun(ctx, taskId);
+    // Durable execution (O-21): enqueue a job, then claim + run it inline so the
+    // request still gets a result, while the persisted job makes the run
+    // recoverable if this process dies mid-run. If a worker already claimed it,
+    // we no-op and the page shows the worker's result.
+    await withTenant(ctx, (tx) => enqueueRun(tx, ctx, taskId));
+    const job = await claimJobForTask(ctx, taskId);
+    if (job) await runClaimedJob(job);
   } catch (err) {
-    if (!(err instanceof AppError)) log.error('startRun failed', { err, taskId });
+    if (!(err instanceof AppError)) log.error('runTask failed', { err, taskId });
     return { error: toPublicMessage(err) };
   }
 

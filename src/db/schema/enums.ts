@@ -25,6 +25,7 @@ import {
   ORG_ROLES,
   PROJECT_ROLES,
   REVIEW_VERDICTS,
+  RUN_JOB_STATUSES,
   RUN_STATUSES,
   STEP_KINDS,
   TASK_STATUSES,
@@ -67,3 +68,4 @@ export const decisionStatusEnum = pgEnum('decision_status', DECISION_STATUSES);
 export const decisionTypeEnum = pgEnum('decision_type', DECISION_TYPES);
 export const decisionConfidenceEnum = pgEnum('decision_confidence', DECISION_CONFIDENCE);
 export const extractionStatusEnum = pgEnum('extraction_status', EXTRACTION_STATUSES);
+export const runJobStatusEnum = pgEnum('run_job_status', RUN_JOB_STATUSES);

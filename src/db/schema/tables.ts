@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import {
   bigint,
   boolean,
@@ -44,6 +45,7 @@ import {
   providerIdEnum,
   providerSelectionEnum,
   reviewVerdictEnum,
+  runJobStatusEnum,
   runStatusEnum,
   stepKindEnum,
   taskStatusEnum,
@@ -601,6 +603,44 @@ export const decisions = pgTable(
     index('decisions_org_project_status_idx').on(t.orgId, t.projectId, t.status),
     index('decisions_originating_task_idx').on(t.originatingTaskId),
     index('decisions_superseded_by_idx').on(t.supersededBy),
+  ],
+);
+
+/**
+ * Durable run jobs (O-21). A job is a request to execute a task's run,
+ * persisted so execution survives a browser close / terminal exit / process
+ * restart. A worker claims a job atomically (FOR UPDATE SKIP LOCKED + a lease),
+ * so no two processes execute the same task and no provider sequence is billed
+ * twice. Reconciliation reclaims jobs whose lease expired.
+ */
+export const runJobs = pgTable(
+  'run_jobs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    status: runJobStatusEnum('status').notNull().default('queued'),
+    attempts: integer('attempts').notNull().default(0),
+    maxAttempts: integer('max_attempts').notNull().default(1),
+    /** Held by the worker currently executing; expiry allows reclaim. */
+    leasedUntil: timestamp('leased_until', { withTimezone: true }),
+    lastError: text('last_error'),
+    ...timestamps,
+  },
+  (t) => [
+    // One live job per task: prevents a duplicate enqueue from double-running.
+    uniqueIndex('run_jobs_active_task_uq')
+      .on(t.taskId)
+      .where(sql`status in ('queued','running')`),
+    index('run_jobs_claimable_idx').on(t.status, t.leasedUntil),
+    index('run_jobs_org_project_idx').on(t.orgId, t.projectId),
   ],
 );
 

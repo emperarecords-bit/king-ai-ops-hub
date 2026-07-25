@@ -41,15 +41,26 @@ async function main() {
   const sql = postgres(url, { max: 1, onnotice: () => {} });
   const db = drizzle(sql);
 
-  console.log('Applying Drizzle migrations…');
-  await migrate(db, { migrationsFolder: join(process.cwd(), 'drizzle') });
+  // Concurrency protection: a session-level advisory lock so two deploy tasks
+  // (e.g. two web instances booting at once) cannot run migrations
+  // simultaneously. The second waits; when it acquires the lock the migrations
+  // are already applied and Drizzle's journal makes re-application a no-op.
+  const LOCK_KEY = 4021; // arbitrary, stable per-app
+  console.log('Acquiring migration advisory lock…');
+  await sql`select pg_advisory_lock(${LOCK_KEY})`;
+  try {
+    console.log('Applying Drizzle migrations…');
+    await migrate(db, { migrationsFolder: join(process.cwd(), 'drizzle') });
 
-  console.log('Applying RLS, roles, and append-only triggers…');
-  const rls = readFileSync(join(process.cwd(), 'src', 'db', 'rls.sql'), 'utf8');
-  await sql.unsafe(rls);
+    console.log('Applying RLS, roles, and append-only triggers…');
+    const rls = readFileSync(join(process.cwd(), 'src', 'db', 'rls.sql'), 'utf8');
+    await sql.unsafe(rls);
 
-  console.log('Migration complete.');
-  await sql.end();
+    console.log('Migration complete.');
+  } finally {
+    await sql`select pg_advisory_unlock(${LOCK_KEY})`;
+    await sql.end();
+  }
 }
 
 main().catch((err) => {

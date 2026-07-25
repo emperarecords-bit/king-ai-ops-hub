@@ -22,6 +22,9 @@ const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
 
+  // Lean, self-contained server bundle for the container image (O-21).
+  output: 'standalone',
+
   typescript: {
     // A type error is a build failure. Never relax this.
     ignoreBuildErrors: false,

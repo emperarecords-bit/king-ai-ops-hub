@@ -147,6 +147,18 @@ export async function refreshIndex(tx: DbTx, ctx: TenantContext): Promise<IndexS
   const byPath = new Map(existing.map((d) => [d.relativePath, d]));
   const seen = new Set<string>();
 
+  // Storage availability (O-21): if the linked folder is unreachable (e.g. the
+  // cloud app cannot see a local machine's disk), REPORT it and stop — never
+  // fall through to the archival loop below, which would falsely archive every
+  // previously-indexed document just because the source is disconnected.
+  try {
+    const s = await stat(folder);
+    if (!s.isDirectory()) throw new AppError('validation', `Linked path is not a folder: ${folder}`);
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    throw new AppError('validation', `Linked folder is unavailable (not archiving existing documents): ${folder}`);
+  }
+
   let files: string[];
   try {
     files = await walk(folder);
