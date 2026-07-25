@@ -458,3 +458,35 @@ not about the graph; the ordering itself was stated confidently. Not pursued
 (out of scope).
 
 **Status: dependency awareness shipped.**
+
+---
+
+### O-19 · RESOLVED — Decision memory (organizational memory)
+
+**Goal.** Preserve approved operational/creative conclusions across tasks so
+future runs inherit them instead of relosing the reasoning at task completion.
+
+**Delivered.** A first-class `decisions` table (proposed → accepted →
+superseded / rejected; self-FK supersession; RLS; structured memory only, no
+transcripts); a human approval workflow (never auto-created); a Level-1
+Decision-memory context source — accepted only, bounded to 10, ranked by
+task/objective/document/recency, superseded never retrieved; manifest +
+Context-used panel; a Decisions screen (propose / accept / reject / supersede).
+No change to retrieval, authority, freshness, dependency graphs, providers, or
+the run workflow — decisions are a parallel Level-1 source.
+
+**Acceptance — all four pass:**
+- T1 live: with "Episode runtime fixed at 22:00" accepted, "Should Episode 1 be
+  shortened to 20 minutes?" → the model cited the decision first and declined.
+- T2 integration: B (24 min) supersedes A (22 min) → A becomes superseded/
+  historical, only B is retrieved as current; A appears solely as B's
+  superseded note.
+- T3 live: "Review Episode 1 continuity" referenced the accepted "Architect
+  symbol first appears in Scene 4" decision without rediscovering it from
+  documents.
+- T4 integration: no decisions → no memory block, no hallucinated memory.
+
+**Residual hedging:** the live responses added the usual doc-vs-Hub freshness
+caveat (correct, from O-17) — decision citations themselves were confident.
+
+**Status: organizational memory shipped.**

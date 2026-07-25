@@ -1,0 +1,93 @@
+'use server';
+
+import { revalidatePath } from 'next/cache';
+import { z } from 'zod';
+import { DECISION_TYPES } from '@/types/domain';
+import { AppError, toPublicMessage } from '@/lib/errors';
+import { log } from '@/lib/log';
+import { requireUser, requireTenant } from '@/domain/auth/guard';
+import { withTenant } from '@/db/tenant';
+import {
+  acceptDecision,
+  createDecision,
+  rejectDecision,
+} from '@/domain/decisions/decisions';
+
+export interface DecisionState {
+  error: string | null;
+}
+
+const idSchema = z.string().uuid();
+
+export async function createDecisionAction(
+  _prev: DecisionState,
+  formData: FormData,
+): Promise<DecisionState> {
+  const projectKey = String(formData.get('projectKey') ?? '');
+  const parsed = z
+    .object({
+      title: z.string().trim().min(1).max(200),
+      summary: z.string().trim().min(1).max(2_000),
+      rationale: z.string().trim().max(4_000).optional().default(''),
+      decisionType: z.enum(DECISION_TYPES).default('operational'),
+      originatingTaskId: z.string().uuid().nullable().optional().default(null),
+      supersedesId: z.string().uuid().nullable().optional().default(null),
+    })
+    .safeParse({
+      title: formData.get('title'),
+      summary: formData.get('summary'),
+      rationale: formData.get('rationale') ?? '',
+      decisionType: formData.get('decisionType') ?? 'operational',
+      originatingTaskId: emptyToNull(formData.get('originatingTaskId')),
+      supersedesId: emptyToNull(formData.get('supersedesId')),
+    });
+  if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid input.' };
+
+  try {
+    const user = await requireUser();
+    const ctx = await requireTenant(projectKey);
+    await withTenant(ctx, (tx) =>
+      createDecision(tx, ctx, user.displayName, {
+        title: parsed.data.title,
+        summary: parsed.data.summary,
+        rationale: parsed.data.rationale,
+        decisionType: parsed.data.decisionType,
+        originatingTaskId: parsed.data.originatingTaskId,
+        supersedesId: parsed.data.supersedesId,
+      }),
+    );
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('createDecision failed', { err });
+    return { error: toPublicMessage(err) };
+  }
+  revalidatePath(`/p/${projectKey}/decisions`);
+  return { error: null };
+}
+
+export async function decideDecisionAction(
+  _prev: DecisionState,
+  formData: FormData,
+): Promise<DecisionState> {
+  const projectKey = String(formData.get('projectKey') ?? '');
+  const id = String(formData.get('decisionId') ?? '');
+  const verb = String(formData.get('verb') ?? '');
+  if (!idSchema.safeParse(id).success || (verb !== 'accept' && verb !== 'reject')) {
+    return { error: 'Invalid request.' };
+  }
+  try {
+    const ctx = await requireTenant(projectKey);
+    await withTenant(ctx, (tx) =>
+      verb === 'accept' ? acceptDecision(tx, ctx, id) : rejectDecision(tx, ctx, id),
+    );
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('decideDecision failed', { err });
+    return { error: toPublicMessage(err) };
+  }
+  revalidatePath(`/p/${projectKey}/decisions`);
+  return { error: null };
+}
+
+function emptyToNull(v: FormDataEntryValue | null): string | null {
+  const s = v == null ? '' : String(v).trim();
+  return s.length === 0 ? null : s;
+}

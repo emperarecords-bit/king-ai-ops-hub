@@ -42,6 +42,34 @@ never inferred from documents.
 | 9 | **Recent outcomes** | if any | `selectRelatedTasks` | `completed` tasks with a **summarized** result (240 chars, never the full transcript), bounded to 5. |
 | 10 | **Pending reviews** | if any | `selectPendingReviews` | `pending` rows in `approvals`, bounded to 5. |
 | 11 | **Task dependency graph** | if any edges | `assembleTaskGraph` | Bounded neighborhood of explicit task dependencies (O-18). |
+| 12 | **Decision memory** | if any accepted | `assembleDecisionMemory` | Accepted organizational decisions, ranked + bounded (O-19). |
+
+### Decision memory (O-19)
+
+A first-class `decisions` entity — approved operational or creative conclusions
+the org remembers across tasks. **Not** conversation history, **not** document
+retrieval: a new Level-1 source parallel to project state and the dependency
+graph. Only structured memory is stored (title, summary, rationale, supporting
+refs, originating task/run, author, type, status) — never prompts or
+transcripts.
+
+**Lifecycle:** `proposed` → `accepted` (human approval) → optionally
+`superseded`; or `rejected`. Decisions are never auto-created — a human files a
+candidate and an admin approves it
+([src/domain/decisions/decisions.ts](src/domain/decisions/decisions.ts),
+Decisions screen).
+
+**Selection** (`selectRelevantDecisions`): only `accepted` decisions, bounded to
+**10**, ranked deterministically by (1) same originating task, (2) same
+objective's tasks, (3) shared document reference, (4) recency. Superseded
+decisions are never retrieved, so they can never outrank their replacement; when
+a retained decision superseded an earlier one, the block names the old one as
+*historical — do not apply*, satisfying "acknowledged only as historical."
+
+**Prompt:** the Level-1 block instructs the model not to contradict an accepted
+decision and to say so explicitly if a proposal would overturn one. Manifest
+entries carry title · status · originating task · date, persisted in
+`context_manifest` and shown in the Context used panel.
 
 ### Task dependency graph (O-18)
 

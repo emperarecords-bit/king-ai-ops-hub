@@ -128,8 +128,29 @@ export const CONTEXT_SOURCES = [
   'pending_review',
   // Task Dependency Graph (O-18): workflow structure from Hub records.
   'task_graph',
+  // Decision Memory (O-19): approved operational/creative conclusions.
+  'decision_memory',
 ] as const;
 export type ContextSource = (typeof CONTEXT_SOURCES)[number];
+
+/**
+ * Decision Memory (O-19). A Decision is an approved operational or creative
+ * conclusion the organization should remember across tasks — not conversation
+ * history. Only `accepted` decisions are retrieved into context; `superseded`
+ * are historical, `proposed` await human approval, `rejected` are discarded.
+ */
+export const DECISION_STATUSES = ['proposed', 'accepted', 'superseded', 'rejected'] as const;
+export type DecisionStatus = (typeof DECISION_STATUSES)[number];
+
+export const DECISION_TYPES = [
+  'operational',
+  'creative',
+  'continuity',
+  'technical',
+  'process',
+  'other',
+] as const;
+export type DecisionType = (typeof DECISION_TYPES)[number];
 
 /**
  * Task dependency edge kinds (O-18). Both are FORWARD edges meaning the

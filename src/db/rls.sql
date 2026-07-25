@@ -51,7 +51,7 @@ grant select, insert, update on
   agents, departments, project_context_items, integration_secrets,
   tasks, runs, run_steps, artifacts, approvals,
   objectives, milestones, knowledge_items, task_schedules,
-  documents, document_chunks, task_dependencies,
+  documents, document_chunks, task_dependencies, decisions,
   usage_events, spend_limits, rate_limit_buckets, profiles
 to app_server;
 
@@ -166,7 +166,7 @@ begin
     'tasks', 'runs', 'run_steps', 'messages',
     'artifacts', 'approvals', 'usage_events', 'spend_limits',
     'objectives', 'milestones', 'knowledge_items', 'task_schedules',
-    'documents', 'document_chunks', 'task_dependencies'
+    'documents', 'document_chunks', 'task_dependencies', 'decisions'
   ]
   loop
     execute format('alter table %I enable row level security', t);

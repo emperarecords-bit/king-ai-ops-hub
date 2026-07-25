@@ -28,6 +28,7 @@ const CONTEXT_SOURCE_LABEL: Record<ContextSource, string> = {
   recent_outcome: 'Recent outcomes',
   pending_review: 'Pending reviews',
   task_graph: 'Task graph',
+  decision_memory: 'Decision memory',
 };
 
 const SEVERITY_STYLE: Record<string, string> = {

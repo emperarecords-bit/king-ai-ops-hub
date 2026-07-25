@@ -6,6 +6,8 @@ import {
   ARTIFACT_KINDS,
   CADENCES,
   CONTEXT_ITEM_STATUSES,
+  DECISION_STATUSES,
+  DECISION_TYPES,
   DEPENDENCY_KINDS,
   DOCUMENT_KINDS,
   DOCUMENT_STATUSES,
@@ -59,3 +61,5 @@ export const cadenceEnum = pgEnum('cadence', CADENCES);
 export const documentKindEnum = pgEnum('document_kind', DOCUMENT_KINDS);
 export const documentStatusEnum = pgEnum('document_status', DOCUMENT_STATUSES);
 export const dependencyKindEnum = pgEnum('dependency_kind', DEPENDENCY_KINDS);
+export const decisionStatusEnum = pgEnum('decision_status', DECISION_STATUSES);
+export const decisionTypeEnum = pgEnum('decision_type', DECISION_TYPES);

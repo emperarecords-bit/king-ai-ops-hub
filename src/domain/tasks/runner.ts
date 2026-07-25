@@ -32,6 +32,7 @@ import {
 } from '@/domain/documents/documents';
 import { assembleProjectState } from '@/domain/state/project-state';
 import { assembleTaskGraph } from '@/domain/dependencies/graph-context';
+import { assembleDecisionMemory, objectiveTaskIds } from '@/domain/decisions/decisions';
 import { compareFreshness, parseEffectiveDate } from '@/domain/context/freshness';
 
 /** Reduces full Freshness to the compact shape persisted in the manifest. */
@@ -181,6 +182,15 @@ export async function startRun(
     // dependencies for THIS task — prerequisites, dependents, blockers, what it
     // unlocks, cycles. Level-1 Hub state; tenant-scoped by the same I1 guard.
     const taskGraph = await assembleTaskGraph(tx, ctx, taskId);
+    // Decision Memory (O-19): accepted organizational decisions relevant to
+    // this run, ranked by task/objective/document/recency, bounded to 10.
+    // Level-1 Hub state; superseded decisions are never retrieved.
+    const objTaskIds = await objectiveTaskIds(tx, ctx, task.objectiveId);
+    const decisionMemory = await assembleDecisionMemory(tx, ctx, {
+      currentTaskId: taskId,
+      objectiveTaskIds: objTaskIds,
+      docPaths: new Set(retrieved.map((r) => r.relativePath)),
+    });
 
     // Document freshness (O-17): indexed-file mtime (medium confidence) plus an
     // explicit parsed "as of" date when present (high confidence). Never infers
@@ -220,6 +230,15 @@ export async function startRun(
               ...taskGraph.contextItem,
               authority: AUTHORITY.HUB_STATE,
               kind: 'Task dependency graph',
+            },
+          ]
+        : []),
+      ...(decisionMemory.contextItem
+        ? [
+            {
+              ...decisionMemory.contextItem,
+              authority: AUTHORITY.HUB_STATE,
+              kind: 'Decision memory',
             },
           ]
         : []),
@@ -307,6 +326,8 @@ export async function startRun(
       ...projectState.manifest,
       // Task-graph manifest entry (O-18) carries node/edge/root/cycle metadata.
       ...taskGraph.manifest,
+      // Decision-memory manifest entries (O-19): title/status/task/date.
+      ...decisionMemory.manifest,
     ];
 
     const runInserted = await tx

@@ -39,6 +39,9 @@ const STATUS_STYLES: Record<string, string> = {
   approved: 'bg-[#1f3a2a] text-[var(--success)]',
   rejected: 'bg-[#3a2026] text-[var(--danger)]',
   expired: 'bg-[#2a2a2a] text-[var(--muted)]',
+  proposed: 'bg-[#2a3247] text-[var(--info)]',
+  accepted: 'bg-[#1f3a2a] text-[var(--success)]',
+  superseded: 'bg-[#2a2a2a] text-[var(--muted)]',
 };
 
 export function StatusBadge({ status }: { status: string }) {

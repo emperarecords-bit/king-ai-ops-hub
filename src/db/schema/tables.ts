@@ -22,6 +22,8 @@ import {
   approvalStatusEnum,
   artifactKindEnum,
   cadenceEnum,
+  decisionStatusEnum,
+  decisionTypeEnum,
   dependencyKindEnum,
   documentKindEnum,
   documentStatusEnum,
@@ -549,6 +551,47 @@ export const taskDependencies = pgTable(
     uniqueIndex('task_dependencies_edge_uq').on(t.projectId, t.prerequisiteTaskId, t.dependentTaskId),
     index('task_dependencies_dependent_idx').on(t.projectId, t.dependentTaskId),
     index('task_dependencies_prerequisite_idx').on(t.projectId, t.prerequisiteTaskId),
+  ],
+);
+
+/**
+ * Decision Memory (O-19): approved operational/creative conclusions the org
+ * remembers across tasks. Structured memory only — never full prompts or
+ * transcripts. `superseded_by` self-references the replacement; the reverse
+ * ("what did this decision replace") is derived by querying superseded_by.
+ */
+export const decisions = pgTable(
+  'decisions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    summary: text('summary').notNull(),
+    rationale: text('rationale').notNull().default(''),
+    /** Structured references (document paths, objective/task ids) — not transcripts. */
+    supportingRefs: jsonb('supporting_refs').$type<string[]>().notNull().default([]),
+    originatingTaskId: uuid('originating_task_id').references(() => tasks.id, {
+      onDelete: 'set null',
+    }),
+    originatingRunId: uuid('originating_run_id'),
+    /** Human author profile, when a person made it. */
+    authorId: uuid('author_id').references(() => profiles.id, { onDelete: 'set null' }),
+    /** Display name of who made it (human or AI employee). */
+    authorLabel: text('author_label').notNull(),
+    decisionType: decisionTypeEnum('decision_type').notNull().default('operational'),
+    status: decisionStatusEnum('status').notNull().default('proposed'),
+    supersededBy: uuid('superseded_by'),
+    ...timestamps,
+  },
+  (t) => [
+    index('decisions_org_project_status_idx').on(t.orgId, t.projectId, t.status),
+    index('decisions_originating_task_idx').on(t.originatingTaskId),
+    index('decisions_superseded_by_idx').on(t.supersededBy),
   ],
 );
 
