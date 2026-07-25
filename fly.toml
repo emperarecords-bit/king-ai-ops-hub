@@ -36,13 +36,13 @@ primary_region = "iad"
   min_machines_running = 1
   processes = ["web"]
 
-  [http_service.checks]
-    [http_service.checks.health]
-      method = "GET"
-      path = "/api/health"
-      interval = "30s"
-      timeout = "5s"
-      grace_period = "20s"
+  # Array-of-tables form ([[...]]) — modern flyctl expects `checks` to be a list.
+  [[http_service.checks]]
+    grace_period = "20s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/api/health"
 
 # The worker takes no inbound traffic; it polls the durable queue.
 [[vm]]
