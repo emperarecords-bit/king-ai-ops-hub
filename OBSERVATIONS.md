@@ -637,3 +637,31 @@ the managed bucket; the live KingdomCore full-run acceptance (Test 8) uses the
 same retrieval path already proven, gated on sign-in like prior sprints.
 
 **Status: cloud ingestion shipped — launch gate #2 closed.**
+
+---
+
+### O-23 acceptance · Live object storage validation
+
+**Validated (real S3 via MinIO, sanitized report: O23-ACCEPTANCE.md).** The
+`S3ObjectStore` SigV4 client — previously only unit-locked — now runs against a
+genuine S3-compatible server (local MinIO, same protocol as Tigris/R2/AWS):
+`npm run test:s3` (7/7) covers raw PUT/GET/HEAD/DELETE, upload→bucket→durable
+index→active→retrieve with cloud provenance, private-bucket anonymous 403,
+idempotency + atomic replacement, worker-restart recovery (no dup chunks),
+object-layer isolation (foreign key refused before fetch), and `/api/health`
+`storage: driver=s3` healthy. Startup config gate proven (`storage-config.test`,
+4/4). A local Postgres+MinIO backup/restore drill confirmed DB↔object sha256
+match, chunks restore queryable, and zero cross-tenant object refs.
+
+s3-live runs on a dedicated config (`npm run test:s3`) — it drives the global
+document-job queue against a live bucket and changes the process object-store
+driver, so it must not run alongside the hermetic queue tests. Default suite
+302/302 in both king and app_server modes; s3-live 7/7 standalone.
+
+**Owner-gated (not executed; NOT faked).** Validation against the owner's MANAGED
+bucket + credentials, the staging deploy, the full KingdomCore signed-in model
+run (Step 6), and the physical-phone pass (Step 10). Ranked blockers in
+O23-ACCEPTANCE.md.
+
+**Status: S3 client validated against real S3; managed-bucket + staging + phone
+remain owner-gated.**

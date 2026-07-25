@@ -401,6 +401,57 @@ fly secrets set STORAGE_DRIVER=s3 \
 `app_server`/worker credential has access. Both the web and worker process groups
 read the same S3_* secrets.
 
+**Minimal permission policy** (scope the storage key to exactly what the Hub
+uses — no account-wide admin, no cross-bucket access; no credentials shown):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "HubObjectRW",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::<BUCKET>/*"
+    },
+    {
+      "Sid": "HubListOwnBucket",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::<BUCKET>"
+    }
+  ]
+}
+```
+
+`s3:PutObject`/`GetObject` cover upload + worker fetch; `HeadObject` is authorized
+by `GetObject`; `DeleteObject` is used by archival cleanup + failed-upload cleanup;
+`ListBucket` is scoped to the one bucket. No `s3:*`, no bucket-policy/ACL write,
+no account-level actions. On Fly Tigris the `fly storage create` key is already
+bucket-scoped; on AWS/R2 attach the policy above to a dedicated IAM user/token.
+
+### 11.8 Live validation status (O-23 production acceptance)
+
+The `S3ObjectStore` (dependency-free SigV4) is **validated against a real
+S3-compatible server** — local **MinIO**, same protocol as Tigris/R2/AWS — by
+`npm run test:s3` (requires a running MinIO + private bucket; not part of the
+hermetic CI suite). It exercises: raw PUT/GET/HEAD/DELETE round-trips; upload →
+tenant-partitioned object in the bucket → durable index → active → retrieval with
+`cloud_upload` provenance; private-bucket anonymous access refused (403);
+idempotent re-upload + atomic replacement; worker-restart recovery with no
+duplicate chunks; object-layer isolation (a foreign-tenant key is refused before
+any fetch); and `/api/health` reporting `storage: driver=s3` healthy.
+
+A local **backup/restore drill** (Postgres `pg_dump` + MinIO `mc mirror` →
+restore to a clean DB + backup bucket) confirmed: cloud document rows + chunks
+restore intact and queryable, the restored DB sha256 matches the backed-up
+object's sha256, and **zero cross-tenant object references** after restore.
+
+**Not yet done — requires owner prerequisites** (see the acceptance report,
+[O23-ACCEPTANCE.md](O23-ACCEPTANCE.md), for the ranked list): validation against
+the owner's *managed* bucket + credentials, the staging deploy, the full
+KingdomCore signed-in model run, and the physical-phone pass.
+
 ### 11.4 Storage security controls
 
 Server-generated keys; MIME allowlist (Markdown/plain-text only); filename

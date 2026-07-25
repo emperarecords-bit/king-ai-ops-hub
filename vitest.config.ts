@@ -6,7 +6,11 @@ export default defineConfig({
     environment: 'node',
     include: ['tests/unit/**/*.test.ts', 'tests/integration/**/*.test.ts'],
     // Playwright specs are driven by `npm run test:e2e`, not vitest.
-    exclude: ['tests/e2e/**', 'node_modules/**'],
+    // s3-live requires a running MinIO/S3 and drives the GLOBAL document-job
+    // queue against a live bucket — it changes the process object-store driver,
+    // so it must not run alongside the hermetic queue tests. Run it on its own:
+    //   `npm run test:s3`  (see scripts). It is a live-acceptance test, not CI.
+    exclude: ['tests/e2e/**', 'node_modules/**', 'tests/integration/s3-live.test.ts'],
     setupFiles: ['tests/support/setup.ts'],
     coverage: {
       provider: 'v8',
