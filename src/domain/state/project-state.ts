@@ -1,6 +1,10 @@
 import 'server-only';
 import { and, desc, eq, inArray } from 'drizzle-orm';
-import { type ContextManifestEntry, type TenantContext } from '@/types/domain';
+import {
+  type ContextManifestEntry,
+  type Freshness,
+  type TenantContext,
+} from '@/types/domain';
 import { TenantViolationError } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { type DbTx } from '@/db/client';
@@ -53,6 +57,19 @@ export interface ObjectiveProgress {
   criteriaTotal: number;
   tasksComplete: number;
   tasksTotal: number;
+  /** Most recent objective or criterion update (ISO) — the Hub freshness basis. */
+  sourceUpdatedAt: string | null;
+}
+
+/** Latest of a set of maybe-timestamps as ISO, or null. */
+function latestIso(...values: Array<Date | string | null | undefined>): string | null {
+  let best: string | null = null;
+  for (const v of values) {
+    if (!v) continue;
+    const iso = v instanceof Date ? v.toISOString() : v;
+    if (best == null || iso > best) best = iso;
+  }
+  return best;
 }
 
 export async function selectObjectiveProgress(
@@ -66,6 +83,7 @@ export async function selectObjectiveProgress(
       title: objectives.title,
       status: objectives.status,
       successCriteria: objectives.successCriteria,
+      updatedAt: objectives.updatedAt,
       orgId: objectives.orgId,
       projectId: objectives.projectId,
     })
@@ -83,7 +101,12 @@ export async function selectObjectiveProgress(
   if (!o) return null;
 
   const taskRows = await tx
-    .select({ status: tasks.status, orgId: tasks.orgId, projectId: tasks.projectId })
+    .select({
+      status: tasks.status,
+      updatedAt: tasks.updatedAt,
+      orgId: tasks.orgId,
+      projectId: tasks.projectId,
+    })
     .from(tasks)
     .where(
       and(
@@ -94,6 +117,15 @@ export async function selectObjectiveProgress(
     );
   assertScoped(taskRows, ctx, 'selectObjectiveProgress.tasks');
 
+  // Freshness of the objective's operational state: the most recent of the
+  // objective row, any criterion verification, and any attached task update.
+  const criterionVerified = o.successCriteria.map((c) => c.verifiedAt);
+  const sourceUpdatedAt = latestIso(
+    o.updatedAt,
+    ...criterionVerified,
+    ...taskRows.map((t) => t.updatedAt),
+  );
+
   return {
     title: o.title,
     status: o.status,
@@ -101,6 +133,7 @@ export async function selectObjectiveProgress(
     criteriaTotal: o.successCriteria.length,
     tasksComplete: taskRows.filter((t) => t.status === 'completed').length,
     tasksTotal: taskRows.length,
+    sourceUpdatedAt,
   };
 }
 
@@ -289,6 +322,8 @@ export interface ProjectStatePackage {
   /** The injected state block, or null when there is no state to report. */
   contextItem: ContextItemForPrompt | null;
   manifest: ContextManifestEntry[];
+  /** Freshness of the Level-1 Hub state, for the O-17 comparison. */
+  freshness: Freshness | null;
 }
 
 function ymd(d: Date): string {
@@ -306,6 +341,7 @@ export async function assembleProjectState(
   objectiveId: string | null,
   excludeTaskId: string | null,
 ): Promise<ProjectStatePackage> {
+  const nowIso = new Date().toISOString();
   const [progress, related, pending] = await Promise.all([
     selectObjectiveProgress(tx, ctx, objectiveId),
     selectRelatedTasks(tx, ctx, objectiveId, excludeTaskId),
@@ -313,8 +349,28 @@ export async function assembleProjectState(
   ]);
 
   const manifest: ContextManifestEntry[] = [];
+
+  // Hub-state freshness: the most recent of any relevant Hub update. High
+  // confidence — these are first-class records with real update timestamps.
+  const hubUpdatedAt = latestIso(
+    progress?.sourceUpdatedAt ?? null,
+    ...related.blockers.map((t) => t.when),
+    ...related.active.map((t) => t.when),
+    ...related.recent.map((t) => t.when),
+    ...pending.map((p) => p.when),
+  );
+  const hubFreshness: Freshness = {
+    observedAt: nowIso,
+    sourceUpdatedAt: hubUpdatedAt ?? undefined,
+    confidence: hubUpdatedAt ? 'high' : 'unknown',
+    basis: hubUpdatedAt
+      ? 'most recent objective / criterion / task update in the Hub'
+      : 'no Hub update timestamp available',
+  };
+
   const lines: string[] = [
     'CURRENT HUB STATE (structured records from the Hub, not inferred from documents):',
+    hubUpdatedAt ? `Hub state last updated: ${hubUpdatedAt.slice(0, 10)} (confidence high).` : '',
     '',
   ];
 
@@ -327,6 +383,9 @@ export async function assembleProjectState(
       source: 'objective_progress',
       label: progress.title,
       detail: `${progress.status} · ${progress.criteriaMet}/${progress.criteriaTotal} criteria · ${progress.tasksComplete}/${progress.tasksTotal} tasks`,
+      freshness: progress.sourceUpdatedAt
+        ? { sourceUpdatedAt: progress.sourceUpdatedAt, confidence: 'high' }
+        : { confidence: 'unknown' },
     });
   }
 
@@ -382,11 +441,16 @@ export async function assembleProjectState(
 
   // Nothing to say if there's no objective and no records at all.
   if (manifest.length === 0) {
-    return { contextItem: null, manifest: [] };
+    return { contextItem: null, manifest: [], freshness: null };
   }
 
   return {
-    contextItem: { title: 'Project state (Hub records)', content: lines.join('\n') },
+    contextItem: {
+      title: 'Project state (Hub records)',
+      content: lines.filter((l, i) => l !== '' || lines[i - 1] !== '').join('\n'),
+      freshness: hubFreshness,
+    },
     manifest,
+    freshness: hubFreshness,
   };
 }

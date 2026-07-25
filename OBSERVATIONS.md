@@ -388,3 +388,37 @@ change.
 
 **Status: authority contract shipped; hedging reduced from framing-level to
 verification-level.**
+
+---
+
+### O-17 · RESOLVED — Context freshness signals; O-16 hedge eliminated
+
+**Problem (from O-16).** The model treated Hub state as authoritative but
+hedged: "I am assuming the Hub state is current, but I cannot independently
+verify the timestamps."
+
+**Fix (commit pending).** Machine-comparable freshness metadata per context
+item (observed / source-updated / content-effective / confidence / basis), a
+conservative labeled-date parser, and a precomputed Hub-vs-document freshness
+relation injected into the prompt. Additive only — no schema change (freshness
+persists in the existing `context_manifest` jsonb), no retrieval/quota/state
+change (only an additive `indexedAt` column added to the document selects).
+
+**Live acceptance (kingdom-core owner, both providers) — Test 1 scenario with
+real data (Hub updated 2026-07-25 vs production-status doc effective
+2026-07-23):**
+- Reported the conflict (writing "COMPLETE" vs criterion "All 12 scripts
+  approved" unmet).
+- Stated the Hub is authoritative and **demonstrably newer**, citing concrete
+  dates: "Hub record: updated 2026-07-25; Document: effective 2026-07-23."
+- **No timestamp-verification hedge** — the O-16 residual is gone.
+
+Tests 2–4 (document newer, not comparable, injection) are covered by
+deterministic integration tests; setting them up live would require fabricating
+documents in the owner's real folder.
+
+**Residual hedging:** none observed in the live run beyond appropriate,
+field-specific uncertainty. The freshness axis converted the prior
+framing-level and verification-level hedging into concrete, dated statements.
+
+**Status: freshness signals shipped; the O-16 → O-17 hedging arc is closed.**

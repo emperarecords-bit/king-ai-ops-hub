@@ -135,6 +135,48 @@ export interface ContextManifestEntry {
   label: string;
   /** e.g. 'chunk 0 · relevance 0.039' or the core-reference type name. */
   detail?: string;
+  /** Freshness signals (O-17), persisted in context_manifest for the panel. */
+  freshness?: {
+    sourceUpdatedAt?: string;
+    contentEffectiveAt?: string;
+    confidence: FreshnessConfidence;
+  };
+}
+
+/**
+ * Context freshness (O-17). A separate axis from authority, injection trust,
+ * and relevance. Shapes live here (the shared types floor); the parser and
+ * comparator live in `src/domain/context/freshness.ts`.
+ */
+export const FRESHNESS_CONFIDENCE = ['high', 'medium', 'low', 'unknown'] as const;
+export type FreshnessConfidence = (typeof FRESHNESS_CONFIDENCE)[number];
+
+export interface Freshness {
+  /** When the Hub assembled/observed the item (ISO). */
+  observedAt?: string;
+  /** The source record's last-known update time (ISO). */
+  sourceUpdatedAt?: string;
+  /** An explicit date the CONTENT represents, only when reliably parsed (ISO date). */
+  contentEffectiveAt?: string;
+  confidence: FreshnessConfidence;
+  /** Short deterministic note on which timestamp was used and how. */
+  basis: string;
+}
+
+export const FRESHNESS_RELATIONS = [
+  'hub_newer',
+  'document_newer',
+  'same_date',
+  'not_comparable',
+] as const;
+export type FreshnessRelation = (typeof FRESHNESS_RELATIONS)[number];
+
+export interface FreshnessComparison {
+  relation: FreshnessRelation;
+  /** Human-readable, deterministic — safe to drop straight into the prompt. */
+  explanation: string;
+  hubInstant: string | null;
+  documentInstant: string | null;
 }
 
 /** Company Knowledge (KNOWLEDGE-DESIGN.md, D-011). K1: project scope only. */

@@ -122,6 +122,21 @@ export default async function TaskDetailPage({
                       {e.detail ? (
                         <span className="text-xs text-[var(--muted)]">{e.detail}</span>
                       ) : null}
+                      {e.freshness ? (
+                        <span className="text-xs text-[var(--muted)]">
+                          {[
+                            e.freshness.sourceUpdatedAt
+                              ? `updated ${e.freshness.sourceUpdatedAt.slice(0, 10)}`
+                              : null,
+                            e.freshness.contentEffectiveAt
+                              ? `effective ${e.freshness.contentEffectiveAt}`
+                              : null,
+                            `freshness ${e.freshness.confidence}`,
+                          ]
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </span>
+                      ) : null}
                     </li>
                   ))}
                 </ul>

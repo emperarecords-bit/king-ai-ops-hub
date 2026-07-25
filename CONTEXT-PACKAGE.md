@@ -132,6 +132,42 @@ Authority is operational trust (which fact is current); injection-trust
 The runner tags each source: project state → L1 (with a run timestamp),
 approved knowledge → L2, all documents → L3.
 
+## Freshness signals (O-17)
+
+Authority decides which source *controls*; freshness explains *how current* the
+evidence appears — a separate axis from authority, injection-trust, and
+relevance. Each context item carries
+([src/domain/context/freshness.ts](src/domain/context/freshness.ts)):
+
+| Field | Meaning | Set from |
+|---|---|---|
+| `observedAt` | when the Hub assembled the item | run time |
+| `sourceUpdatedAt` | source record's last update | objective/criterion/task update (Hub); indexed file mtime (documents) |
+| `contentEffectiveAt` | explicit date the content states | conservative parser, only labeled patterns |
+| `confidence` | high / medium / low / unknown | high = parsed effective date or Hub record; medium = file mtime; unknown = no date |
+| `basis` | which timestamp was used | short deterministic note |
+
+**The parser is deliberately conservative.** It accepts only *labeled* patterns
+in the document header (`Status as of July 23, 2026`, `Last updated: 2026-07-23`,
+`Effective date: 07/23/2026`). A bare year in prose, a file's creation time, and
+the run clock are **never** treated as content-effective dates.
+
+**Precomputed comparison.** When a production-status (operational-claim)
+document is present with a usable date, the Hub precomputes the relationship
+between Level-1 Hub state and that document — `hub_newer`, `document_newer`,
+`same_date`, or `not_comparable` — and injects it as a "FRESHNESS COMPARISON"
+note. The model uses it directly rather than parsing dates itself
+(`buildPrimaryUserTurn`'s `freshnessComparison`).
+
+**Authority is unchanged by freshness.** Even when the document appears newer,
+Level-1 Hub state still controls operational status; the note then instructs the
+model to recommend verifying the document and *updating the Hub* — never to
+silently override it. When not comparable, the model applies the authority
+hierarchy and does not treat file metadata as proof of currency.
+
+Freshness is persisted per-record in `context_manifest` and shown compactly in
+the Context used panel (updated date · effective date · confidence).
+
 ## The manifest (requirement #5)
 
 Persisted to `runs.context_manifest` (migration 0008) as

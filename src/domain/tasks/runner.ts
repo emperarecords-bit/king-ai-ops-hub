@@ -17,6 +17,7 @@ import { AUTHORITY } from '@/orchestration/prompts';
 import { resolveModelForTier } from '@/orchestration/routing';
 import {
   type ContextManifestEntry,
+  type Freshness,
   type ModelTier,
   type RetrievedDocRef,
   type StepKind,
@@ -30,6 +31,18 @@ import {
   selectProductionStatus,
 } from '@/domain/documents/documents';
 import { assembleProjectState } from '@/domain/state/project-state';
+import { compareFreshness, parseEffectiveDate } from '@/domain/context/freshness';
+
+/** Reduces full Freshness to the compact shape persisted in the manifest. */
+function manifestFreshness(
+  f: Freshness,
+): NonNullable<ContextManifestEntry['freshness']> {
+  return {
+    sourceUpdatedAt: f.sourceUpdatedAt,
+    contentEffectiveAt: f.contentEffectiveAt,
+    confidence: f.confidence,
+  };
+}
 import { writeAudit } from '@/domain/audit/audit';
 import { assertWithinBudget, recordUsage } from '@/domain/usage/usage';
 import { consumeRateLimit } from '@/domain/usage/rate-limit';
@@ -101,6 +114,8 @@ export async function startRun(
 ): Promise<RunOutcome> {
   const env = serverEnv();
 
+  const nowIso = new Date().toISOString();
+
   // ---- Preflight, one transaction -----------------------------------------
   const preflight = await withTenant(ctx, async (tx) => {
     const taskRows = await tx
@@ -162,6 +177,24 @@ export async function startRun(
     // document sources above.
     const projectState = await assembleProjectState(tx, ctx, task.objectiveId, taskId);
 
+    // Document freshness (O-17): indexed-file mtime (medium confidence) plus an
+    // explicit parsed "as of" date when present (high confidence). Never infers
+    // dates from prose, file creation, or the run clock.
+    const docFreshness = (chunk: { content: string; indexedAt: Date | null }): Freshness => {
+      const effective = parseEffectiveDate(chunk.content);
+      return {
+        observedAt: nowIso,
+        sourceUpdatedAt: chunk.indexedAt?.toISOString(),
+        contentEffectiveAt: effective ?? undefined,
+        confidence: effective ? 'high' : chunk.indexedAt ? 'medium' : 'unknown',
+        basis: effective
+          ? 'explicit effective date parsed from the document header'
+          : chunk.indexedAt
+            ? 'indexed file modification time'
+            : 'no usable document date',
+      };
+    };
+
     // Authority-labeled context (O-16). Hub state is Level 1, approved
     // knowledge Level 2, project documents Level 3 — the prompt builder groups
     // and labels these so the model treats Hub state as the current record.
@@ -172,7 +205,7 @@ export async function startRun(
               ...projectState.contextItem,
               authority: AUTHORITY.HUB_STATE,
               kind: 'Current Hub operational state',
-              timestamp: new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC',
+              timestamp: nowIso.slice(0, 16).replace('T', ' ') + ' UTC',
             },
           ]
         : []),
@@ -186,12 +219,14 @@ export async function startRun(
         content: r.content,
         authority: AUTHORITY.PROJECT_DOCUMENT,
         kind: 'Linked project document',
+        freshness: docFreshness(r),
       })),
       ...coreRefs.map((r) => ({
         title: r.relativePath,
         content: r.content,
         authority: AUTHORITY.PROJECT_DOCUMENT,
         kind: 'Linked project document (core reference)',
+        freshness: docFreshness(r),
       })),
       ...(productionStatus
         ? [
@@ -200,10 +235,27 @@ export async function startRun(
               content: productionStatus.content,
               authority: AUTHORITY.PROJECT_DOCUMENT,
               kind: 'Linked project document (production status)',
+              freshness: docFreshness(productionStatus),
             },
           ]
         : []),
     ];
+
+    // Precompute the Hub-vs-document freshness relation (O-17). The
+    // production-status document is the operational-claim surface — find it
+    // wherever it landed (its dedicated slot OR the retrieved set, since
+    // retrieval may surface it first and dedup it out of the slot). Null when
+    // either side lacks a usable date.
+    const PRODUCTION_STATUS_RE = /production[ _-]?status/i;
+    const prodDocForCompare =
+      productionStatus ??
+      retrieved.find((r) => PRODUCTION_STATUS_RE.test(r.relativePath)) ??
+      coreRefs.find((r) => PRODUCTION_STATUS_RE.test(r.relativePath)) ??
+      null;
+    const freshnessComparison =
+      projectState.freshness && prodDocForCompare
+        ? compareFreshness(projectState.freshness, docFreshness(prodDocForCompare))
+        : null;
     const retrievedRefs: RetrievedDocRef[] = retrieved.map((r) => ({
       relativePath: r.relativePath,
       chunkIndex: r.chunkIndex,
@@ -218,17 +270,26 @@ export async function startRun(
         source: 'retrieved' as const,
         label: r.relativePath,
         detail: `chunk ${r.chunkIndex} · relevance ${r.rank.toFixed(3)}`,
+        freshness: manifestFreshness(docFreshness(r)),
       })),
       ...coreRefs.map((r) => ({
         source: 'core_reference' as const,
         label: r.relativePath,
         detail: r.coreType,
+        freshness: manifestFreshness(docFreshness(r)),
       })),
       ...(productionStatus
-        ? [{ source: 'production_status' as const, label: productionStatus.relativePath }]
+        ? [
+            {
+              source: 'production_status' as const,
+              label: productionStatus.relativePath,
+              freshness: manifestFreshness(docFreshness(productionStatus)),
+            },
+          ]
         : []),
       // Project State manifest entries (objective_progress / active_work /
-      // blocker / recent_outcome / pending_review) are already shaped.
+      // blocker / recent_outcome / pending_review) are already shaped, incl.
+      // freshness on objective_progress.
       ...projectState.manifest,
     ];
 
@@ -275,10 +336,11 @@ export async function startRun(
       },
     });
 
-    return { task, runId, primaryRow, reviewerRow, contextItems, objective };
+    return { task, runId, primaryRow, reviewerRow, contextItems, objective, freshnessComparison };
   });
 
-  const { task, runId, primaryRow, reviewerRow, contextItems, objective } = preflight;
+  const { task, runId, primaryRow, reviewerRow, contextItems, objective, freshnessComparison } =
+    preflight;
 
   // ---- Engine execution ----------------------------------------------------
   // Each step commits its own transaction: a mid-run crash must not erase the
@@ -362,6 +424,7 @@ export async function startRun(
       taskInput: task.input,
       contextItems,
       objective,
+      freshnessComparison,
       primary: toEngineAgent(primaryRow, task.modelTier),
       reviewer: reviewerRow ? toEngineAgent(reviewerRow, task.modelTier) : null,
       perCallTimeoutMs: env.PROVIDER_TIMEOUT_MS,

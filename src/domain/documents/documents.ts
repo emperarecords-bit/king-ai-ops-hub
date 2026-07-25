@@ -280,6 +280,8 @@ export interface RetrievedChunk {
   chunkIndex: number;
   content: string;
   rank: number;
+  /** Indexed file modification time (O-17 freshness). Additive; no effect on ranking. */
+  indexedAt: Date | null;
 }
 
 const WORD_NUMBERS: Record<string, number> = {
@@ -407,6 +409,7 @@ export async function retrieveRelevant(
       relativePath: documents.relativePath,
       chunkIndex: documentChunks.chunkIndex,
       content: documentChunks.content,
+      indexedAt: documents.indexedAt,
       orgId: documentChunks.orgId,
       projectId: documentChunks.projectId,
       rank: sql<number>`ts_rank(document_chunks.search, ${q})`,
@@ -446,6 +449,7 @@ export async function retrieveRelevant(
     chunkIndex: r.chunkIndex,
     content: r.content,
     rank: Number(r.rank),
+    indexedAt: r.indexedAt,
   }));
 }
 
@@ -514,6 +518,7 @@ export async function selectCoreReferences(
       relativePath: documents.relativePath,
       chunkIndex: documentChunks.chunkIndex,
       content: documentChunks.content,
+      indexedAt: documents.indexedAt,
       orgId: documentChunks.orgId,
       projectId: documentChunks.projectId,
     })
@@ -545,6 +550,7 @@ export async function selectCoreReferences(
       chunkIndex: r.chunkIndex,
       content: r.content,
       rank: 0,
+      indexedAt: r.indexedAt,
       coreType: coreTypeOf(r.relativePath),
     }));
 }
@@ -564,6 +570,7 @@ export async function selectProductionStatus(
       relativePath: documents.relativePath,
       chunkIndex: documentChunks.chunkIndex,
       content: documentChunks.content,
+      indexedAt: documents.indexedAt,
       orgId: documentChunks.orgId,
       projectId: documentChunks.projectId,
     })
@@ -590,6 +597,7 @@ export async function selectProductionStatus(
     chunkIndex: r.chunkIndex,
     content: r.content,
     rank: 0,
+    indexedAt: r.indexedAt,
   };
 }
 

@@ -1,4 +1,9 @@
-import { type ReviewDetail, type ReviewVerdict, type StepKind } from '@/types/domain';
+import {
+  type FreshnessComparison,
+  type ReviewDetail,
+  type ReviewVerdict,
+  type StepKind,
+} from '@/types/domain';
 import {
   type AgentRequest,
   type AgentResponse,
@@ -48,6 +53,8 @@ export interface EngineInput {
   readonly taskInput: string;
   readonly contextItems: readonly ContextItemForPrompt[];
   readonly objective?: ObjectiveForPrompt | null;
+  /** Precomputed Hub-vs-document freshness relation (O-17), when applicable. */
+  readonly freshnessComparison?: FreshnessComparison | null;
   readonly primary: EngineAgent;
   /** Absent → review disabled for this run. */
   readonly reviewer: EngineAgent | null;
@@ -224,7 +231,12 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
 
   // --- Step 1: PRIMARY ------------------------------------------------------
   const primarySystem = buildPrimarySystem(input.primary.systemPrompt);
-  const primaryUserTurn = buildPrimaryUserTurn(input.taskInput, input.contextItems, input.objective);
+  const primaryUserTurn = buildPrimaryUserTurn(
+    input.taskInput,
+    input.contextItems,
+    input.objective,
+    input.freshnessComparison,
+  );
   const primaryTurns: Turn[] = [{ role: 'user', content: primaryUserTurn }];
 
   let primaryResponse: AgentResponse;
