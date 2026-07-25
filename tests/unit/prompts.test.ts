@@ -64,36 +64,54 @@ describe('parseVerdict', () => {
   });
 });
 
-describe('buildReviewUserTurn — approved-policy context parity (EV-009)', () => {
+describe('buildReviewUserTurn — EV-009 regression: review-prompt context parity', () => {
+  // The reviewer's live judgement was validated on staging. These tests pin the
+  // REVIEW PROMPT's instructions (built with crafted primary responses) so the
+  // fixed behaviour cannot silently regress. One test per owner-specified point.
   const policies = [
     { title: 'Launch strategy', content: 'Launch is supply-first and sequenced, not broad public marketing.' },
     { title: 'Validation gate', content: 'Scale only after 25 paying customers, NPS > 40, and 5 workflows.' },
   ];
 
-  it('includes an authoritative Approved Organizational Policies block with the policy content', () => {
-    const out = buildReviewUserTurn('do the thing', 'the response', policies);
-    expect(out).toContain('Approved Organizational Policies (AUTHORITATIVE)');
-    expect(out).toContain('supply-first and sequenced');
-    expect(out).toContain('25 paying customers');
-  });
-
-  it('tells the reviewer NOT to flag correct policy-grounding, but TO flag contradictions', () => {
-    const out = buildReviewUserTurn('t', 'r', policies);
-    expect(out).toMatch(/do NOT flag/i);
-    expect(out).toMatch(/CONTRADICTS/);
-    // still catches genuinely unsupported claims unrelated to policy
+  it('1. a response with an unsupported factual claim: prompt instructs the reviewer to flag it', () => {
+    const crafted = 'AccurateBids already has 10,000 paying enterprise customers.';
+    const out = buildReviewUserTurn('task', crafted, policies);
+    expect(out).toContain(crafted);
     expect(out).toMatch(/genuinely unsupported claim/i);
   });
 
-  it('never exposes the internal name "Decision memory"', () => {
+  it('2. a response contradicting approved policy: prompt instructs the reviewer to flag it', () => {
+    const crafted = 'Recommend an immediate broad public marketing blitz to all homeowners now.';
+    const out = buildReviewUserTurn('task', crafted, policies);
+    expect(out).toContain(crafted);
+    expect(out).toMatch(/CONTRADICTS/);
+  });
+
+  it('3. a policy-grounded response: prompt tells the reviewer NOT to classify it as fabricated', () => {
+    const crafted = 'Per approved policy, we scale only after 25 paying customers and NPS > 40.';
+    const out = buildReviewUserTurn('task', crafted, policies);
+    expect(out).toContain(crafted);
+    expect(out).toMatch(/do NOT flag[\s\S]*fabricated/i);
+    expect(out).toMatch(/appeal to authority/i);
+  });
+
+  it('4. approved policy is authoritative context, NOT content every response must mention', () => {
+    const out = buildReviewUserTurn('task', 'a response that never mentions policy', policies);
+    expect(out).toContain('AUTHORITATIVE');
+    // Issue-raising is scoped to contradiction / unsupported — mere omission is not an issue.
+    expect(out).toMatch(/Raise an issue only when/i);
+    expect(out).not.toMatch(/must (mention|cite|reference|apply) (each|every|all)/i);
+  });
+
+  it('renders the policy under a business-facing heading, never the internal name "Decision memory"', () => {
     const out = buildReviewUserTurn('t', 'r', policies);
+    expect(out).toContain('Approved Organizational Policies');
     expect(out.toLowerCase()).not.toContain('decision memory');
   });
 
-  it('omits the policy block entirely when there are no approved policies (unchanged behavior)', () => {
+  it('omits the policy block entirely when there are no approved policies (unchanged behaviour)', () => {
     const out = buildReviewUserTurn('do the thing', 'the response');
     expect(out).not.toContain('Approved Organizational Policies');
     expect(out).toContain('Review the response against the task.');
-    expect(out).toContain('do the thing');
   });
 });
