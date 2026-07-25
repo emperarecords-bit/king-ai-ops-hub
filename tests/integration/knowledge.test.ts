@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
 import { ConflictError } from '@/lib/errors';
-import { getDb } from '@/db/client';
+import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { memberships, organizations, profiles, projectMembers, projects } from '@/db/schema';
 import {
@@ -29,7 +29,7 @@ process.env.DATABASE_URL =
 
 let available = false;
 try {
-  await getDb().select({ one: profiles.id }).from(profiles).limit(1);
+  await getSetupDb().select({ one: profiles.id }).from(profiles).limit(1);
   available = true;
 } catch (err) {
   console.warn(
@@ -43,7 +43,7 @@ let orgId = '';
 
 beforeAll(async () => {
   if (!available) return;
-  const db = getDb();
+  const db = getSetupDb();
   await db.insert(profiles).values({
     id: userId,
     email: `know-${randomUUID().slice(0, 8)}@test.local`,
@@ -68,7 +68,7 @@ beforeAll(async () => {
 afterAll(async () => {
   // Audit rows pin the fixtures (ON DELETE RESTRICT) — archive, don't delete.
   if (!available) return;
-  await getDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
+  await getSetupDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
 });
 
 describe.skipIf(!available)('company knowledge K1', () => {

@@ -542,3 +542,47 @@ the dev superuser) for RLS to be enforced, and the cloud Project Library
 ingestion adapter is designed but not built.
 
 **Status: deployable, not yet launched.**
+
+---
+
+### O-22 · Production RLS enforcement
+
+**Delivered (verified).** The application now runs against the non-superuser
+`app_server` role (`NOSUPERUSER NOBYPASSRLS`, owns nothing), with RLS proven as
+the independent database boundary — not just the app-layer filters.
+
+- **Three-role model** in `rls.sql`: migration role (owner, DDL/fixtures),
+  `app_server` (runtime), `app_system` (`NOLOGIN BYPASSRLS`, owns the
+  `SECURITY DEFINER` `app.*` dispatch functions only). `app_server` has no
+  general cross-tenant read.
+- **Cross-tenant escape hatches confined to definer functions:** worker claim/
+  finish/requeue, stale-job list, due-schedule list, health aggregate, and
+  placeholder-profile adoption. The worker, standing tick, and health endpoint
+  were all rewritten to use them; every run still executes through `withTenant()`.
+- **Bootstrap made app_server-safe:** `withUser()` boundary + navigation-table
+  policies keyed off membership (recursion-safe via `app.is_org_member` /
+  `is_project_member` definer helpers — a latent self-referential policy recursion
+  that only surfaced under a non-superuser role, fixed here).
+- **Provisioning fix:** `INSERT … RETURNING` on a just-created org/project is
+  refused by the SELECT policy (no membership row yet); provisioning now generates
+  ids and inserts without RETURNING.
+- **Observability:** `tenant.context_invalid` (fail closed), `rls.rejected`
+  (WITH CHECK refusal), identifiers only — never row data.
+- **Proof:** `tests/integration/rls-enforcement.test.ts` (direct cross-tenant
+  read/insert/update refused as app_server, missing-context, membership, policy
+  guard) + `worker-isolation.test.ts` (per-job context restore, no pool leak,
+  fail-closed on missing identity). `npm run test:rls` runs the FULL suite with
+  the app connection = `app_server`: **276/276 pass**, and it prints the resolved
+  `current_user`. Re-verified against a freshly migrated clean database.
+- **Live:** worker boots as `app_server`, claims across the queue via the definer,
+  restores per-job tenant context, and executes the gated run path; the web
+  process boots as `app_server` and serves `/api/health` (`ok`) and the
+  authenticated dashboard rendering real tenant data under RLS.
+
+**Owner-dependent.** Production sets a real `app_server` password (the dev value
+is a placeholder `assertProductionSafe` rejects); the interactive real-device
+click-through is the same sign-in-gated step as O-21. Standing-work still runs
+locally as `king`; when the cloud scheduler is wired (§9 #3) it uses the same
+definer path, already implemented.
+
+**Status: RLS enforcement proven under app_server — launch gate #1 closed.**

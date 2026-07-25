@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
-import { getDb } from '@/db/client';
+import { getSetupDb } from '@/db/client';
 import { memberships, organizations, profiles, projectMembers, projects } from '@/db/schema';
 import { upsertProfile } from '@/db/system';
 
@@ -25,7 +25,7 @@ process.env.DATABASE_URL =
 
 let available = false;
 try {
-  await getDb().select({ one: profiles.id }).from(profiles).limit(1);
+  await getSetupDb().select({ one: profiles.id }).from(profiles).limit(1);
   available = true;
 } catch (err) {
   console.warn(
@@ -33,7 +33,7 @@ try {
   );
 }
 
-let db: ReturnType<typeof getDb>;
+let db: ReturnType<typeof getSetupDb>;
 
 const email = `relink-${randomUUID().slice(0, 8)}@test.local`;
 const placeholderId = randomUUID();
@@ -43,7 +43,7 @@ let projectId = '';
 
 beforeAll(async () => {
   if (!available) return;
-  db = getDb();
+  db = getSetupDb();
   await db.insert(profiles).values({
     id: placeholderId,
     email,

@@ -48,12 +48,9 @@ export async function GET() {
   // the unhealthy signal (jobs piling up, nothing executing).
   if (checks.database?.ok && db) {
     try {
-      const r = await db.execute(sql`
-        select
-          count(*) filter (where status = 'queued') as queued,
-          count(*) filter (where updated_at > now() - interval '5 minutes') as recent
-        from run_jobs
-      `);
+      // Via a definer aggregate so the signal is real under the non-superuser
+      // app_server role (which has no cross-tenant read of run_jobs). O-22.
+      const r = await db.execute(sql`select queued, recent from app.run_jobs_health()`);
       const row = (r as unknown as { rows?: Array<{ queued: string; recent: string }> }).rows?.[0]
         ?? (Array.isArray(r) ? r[0] : undefined);
       const queued = Number(row?.queued ?? 0);

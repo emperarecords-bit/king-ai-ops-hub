@@ -89,11 +89,12 @@ export async function createWorkspace(
     if (!orgId) {
       const orgName = `${user.displayName.split('@')[0]}'s Company`;
       const orgSlug = `${slugify(orgName)}-${crypto.randomUUID().slice(0, 8)}`;
-      const org = await tx
-        .insert(organizations)
-        .values({ name: orgName, slug: orgSlug })
-        .returning({ id: organizations.id });
-      orgId = org[0]!.id;
+      // Generate the id here and INSERT without RETURNING: under RLS the freshly
+      // created org is not yet visible to the SELECT policy (no membership row
+      // exists until the next statement), so a RETURNING read-back would be
+      // refused. A plain INSERT only checks WITH CHECK, which passes (O-22).
+      orgId = crypto.randomUUID();
+      await tx.insert(organizations).values({ id: orgId, name: orgName, slug: orgSlug });
       await tx.execute(sql`select set_config('app.org_id', ${orgId}, true)`);
       await tx.insert(memberships).values({ orgId, userId: user.id, role: 'owner' });
     } else {
@@ -113,11 +114,11 @@ export async function createWorkspace(
       key = `${base}-${n}`;
     }
 
-    const project = await tx
-      .insert(projects)
-      .values({ orgId, key, name, description })
-      .returning({ id: projects.id });
-    const projectId = project[0]!.id;
+    // Same as the org above: generate the id and skip RETURNING, because the
+    // project is not visible to projects_scope until the project_members row
+    // below exists (O-22).
+    const projectId = crypto.randomUUID();
+    await tx.insert(projects).values({ id: projectId, orgId, key, name, description });
 
     await tx
       .insert(projectMembers)

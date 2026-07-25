@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
 import { AppError } from '@/lib/errors';
-import { getDb } from '@/db/client';
+import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import {
   memberships,
@@ -35,7 +35,7 @@ process.env.DATABASE_URL =
 
 let available = false;
 try {
-  await getDb().select({ one: profiles.id }).from(profiles).limit(1);
+  await getSetupDb().select({ one: profiles.id }).from(profiles).limit(1);
   available = true;
 } catch (err) {
   console.warn(
@@ -52,7 +52,7 @@ let projectId = '';
 
 beforeAll(async () => {
   if (!available) return;
-  const db = getDb();
+  const db = getSetupDb();
   await db.insert(profiles).values([
     { id: adminId, email: `stand-a-${randomUUID().slice(0, 8)}@test.local`, displayName: 'Admin' },
     { id: memberId, email: `stand-m-${randomUUID().slice(0, 8)}@test.local`, displayName: 'Member' },
@@ -81,7 +81,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!available) return;
-  await getDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
+  await getSetupDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
 });
 
 describe.skipIf(!available)('standing work', () => {
@@ -136,7 +136,7 @@ describe.skipIf(!available)('standing work', () => {
 
   it('pausing is the kill switch; a paused schedule is not due for the tick', async () => {
     await withTenant(adminCtx, (tx) => setScheduleEnabled(tx, adminCtx, scheduleId, false));
-    const db = getDb();
+    const db = getSetupDb();
     const row = (
       await db
         .select({ enabled: taskSchedules.enabled })

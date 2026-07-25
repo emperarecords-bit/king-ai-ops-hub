@@ -6,7 +6,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
-import { getDb } from '@/db/client';
+import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { memberships, organizations, profiles, projectMembers, projects } from '@/db/schema';
 import {
@@ -32,7 +32,7 @@ process.env.DATABASE_URL =
 
 let available = false;
 try {
-  await getDb().select({ one: profiles.id }).from(profiles).limit(1);
+  await getSetupDb().select({ one: profiles.id }).from(profiles).limit(1);
   available = true;
 } catch (err) {
   console.warn(
@@ -47,7 +47,7 @@ let folderA = '';
 let folderB = '';
 
 async function makeWorkspace(userId: string): Promise<TenantContext> {
-  const db = getDb();
+  const db = getSetupDb();
   const project = await db
     .insert(projects)
     .values({ orgId, key: fixtureKey('docs'), name: 'Docs Project' })
@@ -59,7 +59,7 @@ async function makeWorkspace(userId: string): Promise<TenantContext> {
 
 beforeAll(async () => {
   if (!available) return;
-  const db = getDb();
+  const db = getSetupDb();
   const userId = randomUUID();
   await db
     .insert(profiles)
@@ -93,7 +93,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!available) return;
-  await getDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
+  await getSetupDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
   if (folderA) await rm(folderA, { recursive: true, force: true });
   if (folderB) await rm(folderB, { recursive: true, force: true });
 });

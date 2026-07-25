@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
 import { ConflictError } from '@/lib/errors';
-import { getDb } from '@/db/client';
+import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { memberships, organizations, profiles, projectMembers, projects } from '@/db/schema';
 import {
@@ -30,7 +30,7 @@ process.env.DATABASE_URL =
 
 let available = false;
 try {
-  await getDb().select({ one: profiles.id }).from(profiles).limit(1);
+  await getSetupDb().select({ one: profiles.id }).from(profiles).limit(1);
   available = true;
 } catch (err) {
   console.warn(
@@ -44,7 +44,7 @@ let orgId = '';
 
 beforeAll(async () => {
   if (!available) return;
-  const db = getDb();
+  const db = getSetupDb();
   await db.insert(profiles).values({
     id: userId,
     email: `objtest-${randomUUID().slice(0, 8)}@test.local`,
@@ -71,7 +71,7 @@ afterAll(async () => {
   // pins its subjects. Fixtures use random slugs/keys so re-runs never
   // collide; archive the project so it can't appear in any picker.
   if (!available) return;
-  const db = getDb();
+  const db = getSetupDb();
   await db.update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
 });
 

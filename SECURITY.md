@@ -38,17 +38,35 @@ is trusted, and project B's approved memory is loaded into project A's prompt.
 - Every tenant table has `org_id` and `project_id`, both `NOT NULL`.
 - RLS is enabled on every tenant table with a policy of the form
   `project_id = app.current_project_id() AND org_id = app.current_org_id()`.
-- The application connects as `app_server`, created `NOBYPASSRLS`. The Postgres
-  superuser and the Supabase service-role key are not used in the request path.
+- The application connects as `app_server`, created `NOSUPERUSER NOBYPASSRLS`. The
+  Postgres superuser and the Supabase service-role key are not used in the request
+  path.
 - `withTenant()` is the only way to obtain a DB handle for tenant data; it sets the
-  session GUCs the policies read.
+  session GUCs the policies read. `withUser()` is the narrower pre-tenant boundary
+  (only `app.user_id`) for the login bootstrap; both fail closed on a
+  missing/malformed identifier and log `tenant.context_invalid`.
 - `loadApprovedContext()` re-asserts `row.projectId === ctx.projectId` and throws
   `TenantViolationError` on mismatch, which is logged at `error` and audited.
-- A Vitest integration test runs a real cross-tenant read attempt and asserts zero
-  rows.
+- **Proven under `app_server` (O-22).** The RLS policies are exercised by a suite
+  that connects as `app_server` and attempts direct cross-tenant reads, inserts,
+  and updates with the app-layer filter deliberately omitted — all refused by the
+  database, not the app (`tests/integration/rls-enforcement.test.ts`,
+  `worker-isolation.test.ts`). The full suite passes with the application
+  connection set to `app_server` (`npm run test:rls`); a guard test fails if that
+  connection is ever a superuser or `BYPASSRLS` role.
+- The one operation each background path needs that is inherently cross-tenant —
+  the run worker claiming the next job, the standing tick finding due schedules,
+  the health worker-liveness count, and the seed placeholder-profile adoption — is
+  confined to a small set of `SECURITY DEFINER` functions in schema `app`, owned by
+  a `NOLOGIN BYPASSRLS` role (`app_system`) and `EXECUTE`-granted to `app_server`.
+  `app_server` therefore never holds a general cross-tenant read; it can only do
+  exactly what those fixed function bodies expose, and every run still executes
+  through `withTenant()`.
 
-*Residual risk:* a migration that adds a table without RLS. Mitigated by a test
-that enumerates `pg_tables` and fails if any tenant table has `rowsecurity = false`.
+*Residual risk:* a migration that adds a table without RLS. Mitigated by two tests:
+one enumerates `pg_tables` and fails if any tenant table has `rowsecurity = false`;
+`rls-enforcement.test.ts` additionally asserts every tenant table is RLS-forced,
+not owned by `app_server`, and grants it no `TRUNCATE/REFERENCES/TRIGGER`.
 
 ### T2 — Prompt injection escalating into a real action (A1, A2)
 
@@ -184,8 +202,9 @@ own review.
 | Principal | Grants |
 |-----------|--------|
 | Browser (anon key) | Supabase Auth only. No table access — RLS denies by default and no policy grants the anon role. |
-| `app_server` DB role | `SELECT/INSERT/UPDATE` on tenant tables, `INSERT` only on `messages` and `audit_logs`, `NOBYPASSRLS`. |
-| Migration role | DDL. Used by `drizzle-kit` at deploy time, never by the running app. |
+| `app_server` DB role | `NOSUPERUSER NOBYPASSRLS`, owns nothing. `SELECT/INSERT/UPDATE` (+`DELETE` where deletion is supported) on tenant tables, `INSERT` only on `messages`/`audit_logs`, and `EXECUTE` on the `app.*` dispatch functions. The web process, the worker, and every background job use this. |
+| `app_system` DB role | `NOLOGIN BYPASSRLS`. Owns only the `SECURITY DEFINER` functions in schema `app` (queue claim/finish/requeue, due-schedule + health aggregates, placeholder-profile adoption) and holds exactly the table grants those bodies need. Cannot log in; reachable solely via `app_server`'s `EXECUTE` on those fixed functions. |
+| Migration role | Superuser/owner. DDL, migrations, policy + role creation (`rls.sql`). Used at deploy time and by test fixtures, never by the running app. |
 | Service-role key | Not used in the request path. Present in `.env.example` only for future admin scripts, commented out. |
 
 ## 6. Secret rotation

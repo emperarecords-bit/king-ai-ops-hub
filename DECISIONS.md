@@ -370,3 +370,35 @@ a proxy, and a proxy optimized directly becomes a target worth gaming — the
 Hub should end a session quickly when the work is genuinely done. The
 measure that survives that failure mode is *workflow completion inside the
 Hub*, not raw duration.
+
+## D-020 — RLS is enforced by the database under a non-superuser role, with a minimal audited elevation for cross-tenant system work
+
+**Decision.** The running application connects as `app_server`
+(`NOSUPERUSER NOBYPASSRLS`, owns nothing). Row-Level Security — not the
+app-layer `WHERE org/project` filters — is the tenant boundary the database
+enforces. The unavoidable cross-tenant system operations (worker queue claim,
+standing-work discovery, health liveness count, seed placeholder-profile
+adoption) are confined to a small set of `SECURITY DEFINER` functions owned by a
+`NOLOGIN BYPASSRLS` role (`app_system`), `EXECUTE`-granted to `app_server`.
+
+**Why.** Development connects as the superuser `king`, which *bypasses* RLS, so
+every prior isolation test proved the app-layer filters, never the policies. A
+single forgotten filter, a trusted client `projectId`, or a future query that
+skips `withTenant()` would have leaked across tenants with nothing behind it.
+RLS is only a real net when the connecting role cannot bypass it. Granting
+`app_server` `BYPASSRLS` to make background work "just work" would have thrown
+that away; a fixed, auditable definer function is the least privilege that lets
+one specific cross-tenant step happen without opening a general hole.
+
+**Consequence.** Any new cross-tenant read in the app is a design smell to be
+questioned, not routed around with a broad grant — it either belongs inside
+`withTenant()` or, if genuinely system-level, a new narrow definer function with
+its own review. `app_server` must never be granted `BYPASSRLS`, ownership, or
+`GRANT ALL`; a guard test enforces this. `INSERT … RETURNING` on a row not yet
+visible to its own SELECT policy (provisioning) is forbidden — generate the id
+and insert without RETURNING.
+
+**Revisit if.** A legitimate need for broad cross-tenant analytics emerges
+(e.g. an owner-level operational dashboard). Even then the answer is a scoped
+definer function or a separate read model — not `BYPASSRLS` on the request-path
+role.

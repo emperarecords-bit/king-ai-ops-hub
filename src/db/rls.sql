@@ -1,15 +1,30 @@
 -- ---------------------------------------------------------------------------
--- Row-Level Security, append-only triggers, and the runtime role.
+-- Row-Level Security, append-only triggers, and the runtime roles.
 --
 -- Applied by scripts/migrate.ts AFTER the Drizzle-generated DDL. Idempotent:
 -- safe to re-run on every migrate.
 --
--- Model (SECURITY.md T1, T5):
---   * The app connects as `app_server`, NOBYPASSRLS.
+-- Role model (O-22, SECURITY.md T1/T5):
+--   * MIGRATION role (king / your managed-PG owner): DDL, policies, table
+--     ownership. Runs migrations. NEVER used by the web or worker process.
+--   * app_server: the runtime role. NOSUPERUSER, NOBYPASSRLS, owns nothing.
+--     The web process, the worker, and every background job connect as this.
+--   * app_system: NOLOGIN, BYPASSRLS. Owns only the SECURITY DEFINER queue-
+--     dispatch functions below. It cannot log in; app_server reaches its
+--     narrow, audited elevation solely by EXECUTE on those functions. This is
+--     how a worker claims a job across workspaces without app_server itself
+--     holding BYPASSRLS.
+--
+-- Tenant contract:
 --   * withTenant() stamps app.user_id / app.org_id / app.project_id as
---     transaction-local GUCs; policies read them via helper functions.
+--     transaction-local GUCs (SET LOCAL semantics via set_config(...,true)),
+--     so nothing leaks across pooled connections. Policies read them via the
+--     app.current_*() helpers, which return NULL when unset → fail closed.
 --   * Tenant tables: single-table predicate on (org_id, project_id).
---   * Org-scoped tables: predicate on org_id via membership.
+--   * Navigation tables (organizations, memberships, projects, project_members)
+--     key off membership so the pre-tenant bootstrap works with only
+--     app.user_id set (withUser). They never expose a tenant the user is not a
+--     member of.
 --   * messages + audit_logs: UPDATE/DELETE raise, always, for every role.
 -- ---------------------------------------------------------------------------
 
@@ -32,13 +47,42 @@ language sql stable as $$
   select nullif(current_setting('app.project_id', true), '')::uuid
 $$;
 
--- Runtime role ---------------------------------------------------------------
+-- Membership predicates used INSIDE the navigation-table policies. They must be
+-- SECURITY DEFINER (owned by the BYPASSRLS app_system, set below) so their
+-- internal reads of memberships/project_members do NOT re-enter those tables'
+-- own RLS policies — otherwise a policy that queries its own table recurses
+-- infinitely. This latent trap only surfaces once the app connects as a
+-- non-superuser (O-22); under the dev superuser RLS was never evaluated.
+create or replace function app.is_org_member(p_org uuid) returns boolean
+language sql stable security definer set search_path = public, pg_temp as $$
+  select exists (
+    select 1 from memberships
+    where org_id = p_org and user_id = app.current_user_id()
+  )
+$$;
+
+create or replace function app.is_project_member(p_project uuid) returns boolean
+language sql stable security definer set search_path = public, pg_temp as $$
+  select exists (
+    select 1 from project_members
+    where project_id = p_project and user_id = app.current_user_id()
+  )
+$$;
+
+-- Runtime roles --------------------------------------------------------------
 
 do $$
 begin
   if not exists (select 1 from pg_roles where rolname = 'app_server') then
-    create role app_server login password 'app_server_dev_only' nobypassrls;
+    create role app_server login password 'app_server_dev_only' nosuperuser nobypassrls;
   end if;
+  -- Defensive: a role someone created by hand must not carry bypass/superuser.
+  alter role app_server nosuperuser nobypassrls nocreatedb nocreaterole;
+
+  if not exists (select 1 from pg_roles where rolname = 'app_system') then
+    create role app_system nologin nosuperuser bypassrls;
+  end if;
+  alter role app_system nologin nosuperuser bypassrls;
 end
 $$;
 
@@ -67,6 +111,19 @@ grant select, insert on messages, audit_logs to app_server;
 
 grant usage on all sequences in schema public to app_server;
 
+-- app_system owns the dispatch functions and touches only the queue + the
+-- identity columns those functions read. It has BYPASSRLS, so it still needs
+-- explicit table privileges (bypass affects row filtering, not GRANTs).
+grant usage on schema public to app_system;
+grant usage on schema app to app_system;  -- the definer fns call app.current_*()
+grant select, update on run_jobs to app_system;
+grant select on task_schedules to app_system;  -- the standing-tick dispatcher
+-- Profile adoption (app.adopt_placeholder_profile) reassigns a seed
+-- placeholder's rows to the real auth user — a cross-identity provisioning step
+-- confined to that one fixed function body.
+grant select, insert, update, delete on profiles to app_system;
+grant select, update on tasks, project_members, memberships, project_context_items, approvals to app_system;
+
 -- Append-only enforcement ----------------------------------------------------
 -- Belt (no UPDATE grant) and braces (trigger), because a future GRANT ALL
 -- should not silently make history mutable.
@@ -90,6 +147,235 @@ create trigger audit_logs_append_only
   before update or delete on audit_logs
   for each row execute function app.forbid_mutation();
 
+-- Queue-dispatch functions (O-22) --------------------------------------------
+-- The worker must claim/scan run_jobs ACROSS workspaces (it does not yet know
+-- whose job is next). That single cross-tenant step is the only thing that
+-- cannot run under a per-tenant GUC, so it is confined to these SECURITY
+-- DEFINER functions owned by app_system (BYPASSRLS). Everything the worker
+-- does AFTER a claim — executing the run, writing runs/steps/audit — happens
+-- under withTenant() with RLS fully enforced. app_server can ONLY do what
+-- these functions expose; it never gains general cross-tenant read.
+--
+-- `set search_path` is pinned so a malicious search_path cannot redirect the
+-- table references inside a definer function.
+
+create or replace function app.claim_next_run_job(p_lease_ms bigint)
+returns table (
+  job_id uuid, task_id uuid, org_id uuid, project_id uuid,
+  created_by uuid, project_role text
+)
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare
+  v run_jobs;
+begin
+  update run_jobs j
+     set status = 'running',
+         attempts = j.attempts + 1,
+         leased_until = now() + make_interval(secs => p_lease_ms / 1000.0),
+         updated_at = now()
+   where j.id = (
+     select rj.id from run_jobs rj
+      where rj.status = 'queued'
+         or (rj.status = 'running' and rj.leased_until < now())
+      order by rj.created_at
+      for update skip locked
+      limit 1
+   )
+  returning j.* into v;
+
+  if not found then
+    return;
+  end if;
+
+  job_id := v.id;
+  task_id := v.task_id;
+  org_id := v.org_id;
+  project_id := v.project_id;
+  select t.created_by into created_by from tasks t where t.id = v.task_id;
+  select pm.role into project_role
+    from project_members pm
+   where pm.project_id = v.project_id and pm.user_id = created_by
+   limit 1;
+  return next;
+end
+$$;
+
+create or replace function app.claim_run_job_for_task(
+  p_task uuid, p_org uuid, p_project uuid, p_lease_ms bigint
+)
+returns table (
+  job_id uuid, task_id uuid, org_id uuid, project_id uuid,
+  created_by uuid, project_role text
+)
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare
+  v run_jobs;
+begin
+  update run_jobs j
+     set status = 'running',
+         attempts = j.attempts + 1,
+         leased_until = now() + make_interval(secs => p_lease_ms / 1000.0),
+         updated_at = now()
+   where j.id = (
+     select rj.id from run_jobs rj
+      where rj.task_id = p_task and rj.org_id = p_org and rj.project_id = p_project
+        and (rj.status = 'queued' or (rj.status = 'running' and rj.leased_until < now()))
+      for update skip locked
+      limit 1
+   )
+  returning j.* into v;
+
+  if not found then
+    return;
+  end if;
+
+  job_id := v.id;
+  task_id := v.task_id;
+  org_id := v.org_id;
+  project_id := v.project_id;
+  select t.created_by into created_by from tasks t where t.id = v.task_id;
+  select pm.role into project_role
+    from project_members pm
+   where pm.project_id = v.project_id and pm.user_id = created_by
+   limit 1;
+  return next;
+end
+$$;
+
+create or replace function app.list_stale_run_jobs()
+returns table (
+  job_id uuid, task_id uuid, org_id uuid, project_id uuid,
+  task_status text, created_by uuid, project_role text
+)
+language sql security definer set search_path = public, pg_temp as $$
+  select j.id, j.task_id, j.org_id, j.project_id,
+         t.status, t.created_by,
+         (select pm.role from project_members pm
+           where pm.project_id = j.project_id and pm.user_id = t.created_by limit 1)
+  from run_jobs j
+  left join tasks t on t.id = j.task_id
+  where j.status = 'running'
+    and (j.leased_until < now() or j.leased_until is null)
+$$;
+
+create or replace function app.finish_run_job(p_id uuid, p_status text, p_error text)
+returns void language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  update run_jobs
+     set status = p_status::run_job_status,
+         last_error = left(p_error, 500),
+         updated_at = now()
+   where id = p_id;
+end
+$$;
+
+create or replace function app.requeue_run_job(p_id uuid)
+returns void language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  update run_jobs
+     set status = 'queued', leased_until = null, updated_at = now()
+   where id = p_id;
+end
+$$;
+
+-- Standing-work dispatch (O-22): the hourly tick scans task_schedules ACROSS
+-- workspaces to find due ones — the same cross-tenant step as the run worker.
+-- Returns only the identity tuple + author role; the tick then reads each full
+-- schedule row and does all writes UNDER withTenant(), RLS enforced.
+create or replace function app.list_due_schedules(p_now timestamptz)
+returns table (
+  schedule_id uuid, org_id uuid, project_id uuid, created_by uuid, project_role text
+)
+language sql security definer set search_path = public, pg_temp as $$
+  select s.id, s.org_id, s.project_id, s.created_by,
+         (select pm.role from project_members pm
+           where pm.project_id = s.project_id and pm.user_id = s.created_by limit 1)
+  from task_schedules s
+  where s.enabled = true and s.next_run_at <= p_now
+$$;
+
+-- Worker/queue health (O-22): the /api/health worker-liveness signal counts
+-- run_jobs across tenants. app_server has no cross-tenant read, so this fixed
+-- aggregate (no row data) is exposed as a definer function instead.
+create or replace function app.run_jobs_health()
+returns table (queued bigint, recent bigint)
+language sql security definer set search_path = public, pg_temp as $$
+  select
+    count(*) filter (where status = 'queued'),
+    count(*) filter (where updated_at > now() - interval '5 minutes')
+  from run_jobs
+$$;
+
+-- Profile adoption (Sprint 1 issue #2, now app_server-safe). The seed may hold a
+-- placeholder profile (random id) carrying the owner's memberships so their
+-- workspaces exist before first sign-up. First real sign-in arrives with the
+-- SAME email under the auth id; we must move the placeholder's references to
+-- the auth id and drop it. This is a cross-identity write — impossible under a
+-- per-user RLS context — so it lives in one fixed SECURITY DEFINER body.
+-- Returns: 'relinked' | 'conflict' | 'upserted' (the caller logs).
+create or replace function app.adopt_placeholder_profile(
+  p_auth_id uuid, p_email text, p_display text
+) returns text
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare
+  v_placeholder uuid;
+  v_self_exists boolean;
+begin
+  select id into v_placeholder from profiles where email = p_email limit 1;
+  select exists (select 1 from profiles where id = p_auth_id) into v_self_exists;
+
+  if v_placeholder is not null and v_placeholder <> p_auth_id then
+    if v_self_exists then
+      -- Two REAL histories (auth profile under an old email + another profile
+      -- holding this email). Merging implicitly is unsafe — surface it.
+      return 'conflict';
+    end if;
+    -- Temporary unique email so the real one can move over afterwards.
+    insert into profiles (id, email, display_name)
+      values (p_auth_id, 'relinking-' || p_auth_id::text || '@invalid.local', p_display);
+    update memberships          set user_id    = p_auth_id where user_id    = v_placeholder;
+    update project_members      set user_id    = p_auth_id where user_id    = v_placeholder;
+    update project_context_items set created_by = p_auth_id where created_by = v_placeholder;
+    update tasks                set created_by  = p_auth_id where created_by  = v_placeholder;
+    update approvals            set decided_by  = p_auth_id where decided_by  = v_placeholder;
+    delete from profiles where id = v_placeholder;
+    update profiles set email = p_email, updated_at = now() where id = p_auth_id;
+    return 'relinked';
+  end if;
+
+  insert into profiles (id, email, display_name) values (p_auth_id, p_email, p_display)
+    on conflict (id) do update set email = excluded.email, updated_at = now();
+  return 'upserted';
+end
+$$;
+
+-- Own the dispatch functions with app_system (BYPASSRLS) and expose them to the
+-- runtime role by EXECUTE only. create-or-replace preserves an existing owner,
+-- but reassert every run so a first-time create is corrected too.
+do $$
+declare fn text;
+begin
+  foreach fn in array array[
+    'app.claim_next_run_job(bigint)',
+    'app.claim_run_job_for_task(uuid, uuid, uuid, bigint)',
+    'app.list_stale_run_jobs()',
+    'app.finish_run_job(uuid, text, text)',
+    'app.requeue_run_job(uuid)',
+    'app.list_due_schedules(timestamptz)',
+    'app.run_jobs_health()',
+    'app.adopt_placeholder_profile(uuid, text, text)',
+    'app.is_org_member(uuid)',
+    'app.is_project_member(uuid)'
+  ]
+  loop
+    execute format('alter function %s owner to app_system', fn);
+    -- Do not let the world execute an RLS-bypassing function.
+    execute format('revoke all on function %s from public', fn);
+    execute format('grant execute on function %s to app_server', fn);
+  end loop;
+end
+$$;
+
 -- Row-Level Security ---------------------------------------------------------
 
 -- Profiles: a user sees exactly themself.
@@ -100,59 +386,44 @@ create policy profiles_self on profiles
   using (id = app.current_user_id())
   with check (id = app.current_user_id());
 
--- Organizations: visible when the current user has a membership row.
+-- Organizations: visible when the current user is a member. Keyed off
+-- membership (not app.org_id) so the pre-tenant bootstrap — "which orgs am I
+-- in?" — works with only app.user_id set. Still never exposes a non-member org.
 alter table organizations enable row level security;
 alter table organizations force row level security;
 drop policy if exists organizations_member on organizations;
 create policy organizations_member on organizations
-  using (
-    id = app.current_org_id()
-    and exists (
-      select 1 from memberships m
-      where m.org_id = organizations.id
-        and m.user_id = app.current_user_id()
-    )
-  );
+  using (app.is_org_member(id));
 
--- Memberships: rows for the current org, if you belong to it.
+-- Memberships: your own rows always (bootstrap), plus co-members of any org you
+-- belong to. Does not require app.org_id, so "resolve my memberships" works
+-- before a workspace is chosen.
 alter table memberships enable row level security;
 alter table memberships force row level security;
 drop policy if exists memberships_scope on memberships;
 create policy memberships_scope on memberships
   using (
-    org_id = app.current_org_id()
-    and exists (
-      select 1 from memberships m2
-      where m2.org_id = memberships.org_id
-        and m2.user_id = app.current_user_id()
-    )
+    user_id = app.current_user_id()
+    or app.is_org_member(org_id)
   );
 
--- Projects: org-scoped read (project pickers need sibling projects the user
--- belongs to; system.ts filters by explicit membership on top of this).
+-- Projects: visible when the current user is a member of the project. Keyed off
+-- project_members (not app.org_id) so "which workspaces am I in?" resolves at
+-- bootstrap. Tenant tables still enforce the strict (org, project) GUC match;
+-- this navigation read only ever surfaces the user's own workspaces.
 alter table projects enable row level security;
 alter table projects force row level security;
 drop policy if exists projects_scope on projects;
 create policy projects_scope on projects
-  using (
-    org_id = app.current_org_id()
-    and exists (
-      select 1 from project_members pm
-      where pm.project_id = projects.id
-        and pm.user_id = app.current_user_id()
-    )
-  );
+  using (app.is_project_member(id));
 
 alter table project_members enable row level security;
 alter table project_members force row level security;
 drop policy if exists project_members_scope on project_members;
 create policy project_members_scope on project_members
   using (
-    org_id = app.current_org_id()
-    and (
-      user_id = app.current_user_id()
-      or project_id = app.current_project_id()
-    )
+    user_id = app.current_user_id()
+    or project_id = app.current_project_id()
   );
 
 -- Tenant tables: the strict single-table predicate. -------------------------

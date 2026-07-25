@@ -187,11 +187,15 @@ requires the Fly deploy in §7.
 
 ## 9. Deferred production-launch risks (explicit)
 
-1. **DB role.** Dev connects as superuser `king`, so RLS is bypassed and only
-   the app-layer `WHERE org/project` filtering isolates tenants (tested). In
-   production the app **must** connect as `app_server`; the config layer now
-   refuses to boot otherwise, but there is no automated test that runs the suite
-   *as* `app_server` to prove the RLS policies themselves. Add one before launch.
+1. **DB role — RESOLVED (O-22, see §10).** The full suite now runs with the
+   application connection set to the non-superuser `app_server` role
+   (`npm run test:rls`), a dedicated suite proves the RLS policies block direct
+   cross-tenant reads/writes as `app_server`, and the worker/standing/health/
+   provisioning paths were made app_server-safe. Dev *still* connects as superuser
+   `king` for convenience (RLS bypassed locally); production must use `app_server`
+   and the config layer refuses to boot otherwise. Residual: the dev `app_server`
+   password is a placeholder — production sets a real one and `assertProductionSafe`
+   rejects the dev value.
 2. **Cloud Project Library.** Local-folder indexing cannot run from the cloud;
    a cloud ingestion adapter is designed but not built. Until then, indexing is
    a local-machine operation and the cloud app serves already-indexed content.
@@ -211,4 +215,125 @@ requires the Fly deploy in §7.
    drill is local-only and should be re-proven against the managed instance.
 
 These are launch-gating items, not readiness blockers — the system is
-*deployable* today; closing 1–4 is the path to *launchable*.
+*deployable* today; closing 2–4 is the path to *launchable* (1 is closed, §10).
+
+---
+
+## 10. Database roles & RLS enforcement (O-22)
+
+RLS is the **independent database-level** tenant boundary, under the app-layer
+`WHERE org/project` filters (which remain required). It is only a real net when
+the app connects as a role that cannot bypass it. This section is the contract.
+
+### 10.1 Role model (three roles)
+
+| Role | Attributes | Used by | Must NOT have |
+|---|---|---|---|
+| **Migration role** (`king` locally / managed-PG owner) | superuser/owner | `npm run db:migrate`, DDL, `rls.sql`, test fixtures | — (privileged by design; never used by the running app) |
+| **`app_server`** | `LOGIN NOSUPERUSER NOBYPASSRLS`, owns nothing | web process, worker, all background jobs, every app query | `SUPERUSER`, `BYPASSRLS`, table/schema ownership, `TRUNCATE/REFERENCES/TRIGGER` |
+| **`app_system`** | `NOLOGIN NOSUPERUSER BYPASSRLS` | owns the `SECURITY DEFINER` `app.*` dispatch functions only | login; any grant beyond what those function bodies touch |
+
+Both `app_server` and `app_system` are created idempotently by
+[`src/db/rls.sql`](src/db/rls.sql) (applied on every `npm run db:migrate`), which
+also asserts `app_server` is `NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`.
+Privilege grants are the explicit `grant …` lists there — **not** `GRANT ALL`.
+
+### 10.2 Why `app_system` exists (the cross-tenant escape hatch)
+
+Four operations are inherently cross-tenant and cannot run under a per-tenant
+GUC: the worker claiming the next job across workspaces, the standing tick
+finding due schedules, the health worker-liveness count, and adopting a seed
+placeholder profile at first sign-in. Each is confined to a fixed
+`SECURITY DEFINER` function in schema `app`, owned by `app_system` (BYPASSRLS),
+`EXECUTE`-granted to `app_server`. `app_server` gains **no general** cross-tenant
+read — only the exact, audited behavior of those bodies. Every run then executes
+through `withTenant()` with RLS fully enforced.
+
+### 10.3 Tenant-session contract
+
+- `withTenant(ctx, fn)` opens a transaction and sets transaction-local GUCs
+  `app.user_id`, `app.org_id`, `app.project_id` via `set_config(..., true)`
+  (`SET LOCAL` semantics — never persisted, so nothing leaks across the pool).
+  Policies read them through `app.current_*()`, which return `NULL` when unset →
+  **fail closed**.
+- `withUser({userId}, fn)` is the narrower pre-tenant bootstrap (login) boundary:
+  only `app.user_id` is set; navigation-table policies key off membership so a
+  user resolves exactly their own orgs/projects.
+- Both **fail closed** on a missing/malformed identifier (`tenant.context_invalid`
+  is logged) and both log `rls.rejected` on a database WITH CHECK refusal.
+- Org/project IDs are **never** taken from unvalidated browser input — the client
+  supplies a project *key*, resolved against the caller's memberships.
+
+### 10.4 Connection URLs & process config
+
+```bash
+# Migration role — DDL + migrations only (release_command). NEVER the app.
+DATABASE_MIGRATION_URL=postgresql://<owner>:<pw>@<host>:5432/king_ai_hub
+
+# Application role — web + worker + jobs. NOSUPERUSER, NOBYPASSRLS.
+DATABASE_URL=postgresql://app_server:<app_pw>@<host>:5432/king_ai_hub
+```
+
+- **Web** (`node server.js`) and **worker** (`npm run worker`) both read
+  `DATABASE_URL` (the `app_server` URL). On Fly they are the two process groups
+  in [fly.toml](fly.toml); the `release_command` migrate step is the only thing
+  that uses `DATABASE_MIGRATION_URL`.
+- Production **must** set a real `app_server` password; `assertProductionSafe`
+  (env.server.ts) refuses to boot on the dev placeholder or a superuser URL.
+
+### 10.5 Owner one-time role setup (managed Postgres)
+
+`rls.sql` creates the roles, but on managed Postgres you own the passwords:
+
+```sql
+-- as the database owner:
+alter role app_server with login password '<strong-app-password>';
+-- app_system stays NOLOGIN; no password needed.
+```
+
+Then set `DATABASE_URL` to the `app_server` URL and `DATABASE_MIGRATION_URL` to
+the owner URL, and deploy. `npm run db:migrate` (release command) applies the
+grants/policies/functions idempotently.
+
+### 10.6 Clean-environment setup + RLS verification
+
+```bash
+# Fresh database from zero, then prove RLS as app_server:
+createdb king_ai_hub
+DATABASE_MIGRATION_URL=postgresql://<owner>@<host>/king_ai_hub npm run db:migrate
+npm run test:rls        # full suite with the app connection = app_server
+```
+
+`npm run test:rls` points `DATABASE_URL` at `app_server`, keeps
+`DATABASE_MIGRATION_URL` for fixtures, and **prints the resolved `current_user`**
+so an accidental superuser run is obvious. A guard test fails if that role is a
+superuser or `BYPASSRLS`. Verified: 276/276 pass as `app_server`, including a
+dedicated suite that reads/writes across tenants and is refused by the database.
+
+### 10.7 Database-credential rotation
+
+1. Set a new password on the app role: `alter role app_server with password '<new>';`.
+2. Update the `DATABASE_URL` secret (`fly secrets set DATABASE_URL=…`) — this is a
+   separate secret from `DATABASE_MIGRATION_URL`.
+3. Roll the web + worker machines (`fly deploy` or `fly machine restart`) so they
+   reconnect with the new credential; the pool reconnects, no schema change.
+4. The migration-role password rotates the same way but is only needed at deploy
+   time. Neither rotation touches encryption keys (SECURITY.md §6) — they are
+   independent.
+
+### 10.8 Tables intentionally without a project-scoped RLS predicate
+
+All 28 public tables have RLS enabled **and** forced. The following are scoped by
+something other than `(org, project)`, by design — not exclusions from RLS:
+
+| Table | Policy basis | Why |
+|---|---|---|
+| `profiles` | `id = current_user` | per-user, not per-tenant |
+| `organizations`, `memberships` | org membership | navigation; a user sees only orgs they belong to |
+| `projects`, `project_members` | project membership | navigation; resolves at bootstrap before a workspace is chosen |
+| `departments`, `audit_logs` | `org_id = current_org` | org-scoped (an employee's dept, org-level events) |
+| `rate_limit_buckets` | open (`true`) | holds no tenant data — scope lives inside `scope_key` |
+
+"Decision candidates" are rows in `decisions` (`status='proposed'`), and "context
+manifests / provenance" are the `runs.context_manifest` column — both covered by
+their table's `_tenant` policy. There is **no** tenant table without RLS.

@@ -1,4 +1,4 @@
-import { and, asc, eq, lte, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
   CADENCES,
@@ -12,7 +12,7 @@ import { AppError, NotFoundError, ValidationError } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { type DbTx, getDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
-import { projectMembers, taskSchedules, tasks, usageEvents } from '@/db/schema';
+import { taskSchedules, tasks, usageEvents } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 import { createTask } from '@/domain/tasks/tasks';
 import { startRun } from '@/domain/tasks/runner';
@@ -304,76 +304,86 @@ export interface TickResult {
  * skipped and paused — standing work never outlives its author's authority.
  */
 export async function runDueSchedules(now = new Date()): Promise<TickResult> {
-  const db = getDb();
-  const due = await db
-    .select({
-      id: taskSchedules.id,
-      orgId: taskSchedules.orgId,
-      projectId: taskSchedules.projectId,
-      objectiveId: taskSchedules.objectiveId,
-      title: taskSchedules.title,
-      input: taskSchedules.input,
-      providerSelection: taskSchedules.providerSelection,
-      reviewEnabled: taskSchedules.reviewEnabled,
-      modelTier: taskSchedules.modelTier,
-      flagshipCategory: taskSchedules.flagshipCategory,
-      cadence: taskSchedules.cadence,
-      atHour: taskSchedules.atHour,
-      weekday: taskSchedules.weekday,
-      monthday: taskSchedules.monthday,
-      createdBy: taskSchedules.createdBy,
-    })
-    .from(taskSchedules)
-    .where(and(eq(taskSchedules.enabled, true), lte(taskSchedules.nextRunAt, now)));
+  // Cross-tenant discovery via the SECURITY DEFINER dispatcher (O-22). Under the
+  // non-superuser app_server role there is no direct cross-tenant read of
+  // task_schedules; the dispatcher returns only the identity tuple + the
+  // author's project role. Every subsequent read/write runs under withTenant().
+  const listed = await getDb().execute(sql`select * from app.list_due_schedules(${now})`);
+  const dueRows = ((listed as { rows?: unknown[] }).rows ??
+    (Array.isArray(listed) ? listed : [])) as Array<{
+    schedule_id: string;
+    org_id: string;
+    project_id: string;
+    created_by: string;
+    project_role: string | null;
+  }>;
 
-  const result: TickResult = { due: due.length, started: 0, failures: [] };
+  const result: TickResult = { due: dueRows.length, started: 0, failures: [] };
 
-  for (const schedule of due) {
-    // Authority check: the author must still be a project admin.
-    const membership = (
-      await db
-        .select({ role: projectMembers.role })
-        .from(projectMembers)
-        .where(
-          and(
-            eq(projectMembers.projectId, schedule.projectId),
-            eq(projectMembers.userId, schedule.createdBy),
-          ),
-        )
-        .limit(1)
-    )[0];
-
+  for (const row of dueRows) {
     const ctx: TenantContext = {
-      userId: schedule.createdBy,
-      orgId: schedule.orgId,
-      projectId: schedule.projectId,
+      userId: row.created_by,
+      orgId: row.org_id,
+      projectId: row.project_id,
       orgRole: 'member',
-      projectRole: membership?.role ?? 'viewer',
+      projectRole: (row.project_role as TenantContext['projectRole']) ?? 'viewer',
     };
 
-    if (membership?.role !== 'admin') {
+    // Authority check: the author must still be a project admin (role resolved
+    // across tenants by the dispatcher). Standing work never outlives it.
+    if (ctx.projectRole !== 'admin') {
       await withTenant(ctx, async (tx) => {
         await tx
           .update(taskSchedules)
           .set({ enabled: false, updatedAt: new Date() })
-          .where(eq(taskSchedules.id, schedule.id));
+          .where(eq(taskSchedules.id, row.schedule_id));
         await writeAudit(tx, ctx, {
           action: 'standing_work.paused',
           entityType: 'task_schedule',
-          entityId: schedule.id,
+          entityId: row.schedule_id,
           detail: { reason: 'author no longer a project admin' },
         });
       });
-      result.failures.push({ scheduleId: schedule.id, reason: 'author lost admin role; paused' });
+      result.failures.push({ scheduleId: row.schedule_id, reason: 'author lost admin role; paused' });
       continue;
     }
 
+    // Read the full schedule row under RLS (ctx matches, so it is visible).
+    const schedule = await withTenant(ctx, async (tx) =>
+      (
+        await tx
+          .select({
+            id: taskSchedules.id,
+            orgId: taskSchedules.orgId,
+            projectId: taskSchedules.projectId,
+            objectiveId: taskSchedules.objectiveId,
+            title: taskSchedules.title,
+            input: taskSchedules.input,
+            providerSelection: taskSchedules.providerSelection,
+            reviewEnabled: taskSchedules.reviewEnabled,
+            modelTier: taskSchedules.modelTier,
+            flagshipCategory: taskSchedules.flagshipCategory,
+            cadence: taskSchedules.cadence,
+            atHour: taskSchedules.atHour,
+            weekday: taskSchedules.weekday,
+            monthday: taskSchedules.monthday,
+            createdBy: taskSchedules.createdBy,
+          })
+          .from(taskSchedules)
+          .where(eq(taskSchedules.id, row.schedule_id))
+          .limit(1)
+      )[0],
+    );
+    if (!schedule) continue; // vanished between listing and processing
+
     // Advance the clock FIRST: a crash below runs once next window, never N.
     const nextRunAt = computeNextRunAt(schedule, now);
-    await db
-      .update(taskSchedules)
-      .set({ nextRunAt, lastRunAt: now, updatedAt: new Date() })
-      .where(eq(taskSchedules.id, schedule.id));
+    await withTenant(ctx, (tx) =>
+      tx
+        .update(taskSchedules)
+        .set({ nextRunAt, lastRunAt: now, updatedAt: new Date() })
+        .where(eq(taskSchedules.id, schedule.id)),
+    );
 
     try {
       const taskId = await withTenant(ctx, (tx) =>

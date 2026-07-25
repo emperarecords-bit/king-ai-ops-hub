@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { getDb } from '@/db/client';
+import { getSetupDb } from '@/db/client';
 import {
   agents,
   departments,
@@ -29,7 +29,7 @@ process.env.DATABASE_URL =
 
 let available = false;
 try {
-  await getDb().select({ one: profiles.id }).from(profiles).limit(1);
+  await getSetupDb().select({ one: profiles.id }).from(profiles).limit(1);
   available = true;
 } catch (err) {
   console.warn(
@@ -51,7 +51,7 @@ let existingOrgId = '';
 
 beforeAll(async () => {
   if (!available) return;
-  const db = getDb();
+  const db = getSetupDb();
   await db.insert(profiles).values([ownerUser, freshUser].map((u) => ({ ...u })));
   const org = await db
     .insert(organizations)
@@ -67,7 +67,7 @@ afterAll(async () => {
   // Provisioning writes audit rows, which pin org/project (ON DELETE
   // RESTRICT). Archive instead of delete; random slugs prevent collisions.
   if (!available) return;
-  const db = getDb();
+  const db = getSetupDb();
   await db.update(projects).set({ archived: true }).where(eq(projects.orgId, existingOrgId));
   const freshOrgs = await db
     .select({ orgId: memberships.orgId })
@@ -84,7 +84,7 @@ describe.skipIf(!available)('workspace provisioning', () => {
       name: 'ZZ Fixture Prov Workspace',
       description: 'A test venture.',
     });
-    const db = getDb();
+    const db = getSetupDb();
     const project = (
       await db
         .select()
@@ -123,7 +123,7 @@ describe.skipIf(!available)('workspace provisioning', () => {
 
   it('a brand-new user gets an org of their own, as owner, with departments', async () => {
     const { projectKey } = await createWorkspace(freshUser, { name: 'ZZ Fixture First Venture' });
-    const db = getDb();
+    const db = getSetupDb();
     const m = await db
       .select({ orgId: memberships.orgId, role: memberships.role })
       .from(memberships)

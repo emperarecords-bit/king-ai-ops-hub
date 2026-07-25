@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
-import { getDb } from '@/db/client';
+import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { memberships, organizations, profiles, projectMembers, projects, tasks } from '@/db/schema';
 import {
@@ -25,7 +25,7 @@ process.env.DATABASE_URL =
 
 let available = false;
 try {
-  await getDb().select({ one: profiles.id }).from(profiles).limit(1);
+  await getSetupDb().select({ one: profiles.id }).from(profiles).limit(1);
   available = true;
 } catch (err) {
   console.warn(`[decisions.test] SKIPPING — db not reachable: ${err instanceof Error ? err.message : err}`);
@@ -37,14 +37,14 @@ let ctxA: TenantContext;
 let ctxB: TenantContext;
 
 async function makeWorkspace(): Promise<TenantContext> {
-  const db = getDb();
+  const db = getSetupDb();
   const p = await db.insert(projects).values({ orgId, key: fixtureKey('dec'), name: 'Dec Project' }).returning({ id: projects.id });
   await db.insert(projectMembers).values({ orgId, projectId: p[0]!.id, userId, role: 'admin' });
   return { userId, orgId, projectId: p[0]!.id, orgRole: 'owner', projectRole: 'admin' };
 }
 
 async function mkTask(ctx: TenantContext, title: string): Promise<string> {
-  const t = await getDb()
+  const t = await getSetupDb()
     .insert(tasks)
     .values({ orgId, projectId: ctx.projectId, title, input: 'x', providerSelection: 'openai', status: 'completed', createdBy: userId })
     .returning({ id: tasks.id });
@@ -55,7 +55,7 @@ const noArgs = (taskId: string) => ({ currentTaskId: taskId, objectiveTaskIds: [
 
 beforeAll(async () => {
   if (!available) return;
-  const db = getDb();
+  const db = getSetupDb();
   userId = randomUUID();
   await db.insert(profiles).values({ id: userId, email: `dec-${randomUUID().slice(0, 8)}@test.local`, displayName: 'Owner' });
   const org = await db.insert(organizations).values({ name: 'Dec Org', slug: `dec-${randomUUID().slice(0, 8)}` }).returning({ id: organizations.id });
@@ -67,7 +67,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!available) return;
-  await getDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
+  await getSetupDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
 });
 
 describe.skipIf(!available)('decision memory', () => {

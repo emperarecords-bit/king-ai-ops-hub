@@ -3,7 +3,7 @@ import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
 import { type ContextManifestEntry, type TenantContext } from '@/types/domain';
-import { getDb } from '@/db/client';
+import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { agents, decisions, memberships, organizations, profiles, projectMembers, projects, runs, tasks } from '@/db/schema';
 import { acceptDecision, assembleDecisionMemory, listCandidatesForTask } from '@/domain/decisions/decisions';
@@ -22,7 +22,7 @@ process.env.DATABASE_URL =
 
 let available = false;
 try {
-  await getDb().select({ one: profiles.id }).from(profiles).limit(1);
+  await getSetupDb().select({ one: profiles.id }).from(profiles).limit(1);
   available = true;
 } catch (err) {
   console.warn(`[decision-extraction.test] SKIPPING — db not reachable: ${err instanceof Error ? err.message : err}`);
@@ -33,7 +33,7 @@ let userId = '';
 let ctx: TenantContext;
 
 async function completedRun(title: string, consolidated: string, manifest: ContextManifestEntry[] = []): Promise<{ taskId: string; runId: string }> {
-  const db = getDb();
+  const db = getSetupDb();
   const t = await db.insert(tasks).values({ orgId, projectId: ctx.projectId, title, input: 'x', providerSelection: 'openai', status: 'completed', createdBy: userId }).returning({ id: tasks.id });
   const r = await db
     .insert(runs)
@@ -46,7 +46,7 @@ let agentId = '';
 
 beforeAll(async () => {
   if (!available) return;
-  const db = getDb();
+  const db = getSetupDb();
   userId = randomUUID();
   await db.insert(profiles).values({ id: userId, email: `ext-${randomUUID().slice(0, 8)}@test.local`, displayName: 'Owner' });
   const org = await db.insert(organizations).values({ name: 'Ext Org', slug: `ext-${randomUUID().slice(0, 8)}` }).returning({ id: organizations.id });
@@ -61,7 +61,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!available) return;
-  await getDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
+  await getSetupDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
 });
 
 const fakeExtract = (json: string) => async () => json;
@@ -117,7 +117,7 @@ describe.skipIf(!available)('decision extraction orchestration', () => {
     const saved = await withTenant(ctx, (tx) => extractCandidatesForRun(tx, ctx, runId, boom));
     expect(saved).toBe(0);
 
-    const db = getDb();
+    const db = getSetupDb();
     const run = (await db.select().from(runs).where(eq(runs.id, runId)).limit(1))[0]!;
     expect(run.status).toBe('completed'); // task/run untouched
     expect(run.consolidatedResult).toContain('canon rule established');
@@ -142,7 +142,7 @@ describe.skipIf(!available)('decision extraction orchestration', () => {
         { title: 'Visual design frozen', summary: 'Frozen.', decisionType: 'creative', supportingRefs: [], confidence: 'high' },
       ] }))),
     );
-    const db = getDb();
+    const db = getSetupDb();
     const rows = await db.select({ status: decisions.status, authorLabel: decisions.authorLabel }).from(decisions).where(and(eq(decisions.originatingTaskId, taskId)));
     expect(rows.every((r) => r.status === 'proposed')).toBe(true);
     expect(rows[0]!.authorLabel).toBe('AI suggestion');

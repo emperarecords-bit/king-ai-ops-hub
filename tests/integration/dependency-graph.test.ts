@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
 import { ConflictError } from '@/lib/errors';
-import { getDb } from '@/db/client';
+import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { memberships, organizations, profiles, projectMembers, projects, tasks } from '@/db/schema';
 import { addDependency, buildTaskGraph } from '@/domain/dependencies/dependencies';
@@ -23,7 +23,7 @@ process.env.DATABASE_URL =
 
 let available = false;
 try {
-  await getDb().select({ one: profiles.id }).from(profiles).limit(1);
+  await getSetupDb().select({ one: profiles.id }).from(profiles).limit(1);
   available = true;
 } catch (err) {
   console.warn(`[dependency-graph.test] SKIPPING — db not reachable: ${err instanceof Error ? err.message : err}`);
@@ -35,7 +35,7 @@ let ctxA: TenantContext;
 let ctxB: TenantContext;
 
 async function makeWorkspace(): Promise<TenantContext> {
-  const db = getDb();
+  const db = getSetupDb();
   const p = await db
     .insert(projects)
     .values({ orgId, key: fixtureKey('dep'), name: 'Dep Project' })
@@ -45,7 +45,7 @@ async function makeWorkspace(): Promise<TenantContext> {
 }
 
 async function mkTask(ctx: TenantContext, title: string, status = 'pending'): Promise<string> {
-  const db = getDb();
+  const db = getSetupDb();
   const t = await db
     .insert(tasks)
     .values({
@@ -63,7 +63,7 @@ async function mkTask(ctx: TenantContext, title: string, status = 'pending'): Pr
 
 beforeAll(async () => {
   if (!available) return;
-  const db = getDb();
+  const db = getSetupDb();
   userId = randomUUID();
   await db.insert(profiles).values({ id: userId, email: `dep-${randomUUID().slice(0, 8)}@test.local`, displayName: 'Owner' });
   const org = await db.insert(organizations).values({ name: 'Dep Org', slug: `dep-${randomUUID().slice(0, 8)}` }).returning({ id: organizations.id });
@@ -75,7 +75,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!available) return;
-  await getDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
+  await getSetupDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
 });
 
 describe.skipIf(!available)('dependency graph', () => {
@@ -134,7 +134,7 @@ describe.skipIf(!available)('dependency graph', () => {
     ).rejects.toBeInstanceOf(ConflictError);
 
     // ...so to TEST cycle *detection/reporting*, insert the back-edge directly.
-    const db = getDb();
+    const db = getSetupDb();
     const { taskDependencies } = await import('@/db/schema');
     await db.insert(taskDependencies).values({ orgId, projectId: ctxA.projectId, prerequisiteTaskId: c, dependentTaskId: a });
 

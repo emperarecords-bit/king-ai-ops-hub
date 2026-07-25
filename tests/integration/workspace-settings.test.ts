@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
 import { AppError, ConflictError } from '@/lib/errors';
-import { getDb } from '@/db/client';
+import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import {
   auditLogs,
@@ -37,7 +37,7 @@ process.env.DATABASE_URL =
 
 let available = false;
 try {
-  await getDb().select({ one: profiles.id }).from(profiles).limit(1);
+  await getSetupDb().select({ one: profiles.id }).from(profiles).limit(1);
   available = true;
 } catch (err) {
   console.warn(
@@ -55,7 +55,7 @@ let projectKey = '';
 
 beforeAll(async () => {
   if (!available) return;
-  const db = getDb();
+  const db = getSetupDb();
   await db.insert(profiles).values([
     { id: adminId, email: `wss-a-${randomUUID().slice(0, 8)}@test.local`, displayName: 'Admin' },
     { id: memberId, email: `wss-m-${randomUUID().slice(0, 8)}@test.local`, displayName: 'Member' },
@@ -88,7 +88,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!available) return;
-  await getDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
+  await getSetupDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
 });
 
 describe.skipIf(!available)('workspace settings', () => {
@@ -132,7 +132,7 @@ describe.skipIf(!available)('workspace settings', () => {
         ...({ key: 'attacker-chosen-key' } as Record<string, unknown>),
       }),
     );
-    const row = await getDb()
+    const row = await getSetupDb()
       .select({ key: projects.key })
       .from(projects)
       .where(eq(projects.id, projectId))
@@ -141,7 +141,7 @@ describe.skipIf(!available)('workspace settings', () => {
   });
 
   it('records the budget change with both values', async () => {
-    const entries = await getDb()
+    const entries = await getSetupDb()
       .select({ action: auditLogs.action, detail: auditLogs.detail })
       .from(auditLogs)
       .where(
@@ -171,7 +171,7 @@ describe.skipIf(!available)('workspace settings', () => {
   it('archiving preserves the row and its history, and is reversible', async () => {
     await withTenant(adminCtx, (tx) => setWorkspaceArchived(tx, adminCtx, true));
 
-    const row = await getDb()
+    const row = await getSetupDb()
       .select({ archived: projects.archived, name: projects.name })
       .from(projects)
       .where(eq(projects.id, projectId))
@@ -179,7 +179,7 @@ describe.skipIf(!available)('workspace settings', () => {
     expect(row).toHaveLength(1); // still there — archive is not delete
     expect(row[0]!.archived).toBe(true);
 
-    const audits = await getDb()
+    const audits = await getSetupDb()
       .select({ action: auditLogs.action })
       .from(auditLogs)
       .where(and(eq(auditLogs.projectId, projectId), eq(auditLogs.action, 'workspace.archived')));

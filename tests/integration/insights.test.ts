@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
-import { getDb } from '@/db/client';
+import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import {
   agents,
@@ -36,7 +36,7 @@ process.env.DATABASE_URL =
 
 let available = false;
 try {
-  await getDb().select({ one: profiles.id }).from(profiles).limit(1);
+  await getSetupDb().select({ one: profiles.id }).from(profiles).limit(1);
   available = true;
 } catch (err) {
   console.warn(
@@ -52,7 +52,7 @@ let agentId = '';
 
 beforeAll(async () => {
   if (!available) return;
-  const db = getDb();
+  const db = getSetupDb();
   await db.insert(profiles).values({
     id: userId,
     email: `insight-${randomUUID().slice(0, 8)}@test.local`,
@@ -89,7 +89,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!available) return;
-  await getDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
+  await getSetupDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
 });
 
 describe.skipIf(!available)('management insights', () => {
@@ -111,7 +111,7 @@ describe.skipIf(!available)('management insights', () => {
     await withTenant(ctx, (tx) => setObjectiveStatus(tx, ctx, objectiveId, 'active'));
 
     // Two tasks, real spend, zero criteria closed.
-    const db = getDb();
+    const db = getSetupDb();
     for (let i = 0; i < 2; i += 1) {
       const task = await db
         .insert(tasks)
@@ -157,7 +157,7 @@ describe.skipIf(!available)('management insights', () => {
   });
 
   it('identifies when the owner is the blocker — decision state joined to objective progress', async () => {
-    const db = getDb();
+    const db = getSetupDb();
     const objectiveId = await withTenant(ctx, (tx) =>
       createObjective(tx, ctx, {
         title: 'Blocked objective',
