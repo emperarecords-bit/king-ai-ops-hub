@@ -2,10 +2,12 @@ import { notFound } from 'next/navigation';
 import { CONTEXT_SOURCES, type ContextSource } from '@/types/domain';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
-import { getTask, listMessages, listRuns, listRunSteps } from '@/domain/tasks/tasks';
+import { getTask, listMessages, listRuns, listRunSteps, listTasks } from '@/domain/tasks/tasks';
+import { listDirectDependencies } from '@/domain/dependencies/dependencies';
 import { NotFoundError } from '@/lib/errors';
 import { Card, ModelText, PageHeader, ProviderBadge, StatusBadge } from '@/components/ui';
 import { CancelTaskButton, RunButton } from './run-button';
+import { AddDependencyForm, RemoveDependencyButton } from './dependency-forms';
 
 const ROLE_LABEL: Record<string, string> = {
   user: 'You',
@@ -25,6 +27,7 @@ const CONTEXT_SOURCE_LABEL: Record<ContextSource, string> = {
   blocker: 'Blockers',
   recent_outcome: 'Recent outcomes',
   pending_review: 'Pending reviews',
+  task_graph: 'Task graph',
 };
 
 const SEVERITY_STYLE: Record<string, string> = {
@@ -52,14 +55,23 @@ export default async function TaskDetailPage({
       const runs = await listRuns(tx, ctx, taskId);
       const latestRun = runs[0] ?? null;
       const steps = latestRun ? await listRunSteps(tx, ctx, latestRun.id) : [];
-      return { task, msgs, runs, latestRun, steps };
+      const deps = await listDirectDependencies(tx, ctx, taskId);
+      const allTasks = await listTasks(tx, ctx, 100);
+      return { task, msgs, runs, latestRun, steps, deps, allTasks };
     });
   } catch (err) {
     if (err instanceof NotFoundError) notFound();
     throw err;
   }
 
-  const { task, msgs, latestRun, steps } = data;
+  const { task, msgs, latestRun, steps, deps, allTasks } = data;
+  // Candidates for a new prerequisite: any other task in the workspace not
+  // already a direct prerequisite (the domain layer still rejects cycles).
+  const existingPrereqIds = new Set(deps.prerequisites.map((p) => p.prerequisiteTaskId));
+  const depCandidates = allTasks
+    .filter((t) => t.id !== taskId && !existingPrereqIds.has(t.id))
+    .map((t) => ({ id: t.id, title: t.title }));
+  const isAdmin = ctx.projectRole === 'admin';
   const canRun = task.status === 'pending' || task.status === 'failed';
   const reviewStep = steps.find((s) => s.kind === 'review' && s.verdictDetail != null);
   const reviewIssues = reviewStep?.verdictDetail?.issues ?? [];
@@ -121,6 +133,14 @@ export default async function TaskDetailPage({
                       <span className="font-mono text-xs">{e.label}</span>
                       {e.detail ? (
                         <span className="text-xs text-[var(--muted)]">{e.detail}</span>
+                      ) : null}
+                      {e.graph ? (
+                        <span
+                          className={`text-xs ${e.graph.cycle ? 'text-[var(--danger)]' : 'text-[var(--muted)]'}`}
+                        >
+                          {e.graph.nodeCount} nodes · {e.graph.edgeCount} edges · root “
+                          {e.graph.rootTask}” · {e.graph.cycle ? 'cycle detected' : 'no cycle'}
+                        </span>
                       ) : null}
                       {e.freshness ? (
                         <span className="text-xs text-[var(--muted)]">
@@ -214,6 +234,55 @@ export default async function TaskDetailPage({
           </ol>
         </Card>
       ) : null}
+
+      <Card title="Dependencies" className="mb-6">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">
+              Blocked by (prerequisites)
+            </h3>
+            {deps.prerequisites.length === 0 ? (
+              <p className="text-sm text-[var(--muted)]">None.</p>
+            ) : (
+              <ul className="space-y-1">
+                {deps.prerequisites.map((p) => (
+                  <li key={p.prerequisiteTaskId} className="flex items-center gap-2 text-sm">
+                    <StatusBadge status={p.prerequisiteStatus} />
+                    <span>{p.prerequisiteTitle}</span>
+                    {isAdmin ? (
+                      <RemoveDependencyButton
+                        projectKey={projectKey}
+                        taskId={task.id}
+                        prerequisiteTaskId={p.prerequisiteTaskId}
+                      />
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div>
+            <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">
+              Unlocks (dependents)
+            </h3>
+            {deps.dependents.length === 0 ? (
+              <p className="text-sm text-[var(--muted)]">None.</p>
+            ) : (
+              <ul className="space-y-1">
+                {deps.dependents.map((d) => (
+                  <li key={d.dependentTaskId} className="flex items-center gap-2 text-sm">
+                    <StatusBadge status={d.dependentStatus} />
+                    <span>{d.dependentTitle}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+        {isAdmin ? (
+          <AddDependencyForm projectKey={projectKey} taskId={task.id} candidates={depCandidates} />
+        ) : null}
+      </Card>
 
       <Card title="Conversation">
         {msgs.length === 0 ? (

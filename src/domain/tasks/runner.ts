@@ -31,6 +31,7 @@ import {
   selectProductionStatus,
 } from '@/domain/documents/documents';
 import { assembleProjectState } from '@/domain/state/project-state';
+import { assembleTaskGraph } from '@/domain/dependencies/graph-context';
 import { compareFreshness, parseEffectiveDate } from '@/domain/context/freshness';
 
 /** Reduces full Freshness to the compact shape persisted in the manifest. */
@@ -176,6 +177,10 @@ export async function startRun(
     // these are Hub records, not documents, so they cannot collide with the
     // document sources above.
     const projectState = await assembleProjectState(tx, ctx, task.objectiveId, taskId);
+    // Task Dependency Graph (O-18): bounded neighborhood of explicit, recorded
+    // dependencies for THIS task — prerequisites, dependents, blockers, what it
+    // unlocks, cycles. Level-1 Hub state; tenant-scoped by the same I1 guard.
+    const taskGraph = await assembleTaskGraph(tx, ctx, taskId);
 
     // Document freshness (O-17): indexed-file mtime (medium confidence) plus an
     // explicit parsed "as of" date when present (high confidence). Never infers
@@ -206,6 +211,15 @@ export async function startRun(
               authority: AUTHORITY.HUB_STATE,
               kind: 'Current Hub operational state',
               timestamp: nowIso.slice(0, 16).replace('T', ' ') + ' UTC',
+            },
+          ]
+        : []),
+      ...(taskGraph.contextItem
+        ? [
+            {
+              ...taskGraph.contextItem,
+              authority: AUTHORITY.HUB_STATE,
+              kind: 'Task dependency graph',
             },
           ]
         : []),
@@ -291,6 +305,8 @@ export async function startRun(
       // blocker / recent_outcome / pending_review) are already shaped, incl.
       // freshness on objective_progress.
       ...projectState.manifest,
+      // Task-graph manifest entry (O-18) carries node/edge/root/cycle metadata.
+      ...taskGraph.manifest,
     ];
 
     const runInserted = await tx

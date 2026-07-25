@@ -126,8 +126,20 @@ export const CONTEXT_SOURCES = [
   'blocker',
   'recent_outcome',
   'pending_review',
+  // Task Dependency Graph (O-18): workflow structure from Hub records.
+  'task_graph',
 ] as const;
 export type ContextSource = (typeof CONTEXT_SOURCES)[number];
+
+/**
+ * Task dependency edge kinds (O-18). Both are FORWARD edges meaning the
+ * prerequisite must complete before the dependent — `blocks` is the harder
+ * phrasing, `prerequisite` the softer, stored identically as
+ * prerequisite → dependent. "blocked by" and "successor" are the reverse
+ * reading of the same edge, derived, never stored separately.
+ */
+export const DEPENDENCY_KINDS = ['blocks', 'prerequisite'] as const;
+export type DependencyKind = (typeof DEPENDENCY_KINDS)[number];
 
 export interface ContextManifestEntry {
   source: ContextSource;
@@ -140,6 +152,13 @@ export interface ContextManifestEntry {
     sourceUpdatedAt?: string;
     contentEffectiveAt?: string;
     confidence: FreshnessConfidence;
+  };
+  /** Task-graph metadata (O-18), persisted for the panel. */
+  graph?: {
+    nodeCount: number;
+    edgeCount: number;
+    rootTask: string;
+    cycle: boolean;
   };
 }
 

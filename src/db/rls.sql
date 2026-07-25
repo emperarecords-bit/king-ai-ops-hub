@@ -51,7 +51,7 @@ grant select, insert, update on
   agents, departments, project_context_items, integration_secrets,
   tasks, runs, run_steps, artifacts, approvals,
   objectives, milestones, knowledge_items, task_schedules,
-  documents, document_chunks,
+  documents, document_chunks, task_dependencies,
   usage_events, spend_limits, rate_limit_buckets, profiles
 to app_server;
 
@@ -59,7 +59,7 @@ to app_server;
 -- both need DELETE. The `search` tsvector is generated, never written directly.
 grant delete on
   rate_limit_buckets, integration_secrets, project_context_items,
-  documents, document_chunks
+  documents, document_chunks, task_dependencies
 to app_server;
 
 -- Append-only tables: INSERT and SELECT only. No UPDATE grant at all.
@@ -166,7 +166,7 @@ begin
     'tasks', 'runs', 'run_steps', 'messages',
     'artifacts', 'approvals', 'usage_events', 'spend_limits',
     'objectives', 'milestones', 'knowledge_items', 'task_schedules',
-    'documents', 'document_chunks'
+    'documents', 'document_chunks', 'task_dependencies'
   ]
   loop
     execute format('alter table %I enable row level security', t);

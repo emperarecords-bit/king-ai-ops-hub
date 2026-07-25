@@ -22,6 +22,7 @@ import {
   approvalStatusEnum,
   artifactKindEnum,
   cadenceEnum,
+  dependencyKindEnum,
   documentKindEnum,
   documentStatusEnum,
   contextItemStatusEnum,
@@ -514,6 +515,40 @@ export const tasks = pgTable(
     index('tasks_org_project_idx').on(t.orgId, t.projectId),
     index('tasks_project_status_idx').on(t.projectId, t.status),
     index('tasks_project_created_idx').on(t.projectId, t.createdAt),
+  ],
+);
+
+/**
+ * Task dependencies (O-18): explicit workflow structure, NOT inferred. One
+ * canonical directed edge per row — the prerequisite must complete before the
+ * dependent. "blocked by" / "successor" are the reverse reading, derived, never
+ * stored. Both endpoints carry org_id + project_id (D-008) and the pair is
+ * unique; a self-edge is rejected by a CHECK added in the migration.
+ */
+export const taskDependencies = pgTable(
+  'task_dependencies',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    prerequisiteTaskId: uuid('prerequisite_task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    dependentTaskId: uuid('dependent_task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    kind: dependencyKindEnum('kind').notNull().default('prerequisite'),
+    createdBy: uuid('created_by').references(() => profiles.id, { onDelete: 'set null' }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('task_dependencies_edge_uq').on(t.projectId, t.prerequisiteTaskId, t.dependentTaskId),
+    index('task_dependencies_dependent_idx').on(t.projectId, t.dependentTaskId),
+    index('task_dependencies_prerequisite_idx').on(t.projectId, t.prerequisiteTaskId),
   ],
 );
 

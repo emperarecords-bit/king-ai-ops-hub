@@ -422,3 +422,39 @@ field-specific uncertainty. The freshness axis converted the prior
 framing-level and verification-level hedging into concrete, dated statements.
 
 **Status: freshness signals shipped; the O-16 → O-17 hedging arc is closed.**
+
+---
+
+### O-18 · RESOLVED — Task dependency graph (workflow structure)
+
+**Goal.** Give employees dependency awareness, not just status: prerequisites,
+dependents, blockers, what completion unlocks — from Hub records, never
+inferred.
+
+**Delivered.** A `task_dependencies` table (canonical prerequisite→dependent
+edge, self-edge CHECK, RLS, unique pair); bounded neighborhood traversal
+(depth 2 / 15 nodes) with Kahn's-algorithm cycle detection that reports rather
+than recurses; a Level-1 Hub context source stating blocked-vs-independent-vs-
+no-data explicitly; manifest `{nodeCount, edgeCount, rootTask, cycle}`; a
+Dependencies management card on task detail (admins add/remove; cycles refused
+at add time); panel extension. No change to retrieval, assembly, authority,
+freshness, or providers.
+
+**Acceptance — all four pass:**
+- T1 chain A→B→C (integration): B reports prerequisite A, unlocks C.
+- T2 parallel A→{B,C} (integration): C identified as parallel work, not a
+  blocker of B.
+- T3 cycle A→B→C→A (integration): detected, traversal bounded, no chain
+  reported; `addDependency` also refuses the cycle-closing edge.
+- T4 live KingdomCore (both providers): with a real scripts→dialogue→audio
+  chain, the model recommended the three actions **in dependency order**
+  (approve scripts first, "downstream work should remain secondary"), refusing
+  to elevate blocked work. Graph metadata `{nodeCount:4, edgeCount:5,
+  cycle:false}` persisted.
+
+**Residual hedging:** the live response added "confidence moderate… sources do
+not expose the full underlying records" — mild, about not seeing every record,
+not about the graph; the ordering itself was stated confidently. Not pursued
+(out of scope).
+
+**Status: dependency awareness shipped.**

@@ -41,6 +41,36 @@ never inferred from documents.
 | 8 | **Blockers** | if any | `selectRelatedTasks` | `failed` (with error) + `awaiting_approval` (blocked on a human) tasks, bounded to 5. |
 | 9 | **Recent outcomes** | if any | `selectRelatedTasks` | `completed` tasks with a **summarized** result (240 chars, never the full transcript), bounded to 5. |
 | 10 | **Pending reviews** | if any | `selectPendingReviews` | `pending` rows in `approvals`, bounded to 5. |
+| 11 | **Task dependency graph** | if any edges | `assembleTaskGraph` | Bounded neighborhood of explicit task dependencies (O-18). |
+
+### Task dependency graph (O-18)
+
+Explicit, Hub-recorded workflow *structure* — never inferred. A single canonical
+directed edge per row in `task_dependencies` (prerequisite → dependent); "blocked
+by" / "successor" are the reverse reading, derived. Both endpoints carry
+org_id + project_id (D-008), the pair is unique, and a self-edge is rejected by a
+CHECK constraint.
+
+`buildTaskGraph` ([src/domain/dependencies/dependencies.ts](src/domain/dependencies/dependencies.ts))
+walks the neighborhood of the current task — direct prerequisites, direct
+dependents, and siblings sharing a prerequisite — bounded to **depth 2 / 15
+nodes**, and derives:
+
+- **blockers** — incomplete prerequisites (task is BLOCKED until they finish);
+- **unlocked on completion** — dependents whose only incomplete prerequisite is
+  this task;
+- **siblings** — tasks sharing a prerequisite (parallel work, *not* blocking);
+- **critical incomplete chain** — longest chain of incomplete prerequisites;
+- **cycle** — detected via Kahn's algorithm and *reported*, never recursed.
+  `addDependency` also refuses an edge that would create a cycle (bounded
+  forward-reachability check).
+
+The graph is injected as a Level-1 Hub context block that states the
+distinctions explicitly — "blocked because prerequisite incomplete" vs
+"independent work" vs "no dependency information available" — and instructs the
+model to respect order (never recommend work whose prerequisites are
+incomplete). The manifest carries `{ nodeCount, edgeCount, rootTask, cycle }`,
+shown in the Context used panel and persisted in `context_manifest`.
 
 ### Operational-state model (O-15)
 
