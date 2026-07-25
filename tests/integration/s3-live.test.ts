@@ -62,10 +62,14 @@ try {
 }
 let s3Available = false;
 try {
-  const res = await fetch(`${S3.endpoint}/minio/health/live`, { signal: AbortSignal.timeout(2000) });
-  s3Available = res.ok;
+  // Provider-generic reachability. MinIO exposes /minio/health/live, but managed
+  // S3 (Tigris/R2/AWS) does not — so probe the bucket itself: any HTTP response
+  // (a private bucket answers an unsigned HEAD with 403) proves the endpoint is
+  // up. Network failure → catch → skip.
+  const res = await fetch(`${S3.endpoint}/${S3.bucket}`, { method: 'HEAD', signal: AbortSignal.timeout(3000) });
+  s3Available = res.status > 0;
 } catch {
-  console.warn('[s3-live.test] SKIPPING — MinIO/S3 not reachable at ' + S3.endpoint);
+  console.warn('[s3-live.test] SKIPPING — S3 endpoint not reachable at ' + S3.endpoint);
 }
 const available = dbAvailable && s3Available;
 
