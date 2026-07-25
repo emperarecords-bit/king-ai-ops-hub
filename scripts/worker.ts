@@ -5,6 +5,11 @@ loadEnv({ path: '.env.local' });
 loadEnv();
 
 import { claimNextJob, reconcileStaleJobs, runClaimedJob } from '../src/domain/jobs/jobs';
+import {
+  claimNextDocumentJob,
+  reconcileStaleDocumentJobs,
+  runClaimedDocumentJob,
+} from '../src/domain/documents/document-jobs';
 
 /**
  * Durable run worker (O-21). The process that actually executes queued runs in
@@ -22,10 +27,13 @@ let stopping = false;
 
 async function loop(): Promise<void> {
   const recon = await reconcileStaleJobs();
-  if (recon.requeued || recon.recovered) {
-    console.log(`worker: reconciled ${recon.requeued} requeued, ${recon.recovered} recovered`);
+  const docRecon = await reconcileStaleDocumentJobs();
+  if (recon.requeued || recon.recovered || docRecon.requeued) {
+    console.log(
+      `worker: reconciled ${recon.requeued} run requeued, ${recon.recovered} recovered, ${docRecon.requeued} doc requeued`,
+    );
   }
-  console.log('worker: ready, polling for jobs');
+  console.log('worker: ready, polling for run + document jobs');
 
   while (!stopping) {
     let claimed = false;
@@ -33,9 +41,17 @@ async function loop(): Promise<void> {
       const job = await claimNextJob();
       if (job) {
         claimed = true;
-        console.log(`worker: claimed job ${job.jobId} (task ${job.taskId})`);
+        console.log(`worker: claimed run job ${job.jobId} (task ${job.taskId})`);
         const outcome = await runClaimedJob(job);
-        console.log(`worker: job ${job.jobId} → ${outcome?.status ?? 'recovered/failed'}`);
+        console.log(`worker: run job ${job.jobId} → ${outcome?.status ?? 'recovered/failed'}`);
+      }
+      // Document-index jobs share the same worker; claim one per idle pass too.
+      const docJob = await claimNextDocumentJob();
+      if (docJob) {
+        claimed = true;
+        console.log(`worker: claimed document job ${docJob.jobId} (document ${docJob.documentId})`);
+        await runClaimedDocumentJob(docJob);
+        console.log(`worker: document job ${docJob.jobId} → done`);
       }
     } catch (err) {
       console.error('worker: loop error', err instanceof Error ? err.message : err);

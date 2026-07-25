@@ -55,6 +55,16 @@ function assertProductionSafe(env: ServerEnv): void {
   if (/:(king|postgres|app_server_dev_only)@/.test(env.DATABASE_URL)) {
     offenders.push('DATABASE_URL (must use the non-superuser app_server role in production)');
   }
+  // Cloud upload (O-23): if enabled, the object-storage config must be complete
+  // and non-placeholder, or the Library would appear to work and lose files.
+  if ((process.env.STORAGE_DRIVER ?? '') === 's3') {
+    for (const name of ['S3_ENDPOINT', 'S3_REGION', 'S3_BUCKET', 'S3_ACCESS_KEY_ID', 'S3_SECRET_ACCESS_KEY']) {
+      const value = process.env[name] ?? '';
+      if (value.trim() === '' || PLACEHOLDER_PATTERNS.some((re) => re.test(value))) {
+        offenders.push(`${name} (required when STORAGE_DRIVER=s3)`);
+      }
+    }
+  }
   if (offenders.length > 0) {
     throw new Error(
       `Refusing to start in production with placeholder/insecure config: ${offenders.join(', ')}`,

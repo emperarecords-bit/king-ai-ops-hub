@@ -180,6 +180,34 @@ task.
 `npm audit` in the quality gate, and a lockfile committed. Provider SDKs are the
 only dependencies permitted to make outbound network calls.
 
+### T8 — Uploaded-file abuse & cross-tenant object access (A1, A3, A4) — O-23
+
+*Attack:* a user uploads an executable/binary disguised as `.md`, a huge file,
+a traversal filename, or crafts an object key to read another workspace's files.
+
+*Controls:*
+- **Text only, verified by bytes.** MIME allowlist (Markdown/plain-text);
+  extension → kind; strict UTF-8 decode and a NUL/control-byte heuristic reject
+  binary-as-text; PDF/DOCX are recorded `unsupported` and never indexed. Uploaded
+  content is never executed and never rendered as trusted markup; indexed text
+  stays wrapped `<untrusted-context>` in prompts (T2 unchanged).
+- **Filenames normalized** to a basename (no directory component survives),
+  traversal/degenerate names rejected, length-capped.
+- **Size + batch ceilings** (`MAX_UPLOAD_BYTES`, `MAX_UPLOAD_BATCH`), measured
+  server-side; checksum (sha256) of stored bytes.
+- **Tenant-partitioned object keys** (`org/<orgId>/project/<projectId>/…`),
+  server-generated only — never from client input. `keyBelongsToTenant` re-checks
+  the prefix before any GET/DELETE; a document's ownership is validated
+  server-side (RLS + `WHERE org/project`) before replace/archive/retry.
+- **No public buckets, no presigned/guessable URLs.** All object access is
+  server-mediated with server-only credentials; the browser never sees them.
+- **Isolation proven at both layers** — `document-cloud-isolation.test.ts` shows
+  Workspace A (as `app_server`) can neither read/insert/update B's document rows
+  nor dereference a B object key.
+- **Fail-safe pipeline:** a failed upload leaves no active document; a missing
+  object → `source_unavailable` (provenance retained, never a silent delete); one
+  bad file never fails a batch. Indexing needs no AI provider.
+
 ## 4. Actions that always require human approval
 
 Defined once, in `src/domain/approvals/policy.ts`, as a closed enum:

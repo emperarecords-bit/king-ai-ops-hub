@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { extname, join, relative, sep } from 'node:path';
 import { and, desc, eq, sql } from 'drizzle-orm';
-import { type DocumentKind, type TenantContext } from '@/types/domain';
+import { type DocumentKind, type DocumentSource, type TenantContext } from '@/types/domain';
 import { AppError, TenantViolationError } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { type DbTx } from '@/db/client';
@@ -294,6 +294,8 @@ export interface RetrievedChunk {
   rank: number;
   /** Indexed file modification time (O-17 freshness). Additive; no effect on ranking. */
   indexedAt: Date | null;
+  /** Source adapter for provenance (O-23). Retrieval is identical regardless. */
+  source: DocumentSource;
 }
 
 const WORD_NUMBERS: Record<string, number> = {
@@ -422,6 +424,7 @@ export async function retrieveRelevant(
       chunkIndex: documentChunks.chunkIndex,
       content: documentChunks.content,
       indexedAt: documents.indexedAt,
+      source: documents.source,
       orgId: documentChunks.orgId,
       projectId: documentChunks.projectId,
       rank: sql<number>`ts_rank(document_chunks.search, ${q})`,
@@ -462,6 +465,7 @@ export async function retrieveRelevant(
     content: r.content,
     rank: Number(r.rank),
     indexedAt: r.indexedAt,
+    source: r.source,
   }));
 }
 
@@ -531,6 +535,7 @@ export async function selectCoreReferences(
       chunkIndex: documentChunks.chunkIndex,
       content: documentChunks.content,
       indexedAt: documents.indexedAt,
+      source: documents.source,
       orgId: documentChunks.orgId,
       projectId: documentChunks.projectId,
     })
@@ -563,6 +568,7 @@ export async function selectCoreReferences(
       content: r.content,
       rank: 0,
       indexedAt: r.indexedAt,
+      source: r.source,
       coreType: coreTypeOf(r.relativePath),
     }));
 }
@@ -583,6 +589,7 @@ export async function selectProductionStatus(
       chunkIndex: documentChunks.chunkIndex,
       content: documentChunks.content,
       indexedAt: documents.indexedAt,
+      source: documents.source,
       orgId: documentChunks.orgId,
       projectId: documentChunks.projectId,
     })
@@ -610,6 +617,7 @@ export async function selectProductionStatus(
     content: r.content,
     rank: 0,
     indexedAt: r.indexedAt,
+    source: r.source,
   };
 }
 
@@ -621,6 +629,8 @@ export interface DocumentListRow {
   chunkCount: number;
   sizeBytes: number;
   indexedAt: Date | null;
+  source: DocumentSource;
+  errorMessage: string | null;
 }
 
 export async function listDocuments(tx: DbTx, ctx: TenantContext): Promise<DocumentListRow[]> {
@@ -633,6 +643,8 @@ export async function listDocuments(tx: DbTx, ctx: TenantContext): Promise<Docum
       chunkCount: documents.chunkCount,
       sizeBytes: documents.sizeBytes,
       indexedAt: documents.indexedAt,
+      source: documents.source,
+      errorMessage: documents.errorMessage,
     })
     .from(documents)
     .where(and(eq(documents.projectId, ctx.projectId), eq(documents.orgId, ctx.orgId)))

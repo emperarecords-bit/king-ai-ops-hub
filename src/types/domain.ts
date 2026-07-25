@@ -98,14 +98,40 @@ export type Cadence = (typeof CADENCES)[number];
 export const DOCUMENT_KINDS = ['markdown', 'text', 'pdf', 'docx'] as const;
 export type DocumentKind = (typeof DOCUMENT_KINDS)[number];
 
-export const DOCUMENT_STATUSES = ['active', 'archived', 'failed'] as const;
+/**
+ * Where a document's source lives (O-23). `local_folder` is the original
+ * on-disk adapter (D-020); `cloud_upload` is a file uploaded into managed object
+ * storage so the Library works when the user's machine is offline. Retrieval is
+ * identical for both — a run can only tell them apart via this provenance tag.
+ */
+export const DOCUMENT_SOURCES = ['local_folder', 'cloud_upload'] as const;
+export type DocumentSource = (typeof DOCUMENT_SOURCES)[number];
+
+/**
+ * Full document lifecycle (O-23). Original states: active/archived/failed. Cloud
+ * upload adds the pre-active pipeline (uploaded → queued → indexing → active),
+ * `unsupported` (a recognized-but-not-indexable type, never enters retrieval),
+ * and `source_unavailable` (the backing object/folder is gone, but provenance is
+ * retained — never silently deleted).
+ */
+export const DOCUMENT_STATUSES = [
+  'active', 'archived', 'failed',
+  'uploaded', 'queued', 'indexing', 'unsupported', 'source_unavailable',
+] as const;
 export type DocumentStatus = (typeof DOCUMENT_STATUSES)[number];
+
+/** Durable document-indexing job states (O-23), same shape as run jobs. */
+export const DOCUMENT_JOB_STATUSES = ['queued', 'running', 'done', 'failed'] as const;
+export type DocumentJobStatus = (typeof DOCUMENT_JOB_STATUSES)[number];
 
 /** Provenance: which document chunks fed a given run (transparency, D-020). */
 export interface RetrievedDocRef {
   relativePath: string;
   chunkIndex: number;
   rank: number;
+  /** Source adapter for the chunk's document (O-23). Optional so historical
+   *  manifests without it still parse; absent ⇒ treat as local_folder. */
+  source?: DocumentSource;
 }
 
 /**

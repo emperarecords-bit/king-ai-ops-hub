@@ -95,7 +95,7 @@ grant select, insert, update on
   agents, departments, project_context_items, integration_secrets,
   tasks, runs, run_steps, artifacts, approvals,
   objectives, milestones, knowledge_items, task_schedules,
-  documents, document_chunks, task_dependencies, decisions, run_jobs,
+  documents, document_chunks, task_dependencies, decisions, run_jobs, document_jobs,
   usage_events, spend_limits, rate_limit_buckets, profiles
 to app_server;
 
@@ -103,7 +103,7 @@ to app_server;
 -- both need DELETE. The `search` tsvector is generated, never written directly.
 grant delete on
   rate_limit_buckets, integration_secrets, project_context_items,
-  documents, document_chunks, task_dependencies, run_jobs
+  documents, document_chunks, task_dependencies, run_jobs, document_jobs
 to app_server;
 
 -- Append-only tables: INSERT and SELECT only. No UPDATE grant at all.
@@ -116,7 +116,7 @@ grant usage on all sequences in schema public to app_server;
 -- explicit table privileges (bypass affects row filtering, not GRANTs).
 grant usage on schema public to app_system;
 grant usage on schema app to app_system;  -- the definer fns call app.current_*()
-grant select, update on run_jobs to app_system;
+grant select, update on run_jobs, document_jobs to app_system;
 grant select on task_schedules to app_system;  -- the standing-tick dispatcher
 -- Profile adoption (app.adopt_placeholder_profile) reassigns a seed
 -- placeholder's rows to the real auth user — a cross-identity provisioning step
@@ -278,6 +278,70 @@ begin
 end
 $$;
 
+-- Document-indexing dispatch (O-23): the worker claims document_jobs across
+-- workspaces exactly like run_jobs. Same SECURITY DEFINER pattern; indexing then
+-- runs under withTenant() with the job's persisted (org, project).
+create or replace function app.claim_next_document_job(p_lease_ms bigint)
+returns table (
+  job_id uuid, document_id uuid, org_id uuid, project_id uuid,
+  created_by uuid, project_role text
+)
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare
+  v document_jobs;
+begin
+  update document_jobs j
+     set status = 'running',
+         attempts = j.attempts + 1,
+         leased_until = now() + make_interval(secs => p_lease_ms / 1000.0),
+         updated_at = now()
+   where j.id = (
+     select dj.id from document_jobs dj
+      where dj.status = 'queued'
+         or (dj.status = 'running' and dj.leased_until < now())
+      order by dj.created_at
+      for update skip locked
+      limit 1
+   )
+  returning j.* into v;
+  if not found then return; end if;
+  job_id := v.id; document_id := v.document_id;
+  org_id := v.org_id; project_id := v.project_id;
+  -- No per-user identity: indexing is a system operation scoped by (org,project);
+  -- created_by/project_role are returned null and the worker uses a system ctx.
+  created_by := null; project_role := null;
+  return next;
+end
+$$;
+
+create or replace function app.finish_document_job(p_id uuid, p_status text, p_error text)
+returns void language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  update document_jobs
+     set status = p_status::document_job_status,
+         last_error = left(p_error, 500),
+         updated_at = now()
+   where id = p_id;
+end
+$$;
+
+create or replace function app.requeue_document_job(p_id uuid)
+returns void language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  update document_jobs
+     set status = 'queued', leased_until = null, updated_at = now()
+   where id = p_id;
+end
+$$;
+
+create or replace function app.list_stale_document_jobs()
+returns table (job_id uuid, document_id uuid, org_id uuid, project_id uuid)
+language sql security definer set search_path = public, pg_temp as $$
+  select j.id, j.document_id, j.org_id, j.project_id
+  from document_jobs j
+  where j.status = 'running' and (j.leased_until < now() or j.leased_until is null)
+$$;
+
 -- Standing-work dispatch (O-22): the hourly tick scans task_schedules ACROSS
 -- workspaces to find due ones — the same cross-tenant step as the run worker.
 -- Returns only the identity tuple + author role; the tick then reads each full
@@ -361,6 +425,10 @@ begin
     'app.list_stale_run_jobs()',
     'app.finish_run_job(uuid, text, text)',
     'app.requeue_run_job(uuid)',
+    'app.claim_next_document_job(bigint)',
+    'app.finish_document_job(uuid, text, text)',
+    'app.requeue_document_job(uuid)',
+    'app.list_stale_document_jobs()',
     'app.list_due_schedules(timestamptz)',
     'app.run_jobs_health()',
     'app.adopt_placeholder_profile(uuid, text, text)',
@@ -437,7 +505,8 @@ begin
     'tasks', 'runs', 'run_steps', 'messages',
     'artifacts', 'approvals', 'usage_events', 'spend_limits',
     'objectives', 'milestones', 'knowledge_items', 'task_schedules',
-    'documents', 'document_chunks', 'task_dependencies', 'decisions', 'run_jobs'
+    'documents', 'document_chunks', 'task_dependencies', 'decisions', 'run_jobs',
+    'document_jobs'
   ]
   loop
     execute format('alter table %I enable row level security', t);

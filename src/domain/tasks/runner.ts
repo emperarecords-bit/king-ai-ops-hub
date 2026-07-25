@@ -294,6 +294,7 @@ export async function startRun(
       relativePath: r.relativePath,
       chunkIndex: r.chunkIndex,
       rank: r.rank,
+      source: r.source,
     }));
 
     // The manifest is the explainable record of the assembled package.

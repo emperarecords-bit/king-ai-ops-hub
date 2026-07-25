@@ -1,7 +1,15 @@
 'use client';
 
 import { useActionState } from 'react';
-import { linkFolderAction, refreshIndexAction, type DocumentsState } from './actions';
+import {
+  archiveDocumentAction,
+  linkFolderAction,
+  refreshIndexAction,
+  replaceDocumentAction,
+  retryDocumentAction,
+  uploadDocumentsAction,
+  type DocumentsState,
+} from './actions';
 
 const initial: DocumentsState = { error: null, message: null };
 
@@ -67,5 +75,100 @@ export function RefreshIndexButton({ projectKey }: { projectKey: string }) {
       </button>
       <Note state={state} />
     </form>
+  );
+}
+
+const smallBtn =
+  'rounded-md border border-[var(--border)] px-2 py-1 text-xs font-medium hover:border-[var(--accent)] disabled:opacity-50';
+
+/** Cloud upload (O-23): admin uploads one or more Markdown/text files into the
+ *  current workspace. The worker indexes them; no local machine required. */
+export function UploadForm({ projectKey }: { projectKey: string }) {
+  const [state, action, pending] = useActionState(uploadDocumentsAction, initial);
+  return (
+    <form action={action} className="space-y-2">
+      <input type="hidden" name="projectKey" value={projectKey} />
+      <label htmlFor="files" className="block text-sm text-[var(--muted)]">
+        Upload Markdown or text files (.md, .markdown, .txt)
+      </label>
+      <input
+        id="files"
+        name="files"
+        type="file"
+        multiple
+        accept=".md,.markdown,.txt,.text,text/markdown,text/plain"
+        className={`${field} file:mr-3 file:rounded file:border-0 file:bg-[var(--accent)] file:px-3 file:py-1 file:text-[#0b0e14]`}
+      />
+      <button type="submit" disabled={pending} className={btn}>
+        {pending ? 'Uploading…' : 'Upload files'}
+      </button>
+      <Note state={state} />
+    </form>
+  );
+}
+
+/** Per-document actions: Retry (failed/unavailable), Replace (new version),
+ *  Archive (active). Rendered only for admins. */
+export function DocumentRowActions({
+  projectKey,
+  documentId,
+  status,
+  source,
+}: {
+  projectKey: string;
+  documentId: string;
+  status: string;
+  source: string;
+}) {
+  const [retryState, retry, retrying] = useActionState(retryDocumentAction, initial);
+  const [archiveState, archive, archiving] = useActionState(archiveDocumentAction, initial);
+  const [replaceState, replace, replacing] = useActionState(replaceDocumentAction, initial);
+  const isCloud = source === 'cloud_upload';
+  const canRetry = isCloud && (status === 'failed' || status === 'source_unavailable');
+  const canArchive = isCloud && status === 'active';
+
+  if (!isCloud) return <span className="text-xs text-[var(--muted)]">local folder</span>;
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {canRetry ? (
+        <form action={retry}>
+          <input type="hidden" name="projectKey" value={projectKey} />
+          <input type="hidden" name="documentId" value={documentId} />
+          <button type="submit" disabled={retrying} className={smallBtn}>
+            {retrying ? 'Retrying…' : 'Retry'}
+          </button>
+        </form>
+      ) : null}
+      {canArchive ? (
+        <form action={archive}>
+          <input type="hidden" name="projectKey" value={projectKey} />
+          <input type="hidden" name="documentId" value={documentId} />
+          <button type="submit" disabled={archiving} className={smallBtn}>
+            {archiving ? 'Archiving…' : 'Archive'}
+          </button>
+        </form>
+      ) : null}
+      <form action={replace} className="flex items-center gap-1">
+        <input type="hidden" name="projectKey" value={projectKey} />
+        <input type="hidden" name="documentId" value={documentId} />
+        <input
+          name="file"
+          type="file"
+          accept=".md,.markdown,.txt,.text"
+          className="w-32 text-xs file:mr-1 file:rounded file:border-0 file:bg-[var(--border)] file:px-1 file:text-xs"
+        />
+        <button type="submit" disabled={replacing} className={smallBtn}>
+          {replacing ? '…' : 'Replace'}
+        </button>
+      </form>
+      {[retryState, archiveState, replaceState].map((s, i) =>
+        s.error ? (
+          <span key={i} role="alert" className="text-xs text-[var(--danger)]">
+            {s.error}
+          </span>
+        ) : null,
+      )}
+    </div>
   );
 }

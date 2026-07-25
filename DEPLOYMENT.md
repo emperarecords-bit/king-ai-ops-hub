@@ -196,9 +196,13 @@ requires the Fly deploy in §7.
    and the config layer refuses to boot otherwise. Residual: the dev `app_server`
    password is a placeholder — production sets a real one and `assertProductionSafe`
    rejects the dev value.
-2. **Cloud Project Library.** Local-folder indexing cannot run from the cloud;
-   a cloud ingestion adapter is designed but not built. Until then, indexing is
-   a local-machine operation and the cloud app serves already-indexed content.
+2. **Cloud Project Library — RESOLVED (O-23, see §11).** Documents can be
+   uploaded from a browser/phone into object storage and indexed by the durable
+   worker with the local machine offline; local + cloud sources coexist. Remaining
+   for launch: provision the production bucket + set `STORAGE_DRIVER=s3` and the
+   S3_* secrets (owner, one-time), and run the §11.6 backup/restore drill against
+   the managed bucket. PDF/DOCX parsing is still out of scope (recorded
+   `unsupported`).
 3. **Standing-work scheduler.** The hourly tick is a Windows Task Scheduler
    script; the cloud equivalent (a scheduled Fly machine / cron) is not wired.
 4. **Auth in the cloud.** Supabase redirect URLs, email settings, and session
@@ -323,7 +327,7 @@ dedicated suite that reads/writes across tenants and is refused by the database.
 
 ### 10.8 Tables intentionally without a project-scoped RLS predicate
 
-All 28 public tables have RLS enabled **and** forced. The following are scoped by
+All 29 public tables have RLS enabled **and** forced. The following are scoped by
 something other than `(org, project)`, by design — not exclusions from RLS:
 
 | Table | Policy basis | Why |
@@ -336,4 +340,92 @@ something other than `(org, project)`, by design — not exclusions from RLS:
 
 "Decision candidates" are rows in `decisions` (`status='proposed'`), and "context
 manifests / provenance" are the `runs.context_manifest` column — both covered by
-their table's `_tenant` policy. There is **no** tenant table without RLS.
+their table's `_tenant` policy. `document_jobs` (O-23) is a project-scoped tenant
+table with the standard `_tenant` policy. There is **no** tenant table without RLS.
+
+## 11. Object storage & Cloud Project Library (O-23)
+
+The Project Library works in the cloud with the user's machine offline: files are
+uploaded into managed S3-compatible object storage, indexed by the durable
+worker, and retrieved identically to local-folder documents (§5 still describes
+the local adapter, which is unchanged and coexists).
+
+### 11.1 Storage model
+
+- Source **files** live in object storage; PostgreSQL keeps only metadata +
+  extracted text/chunks. Per document row: `source` (`local_folder`/`cloud_upload`),
+  `source_id` (stable identity), `object_key`, `mime_type`, `size_bytes`,
+  `sha256`, `source_modified_at`, `ingested_at`, `status`, `error_message`,
+  provenance via the audit log.
+- **Uploads/downloads are server-mediated** (browser → app → store): credentials
+  never reach the browser, and there are **no public buckets and no presigned/
+  guessable object URLs**. The worker fetches objects with server credentials.
+- **Object keys are tenant-partitioned**: `org/<orgId>/project/<projectId>/doc/<sourceId>/<versionHash>`.
+  A key is meaningless outside its workspace, and `keyBelongsToTenant` re-checks
+  the prefix before any GET/DELETE.
+
+### 11.2 Identity & version rule
+
+Within a workspace a cloud document's stable `source_id` is its **normalized
+filename**. Re-uploading the same filename updates that document in place; it is
+never duplicated.
+- same source + same hash → no-op (no re-index).
+- same source + new hash → new version: the row id is retained (provenance), the
+  new immutable version object is stored under its own `versionHash` key, and the
+  worker replaces the chunks **atomically** at index time.
+- a cloud upload and a local-folder file sharing a name are **different sources**
+  (separate adapters; partial-unique indexes per adapter) and never merge.
+- a missing backing object → `source_unavailable` (row retained, never deleted).
+
+### 11.3 Drivers & configuration
+
+`STORAGE_DRIVER=local` (filesystem — dev/test) or `s3` (production). The S3 client
+is dependency-free SigV4 and works with any S3-compatible endpoint. Required env
+when `s3` (production **fails to start** if any is missing/placeholder —
+`assertProductionSafe`): `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`,
+`S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`. Ceilings: `MAX_UPLOAD_BYTES`
+(default 2 MB), `MAX_UPLOAD_BATCH` (default 20).
+
+Owner setup (Fly Tigris shown; R2/MinIO/AWS analogous):
+
+```bash
+fly storage create                      # provisions a Tigris bucket, sets AWS_* secrets
+# expose them under our names + enable the driver:
+fly secrets set STORAGE_DRIVER=s3 \
+    S3_ENDPOINT=https://fly.storage.tigris.dev S3_REGION=auto \
+    S3_BUCKET="$BUCKET_NAME" \
+    S3_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" S3_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY"
+```
+
+**Bucket policy:** private (no public read/write, no public listing). Only the
+`app_server`/worker credential has access. Both the web and worker process groups
+read the same S3_* secrets.
+
+### 11.4 Storage security controls
+
+Server-generated keys; MIME allowlist (Markdown/plain-text only); filename
+normalization + path-traversal rejection (basename only); content-length limit;
+strict UTF-8 decode; binary-as-text rejection (NUL / control-byte heuristic);
+checksum (sha256) of stored bytes; no execution of uploaded content; indexed
+content stays wrapped as untrusted context in prompts (unchanged). PDF/DOCX are
+recorded `unsupported` and never enter retrieval.
+
+### 11.5 Health
+
+`GET /api/health` gains a `storage` check: a cheap HEAD on a probe key confirms
+the store is reachable + authorized (200) or degraded (503). It never lists or
+exposes bucket contents.
+
+### 11.6 Backup & restore
+
+- **Backup:** (1) PostgreSQL as in §3 (`pg_dump` / managed snapshot — includes all
+  document metadata + chunks, so **retrieval survives on the DB backup alone**);
+  (2) the object bucket — Tigris/R2/S3 provide versioning + their own snapshot/
+  replication; enable bucket versioning so a deleted/overwritten object is
+  recoverable.
+- **Restore drill (Test 9):** restore Postgres + bucket into a clean staging
+  environment. Because object keys embed `org/project`, uploaded files remain
+  associated with the correct workspace and no cross-tenant reference is possible.
+  Documents whose chunks restored from the DB are immediately queryable;
+  otherwise `Retry` re-indexes deterministically from the restored object.
+

@@ -18,6 +18,10 @@ export interface AuditEventInput {
   readonly detail?: Record<string, unknown>;
 }
 
+/** The nil user id used by background/system operations (O-23 document
+ *  indexing). It is not a real profile, so audit records it as a NULL actor. */
+const SYSTEM_ACTOR_ID = '00000000-0000-0000-0000-000000000000';
+
 export async function writeAudit(
   tx: DbTx,
   ctx: Pick<TenantContext, 'orgId' | 'projectId' | 'userId'>,
@@ -37,10 +41,14 @@ export async function writeAudit(
   const detail = event.detail ?? {};
   const detailJson = JSON.stringify(detail);
 
+  // System actions (background indexing, O-23) carry the nil user id, which is
+  // not a real profile — record them with a NULL actor rather than a dangling FK.
+  const actorId = ctx.userId === SYSTEM_ACTOR_ID ? null : ctx.userId;
+
   const rowHash = auditRowHash({
     prevHash,
     orgId: ctx.orgId,
-    actorId: ctx.userId,
+    actorId,
     action: event.action,
     entityType: event.entityType,
     entityId: event.entityId ?? null,
@@ -51,7 +59,7 @@ export async function writeAudit(
   await tx.insert(auditLogs).values({
     orgId: ctx.orgId,
     projectId: ctx.projectId,
-    actorId: ctx.userId,
+    actorId,
     action: event.action,
     entityType: event.entityType,
     entityId: event.entityId ?? null,

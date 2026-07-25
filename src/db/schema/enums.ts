@@ -13,6 +13,8 @@ import {
   EXTRACTION_STATUSES,
   DOCUMENT_KINDS,
   DOCUMENT_STATUSES,
+  DOCUMENT_SOURCES,
+  DOCUMENT_JOB_STATUSES,
   FLAGSHIP_CATEGORIES,
   KNOWLEDGE_KINDS,
   KNOWLEDGE_SCOPES,
@@ -63,6 +65,8 @@ export const knowledgeSourceEnum = pgEnum('knowledge_source', KNOWLEDGE_SOURCES)
 export const cadenceEnum = pgEnum('cadence', CADENCES);
 export const documentKindEnum = pgEnum('document_kind', DOCUMENT_KINDS);
 export const documentStatusEnum = pgEnum('document_status', DOCUMENT_STATUSES);
+export const documentSourceEnum = pgEnum('document_source', DOCUMENT_SOURCES);
+export const documentJobStatusEnum = pgEnum('document_job_status', DOCUMENT_JOB_STATUSES);
 export const dependencyKindEnum = pgEnum('dependency_kind', DEPENDENCY_KINDS);
 export const decisionStatusEnum = pgEnum('decision_status', DECISION_STATUSES);
 export const decisionTypeEnum = pgEnum('decision_type', DECISION_TYPES);

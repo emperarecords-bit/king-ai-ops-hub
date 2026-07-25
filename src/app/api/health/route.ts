@@ -63,6 +63,18 @@ export async function GET() {
     }
   }
 
+  // Object storage (O-23): a cheap HEAD on a probe key confirms the configured
+  // store is reachable + authorized. A missing key returns null (healthy); a
+  // network/auth failure throws (degraded). Never exposes bucket contents.
+  try {
+    const { getObjectStore } = await import('@/domain/documents/object-store');
+    const store = await getObjectStore();
+    await store.head('__health_probe__');
+    checks.storage = { ok: true, detail: `driver=${store.driver}` };
+  } catch (err) {
+    checks.storage = { ok: false, detail: err instanceof Error ? err.message.slice(0, 120) : 'unreachable' };
+  }
+
   const healthy = Object.values(checks).every((c) => c.ok);
   return NextResponse.json(
     { status: healthy ? 'ok' : 'degraded', checks },

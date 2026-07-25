@@ -586,3 +586,54 @@ locally as `king`; when the cloud scheduler is wired (§9 #3) it uses the same
 definer path, already implemented.
 
 **Status: RLS enforcement proven under app_server — launch gate #1 closed.**
+
+---
+
+### O-23 · Cloud Project Library ingestion
+
+**Delivered (verified).** The Project Library works with the user's machine
+offline: upload text/Markdown → durable index → retrieve, all in the cloud.
+
+- **Object storage boundary:** `ObjectStore` interface with `LocalObjectStore`
+  (dev/test) and a dependency-free SigV4 `S3ObjectStore` (Tigris/R2/MinIO/AWS,
+  `STORAGE_DRIVER=s3`). Files live outside Postgres; keys are tenant-partitioned
+  (`org/<org>/project/<project>/doc/<sourceId>/<versionHash>`); uploads/downloads
+  are server-mediated — no public buckets, no presigned URLs, credentials never
+  reach the browser.
+- **Additive schema (0013):** `documents` gains source/source_id/object_key/
+  mime_type/source_modified_at/ingested_at + expanded status
+  (uploaded/queued/indexing/unsupported/source_unavailable); existing 265 docs
+  backfilled `local_folder`. New `document_jobs` (durable indexing queue, RLS
+  forced, one-live-per-document). Partial-unique identity indexes per adapter.
+- **Reuses the pipeline:** cloud docs are chunked by the same `chunkText`, become
+  ordinary `active` documents, and are retrieved by the unchanged `retrieveRelevant`
+  — a run cannot distinguish cloud from local except via the `source` provenance
+  tag now threaded through retrieval + the run manifest.
+- **Durable indexing** on the O-21/O-22 worker via a `app.claim_next_document_job`
+  SECURITY DEFINER dispatcher; idempotent (retries never duplicate chunks),
+  restart-recoverable, no AI provider needed.
+- **Identity/version rule:** source_id = normalized filename; same hash → no-op,
+  new hash → atomic chunk replacement (row id retained), missing object →
+  source_unavailable (never deleted). Documented in DEPLOYMENT.md §11.2.
+- **Security (T8):** MIME allowlist, filename normalization + traversal rejection,
+  binary-as-text rejection, size/batch ceilings, checksum, no execution, indexed
+  text stays untrusted.
+- **UI:** Project Library gains an admin Upload card, Source/Last-indexed/Actions
+  columns, and per-doc Retry/Replace/Archive; local + cloud coexist. Validated at
+  375px — no horizontal overflow, table scrolls in its own container.
+- **Config/health:** production refuses to start if `STORAGE_DRIVER=s3` but the
+  S3_* config is missing/placeholder; `/api/health` gains a `storage` probe.
+
+**Tests.** 22 new: `document-cloud.test.ts` (upload→job→index→active→retrieve,
+idempotent, versioning, worker-restart, unsupported/deceptive, local-offline
+coexistence, source_unavailable), `document-cloud-isolation.test.ts` (Test 4 —
+RLS + object-key auth as app_server), unit `sigv4` + `document-upload`. Full
+suite **298/298 in BOTH king and app_server modes**; clean-DB migration verified;
+UI smoke live.
+
+**Owner-dependent (documented).** Provision the production bucket + set
+`STORAGE_DRIVER=s3` and S3_* secrets; run the §11.6 backup/restore drill against
+the managed bucket; the live KingdomCore full-run acceptance (Test 8) uses the
+same retrieval path already proven, gated on sign-in like prior sprints.
+
+**Status: cloud ingestion shipped — launch gate #2 closed.**

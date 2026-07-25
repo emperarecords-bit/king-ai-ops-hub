@@ -402,3 +402,37 @@ and insert without RETURNING.
 (e.g. an owner-level operational dashboard). Even then the answer is a scoped
 definer function or a separate read model — not `BYPASSRLS` on the request-path
 role.
+
+## D-021 — Cloud documents are text uploaded to tenant-partitioned object storage, indexed through the same pipeline; source is provenance, not behavior
+
+**Decision.** The cloud Project Library adapter stores source *files* in managed
+S3-compatible object storage (never in Postgres), keyed by
+`org/<org>/project/<project>/doc/<sourceId>/<versionHash>`, and feeds the SAME
+chunk/index/retrieve pipeline as the local-folder adapter. Uploads and downloads
+are server-mediated (no public buckets, no presigned URLs). A document's stable
+identity within a workspace is its normalized filename; re-upload updates in
+place (same hash → no-op, new hash → atomic version replacement). Retrieval,
+ranking, authority, and freshness are unchanged — `source` is a provenance tag a
+run can read but not act on.
+
+**Why.** The whole product depends on retrieval being explainable and isolated
+(I1, D-020). Forking retrieval by storage type, or letting storage location
+change ranking/authority, would make results depend on where a file happened to
+live — invisible and ungameable-only-by-luck. Keeping cloud docs
+indistinguishable-after-indexing means every existing guarantee (isolation,
+freshness, core-reference reservation) applies unchanged. Storing files outside
+Postgres keeps the DB small and lets object-store versioning/replication own
+durability; embedding the tenant in the key makes cross-workspace access a
+structural impossibility, not a code check that could be forgotten.
+
+**Consequence.** New storage backends implement `ObjectStore`, not a new
+retrieval path. Object keys are ALWAYS server-generated from the authenticated
+context — never from upload metadata. `app_server` never gets `BYPASSRLS` or
+public-bucket access; the worker fetches with server credentials. PDF/DOCX remain
+`unsupported` until a parser is added (separate decision). Uploaded content is
+untrusted input — never executed, never rendered as trusted markup, always
+wrapped `<untrusted-context>` in prompts.
+
+**Revisit if.** A source type needs binary retention (images, audio) or a
+provider-backed parser (PDF/OCR). Even then the boundary holds: a new kind +
+extractor feeding the same chunk table, not a storage-specific retrieval path.

@@ -30,6 +30,8 @@ import {
   extractionStatusEnum,
   documentKindEnum,
   documentStatusEnum,
+  documentSourceEnum,
+  documentJobStatusEnum,
   contextItemStatusEnum,
   flagshipCategoryEnum,
   knowledgeKindEnum,
@@ -291,7 +293,7 @@ export const documents = pgTable(
     projectId: uuid('project_id')
       .notNull()
       .references(() => projects.id, { onDelete: 'cascade' }),
-    /** Path relative to the linked folder root — the human-facing identity. */
+    /** Display identity: relative path (local_folder) or filename (cloud_upload). */
     relativePath: text('relative_path').notNull(),
     kind: documentKindEnum('kind').notNull(),
     sha256: text('sha256').notNull(),
@@ -301,11 +303,63 @@ export const documents = pgTable(
     status: documentStatusEnum('status').notNull().default('active'),
     errorMessage: text('error_message'),
     indexedAt: timestamp('indexed_at', { withTimezone: true }),
+    // ---- O-23 cloud source model (additive) --------------------------------
+    /** Source adapter. Existing rows backfilled to 'local_folder'. */
+    source: documentSourceEnum('source').notNull().default('local_folder'),
+    /** Stable per-source identity. local_folder: the relative path. cloud_upload:
+     *  a server-generated id that survives re-uploads (the version key). */
+    sourceId: text('source_id'),
+    /** Tenant-partitioned object-storage key (cloud_upload only). */
+    objectKey: text('object_key'),
+    mimeType: text('mime_type'),
+    /** Source's own modification time, when the uploader supplies it. */
+    sourceModifiedAt: timestamp('source_modified_at', { withTimezone: true }),
+    /** When the current version's bytes were ingested into object storage. */
+    ingestedAt: timestamp('ingested_at', { withTimezone: true }),
     ...timestamps,
   },
   (t) => [
-    uniqueIndex('documents_project_path_uq').on(t.projectId, t.relativePath),
+    // local_folder keeps path-uniqueness; cloud_upload is keyed by (source_id),
+    // so "different source, same filename" cannot merge. Both are partial so the
+    // two adapters never collide on each other's identity. (Enforced in the
+    // migration as partial unique indexes; see rls.sql / 0013.)
     index('documents_org_project_status_idx').on(t.orgId, t.projectId, t.status),
+    index('documents_source_idx').on(t.projectId, t.source, t.sourceId),
+  ],
+);
+
+/**
+ * Durable document-indexing jobs (O-23), the same claim/lease pattern as
+ * run_jobs (O-21/O-22): a cloud upload enqueues a job that the worker claims
+ * atomically and executes, so indexing never depends on the browser staying
+ * open and survives a worker restart. One live job per document at a time.
+ */
+export const documentJobs = pgTable(
+  'document_jobs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    documentId: uuid('document_id')
+      .notNull()
+      .references(() => documents.id, { onDelete: 'cascade' }),
+    status: documentJobStatusEnum('status').notNull().default('queued'),
+    attempts: integer('attempts').notNull().default(0),
+    leasedUntil: timestamp('leased_until', { withTimezone: true }),
+    lastError: text('last_error'),
+    ...timestamps,
+  },
+  (t) => [
+    index('document_jobs_status_idx').on(t.status),
+    index('document_jobs_org_project_idx').on(t.orgId, t.projectId),
+    // At most one live (queued|running) job per document — idempotent enqueue.
+    uniqueIndex('document_jobs_one_live_uq')
+      .on(t.documentId)
+      .where(sql`status in ('queued','running')`),
   ],
 );
 
