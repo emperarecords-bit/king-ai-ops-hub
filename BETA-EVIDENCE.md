@@ -102,3 +102,14 @@ workflows friction-tested · backup/recovery re-verified · mobile validation do
 - **Root cause (if known):** N/A — new capability, outside the current architecture.
 - **Resolution:** None; parked per evidence-first policy. Not built.
 - **Follow-up required:** Watch for observed in-product friction (e.g., owner abandons or errors on long text entry) that would upgrade this from preference to demonstrated need before any roadmap slot.
+
+### EV-007 — Bulk upload capped at 20 files; real doc sets are larger
+- **Date:** 2026-07-25
+- **Environment:** staging (operating AccurateBids — loading the real knowledge base)
+- **Feature exercised:** Project Library bulk document upload
+- **Expected behavior:** Load an existing business's document set in one action.
+- **Observed behavior:** Upload is capped at **20 files per batch**; the owner's AccurateBids doc set is **53 markdown files**, forcing **3 separate manual batches** to load one business. Repetitive; compounds across a 6-business portfolio (each with dozens of docs).
+- **Severity:** medium (doesn't block, but materially adds repetitive steps to first-time knowledge loading, and recurs per business).
+- **Root cause (if known):** Batch-size limit (O-23 shipped it as "explicit and configurable"), currently 20.
+- **Resolution:** None (measuring). Candidate small improvements *if recurring/material*: raise/config the cap, or add a folder/zip import path. Not built.
+- **Follow-up required:** Confirm recurrence on the next business's onboarding. If bulk-loading is routine, it justifies raising the cap or a folder import — a small, contained change.
