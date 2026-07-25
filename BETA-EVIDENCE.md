@@ -1,0 +1,71 @@
+# Beta Evidence Log
+
+Baseline: **v0.23.0-beta** (O-23 accepted, 2026-07-25). Platform operational on
+Fly.io staging (`king-ai-ops-hub-staging.fly.dev`).
+
+**Purpose.** Every meaningful beta observation gets an entry here. Roadmap and
+architecture decisions cite evidence IDs (`EV-###`) from this log — not intuition
+or anticipated needs. Per the engineering policy, any change that materially
+alters architecture must reference one or more entries below.
+
+**Severity scale:** `critical` (data loss / outage / isolation breach) ·
+`high` (blocks a core workflow) · `medium` (degrades a workflow, has a workaround)
+· `low` (cosmetic / usability / self-corrected).
+
+**Exit criteria (tracked, not yet met):** critical defects resolved · operational
+metrics stable · retrieval quality acceptable · decision quality acceptable · user
+workflows friction-tested · backup/recovery re-verified · mobile validation done.
+
+---
+
+## Entry template
+
+```
+### EV-NNN — <short title>
+- Date:
+- Environment:
+- Feature exercised:
+- Expected behavior:
+- Observed behavior:
+- Severity:
+- Root cause (if known):
+- Resolution:
+- Follow-up required:
+```
+
+---
+
+## Entries
+
+### EV-001 — Stale blocker text leaked into model output
+- **Date:** 2026-07-25
+- **Environment:** staging
+- **Feature exercised:** Multi-model run + context assembly (Blockers source)
+- **Expected behavior:** A prior failed attempt's blocker is background status; the model should not echo it as part of a continuity-review answer.
+- **Observed behavior:** The primary (OpenAI) answer appended unrelated "Current Hub status still shows the Review task as pending/blocked due to a failed primary model call" text. The Anthropic reviewer flagged it (`major`: irrelevant/hallucinated system status); the revision removed it. Final consolidated output was clean.
+- **Severity:** low (self-corrected by the review layer; no defective final output)
+- **Root cause:** The same task's earlier failed attempt (transient OpenAI-key rejection) was present in the context package's Blockers section, and the model incorporated it.
+- **Resolution:** None applied. Candidate fix (usability): exclude transient/superseded blockers from a retry's context, or instruct the model to treat Blockers as non-echoable status.
+- **Follow-up required:** Track recurrence across beta runs; fix only if it repeats or ever survives the review layer.
+
+### EV-002 — `cloud_upload` provenance not surfaced in "Context used" UI
+- **Date:** 2026-07-25
+- **Environment:** staging
+- **Feature exercised:** "Context used" / provenance display
+- **Expected behavior:** Per O-23, a retrieved document's source type (`cloud_upload` / `local_folder`) is visible in the provenance panel.
+- **Observed behavior:** Panel shows filename + freshness but no source badge. Data is correct — `runs.retrieved_documents` records `"source":"cloud_upload"` (verified server-side).
+- **Severity:** low (cosmetic; underlying data correct)
+- **Root cause:** The panel does not render the `source` field from `retrieved_documents`.
+- **Resolution:** None applied. Candidate: render source in the panel (permitted usability enhancement).
+- **Follow-up required:** Small UI fix, schedule when convenient.
+
+### EV-003 — Managed Postgres outage under load at 256 MB
+- **Date:** 2026-07-25
+- **Environment:** staging
+- **Feature exercised:** Managed Postgres under app pool + 2 s worker polling + health checks
+- **Expected behavior:** DB stays available under normal staging load.
+- **Observed behavior:** DB machine (256 MB, Fly default) thrashed; primary flapped its own health check (5–7 s); cluster reported "no active leader"; app returned **503**; worker claim queries failed.
+- **Severity:** critical (full outage) — resolved
+- **Root cause:** 256 MB insufficient for `postgres-flex` under this workload.
+- **Resolution:** Scaled DB machine to **1 GB**; recovered immediately. Documented ≥1 GB as a launch requirement (DEPLOYMENT.md §11.8).
+- **Follow-up required:** Watch DB memory/CPU under real beta load; add metrics/alerting before production RC.
