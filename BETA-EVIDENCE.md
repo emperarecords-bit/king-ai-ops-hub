@@ -128,6 +128,7 @@ workflows friction-tested · backup/recovery re-verified · mobile validation do
 - **Follow-up required:** Capture the usage pattern as owner guidance ("decompose comprehensive reviews into focused tasks"). Residual risk to watch: an owner trusting a broad assessment's "nothing missing" without targeted follow-up — if that causes a real miss in practice, revisit a *small* nudge (e.g., a "covered N of M docs" hint), still not a retrieval rebuild.
 
 ### EV-009 — Review step is blind to Decision Memory, so it penalizes correct memory-grounding
+- **Status: CONFIRMED (2026-07-25).** Reproduced on a substantially different domain (pricing/billing rollout, vs. the first occurrence's launch/marketing). Same failure, **worse**: the reviewer flagged the primary's correct policy-grounding as "Fabricated references to nonexistent prior context," and the forced revision **removed the accepted 25/NPS40/5 validation thresholds entirely** from the final deliverable. Two occurrences, two domains → evidence threshold met. **This is the beta's first evidence-justified product change.**
 - **Date:** 2026-07-25
 - **Environment:** staging (Decision Memory validation — neutral AccurateBids GTM task after accepting 6 org decisions)
 - **Feature exercised:** Multi-model review pipeline interacting with Decision Memory (O-19)
