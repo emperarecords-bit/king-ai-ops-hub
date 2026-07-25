@@ -113,3 +113,14 @@ workflows friction-tested · backup/recovery re-verified · mobile validation do
 - **Root cause (if known):** Batch-size limit (O-23 shipped it as "explicit and configurable"), currently 20.
 - **Resolution:** None (measuring). Candidate small improvements *if recurring/material*: raise/config the cap, or add a folder/zip import path. Not built.
 - **Follow-up required:** Confirm recurrence on the next business's onboarding. If bulk-loading is routine, it justifies raising the cap or a folder import — a small, contained change.
+
+### EV-008 — Retrieval breadth too narrow for a comprehensive assessment over a large corpus
+- **Date:** 2026-07-25
+- **Environment:** staging (operating AccurateBids — first launch-readiness assessment over 53 docs / 293 chunks)
+- **Feature exercised:** Context retrieval for a broad analytical task
+- **Expected behavior:** A launch-readiness assessment draws on the launch-relevant material that was loaded (checklists, 90-day plan, state-of-product).
+- **Observed behavior:** The completed run retrieved only **5 chunks from 4 of 53 documents** (board-debate, business-model, claude-code-handoff, state-of-product). It **missed launch-critical docs that directly answer the task** — Stripe go-live checklist, checkup checklists, brief+90-day plan, launch smoke test, product descriptions. Retrieval returns the top-5 chunks (+ core references, which are KingdomCore-shaped and don't apply here) regardless of corpus size, so one run over a large corpus sees a narrow slice.
+- **Severity:** medium — undercuts the core value prop (using the Hub to produce a *comprehensive* assessment of a real business); a launch assessment that omits the launch checklist is materially incomplete. **Highest-priority beta signal so far** re: retrieval/context quality. (Output-quality impact pending owner paste.)
+- **Root cause (if known):** Top-N (=5) ranked retrieval with no breadth scaling and no multi-pass/section-scoped retrieval for large analytical tasks. Retrieval ranking is frozen by directive.
+- **Resolution:** None (measuring; retrieval ranking is explicitly not to be changed). Usage workaround to test first: run **section-scoped tasks** (one per deliverable) so each pulls its own top-5. Candidate future improvements *only if confirmed material/recurring*: higher retrieval limit for assessment-type tasks, multi-pass/section retrieval, or a "full-corpus assessment" mode.
+- **Follow-up required:** Read the actual output to confirm incompleteness; retest with section-scoped prompts (usage, not code) and record whether that recovers coverage. This is the leading candidate to justify the first real product improvement — but only after the workaround is shown insufficient.
