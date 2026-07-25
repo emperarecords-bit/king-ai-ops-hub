@@ -125,12 +125,16 @@ export class S3ObjectStore implements ObjectStore {
   constructor(private readonly cfg: S3Config) {}
 
   static fromEnv(): S3ObjectStore {
+    // S3_* is the documented contract; managed platforms (Fly/Tigris) inject the
+    // same credentials under AWS_* names, and Fly secrets are write-only so they
+    // cannot be copied into S3_* by hand — accept AWS_* as a fallback. This does
+    // not change storage behavior, only where config is read (O-23 acceptance).
     const cfg: S3Config = {
-      endpoint: (process.env.S3_ENDPOINT ?? '').replace(/\/+$/, ''),
-      region: process.env.S3_REGION ?? 'auto',
-      bucket: process.env.S3_BUCKET ?? '',
-      accessKeyId: process.env.S3_ACCESS_KEY_ID ?? '',
-      secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? '',
+      endpoint: (process.env.S3_ENDPOINT ?? process.env.AWS_ENDPOINT_URL_S3 ?? '').replace(/\/+$/, ''),
+      region: process.env.S3_REGION ?? process.env.AWS_REGION ?? 'auto',
+      bucket: process.env.S3_BUCKET ?? process.env.BUCKET_NAME ?? '',
+      accessKeyId: process.env.S3_ACCESS_KEY_ID ?? process.env.AWS_ACCESS_KEY_ID ?? '',
+      secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? process.env.AWS_SECRET_ACCESS_KEY ?? '',
     };
     const missing = (Object.keys(cfg) as (keyof S3Config)[]).filter((k) => !cfg[k]);
     if (missing.length > 0) {

@@ -15,6 +15,9 @@ primary_region = 'iad'
 [env]
   NODE_ENV = 'production'
   PORT = '3000'
+  # Cloud Project Library (O-23). Credentials come from the Tigris attachment
+  # (AWS_* secrets); the S3 reader accepts those as a fallback for S3_*.
+  STORAGE_DRIVER = 's3'
 
 [processes]
   web = 'node server.js'

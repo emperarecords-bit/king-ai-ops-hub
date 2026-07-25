@@ -58,8 +58,17 @@ function assertProductionSafe(env: ServerEnv): void {
   // Cloud upload (O-23): if enabled, the object-storage config must be complete
   // and non-placeholder, or the Library would appear to work and lose files.
   if ((process.env.STORAGE_DRIVER ?? '') === 's3') {
-    for (const name of ['S3_ENDPOINT', 'S3_REGION', 'S3_BUCKET', 'S3_ACCESS_KEY_ID', 'S3_SECRET_ACCESS_KEY']) {
-      const value = process.env[name] ?? '';
+    // Accept the platform's AWS_* names as a fallback for each S3_* var (Fly/
+    // Tigris inject credentials under AWS_* and Fly secrets are write-only).
+    const s3Fallback: Record<string, string> = {
+      S3_ENDPOINT: 'AWS_ENDPOINT_URL_S3',
+      S3_REGION: 'AWS_REGION',
+      S3_BUCKET: 'BUCKET_NAME',
+      S3_ACCESS_KEY_ID: 'AWS_ACCESS_KEY_ID',
+      S3_SECRET_ACCESS_KEY: 'AWS_SECRET_ACCESS_KEY',
+    };
+    for (const [name, fallback] of Object.entries(s3Fallback)) {
+      const value = process.env[name] ?? process.env[fallback] ?? '';
       if (value.trim() === '' || PLACEHOLDER_PATTERNS.some((re) => re.test(value))) {
         offenders.push(`${name} (required when STORAGE_DRIVER=s3)`);
       }
