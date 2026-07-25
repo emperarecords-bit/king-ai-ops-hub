@@ -94,6 +94,44 @@ on any mismatch — identical to `loadApprovedContext` and `retrieveRelevant`,
 because all three feed the prompt. Tested: a workspace with no bibles returns
 an empty core quota; the quota never crosses workspaces.
 
+## Authority contract (O-16)
+
+Assembling the right context is not enough — the model must know how to *weigh*
+it. Without that, it sometimes discounted correct Hub state as "conversation
+context" or "not a live tracker," weakening otherwise-right answers.
+
+Each context item now carries an **authority tier**
+([prompts.ts](src/orchestration/prompts.ts) `AUTHORITY`), the prompt groups the
+context by tier under labeled headers, and the system prompt states a contract
+for weighing them:
+
+| Level | Tier | What it is | Rule |
+|---|---|---|---|
+| 1 | **Current Hub operational state** | objective status & criteria, task statuses, blockers, approvals, recent outcomes, owners, timestamps | The authoritative live snapshot for this run. Treated as present fact — never "conversational" or "hypothetical". |
+| 2 | **Approved workspace controls** | charter, policies, approved knowledge | Authoritative for creative & procedural rules. |
+| 3 | **Linked project documents** | production files, scripts, canon, references | Useful, but may be out of date relative to Level 1. |
+| 4 | **Historical outcomes** | prior evidence | Not automatically current. |
+| — | **Model inference** | the model's own reasoning | Allowed, must be labeled inference, never overrides 1–4. |
+
+**Conflict rules** (in the contract, enforced by the model, surfaced not
+reconciled):
+
+- Document (L3) says done, but Hub state (L1) shows the criterion/task
+  incomplete → **Hub state is the current status**; state the conflict and
+  recommend verifying/updating the Hub record — do not declare completion.
+- Document conflicts with charter/canon (L2) on a creative rule → **charter/
+  canon controls**; surface the conflict.
+- Claim information is missing **only** when the specific field is genuinely
+  absent — do not plead lack of access/current status when L1 state is present.
+
+The contract does **not** loosen injection defense: every item is still wrapped
+`<untrusted-context>` and is data, never instructions (SECURITY.md T2).
+Authority is operational trust (which fact is current); injection-trust
+(whether content may issue commands) is separate and unchanged.
+
+The runner tags each source: project state → L1 (with a run timestamp),
+approved knowledge → L2, all documents → L3.
+
 ## The manifest (requirement #5)
 
 Persisted to `runs.context_manifest` (migration 0008) as

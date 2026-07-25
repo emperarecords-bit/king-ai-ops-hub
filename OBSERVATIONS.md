@@ -351,3 +351,40 @@ episode-filename boost prioritizes the referenced episode's own material. The
 hard acceptance criteria all pass; if canon breadth becomes desirable later,
 the lever is retrieval depth (raise K) or a small canon-doc quota — a future
 decision, deliberately not made now.
+
+---
+
+### O-16 · RESOLVED — Context authority contract; residual hedging recorded
+
+**Problem.** The model sometimes discounted correct Hub state as "conversation
+context" / "not a live tracker", weakening right answers.
+
+**Fix (commit pending).** An authority contract in the system prompt + tiered,
+labeled context sections (Level 1 Hub state → Level 4 historical), with
+conflict rules. Prompt-assembly only; no schema, retrieval, or state-selection
+change.
+
+**Live acceptance (kingdom-core owner, both providers) — all three pass:**
+- T1 operational status: "treating the Hub snapshot as the current operational
+  record for this run"; distinguishes doc claims from Hub status; recommends
+  confirming approvals, not building a tracker.
+- T2 conflict: names the conflict (doc "writing COMPLETE" vs Hub "0/5 criteria
+  met"), rules Hub authoritative, recommends verify/update the Hub record —
+  does not declare completion.
+- T3 missing: names only the absent fields (owner, deadline); does not plead
+  lack of project access.
+
+**Residual hedging (recorded, not fixed — no scope expansion):**
+1. T1 added: "that is an assumption based on the provided authority hierarchy,
+   not a timestamp comparison I can independently verify here." This is the
+   model correctly applying the L1>L3 hierarchy while noting it cannot verify
+   document staleness — reasonable epistemic caution, not the old "conversation
+   context" failure. If we wanted it gone, the lever is giving the state block
+   a machine-comparable freshness signal vs. document dates, so the model can
+   *verify* rather than *assume* currency — a future context-freshness sprint,
+   deliberately not done here.
+2. T3 phrased the scope as "the materials provided" while still naming the
+   specific missing fields — acceptable; no broad access disclaimer.
+
+**Status: authority contract shipped; hedging reduced from framing-level to
+verification-level.**

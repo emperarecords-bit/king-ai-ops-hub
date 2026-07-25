@@ -13,6 +13,7 @@ import {
   type EngineAgent,
   type StepRecord,
 } from '@/orchestration/engine';
+import { AUTHORITY } from '@/orchestration/prompts';
 import { resolveModelForTier } from '@/orchestration/routing';
 import {
   type ContextManifestEntry,
@@ -161,14 +162,47 @@ export async function startRun(
     // document sources above.
     const projectState = await assembleProjectState(tx, ctx, task.objectiveId, taskId);
 
+    // Authority-labeled context (O-16). Hub state is Level 1, approved
+    // knowledge Level 2, project documents Level 3 — the prompt builder groups
+    // and labels these so the model treats Hub state as the current record.
     const contextItems = [
-      ...knowledge,
-      ...retrieved.map((r) => ({ title: `Document — ${r.relativePath}`, content: r.content })),
-      ...coreRefs.map((r) => ({ title: `Core reference — ${r.relativePath}`, content: r.content })),
-      ...(productionStatus
-        ? [{ title: `Production status — ${productionStatus.relativePath}`, content: productionStatus.content }]
+      ...(projectState.contextItem
+        ? [
+            {
+              ...projectState.contextItem,
+              authority: AUTHORITY.HUB_STATE,
+              kind: 'Current Hub operational state',
+              timestamp: new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC',
+            },
+          ]
         : []),
-      ...(projectState.contextItem ? [projectState.contextItem] : []),
+      ...knowledge.map((k) => ({
+        ...k,
+        authority: AUTHORITY.WORKSPACE_CONTROL,
+        kind: 'Approved workspace control',
+      })),
+      ...retrieved.map((r) => ({
+        title: r.relativePath,
+        content: r.content,
+        authority: AUTHORITY.PROJECT_DOCUMENT,
+        kind: 'Linked project document',
+      })),
+      ...coreRefs.map((r) => ({
+        title: r.relativePath,
+        content: r.content,
+        authority: AUTHORITY.PROJECT_DOCUMENT,
+        kind: 'Linked project document (core reference)',
+      })),
+      ...(productionStatus
+        ? [
+            {
+              title: productionStatus.relativePath,
+              content: productionStatus.content,
+              authority: AUTHORITY.PROJECT_DOCUMENT,
+              kind: 'Linked project document (production status)',
+            },
+          ]
+        : []),
     ];
     const retrievedRefs: RetrievedDocRef[] = retrieved.map((r) => ({
       relativePath: r.relativePath,
