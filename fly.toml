@@ -1,51 +1,40 @@
-# King AI Operations Hub — Fly.io deployment (O-21, the one supported path).
+# fly.toml app configuration file generated for king-ai-ops-hub-staging on 2026-07-25T07:46:24-04:00
 #
-# Prerequisites (owner, one-time):
-#   fly launch --no-deploy            # creates the app
-#   fly postgres create               # managed Postgres; attach → sets DATABASE_URL
-#   fly secrets set OPENAI_API_KEY=… ANTHROPIC_API_KEY=… APP_ENCRYPTION_KEY=… \
-#       NEXT_PUBLIC_SUPABASE_URL=… NEXT_PUBLIC_SUPABASE_ANON_KEY=… NODE_ENV=production
-#   fly deploy                        # runs the release migrate, then web + worker
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
-# See DEPLOYMENT.md for the full runbook, health checks, backups, and rollback.
 
-app = "king-ai-ops-hub"
-primary_region = "iad"
+app = 'king-ai-ops-hub-staging'
+primary_region = 'iad'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
-# Migrations run once per release, before the new machines take traffic, with an
-# advisory lock (scripts/migrate.ts) so concurrent releases are safe.
 [deploy]
-  release_command = "npm run db:migrate"
-
-# Two process groups from the one image: the web server and the durable worker.
-[processes]
-  web = "node server.js"
-  worker = "npm run worker"
+  release_command = 'npm run db:migrate'
 
 [env]
-  NODE_ENV = "production"
-  PORT = "3000"
+  NODE_ENV = 'production'
+  PORT = '3000'
+
+[processes]
+  web = 'node server.js'
+  worker = 'npm run worker'
 
 [http_service]
   internal_port = 3000
   force_https = true
-  auto_stop_machines = false   # keep web warm; SSE runs are long-lived
+  auto_stop_machines = 'off'
   min_machines_running = 1
-  processes = ["web"]
+  processes = ['web']
 
-  # Array-of-tables form ([[...]]) — modern flyctl expects `checks` to be a list.
   [[http_service.checks]]
-    grace_period = "20s"
-    interval = "30s"
-    method = "GET"
-    timeout = "5s"
-    path = "/api/health"
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '20s'
+    method = 'GET'
+    path = '/api/health'
 
-# The worker takes no inbound traffic; it polls the durable queue.
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
-  processes = ["web", "worker"]
+  size = 'shared-cpu-1x'
+  memory = '512mb'
+  processes = ['web', 'worker']
