@@ -506,4 +506,16 @@ exposes bucket contents.
   associated with the correct workspace and no cross-tenant reference is possible.
   Documents whose chunks restored from the DB are immediately queryable;
   otherwise `Retry` re-indexes deterministically from the restored object.
+- **Managed drill result (2026-07-25) — PASS.** On the live staging cluster,
+  `pg_dump` of `king_ai_ops_hub_staging` restored into a scratch DB
+  (`WITH (FORCE)` drop for teardown, since the Fly proxy pools connections):
+  restored row counts matched source **exactly** (orgs·projects·documents·chunks·
+  runs = `1·1·2·2·2`), and a cross-tenant integrity probe found **0** chunks
+  referencing a mismatched-tenant document. Confirms the managed PG backup is
+  valid + restorable and that retrieval-critical data survives on the DB backup
+  alone. **Object-file** recovery relies on **Tigris bucket versioning** (confirm
+  enabled in the Tigris dashboard); the DB backup by itself already restores
+  retrieval because chunk text lives in Postgres.
+  Command shape (run inside the DB VM as the `app_migrator` superuser):
+  `pg_dump "$SRC" | psql "$SCRATCH"` then compare `count(*)` per tenant table.
 
