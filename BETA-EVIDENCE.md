@@ -80,3 +80,25 @@ workflows friction-tested · backup/recovery re-verified · mobile validation do
 - **Root cause (if known):** The objective model requires ≥1 measurable criterion (target+unit) to activate; qualitative goals must be forced into a quantitative frame, and the "must add a criterion to activate" rule isn't surfaced up front.
 - **Resolution:** None (measuring per policy).
 - **Follow-up required:** Watch whether this recurs and materially slows the owner across the other businesses' objectives. Candidate small improvements *only if confirmed recurring/material*: inline "add a criterion to activate" hint at creation, a qualitative/checklist criterion option, or allowing a draft objective to be worked before it's measurable.
+
+### EV-005 — No owner-facing way to edit/assign employees (team)
+- **Date:** 2026-07-25
+- **Environment:** staging (operating AccurateBids)
+- **Feature exercised:** Team / employee management
+- **Expected behavior:** Owner can view and edit/assign the people working a business.
+- **Observed behavior:** (1) Getting Started "Meet your team" is read-only (noted earlier as a candidate). (2) While operating the business the owner stated plainly: "we definitely need to be able to edit employees." Current model is a fixed set of engineering roles (Lead/Senior/Reviewer/Principal) with no owner-facing add/assign/edit path — so a business can't be staffed with the roles it actually needs (e.g., a marketer for AccurateBids' launch).
+- **Severity:** medium (does not block the current objective/assessment, but blocks the intended operating model of staffing each business).
+- **Root cause (if known):** Employee model is fixed at the code level; no CRUD/assignment UI, and non-engineering roles don't exist yet (deferred by directive).
+- **Resolution:** None (measuring). This is the beta signal the directive anticipated would justify the employee-editing + non-engineering roles work — hold until a real task is blocked for lack of the right employee.
+- **Follow-up required:** Confirm with a blocking instance — a point where the owner cannot complete needed work (e.g., marketing) because the role can't be assigned. That instance upgrades severity and justifies the smallest employee-management improvement.
+
+### EV-006 — Request: voice control (feature request, behavioral basis)
+- **Date:** 2026-07-25
+- **Environment:** staging (operating AccurateBids)
+- **Feature exercised:** Text input across the app (objective, description, criteria)
+- **Expected behavior:** N/A — owner-stated future desire, not a defect.
+- **Observed behavior:** Owner requested "we need to put voice control in." Behavioral basis: the owner is operating largely by voice dictation (into the assistant), and typing structured fields is friction-prone. No in-product abandonment observed yet.
+- **Severity:** low (feature request / preference, not observed in-product failure)
+- **Root cause (if known):** N/A — new capability, outside the current architecture.
+- **Resolution:** None; parked per evidence-first policy. Not built.
+- **Follow-up required:** Watch for observed in-product friction (e.g., owner abandons or errors on long text entry) that would upgrade this from preference to demonstrated need before any roadmap slot.
