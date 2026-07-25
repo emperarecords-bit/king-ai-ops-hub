@@ -69,3 +69,14 @@ workflows friction-tested · backup/recovery re-verified · mobile validation do
 - **Root cause:** 256 MB insufficient for `postgres-flex` under this workload.
 - **Resolution:** Scaled DB machine to **1 GB**; recovered immediately. Documented ≥1 GB as a launch requirement (DEPLOYMENT.md §11.8).
 - **Follow-up required:** Watch DB memory/CPU under real beta load; add metrics/alerting before production RC.
+
+### EV-004 — Objective stays `draft` until a measurable success criterion is added
+- **Date:** 2026-07-25
+- **Environment:** staging (real operation — creating AccurateBids' first objective)
+- **Feature exercised:** Objective creation + activation (first business, "Launch AccurateBids.com commercially")
+- **Expected behavior:** Creating an objective for a business goal makes it active/usable.
+- **Observed behavior:** The objective saved in **`draft`** and would not activate until the owner added a success **criterion** with a **target + unit**. The owner had to discover this requirement ("needed to give it a criterion to activate it"). The objective form also carries several structured fields (criterion target+unit, sponsoring department, accountable employee) vs. the 2-field workspace form. Translating a qualitative launch goal into a numeric target/unit is not obvious.
+- **Severity:** low (owner resolved it) — but **structural**: every objective requires this, so likely recurs.
+- **Root cause (if known):** The objective model requires ≥1 measurable criterion (target+unit) to activate; qualitative goals must be forced into a quantitative frame, and the "must add a criterion to activate" rule isn't surfaced up front.
+- **Resolution:** None (measuring per policy).
+- **Follow-up required:** Watch whether this recurs and materially slows the owner across the other businesses' objectives. Candidate small improvements *only if confirmed recurring/material*: inline "add a criterion to activate" hint at creation, a qualitative/checklist criterion option, or allowing a draft objective to be worked before it's measurable.
