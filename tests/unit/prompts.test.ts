@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildPrimaryUserTurn,
+  buildReviewUserTurn,
   parseVerdict,
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
@@ -60,5 +61,39 @@ describe('parseVerdict', () => {
     expect(parseVerdict('VERDICT: reject\n…although VERDICT: approve someone might say')).toBe(
       'reject',
     );
+  });
+});
+
+describe('buildReviewUserTurn — approved-policy context parity (EV-009)', () => {
+  const policies = [
+    { title: 'Launch strategy', content: 'Launch is supply-first and sequenced, not broad public marketing.' },
+    { title: 'Validation gate', content: 'Scale only after 25 paying customers, NPS > 40, and 5 workflows.' },
+  ];
+
+  it('includes an authoritative Approved Organizational Policies block with the policy content', () => {
+    const out = buildReviewUserTurn('do the thing', 'the response', policies);
+    expect(out).toContain('Approved Organizational Policies (AUTHORITATIVE)');
+    expect(out).toContain('supply-first and sequenced');
+    expect(out).toContain('25 paying customers');
+  });
+
+  it('tells the reviewer NOT to flag correct policy-grounding, but TO flag contradictions', () => {
+    const out = buildReviewUserTurn('t', 'r', policies);
+    expect(out).toMatch(/do NOT flag/i);
+    expect(out).toMatch(/CONTRADICTS/);
+    // still catches genuinely unsupported claims unrelated to policy
+    expect(out).toMatch(/genuinely unsupported claim/i);
+  });
+
+  it('never exposes the internal name "Decision memory"', () => {
+    const out = buildReviewUserTurn('t', 'r', policies);
+    expect(out.toLowerCase()).not.toContain('decision memory');
+  });
+
+  it('omits the policy block entirely when there are no approved policies (unchanged behavior)', () => {
+    const out = buildReviewUserTurn('do the thing', 'the response');
+    expect(out).not.toContain('Approved Organizational Policies');
+    expect(out).toContain('Review the response against the task.');
+    expect(out).toContain('do the thing');
   });
 });

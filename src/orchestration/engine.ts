@@ -285,8 +285,16 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
   // --- Step 2: REVIEW (optional) -------------------------------------------
   if (input.reviewer) {
     const reviewSystem = buildReviewSystem(input.reviewer.systemPrompt);
+    // Context parity (EV-009): give the reviewer the same approved organizational
+    // policy the primary saw (the accepted-decision context items, labelled
+    // 'Decision memory' by the runner). Presented as authoritative policy, never
+    // by its internal name, so correct policy-grounding is not mis-flagged.
+    const approvedPolicies = input.contextItems.filter((i) => i.kind === 'Decision memory');
     const reviewTurns: Turn[] = [
-      { role: 'user', content: buildReviewUserTurn(input.taskInput, primaryResponse.text) },
+      {
+        role: 'user',
+        content: buildReviewUserTurn(input.taskInput, primaryResponse.text, approvedPolicies),
+      },
     ];
     try {
       reviewResponse = await callWithRetry(

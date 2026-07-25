@@ -194,11 +194,32 @@ ${ISSUES_BLOCK_CLOSE}
 List at most 20 issues. If the verdict is approve and there are no issues, omit the block.`;
 }
 
-export function buildReviewUserTurn(taskInput: string, primaryResponse: string): string {
-  return `${wrapUntrusted('Original task', taskInput)}\n\n${wrapUntrusted(
+export function buildReviewUserTurn(
+  taskInput: string,
+  primaryResponse: string,
+  approvedPolicies: readonly ContextItemForPrompt[] = [],
+): string {
+  // Context parity (EV-009): the reviewer must judge against the SAME approved
+  // organizational policy the primary was given. Without it, the reviewer flags
+  // correct policy-grounded statements as unsupported / "fabricated appeal to
+  // authority" and forces revisions that strip approved policy from the output.
+  const policyBlock =
+    approvedPolicies.length > 0
+      ? `### Approved Organizational Policies (AUTHORITATIVE)
+The following are decisions the organization has explicitly approved. Treat them as established and true. A response that relies on, cites, or applies these policies is CORRECTLY grounded — do NOT flag such references as unsupported, fabricated, or an unverified "appeal to authority". Raise an issue only when a response (a) CONTRADICTS one of these policies, or (b) makes some other genuinely unsupported claim unrelated to them.
+
+${approvedPolicies.map((p) => p.content.trim()).join('\n\n')}
+
+`
+      : '';
+  const closing =
+    approvedPolicies.length > 0
+      ? 'Review the response against the task and the Approved Organizational Policies above.'
+      : 'Review the response against the task.';
+  return `${policyBlock}${wrapUntrusted('Original task', taskInput)}\n\n${wrapUntrusted(
     'Response under review',
     primaryResponse,
-  )}\n\nReview the response against the task.`;
+  )}\n\n${closing}`;
 }
 
 export function buildRevisionUserTurn(review: string): string {
