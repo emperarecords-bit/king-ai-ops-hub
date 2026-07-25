@@ -152,6 +152,18 @@ export const DECISION_TYPES = [
 ] as const;
 export type DecisionType = (typeof DECISION_TYPES)[number];
 
+/** Confidence of an AI-suggested candidate (O-20). Never approval authority. */
+export const DECISION_CONFIDENCE = ['low', 'medium', 'high'] as const;
+export type DecisionConfidence = (typeof DECISION_CONFIDENCE)[number];
+
+/**
+ * Per-run candidate-extraction outcome (O-20). Recorded on the run so the
+ * bounded, one-shot extraction is idempotent — a refresh or re-run never
+ * duplicates candidates.
+ */
+export const EXTRACTION_STATUSES = ['succeeded', 'failed', 'empty'] as const;
+export type ExtractionStatus = (typeof EXTRACTION_STATUSES)[number];
+
 /**
  * Task dependency edge kinds (O-18). Both are FORWARD edges meaning the
  * prerequisite must complete before the dependent — `blocks` is the harder

@@ -124,7 +124,10 @@ export async function acceptDecision(tx: DbTx, ctx: TenantContext, id: string): 
   const d = await loadDecision(tx, ctx, id);
   if (d.status !== 'proposed') throw new ConflictError(`Only a proposed decision can be accepted (is ${d.status}).`);
 
-  await tx.update(decisions).set({ status: 'accepted', updatedAt: new Date() }).where(eq(decisions.id, id));
+  await tx
+    .update(decisions)
+    .set({ status: 'accepted', reviewedBy: ctx.userId, reviewedAt: new Date(), updatedAt: new Date() })
+    .where(eq(decisions.id, id));
 
   const supersedesRef = d.supportingRefs.find((r) => r.startsWith('supersedes:'));
   if (supersedesRef) {
@@ -158,7 +161,10 @@ export async function rejectDecision(tx: DbTx, ctx: TenantContext, id: string): 
   if (d.status === 'superseded' || d.status === 'rejected') {
     throw new ConflictError('This decision is already closed.');
   }
-  await tx.update(decisions).set({ status: 'rejected', updatedAt: new Date() }).where(eq(decisions.id, id));
+  await tx
+    .update(decisions)
+    .set({ status: 'rejected', reviewedBy: ctx.userId, reviewedAt: new Date(), updatedAt: new Date() })
+    .where(eq(decisions.id, id));
   await writeAudit(tx, ctx, {
     action: 'decision.rejected',
     entityType: 'decision',
@@ -204,6 +210,113 @@ export async function listDecisions(tx: DbTx, ctx: TenantContext): Promise<Decis
     .orderBy(desc(decisions.createdAt));
   assertScoped(rows, ctx, 'listDecisions');
   return rows.map(({ orgId: _o, projectId: _p, ...r }) => r);
+}
+
+export interface CandidateRow {
+  id: string;
+  title: string;
+  summary: string;
+  rationale: string;
+  decisionType: DecisionType;
+  confidence: string | null;
+  evidence: string | null;
+  supersedesId: string | null;
+  supersedesTitle: string | null;
+  originatingTaskId: string | null;
+  suggestedByRunId: string | null;
+  reviewedAt: Date | null;
+  createdAt: Date;
+}
+
+/** AI-suggested candidates (proposed, suggested_by_run_id set) for a task. */
+export async function listCandidatesForTask(
+  tx: DbTx,
+  ctx: TenantContext,
+  taskId: string,
+): Promise<CandidateRow[]> {
+  const rows = await tx
+    .select()
+    .from(decisions)
+    .where(
+      and(
+        eq(decisions.projectId, ctx.projectId),
+        eq(decisions.orgId, ctx.orgId),
+        eq(decisions.originatingTaskId, taskId),
+        eq(decisions.status, 'proposed'),
+      ),
+    )
+    .orderBy(desc(decisions.createdAt));
+  assertScoped(rows, ctx, 'listCandidatesForTask');
+  const aiCandidates = rows.filter((r) => r.suggestedByRunId != null);
+
+  // Resolve supersession target titles for display.
+  const supersedesIds = aiCandidates
+    .map((r) => r.supportingRefs.find((x) => x.startsWith('supersedes:'))?.slice('supersedes:'.length))
+    .filter((x): x is string => !!x);
+  const titles = supersedesIds.length
+    ? await tx
+        .select({ id: decisions.id, title: decisions.title, orgId: decisions.orgId, projectId: decisions.projectId })
+        .from(decisions)
+        .where(and(eq(decisions.projectId, ctx.projectId), eq(decisions.orgId, ctx.orgId), inArray(decisions.id, supersedesIds)))
+    : [];
+  const titleById = new Map(titles.map((t) => [t.id, t.title]));
+
+  return aiCandidates.map((r) => {
+    const sid = r.supportingRefs.find((x) => x.startsWith('supersedes:'))?.slice('supersedes:'.length) ?? null;
+    return {
+      id: r.id,
+      title: r.title,
+      summary: r.summary,
+      rationale: r.rationale,
+      decisionType: r.decisionType,
+      confidence: r.suggestionConfidence,
+      evidence: r.suggestionReason,
+      supersedesId: sid,
+      supersedesTitle: sid ? (titleById.get(sid) ?? null) : null,
+      originatingTaskId: r.originatingTaskId,
+      suggestedByRunId: r.suggestedByRunId,
+      reviewedAt: r.reviewedAt,
+      createdAt: r.createdAt,
+    };
+  });
+}
+
+export const editCandidateSchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  summary: z.string().trim().min(1).max(2_000),
+  rationale: z.string().trim().max(4_000).default(''),
+});
+
+/** Edit a proposed candidate's content before accepting (human correction). */
+export async function editCandidate(
+  tx: DbTx,
+  ctx: TenantContext,
+  id: string,
+  input: z.input<typeof editCandidateSchema>,
+): Promise<void> {
+  if (ctx.projectRole !== 'admin') throw new AppError('forbidden', 'Only admins can edit candidates.');
+  const parsed = editCandidateSchema.safeParse(input);
+  if (!parsed.success) throw new ValidationError(parsed.error.issues.map((i) => i.message));
+  const d = await loadDecision(tx, ctx, id);
+  if (d.status !== 'proposed') throw new ConflictError('Only a proposed candidate can be edited.');
+  await tx
+    .update(decisions)
+    .set({ title: parsed.data.title, summary: parsed.data.summary, rationale: parsed.data.rationale, updatedAt: new Date() })
+    .where(eq(decisions.id, id));
+  await writeAudit(tx, ctx, { action: 'decision.candidate_edited', entityType: 'decision', entityId: id, detail: { title: parsed.data.title } });
+}
+
+/** Defer a candidate: mark reviewed, leave it proposed (out of the active queue,
+ *  still NOT injected into Decision Memory — only accepted decisions are). */
+export async function deferCandidate(tx: DbTx, ctx: TenantContext, id: string): Promise<void> {
+  if (ctx.projectRole !== 'admin') throw new AppError('forbidden', 'Only admins can defer candidates.');
+  const d = await loadDecision(tx, ctx, id);
+  if (d.status !== 'proposed') throw new ConflictError('Only a proposed candidate can be deferred.');
+  await tx
+    .update(decisions)
+    .set({ reviewedBy: ctx.userId, reviewedAt: new Date(), updatedAt: new Date() })
+    .where(eq(decisions.id, id));
+  await writeAudit(tx, ctx, { action: 'decision.candidate_deferred', entityType: 'decision', entityId: id, detail: { title: d.title } });
 }
 
 // ---------------------------------------------------------------------------

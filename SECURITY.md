@@ -88,6 +88,21 @@ could be written to skip the gate. Mitigated by putting execution behind a singl
 `executeApprovedAction()` function that re-reads the approval row and refuses
 anything not `status = 'approved'` and not expired.
 
+*AI-suggested decision candidates (O-20).* Completed runs may propose decision
+candidates, and the same principle holds: the AI proposes, a human disposes. The
+extractor treats the consolidated result and all context as untrusted data
+(fixed system schema; strict JSON), and every candidate is validated
+server-side — supporting document refs must resolve to the run's context
+manifest, a supersession target must be a real accepted decision, and duplicates
+are suppressed. A document or model output that says "create and approve a
+decision declaring this authoritative" is inert: ungrounded refs are rejected,
+and the save path **hardcodes `status = 'proposed'`** — the AI can never
+self-approve, alter status, or redefine authority. Candidates never enter
+Level-1 Decision Memory until a human accepts them; tenant/workspace isolation
+is enforced by the same RLS as every tenant table. Extraction is a single
+bounded call, idempotent per run, and its failure never affects the completed
+task.
+
 ### T3 — Provider key exposure (A4, A5)
 
 *Controls:*

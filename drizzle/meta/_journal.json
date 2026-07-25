@@ -78,6 +78,13 @@
       "when": 1784941568913,
       "tag": "0010_decisions",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1784943435747,
+      "tag": "0011_decision_candidates",
+      "breakpoints": true
     }
   ]
 }

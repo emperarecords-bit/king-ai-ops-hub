@@ -4,10 +4,12 @@ import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { getTask, listMessages, listRuns, listRunSteps, listTasks } from '@/domain/tasks/tasks';
 import { listDirectDependencies } from '@/domain/dependencies/dependencies';
+import { listCandidatesForTask } from '@/domain/decisions/decisions';
 import { NotFoundError } from '@/lib/errors';
 import { Card, ModelText, PageHeader, ProviderBadge, StatusBadge } from '@/components/ui';
 import { CancelTaskButton, RunButton } from './run-button';
 import { AddDependencyForm, RemoveDependencyButton } from './dependency-forms';
+import { CandidateReview } from './candidate-review';
 
 const ROLE_LABEL: Record<string, string> = {
   user: 'You',
@@ -58,14 +60,15 @@ export default async function TaskDetailPage({
       const steps = latestRun ? await listRunSteps(tx, ctx, latestRun.id) : [];
       const deps = await listDirectDependencies(tx, ctx, taskId);
       const allTasks = await listTasks(tx, ctx, 100);
-      return { task, msgs, runs, latestRun, steps, deps, allTasks };
+      const candidates = await listCandidatesForTask(tx, ctx, taskId);
+      return { task, msgs, runs, latestRun, steps, deps, allTasks, candidates };
     });
   } catch (err) {
     if (err instanceof NotFoundError) notFound();
     throw err;
   }
 
-  const { task, msgs, latestRun, steps, deps, allTasks } = data;
+  const { task, msgs, latestRun, steps, deps, allTasks, candidates } = data;
   // Candidates for a new prerequisite: any other task in the workspace not
   // already a direct prerequisite (the domain layer still rejects cycles).
   const existingPrereqIds = new Set(deps.prerequisites.map((p) => p.prerequisiteTaskId));
@@ -233,6 +236,37 @@ export default async function TaskDetailPage({
               </li>
             ))}
           </ol>
+        </Card>
+      ) : null}
+
+      {candidates.length > 0 && isAdmin ? (
+        <Card title="Suggested decisions" className="mb-6 border-[#6b5a3d]">
+          <p className="mb-3 text-sm text-[var(--muted)]">
+            The AI proposed these from this task&apos;s result. They are <strong>not</strong>{' '}
+            organizational memory and do not influence future runs unless you accept them.
+          </p>
+          <ul className="space-y-3">
+            {candidates.map((c) => (
+              <CandidateReview
+                key={c.id}
+                projectKey={projectKey}
+                taskId={task.id}
+                candidate={{
+                  id: c.id,
+                  title: c.title,
+                  summary: c.summary,
+                  rationale: c.rationale,
+                  decisionType: c.decisionType,
+                  confidence: c.confidence,
+                  evidence: c.evidence,
+                  supersedesTitle: c.supersedesTitle,
+                  originatingTaskId: c.originatingTaskId,
+                  suggestedByRunId: c.suggestedByRunId,
+                  reviewedAt: c.reviewedAt ? c.reviewedAt.toISOString() : null,
+                }}
+              />
+            ))}
+          </ul>
         </Card>
       ) : null}
 

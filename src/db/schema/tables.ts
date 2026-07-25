@@ -22,9 +22,11 @@ import {
   approvalStatusEnum,
   artifactKindEnum,
   cadenceEnum,
+  decisionConfidenceEnum,
   decisionStatusEnum,
   decisionTypeEnum,
   dependencyKindEnum,
+  extractionStatusEnum,
   documentKindEnum,
   documentStatusEnum,
   contextItemStatusEnum,
@@ -586,6 +588,13 @@ export const decisions = pgTable(
     decisionType: decisionTypeEnum('decision_type').notNull().default('operational'),
     status: decisionStatusEnum('status').notNull().default('proposed'),
     supersededBy: uuid('superseded_by'),
+    // AI-suggested candidates (O-20). Null suggested_by_run_id ⇒ human-filed;
+    // set ⇒ a model suggestion from that run, awaiting human review.
+    suggestedByRunId: uuid('suggested_by_run_id'),
+    suggestionConfidence: decisionConfidenceEnum('suggestion_confidence'),
+    suggestionReason: text('suggestion_reason'),
+    reviewedBy: uuid('reviewed_by').references(() => profiles.id, { onDelete: 'set null' }),
+    reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
     ...timestamps,
   },
   (t) => [
@@ -621,6 +630,8 @@ export const runs = pgTable(
     retrievedDocuments: jsonb('retrieved_documents').$type<RetrievedDocRef[]>(),
     /** The full assembled context package, grouped by why each part was included (O-14). */
     contextManifest: jsonb('context_manifest').$type<ContextManifestEntry[]>(),
+    /** Decision-candidate extraction outcome (O-20); makes extraction idempotent. */
+    candidateExtractionStatus: extractionStatusEnum('candidate_extraction_status'),
     errorMessage: text('error_message'),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp('finished_at', { withTimezone: true }),

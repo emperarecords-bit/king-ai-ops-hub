@@ -33,6 +33,7 @@ import {
 import { assembleProjectState } from '@/domain/state/project-state';
 import { assembleTaskGraph } from '@/domain/dependencies/graph-context';
 import { assembleDecisionMemory, objectiveTaskIds } from '@/domain/decisions/decisions';
+import { extractCandidatesForRun, type ExtractFn } from '@/domain/decisions/extraction';
 import { compareFreshness, parseEffectiveDate } from '@/domain/context/freshness';
 
 /** Reduces full Freshness to the compact shape persisted in the manifest. */
@@ -483,7 +484,7 @@ export async function startRun(
   );
 
   // ---- Finalize ------------------------------------------------------------
-  return withTenant(ctx, async (tx) => {
+  const outcome = await withTenant(ctx, async (tx) => {
     if (!result.ok) {
       await tx
         .update(runs)
@@ -564,4 +565,45 @@ export async function startRun(
 
     return { runId, status: finalStatus, failureReason: null };
   });
+
+  // ---- AI decision-candidate extraction (O-20) ----------------------------
+  // Separate, bounded, ONE structured call on the primary provider AFTER the
+  // task is completed. Fail-safe: any error records a 'failed' extraction
+  // status and is swallowed — the completed task is never affected. Idempotent
+  // via runs.candidate_extraction_status. Skipped when a run awaits approval or
+  // failed (only extract from a cleanly completed conclusion).
+  if (outcome.status === 'completed') {
+    try {
+      await withTenant(ctx, async (tx) => {
+        const extract: ExtractFn = async (system, user) => {
+          const provider = getProvider(primaryRow.provider);
+          const resp = await provider.execute({
+            model: primaryRow.model, // standard tier — a cheap bounded call
+            system,
+            turns: [{ role: 'user', content: user }],
+            temperature: 0,
+            maxOutputTokens: 1500,
+            timeoutMs: env.PROVIDER_TIMEOUT_MS,
+          });
+          await recordUsage(tx, ctx, {
+            taskId,
+            runId: outcome.runId,
+            runStepId: null,
+            provider: primaryRow.provider,
+            model: resp.model,
+            usage: resp.usage,
+          });
+          return resp.text;
+        };
+        await extractCandidatesForRun(tx, ctx, outcome.runId, extract);
+      });
+    } catch (err) {
+      log.warn('candidate extraction transaction failed (task unaffected)', {
+        runId: outcome.runId,
+        err: err instanceof Error ? err.message : err,
+      });
+    }
+  }
+
+  return outcome;
 }

@@ -71,6 +71,37 @@ decision and to say so explicitly if a proposal would overturn one. Manifest
 entries carry title · status · originating task · date, persisted in
 `context_manifest` and shown in the Context used panel.
 
+### Suggestions vs. accepted memory (O-20)
+
+Completed runs may *suggest* decision candidates, but **a suggestion is not
+organizational memory** — only an `accepted` Decision is Level-1 context. The
+distinction is first-class:
+
+| Kind | `status` | `suggested_by_run_id` | In Decision Memory? |
+|---|---|---|---|
+| AI suggestion | `proposed` | set | **No** |
+| Human-filed proposal | `proposed` | null | No |
+| Accepted decision | `accepted` | either | **Yes** |
+| Superseded decision | `superseded` | — | No (historical) |
+| Rejected decision | `rejected` | — | No |
+
+After a run reaches `completed`, a **separate, bounded, one-shot** extraction
+step ([src/domain/decisions/extraction.ts](src/domain/decisions/extraction.ts))
+runs ONE structured call on the *primary* provider, returning strict JSON of at
+most 3 candidates (zero is expected and valid). Each is validated server-side
+against the run's provenance — supporting document refs must resolve to the
+context manifest, a supersession target must be a real accepted decision,
+duplicates of accepted decisions are suppressed. Valid candidates are saved
+`proposed` with `suggested_by_run_id`, `suggestion_confidence`, and an evidence
+statement, and surface in a **Suggested decisions** review queue on task detail
+labeled *"AI suggestion — not an accepted decision."* An admin may accept,
+edit-and-accept, reject, or defer; **only acceptance** activates O-19 memory.
+
+Guarantees: the AI can never self-approve (the save path hardcodes `proposed`);
+extraction is idempotent (`runs.candidate_extraction_status`); and extraction
+failure never fails or rolls back the completed task. Accepted-decision ranking
+(O-19) is unchanged.
+
 ### Task dependency graph (O-18)
 
 Explicit, Hub-recorded workflow *structure* — never inferred. A single canonical

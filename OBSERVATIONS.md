@@ -490,3 +490,33 @@ the run workflow — decisions are a parallel Level-1 source.
 caveat (correct, from O-17) — decision citations themselves were confident.
 
 **Status: organizational memory shipped.**
+
+---
+
+### O-20 · RESOLVED — AI-suggested decision candidates (human-in-the-loop)
+
+**Goal.** Let completed runs suggest structured decision candidates for human
+review, without letting the AI approve anything.
+
+**Delivered.** A separate, bounded, one-shot extraction after task completion
+(one structured call on the primary provider, strict JSON, ≤3 candidates, zero
+valid); server-side grounding + dedup + supersession validation against run
+provenance; candidates saved `proposed` with suggested_by_run_id / confidence /
+evidence (reused decisions table + 5 additive fields + runs.
+candidate_extraction_status); a Suggested-decisions review queue with
+accept / edit-and-accept / reject / defer, labeled "AI suggestion — not an
+accepted decision." Idempotent; fail-safe (extraction failure never touches the
+task); the AI can never self-approve (save path hardcodes proposed). O-19
+accepted-ranking, authority, freshness, dependencies untouched.
+
+**Acceptance — all six pass:** T1 clear decision (integration: one proposed
+candidate, not in memory until accepted, then in memory), T2 recommendation →
+zero, T3 duplicate suppressed, T4 supersession kept+linked, T5 injection/
+ungrounded ref rejected (unit), T6 forced failure leaves task completed +
+records 'failed' + saves nothing (integration).
+
+**Live KingdomCore:** a "lock previz" task produced one AI candidate (proposed,
+confidence high); it was absent from a subsequent run's Decision Memory before
+approval and present after admin acceptance. extraction status 'succeeded'.
+
+**Status: human-in-the-loop memory capture shipped.**
