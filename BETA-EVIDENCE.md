@@ -115,6 +115,7 @@ workflows friction-tested · backup/recovery re-verified · mobile validation do
 - **Follow-up required:** Confirm recurrence on the next business's onboarding. If bulk-loading is routine, it justifies raising the cap or a folder import — a small, contained change.
 
 ### EV-008 — Retrieval breadth too narrow for a comprehensive assessment over a large corpus
+- **Status: CLOSED — resolved as usage (owner-confirmed 2026-07-25).** No engineering justified; the fix was an operator pattern (decompose broad reviews into focused tasks). First demonstration that an observed limitation dissolved via process, not code — the intended outcome of the architecture freeze.
 - **Date:** 2026-07-25
 - **Environment:** staging (operating AccurateBids — first launch-readiness assessment over 53 docs / 293 chunks)
 - **Feature exercised:** Context retrieval for a broad analytical task
