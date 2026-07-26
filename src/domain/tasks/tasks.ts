@@ -101,6 +101,8 @@ export interface TaskListRow {
   id: string;
   title: string;
   status: TaskStatus;
+  /** Carried so surfaces can read a task in the shared execution language (assessTask). */
+  ownerAgentId: string | null;
   providerSelection: ProviderSelection;
   reviewEnabled: boolean;
   createdAt: Date;
@@ -112,6 +114,7 @@ export async function listTasks(tx: DbTx, ctx: TenantContext, limit = 50): Promi
       id: tasks.id,
       title: tasks.title,
       status: tasks.status,
+      ownerAgentId: tasks.ownerAgentId,
       providerSelection: tasks.providerSelection,
       reviewEnabled: tasks.reviewEnabled,
       createdAt: tasks.createdAt,

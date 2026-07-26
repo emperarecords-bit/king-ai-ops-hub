@@ -718,3 +718,27 @@ changed* — the recent line. Per-claim confidence rides on the assessment, not 
   translation, Unknown-stays-Unknown, unowned≠performer) plus new `work-items` integration cases
   (getWorkItem carries owner-not-performer, keeps null condition Unknown, exposes the frozen closure
   record with a resolved closer name).
+
+**Execution 2d — cross-surface consistency (built 2026-07-26). Increment closed → Execution closed.**
+
+The same task or work item now reads in one operational language wherever it appears; no surface
+hand-rolls a second vocabulary of raw statuses/stages.
+- **Objective "Work contributing"** (`objectives/[id]/page.tsx`) routes every attached task and work
+  item through `assessTask`/`assessWorkItem` and shows the shared condition + "needs you"/"watch"
+  read — replacing the old split of raw `StatusBadge`(AI) vs raw `stage`(human). Work items now link
+  to their canonical detail page, not the Execution index.
+- **Dashboard "needs you"** (`p/[projectKey]/page.tsx`) assesses failed tasks through `assessTask`
+  and renders the translator's own required action ("needs you: Retry or cancel") verbatim, instead
+  of a Dashboard-only "failed — open to retry." Finished work still shows only as a "Recently"
+  glance — never restated as objective progress.
+- **Data plumbing:** `ObjectiveTaskRow`/`ObjectiveWorkItemRow` and `TaskListRow` now carry the
+  fields the translator needs (ownerAgentId; condition/waitingOn/updatedAt) so each surface assesses
+  from the row's own truth rather than re-deriving it.
+- **Consistency locked** by `cross-surface.test.ts` execution cases: a failed task reads identically
+  on Dashboard and Execution; a waiting owned item is never a "needs you" on either surface; an
+  unowned active item reads "needs you: assign an owner" everywhere, with its condition intact.
+
+The through-line holds: one pure, tested translator (`domain/execution/assess.ts`) is the single
+source of the operational read, consumed identically by Execution, Objectives, Dashboard, and both
+detail pages. Execution (2a closure integrity · 2b schedule/instance · 2c shared detail · 2d
+cross-surface) is complete.

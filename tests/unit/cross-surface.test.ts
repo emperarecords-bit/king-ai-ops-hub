@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildBriefing } from '@/domain/dashboard/briefing';
 import { assessObjective } from '@/domain/objectives/assess';
+import { assessTask, assessWorkItem } from '@/domain/execution/assess';
 import { type ObjectiveListRow } from '@/domain/objectives/objectives';
 import { type SuccessCriterion } from '@/types/domain';
 
@@ -62,5 +63,41 @@ describe('Dashboard and Objectives agree on the same objective', () => {
     const b = buildBriefing({ ...base, objectives: [olr({ criteria, tasksTotal: 2, workItemTotal: 0 })] });
     expect(b.standout).not.toBeNull();
     expect(b.standout!.surface).not.toMatch(/advancing on evidence/i);
+  });
+});
+
+/**
+ * 2d execution cross-surface consistency: the *same* task or work item must read identically
+ * wherever it is surfaced — Execution, the objective's "Work contributing", and the Dashboard's
+ * "needs you" list all route through this one translator. These lock the canonical reads those
+ * three surfaces now depend on, so a future surface can't hand-roll a divergent label.
+ */
+describe('Execution reads are consistent across surfaces', () => {
+  it('a failed AI task reads the same on the Dashboard as in Execution', () => {
+    // The Dashboard failed-list and Execution both call assessTask with the row's own fields.
+    const exec = assessTask({ status: 'failed', ownerAgentId: 'agent-1' });
+    const dashboard = assessTask({ status: 'failed', ownerAgentId: 'agent-1' });
+    expect(dashboard).toEqual(exec);
+    // The canonical required action the Dashboard now renders verbatim.
+    expect(exec.intervention).toBe('required');
+    expect(exec.requiredAction).toMatch(/retry or cancel/i);
+  });
+
+  it('a waiting work item reads the same under an objective as in Execution', () => {
+    const inputs = { condition: 'waiting' as const, waitingOn: 'customer reply', ownerAgentId: 'agent-1', updatedAt: NOW, now: NOW };
+    const objectiveSurface = assessWorkItem(inputs);
+    const executionSurface = assessWorkItem(inputs);
+    expect(objectiveSurface).toEqual(executionSurface);
+    // Waiting with an owner is not a demand for involvement — no divergent "needs you" on either.
+    expect(objectiveSurface.condition).toBe('waiting');
+    expect(objectiveSurface.intervention).not.toBe('required');
+  });
+
+  it('an unowned active work item reads "needs you: assign an owner" on every surface', () => {
+    const a = assessWorkItem({ condition: 'moving', waitingOn: null, ownerAgentId: null, updatedAt: NOW, now: NOW });
+    expect(a.intervention).toBe('required');
+    expect(a.requiredAction).toMatch(/assign/i);
+    // The condition survives the required flag — it's still Moving, not relabeled by the intervention.
+    expect(a.condition).toBe('moving');
   });
 });

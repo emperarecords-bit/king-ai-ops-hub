@@ -10,6 +10,7 @@ import { listApprovals } from '@/domain/approvals/approvals';
 import { getWorkspaceSettings } from '@/domain/projects/settings';
 import { projectSpendLimit, spentThisPeriodMicros } from '@/domain/usage/usage';
 import { buildBriefing } from '@/domain/dashboard/briefing';
+import { assessTask } from '@/domain/execution/assess';
 import { formatMoney } from '@/lib/money';
 import { Card } from '@/components/ui';
 import { ReasoningPanel } from './reasoning-panel';
@@ -42,7 +43,12 @@ export default async function DashboardPage({
     }));
 
   const base = `/p/${projectKey}`;
-  const failed = tasks.filter((t) => t.status === 'failed');
+  // 2d: the Dashboard reads work needing you in the *same* language as Execution — the failed
+  // tasks it surfaces carry the shared translator's required action ("Retry or cancel"), not a
+  // Dashboard-only phrasing. Same item, same read on both surfaces.
+  const failed = tasks
+    .filter((t) => t.status === 'failed')
+    .map((t) => ({ ...t, a: assessTask({ status: t.status, ownerAgentId: t.ownerAgentId }) }));
   const recentDone = tasks.filter((t) => t.status === 'completed').slice(0, 3);
 
   const briefing = buildBriefing({
@@ -102,7 +108,7 @@ export default async function DashboardPage({
               className="flex items-center justify-between rounded px-2 py-1.5 text-sm hover:bg-[var(--surface-raised)]"
             >
               <span>{t.title}</span>
-              <span className="text-xs text-[var(--danger)]">failed — open to retry</span>
+              <span className="text-xs text-[var(--accent)]">needs you: {t.a.requiredAction}</span>
             </Link>
           ))}
         </div>

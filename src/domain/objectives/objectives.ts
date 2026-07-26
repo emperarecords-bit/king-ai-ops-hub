@@ -6,7 +6,9 @@ import {
   OBJECTIVE_STATUSES,
   type ObjectiveStatus,
   type SuccessCriterion,
+  type TaskStatus,
   type TenantContext,
+  type WorkItemCondition,
 } from '@/types/domain';
 import { ConflictError, NotFoundError, ValidationError } from '@/lib/errors';
 import { METRIC_PATTERN, slugifyMetric } from '@/lib/slug';
@@ -227,8 +229,21 @@ export interface MilestoneRow {
 export interface ObjectiveTaskRow {
   id: string;
   title: string;
-  status: string;
+  status: TaskStatus;
+  /** Carried so the objective page can read this task in the shared execution language. */
+  ownerAgentId: string | null;
   createdAt: Date;
+}
+
+/** Human Work Items attached to an objective, with the fields the shared execution translator needs. */
+export interface ObjectiveWorkItemRow {
+  id: string;
+  title: string;
+  condition: WorkItemCondition | null;
+  waitingOn: string | null;
+  stage: string;
+  ownerAgentId: string | null;
+  updatedAt: Date;
 }
 
 /**
@@ -288,7 +303,7 @@ export interface ObjectiveDetail {
   milestones: MilestoneRow[];
   tasks: ObjectiveTaskRow[];
   /** Human Work Items attached to this objective — effort, shown alongside AI tasks. */
-  workItems: { id: string; title: string; stage: string }[];
+  workItems: ObjectiveWorkItemRow[];
   progress: ObjectiveProgress;
   /** Frozen closure record (completed/cancelled only). */
   closedByName: string | null;
@@ -352,6 +367,7 @@ export async function getObjective(
       id: tasks.id,
       title: tasks.title,
       status: tasks.status,
+      ownerAgentId: tasks.ownerAgentId,
       createdAt: tasks.createdAt,
     })
     .from(tasks)
@@ -359,7 +375,15 @@ export async function getObjective(
     .orderBy(desc(tasks.createdAt));
 
   const attachedWorkItems = await tx
-    .select({ id: workItems.id, title: workItems.title, stage: workItems.stage })
+    .select({
+      id: workItems.id,
+      title: workItems.title,
+      condition: workItems.condition,
+      waitingOn: workItems.waitingOn,
+      stage: workItems.stage,
+      ownerAgentId: workItems.ownerAgentId,
+      updatedAt: workItems.updatedAt,
+    })
     .from(workItems)
     .where(and(eq(workItems.objectiveId, objectiveId), eq(workItems.projectId, ctx.projectId)))
     .orderBy(desc(workItems.createdAt));

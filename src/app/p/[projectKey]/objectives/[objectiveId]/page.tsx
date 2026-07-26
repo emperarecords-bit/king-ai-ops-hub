@@ -4,6 +4,7 @@ import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { getObjective } from '@/domain/objectives/objectives';
 import { assessObjective, describeEvidence } from '@/domain/objectives/assess';
+import { assessTask, assessWorkItem, CONDITION_LABEL } from '@/domain/execution/assess';
 import { listAssignableEmployees } from '@/domain/agents/agents';
 import { listSchedules } from '@/domain/standing/standing';
 import { NotFoundError } from '@/lib/errors';
@@ -66,6 +67,27 @@ export default async function ObjectiveDetailPage({
     taskTotal: o.tasks.length,
     workItemTotal: o.workItems.length,
   });
+
+  // 2d cross-surface consistency: the contributing work reads in the *same* operational language
+  // (condition + "needs you") as the Execution surface, via the shared translator — not a second
+  // vocabulary of raw statuses/stages. Same item, same read, wherever it appears.
+  const now = new Date();
+  const contributing = [
+    ...o.tasks.map((t) => ({
+      kind: 'ai_task' as const,
+      id: t.id,
+      title: t.title,
+      href: `/p/${projectKey}/tasks/${t.id}`,
+      a: assessTask({ status: t.status, ownerAgentId: t.ownerAgentId }),
+    })),
+    ...o.workItems.map((w) => ({
+      kind: 'work_item' as const,
+      id: w.id,
+      title: w.title,
+      href: `/p/${projectKey}/work/${w.id}`,
+      a: assessWorkItem({ condition: w.condition, waitingOn: w.waitingOn, ownerAgentId: w.ownerAgentId, updatedAt: w.updatedAt, now }),
+    })),
+  ];
 
   return (
     <div>
@@ -289,35 +311,30 @@ export default async function ObjectiveDetailPage({
       {/* Work contributing — human and AI effort together, subordinate to the contract. */}
       <Card title="Work contributing" className="mb-6">
         <p className="mb-3 text-xs text-[var(--muted)]">{assessment.work}</p>
-        {o.tasks.length === 0 && o.workItems.length === 0 ? (
+        {contributing.length === 0 ? (
           <p className="text-sm text-[var(--muted)]">No work recorded yet.</p>
         ) : (
           <ul className="space-y-1">
-            {o.tasks.map((t) => (
-              <li key={t.id}>
+            {contributing.map((c) => (
+              <li key={`${c.kind}-${c.id}`}>
                 <Link
-                  href={`/p/${projectKey}/tasks/${t.id}`}
-                  className="flex items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-[var(--surface-raised)]"
+                  href={c.href}
+                  className="flex items-center justify-between gap-2 rounded-md px-3 py-2 text-sm hover:bg-[var(--surface-raised)]"
                 >
                   <span>
-                    <span className="mr-2 text-xs uppercase text-[var(--muted)]">AI</span>
-                    {t.title}
+                    <span className="mr-2 text-xs uppercase text-[var(--muted)]">
+                      {c.kind === 'ai_task' ? 'AI' : 'Human'}
+                    </span>
+                    {c.title}
                   </span>
-                  <StatusBadge status={t.status} />
-                </Link>
-              </li>
-            ))}
-            {o.workItems.map((w) => (
-              <li key={w.id}>
-                <Link
-                  href={`/p/${projectKey}/work`}
-                  className="flex items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-[var(--surface-raised)]"
-                >
-                  <span>
-                    <span className="mr-2 text-xs uppercase text-[var(--muted)]">Human</span>
-                    {w.title}
+                  <span className="shrink-0 text-xs text-[var(--muted)]">
+                    {CONDITION_LABEL[c.a.condition]}
+                    {c.a.intervention === 'required' ? (
+                      <span className="text-[var(--accent)]"> · needs you</span>
+                    ) : c.a.intervention === 'watch' ? (
+                      <span className="text-[var(--warning,#c99a3a)]"> · watch</span>
+                    ) : null}
                   </span>
-                  <span className="text-xs text-[var(--muted)]">{w.stage}</span>
                 </Link>
               </li>
             ))}
