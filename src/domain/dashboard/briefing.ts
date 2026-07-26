@@ -111,7 +111,7 @@ export function buildBriefing(input: BriefingInput): Briefing {
 
   let reassurance: string | null = null;
   if (mood === 'attention' && advancing > 0) {
-    reassurance = `Everything else is healthy: ${advancing} other ${advancing === 1 ? 'objective' : 'objectives'} advancing.`;
+    reassurance = `Everything else is healthy: ${advancing} other ${advancing === 1 ? 'objective' : 'objectives'} active, none stalled.`;
   }
 
   return { business, mood, verdict, standout, advancing, reassurance };

@@ -55,7 +55,6 @@ export default async function DashboardPage({
   const hour = new Date().getHours();
   const greeting = hour < 12 ? 'Good morning.' : hour < 18 ? 'Good afternoon.' : 'Good evening.';
 
-  const active = objectives.filter((o) => o.status === 'active');
   const enabledAgents = agents.filter((a) => a.enabled);
   const runningNow = [...stats.values()].filter((s) => s.activeRuns > 0).length;
 
@@ -132,13 +131,13 @@ export default async function DashboardPage({
 
       {briefing.mood === 'normal' ? (
         <p className="mb-6 text-[15px] leading-relaxed text-[var(--muted)]">
-          Nothing needs you today — objectives are advancing and work is moving.
+          Nothing needs a decision, and nothing&rsquo;s blocked.
         </p>
       ) : null}
 
       {briefing.mood !== 'attention' ? (
         <div className="mb-6 grid gap-3 sm:grid-cols-3">
-          <Stat label="Objectives" value={`${briefing.advancing} advancing`} />
+          <Stat label="Objectives" value={`${briefing.advancing} active`} />
           <Stat label="Work" value={`${workItems.length} tracked`} />
           <Stat
             label="On your desk"
@@ -169,7 +168,7 @@ export default async function DashboardPage({
         <span>
           {formatMoney({ usdMicros: spentMicros })} of {formatMoney({ usdMicros: limitMicros })} this month
         </span>
-        <span>{active.length > 0 ? 'systems normal' : 'no work yet'}</span>
+        <span>{failed.length === 0 ? 'no failed work' : `${failed.length} failed`}</span>
       </div>
     </div>
   );

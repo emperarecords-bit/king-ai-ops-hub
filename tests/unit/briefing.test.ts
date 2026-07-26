@@ -83,6 +83,6 @@ describe('buildBriefing — the honest health verdict', () => {
         obj({ id: 'moving', priority: 2, tasksTotal: 4, tasksCompleted: 1, percent: 25 }),
       ],
     });
-    expect(b.reassurance).toContain('1 other objective advancing');
+    expect(b.reassurance).toContain('1 other objective active, none stalled');
   });
 });
