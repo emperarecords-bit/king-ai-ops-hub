@@ -306,11 +306,23 @@ model. Navigation isn't only organizing today's Hub — it's the constraint that
 Hub from collapsing under a pile of new top-level destinations. That may be its most valuable
 role.
 
-**Open — rename "Resources."** Technically correct but not the language of an operating partner:
-employees, providers, and future AI agents aren't "resources." The name should answer *"who
-helps this workspace operate?"* "Team" is too narrow (people only); "Resources" is too cold.
-Non-blocking — building with a provisional label — but not settled. ("Governance," by contrast,
-is exactly right: stewardship, not administration.)
+**Domain naming — labeled "Team."** The operator-facing label is **Team**: human, immediately
+understood, broad enough to cover people, providers, and future AI agents without translation.
+Operator language over taxonomic precision — the underlying domain is broader than "people," but
+the interface says Team unless real use exposes a problem. ("Capability" was tried and rejected —
+abstract, enterprise-architecture-sounding, not an operating partner's voice. "Governance" stays:
+stewardship, not administration.)
+
+**Location is model-driven (a routing model, not per-page).** A single nav model (`nav-model.ts`)
+maps every route to its domain. The rail highlights the parent domain even for routes that aren't
+rail destinations — a task page lights **Execution** — and a breadcrumb shows "Domain › Section"
+(a task reads "Execution › AI work"). Solved once for all nested/detail routes — objectives,
+decisions, documents, artifacts, employees, approvals, tasks, and future workflows — never patched
+page by page. "Which part am I in?" always has an answer.
+
+**Mobile — scoped follow-up (desktop-first today).** When the persistent rail can't stay visible,
+the mental model *and* the current-location signal must survive. Do **not** collapse into an
+unstructured hamburger — that preserves access while destroying the table-of-contents function.
 
 **The mental model — the operating cycle** *(locked 2026-07-26).* Navigation groups by the
 *enduring domains of operating a workspace*, not by software objects — durable across whatever
@@ -330,8 +342,8 @@ The daily **cycle** (primary, emphasized):
   artifacts are work outputs that become part of the body of knowledge.)*
 
 The **supporting domains** (secondary — touched far less):
-- **Resources** — "who and what enable the work?" → Employees, Providers (and eventually AI
-  agents, tools, integrations, other operational capabilities).
+- **Team** *(operator-facing label; underlying domain is broader)* — "who and what help this
+  workspace operate?" → Employees, Providers (and eventually AI agents, tools, integrations).
 - **Governance** — "is this workspace trustworthy, accountable, and well run?" → Usage, Audit,
   Settings.
 
