@@ -60,14 +60,6 @@ export default async function DashboardPage({
 
   return (
     <div className="mx-auto max-w-3xl">
-      <div className="mb-5 flex items-center gap-2 text-sm text-[var(--muted)]">
-        <span className="text-[var(--foreground)]">{settings.name}</span>
-        <span>· workspace</span>
-        <Link href="/projects" className="text-[var(--muted)] hover:text-[var(--foreground)]">
-          switch →
-        </Link>
-      </div>
-
       <p className="text-sm text-[var(--muted)]">{greeting}</p>
       <h1 className="mb-6 mt-1 text-2xl font-medium leading-snug text-[var(--foreground)]">
         {briefing.verdict}

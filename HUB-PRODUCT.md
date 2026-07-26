@@ -291,6 +291,27 @@ surface teaches the *reasoning* model — one mind, expressed in how the office 
 every moment of scanning, is a small cognitive cost. Good navigation removes those costs: I
 shouldn't *decide* where to go — the right destination should feel obvious.
 
+**The rail is the workspace's table of contents, not a link list.** At a glance it should say
+"this workspace has direction, execution, knowledge, [capability], and governance" — valuable
+*even when you aren't navigating anywhere.* Navigation is almost a side effect; the standing job
+is to reinforce the mental model continuously. This is why the persistent side rail (not a top
+bar) is correct: a top bar optimizes for compactness, a rail optimizes for *understanding*, and
+the Hub optimizes for understanding. Keep the domain labels — like folders in a filing cabinet,
+you stop consciously reading them but never stop benefiting from the structure they create.
+
+**6th responsibility — navigation makes the workspace feel finite, and governs tomorrow's Hub.**
+As the Hub grows, every new capability must ask "which domain do I belong to?" If it doesn't
+clearly belong to one, that's a signal we've invented the wrong feature *or* the wrong mental
+model. Navigation isn't only organizing today's Hub — it's the constraint that keeps tomorrow's
+Hub from collapsing under a pile of new top-level destinations. That may be its most valuable
+role.
+
+**Open — rename "Resources."** Technically correct but not the language of an operating partner:
+employees, providers, and future AI agents aren't "resources." The name should answer *"who
+helps this workspace operate?"* "Team" is too narrow (people only); "Resources" is too cold.
+Non-blocking — building with a provisional label — but not settled. ("Governance," by contrast,
+is exactly right: stewardship, not administration.)
+
 **The mental model — the operating cycle** *(locked 2026-07-26).* Navigation groups by the
 *enduring domains of operating a workspace*, not by software objects — durable across whatever
 business runs in the workspace.
