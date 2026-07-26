@@ -15,7 +15,8 @@ import {
  */
 
 /** How the consumer intends to use the record — different uses tolerate different freshness/dispute. */
-export type KnowledgeUseIntent = 'current_operational_fact' | 'historical_analysis' | 'reference' | 'objective_planning';
+export const KNOWLEDGE_USE_INTENTS = ['current_operational_fact', 'historical_analysis', 'reference', 'objective_planning'] as const;
+export type KnowledgeUseIntent = (typeof KNOWLEDGE_USE_INTENTS)[number];
 
 export type FreshnessState = 'current' | 'review_due' | 'stale' | 'historical' | 'unknown';
 export type UseState = 'usable' | 'usable_with_qualification' | 'withheld';

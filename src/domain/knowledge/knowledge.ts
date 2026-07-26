@@ -20,6 +20,7 @@ import { writeAudit } from '@/domain/audit/audit';
 import { knowledgeRelevance, significantTerms } from '@/domain/knowledge/relevance';
 import { assessProvenance, isProvenanceBroken, resolveKnowledgeSource, type ProvenanceState, type ResolutionOutcome } from '@/domain/knowledge/provenance';
 import { assessKnowledge, type FreshnessState, type KnowledgeUseIntent, type UseState } from '@/domain/knowledge/assess';
+import { loadLiveDisclosureGrants, resolveRestrictedDisclosure } from '@/domain/knowledge/disclosure';
 import {
   type KnowledgeDisclosure,
   type KnowledgeEpistemicBasis,
@@ -530,6 +531,9 @@ export interface KnowledgeTrustSnapshot {
   supplementalSourceIds: string[];
   resolutions: { sourceId: string; outcome: ResolutionOutcome; relied: boolean }[];
   supportJudgmentId: string | null;
+  /** For a supplied RESTRICTED item, the live grant id(s) that authorized this disclosure (one per
+   *  consuming agent). Empty for non-restricted items. Makes a past restricted disclosure explainable. */
+  disclosureGrantIds: string[];
   renderingVersion: string;
 }
 
@@ -600,6 +604,10 @@ export async function selectRelevantKnowledge(
     currentObjectiveId?: string | null;
     /** How the consumer intends to use the records (default: current operational fact). */
     intendedUse?: KnowledgeUseIntent;
+    /** The agent(s) that will consume this selection's context. A RESTRICTED item is permitted only
+     *  when EVERY one of these agents holds a live grant for it + this purpose. Empty (e.g. a non-run
+     *  consumer with no agent) → restricted items are never disclosed. */
+    consumerAgentIds?: string[];
   },
 ): Promise<SelectedKnowledge[]> {
   const rows = await tx
@@ -632,12 +640,21 @@ export async function selectRelevantKnowledge(
   const now = new Date();
   const nowMs = now.getTime();
   const intendedUse: KnowledgeUseIntent = args.intendedUse ?? 'current_operational_fact';
+  const consumerAgentIds = args.consumerAgentIds ?? [];
   const queryTerms = significantTerms(args.queryText);
+  // Live disclosure grants for THIS purpose, loaded once: restricted items are permitted only via a
+  // matching grant for every consuming agent. Non-restricted items never consult this.
+  const liveGrants = await loadLiveDisclosureGrants(tx, ctx, intendedUse, now);
 
   const scored: { item: SelectedKnowledge; score: number; createdAt: Date }[] = [];
   for (const r of rows) {
     // Order: lifecycle → version(active) → disclosure → scope validity → freshness/verification.
-    // v1 disclosure: `restricted` has no grant path yet, so it is not permitted for any consumer.
+    // Disclosure: a restricted item is permitted only when every consuming agent holds a live grant for
+    // it + this purpose; the authorizing grant ids are frozen into the application snapshot.
+    const disclosure =
+      r.disclosure === 'restricted'
+        ? resolveRestrictedDisclosure(liveGrants, r.id, consumerAgentIds)
+        : { permitted: true, grantIds: [] as string[] };
     const baseAssessInput = {
       status: r.status,
       epistemicBasis: r.epistemicBasis,
@@ -652,7 +669,7 @@ export async function selectRelevantKnowledge(
       scopeTaskStatus: r.scopeTaskStatus,
       scopeObjectiveStatus: r.scopeObjectiveStatus,
       disclosure: r.disclosure,
-      disclosurePermitted: r.disclosure !== 'restricted',
+      disclosurePermitted: disclosure.permitted,
       intendedUse,
       now,
     };
@@ -705,6 +722,7 @@ export async function selectRelevantKnowledge(
       supplementalSourceIds: prov.resolutions.map((x) => x.sourceId).filter((id) => !reliedSet.has(id)),
       resolutions: prov.resolutions.map((x) => ({ sourceId: x.sourceId, outcome: x.outcome, relied: x.relied })),
       supportJudgmentId: prov.supportJudgmentId,
+      disclosureGrantIds: disclosure.grantIds,
       renderingVersion: KNOWLEDGE_RENDERING_VERSION,
     };
 

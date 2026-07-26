@@ -1519,7 +1519,41 @@ model stops being an inspection-only artifact and starts governing what actually
   names only resolved relied · no-source→clean · snapshot freezes resolutions/relied-ids/judgment ·
   retry repeats frozen state after a break · reverse trail carries the version). Full suite **468/468**.
 
-*Remaining trustworthiness increments after provenance (deferred, not built): (3) disclosure GRANTS
-(provider/agent/consumer/purpose/period/actor) so restricted can be supplied with a matching grant;
-(4) the AI extraction/promotion path (propose-only, source-identified, human-activated); (5) the
-operating-partner conversation; (6) then the Knowledge Portfolio & Detail — page redesign last.*
+### Trustworthiness increment 3 — enforceable disclosure grants (built 2026-07-26)
+
+Until now, `restricted` was a dead end: the selector hardcoded `disclosurePermitted = disclosure !==
+'restricted'`, so restricted Knowledge was withheld from *everyone*, always. A grant turns that blanket
+refusal into a real, revocable, tightly-scoped decision.
+
+- **Scope: per specific agent + per specific purpose, in an explicit window.** A
+  `knowledge_disclosure_grants` row (migration 0031) authorizes ONE restricted item for ONE agent for
+  ONE purpose (a `KnowledgeUseIntent`) until a required `expiresAt`. A grant is LIVE only when not
+  revoked AND `grantedAt <= now < expiresAt`. Operator chose the tightest consumer scoping on offer —
+  restricted Knowledge reaches exactly the intended agent for exactly the intended use.
+- **Every consuming agent must be granted.** The runner passes `consumerAgentIds = [primary, reviewer]`
+  (both read the same context package); `selectRelevantKnowledge` discloses a restricted item only when
+  EVERY consuming agent holds a live matching grant. One un-granted consumer withholds the whole
+  disclosure. *Principle: a restricted item is only as contained as its least-restricted reader — a
+  grant to one consumer does not leak it to another that shares the same prompt.*
+- **No agent, no disclosure.** A non-run consumer with no agent (e.g. objective suggestion) has an empty
+  consumer set, which can never satisfy "every consumer is granted" — restricted Knowledge is therefore
+  structurally unreachable there. *Principle: there must be a named party accountable for a restricted
+  disclosure; absent one, the answer is no.*
+- **Revocation is a decision, not a delete.** `revokeDisclosureGrant` stamps `revokedAt/revokedBy/
+  revokeReason` (audited); the row and its history survive, and a revoked grant is immediately not live.
+  Double-revoke conflicts. Granting a non-restricted item is rejected (meaningless).
+- **A disclosure is explainable after the fact.** A supplied restricted item freezes the authorizing
+  grant id(s) into its application trust snapshot (`disclosureGrantIds`), alongside the provenance and
+  freshness facts from Part B. *Principle: every restricted disclosure carries, in its immutable
+  record, the exact authorization that permitted it.*
+- Enforcement lives in the ONE shared assessment: `assessKnowledge` already withholds when
+  `disclosure === 'restricted' && !disclosurePermitted`; the selector now computes `disclosurePermitted`
+  from live grants instead of a constant. Nothing else in the trust model changed.
+- Locked by `knowledge-disclosure.test.ts` (no-grant→withheld · agent+purpose grant→disclosed+snapshot
+  records id · wrong-purpose→withheld · both-agents-required · expired→no-grant · revoked→no-grant +
+  history survives + double-revoke conflicts · only-restricted-accepts-a-grant · no-agent→never). RLS
+  regression guard extended to the new table. Full suite **476/476**.
+
+*Remaining Knowledge increments (deferred, not built): (4) the AI extraction/promotion path
+(propose-only, source-identified, human-activated); (5) the operating-partner conversation; (6) then the
+Knowledge Portfolio & Detail — page redesign last.*

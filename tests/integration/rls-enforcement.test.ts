@@ -131,7 +131,7 @@ const TENANT_TABLES = [
   'run_steps', 'messages', 'artifacts', 'approvals', 'usage_events',
   'spend_limits', 'objectives', 'milestones', 'knowledge_items',
   'task_schedules', 'documents', 'document_chunks', 'task_dependencies',
-  'decisions', 'run_jobs',
+  'decisions', 'knowledge_disclosure_grants', 'run_jobs',
 ];
 
 describe.skipIf(!available)('O-22 RLS enforcement (as app_server)', () => {

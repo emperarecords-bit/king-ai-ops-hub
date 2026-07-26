@@ -414,6 +414,41 @@ export const knowledgeVerificationEvents = pgTable(
 );
 
 /**
+ * Enforceable disclosure grants. A `restricted` Knowledge item is withheld from every consumer UNLESS
+ * a live grant authorizes it for a SPECIFIC agent and a SPECIFIC purpose (intended use) within an
+ * explicit validity window. This is the only path by which restricted Knowledge reaches a prompt.
+ * Grants are revocable (revoke is a first-class, audited decision — not a delete), and a supplied
+ * restricted disclosure records the authorizing grant id into its application trust snapshot, so a past
+ * disclosure is always explainable. A grant is LIVE when: not revoked AND granted_at <= now < expires_at.
+ */
+export const knowledgeDisclosureGrants = pgTable(
+  'knowledge_disclosure_grants',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    /** Subject: the restricted item this grant authorizes. */
+    knowledgeItemId: uuid('knowledge_item_id').notNull().references(() => knowledgeItems.id, { onDelete: 'cascade' }),
+    /** Consumer: the specific agent permitted to receive it. */
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    /** Purpose: the intended use granted (a KnowledgeUseIntent). Must match the consumer's intended use. */
+    purpose: text('purpose').notNull(),
+    rationale: text('rationale'),
+    grantedBy: uuid('granted_by').references(() => profiles.id, { onDelete: 'set null' }),
+    grantedAt: timestamp('granted_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Explicit period end — a grant without an expiry is not a grant; an expired grant is no grant. */
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedBy: uuid('revoked_by').references(() => profiles.id, { onDelete: 'set null' }),
+    revokeReason: text('revoke_reason'),
+  },
+  (t) => [
+    index('knowledge_disclosure_grants_item_idx').on(t.knowledgeItemId),
+    index('knowledge_disclosure_grants_lookup_idx').on(t.projectId, t.purpose, t.knowledgeItemId, t.agentId),
+  ],
+);
+
+/**
  * A durable record of an AI operation that is NOT a task run (e.g. objective suggestion), so that
  * every AI use of Knowledge belongs to an inspectable operation rather than an ephemeral correlation
  * value. Recorded before provider dispatch; its status advances to completed/failed. An

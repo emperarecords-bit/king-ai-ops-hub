@@ -170,6 +170,9 @@ export async function startRun(
       currentTaskId: taskId,
       currentObjectiveId: task.objectiveId,
       intendedUse: 'current_operational_fact',
+      // Restricted Knowledge is disclosed only if EVERY agent that will consume this run's context is
+      // granted. Both the primary and (when present) the reviewer read the same context package.
+      consumerAgentIds: [primaryRow.id, reviewerRow?.id].filter((id): id is string => !!id),
     });
     // Balanced context package (O-14, CONTEXT-PACKAGE.md). Retrieval is
     // unchanged (D-020); we ADD a small quota of foundational references and a

@@ -37,6 +37,7 @@ const fakeSnapshot: KnowledgeTrustSnapshot = {
   supplementalSourceIds: [],
   resolutions: [],
   supportJudgmentId: null,
+  disclosureGrantIds: [],
   renderingVersion: 'kv1',
 };
 import { listAllActiveKnowledgeForAdministration } from '@/domain/knowledge/admin';
