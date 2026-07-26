@@ -123,7 +123,7 @@ export default async function DashboardPage({
 
       {briefing.mood === 'normal' ? (
         <p className="mb-6 text-[15px] leading-relaxed text-[var(--muted)]">
-          Nothing needs a decision, and nothing&rsquo;s blocked.
+          No open decisions or blockers are currently recorded.
         </p>
       ) : null}
 
