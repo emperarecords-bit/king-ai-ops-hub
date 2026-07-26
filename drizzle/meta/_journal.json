@@ -225,6 +225,13 @@
       "when": 1785104656276,
       "tag": "0031_military_leader",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1785105853434,
+      "tag": "0032_gigantic_smiling_tiger",
+      "breakpoints": true
     }
   ]
 }

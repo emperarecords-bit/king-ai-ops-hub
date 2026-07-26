@@ -37,7 +37,7 @@ const fakeSnapshot: KnowledgeTrustSnapshot = {
   supplementalSourceIds: [],
   resolutions: [],
   supportJudgmentId: null,
-  disclosureGrantIds: [],
+  disclosureGrants: [],
   renderingVersion: 'kv1',
 };
 import { listAllActiveKnowledgeForAdministration } from '@/domain/knowledge/admin';
@@ -186,13 +186,13 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
   it('an unrelated active item is NOT injected; membership + recency do not create relevance', async () => {
     const shipping = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Shipping carrier accounts', body: 'Freight carrier logistics warehouse pallet dispatch codes.', kind: 'fact', activate: true }));
     // A recent, active, workspace item — but no shared subject with a database query → omitted.
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'migrate the postgres database schema and indexes' }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { consumerType: 'task_run', queryText: 'migrate the postgres database schema and indexes' }));
     expect(picked.find((k) => k.id === shipping)).toBeUndefined();
   });
 
   it('a relevant active item IS injected, with a recorded eligibility reason', async () => {
     await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Database migration policy', body: 'Postgres schema migrations run through drizzle with a backup first.', kind: 'standard', activate: true }));
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'migrate the postgres database schema safely' }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { consumerType: 'task_run', queryText: 'migrate the postgres database schema safely' }));
     const hit = picked.find((k) => k.title === 'Database migration policy')!;
     expect(hit).toBeDefined();
     expect(hit.reason).toMatch(/^subject:/); // matched terms preserved for the trail
@@ -202,13 +202,13 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
   it('drafts, archived, and superseded versions are never selected; one version at most', async () => {
     const id = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Refund window rule', body: 'Refund window billing invoice payment terms are thirty days.', kind: 'policy', activate: true }));
     await withTenant(ctx, (tx) => reviseKnowledge(tx, ctx, id, { body: 'Refund window billing invoice payment terms are now sixty days.', activate: true }));
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'refund window billing invoice payment terms' }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { consumerType: 'task_run', queryText: 'refund window billing invoice payment terms' }));
     const matches = picked.filter((k) => k.title === 'Refund window rule');
     expect(matches).toHaveLength(1); // v1 archived, only v2 active
     expect(matches[0]!.body).toMatch(/sixty days/);
     // A draft is not selected.
     await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Refund draft', body: 'Refund window billing invoice payment draft only.', kind: 'policy', activate: false }));
-    const picked2 = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'refund window billing invoice payment terms' }));
+    const picked2 = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { consumerType: 'task_run', queryText: 'refund window billing invoice payment terms' }));
     expect(picked2.find((k) => k.title === 'Refund draft')).toBeUndefined();
   });
 
@@ -253,7 +253,7 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
 
   it('active manual knowledge stays unverified — selection qualifies it, and it never claims verification', async () => {
     await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Kubernetes cluster autoscaler', body: 'Kubernetes cluster autoscaler nodepool provisioning tuning parameters.', kind: 'fact', activate: true }));
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'tune the kubernetes cluster autoscaler nodepool provisioning' }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { consumerType: 'task_run', queryText: 'tune the kubernetes cluster autoscaler nodepool provisioning' }));
     const hit = picked.find((k) => k.title === 'Kubernetes cluster autoscaler')!;
     expect(hit).toBeDefined();
     // Supplied text carries the trust qualification: human-asserted + unverified (activation is not verification).
@@ -265,7 +265,7 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
     await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Datacenter lease terms', body: 'Datacenter lease colocation rack power cooling contract.', kind: 'fact', activate: true, expiresAt: new Date('2020-01-01') }));
     await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Encryption key rotation secret', body: 'Encryption key rotation secret vault credentials rotation cadence.', kind: 'fact', activate: true, disclosure: 'restricted' }));
     const q = 'datacenter lease colocation rack power cooling and encryption key rotation secret vault credentials cadence';
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: q }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { consumerType: 'task_run', queryText: q }));
     expect(picked.find((k) => k.title === 'Datacenter lease terms')).toBeUndefined(); // expired
     const restricted = picked.find((k) => k.title === 'Encryption key rotation secret');
     expect(restricted).toBeUndefined(); // restricted, no grant → not supplied at all (no sensitive text)
@@ -286,7 +286,7 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
     await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Widget serial format', body: 'Widget serial format numbering scheme barcode.', kind: 'fact', scopeKind: 'task', scopeTaskId: doneTask[0]!.id, activate: true }));
     // An unrelated run — task-scoped to a completed task, so never supplied here.
     const picked = await withTenant(ctx, (tx) =>
-      selectRelevantKnowledge(tx, ctx, { queryText: 'widget serial format numbering barcode', currentTaskId: null, currentObjectiveId: null }),
+      selectRelevantKnowledge(tx, ctx, { consumerType: 'task_run', queryText: 'widget serial format numbering barcode', currentTaskId: null, currentObjectiveId: null }),
     );
     expect(picked.find((k) => k.title === 'Widget serial format')).toBeUndefined();
   });
@@ -295,10 +295,10 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
     const id = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Quarterly discount rate', body: 'Quarterly discount rate margin promotion percentage.', kind: 'policy', activate: true }));
     await withTenant(ctx, (tx) => setKnowledgeVerification(tx, ctx, id, 'disputed', 'two active records disagree on the rate'));
     // Task run = current operational fact → disputed is withheld (not settled context for execution).
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'quarterly discount rate margin promotion percentage', intendedUse: 'current_operational_fact' }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { consumerType: 'task_run', queryText: 'quarterly discount rate margin promotion percentage' }));
     expect(picked.find((k) => k.title === 'Quarterly discount rate')).toBeUndefined();
-    // Its `policy` kind played no role — a reference-use consumer receives it, qualified as disputed.
-    const ref = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'quarterly discount rate margin promotion percentage', intendedUse: 'reference' }));
+    // Its `policy` kind played no role — a non-current-fact consumer (objective planning) receives it, qualified as disputed.
+    const ref = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { consumerType: 'objective_suggestion', queryText: 'quarterly discount rate margin promotion percentage' }));
     const hit = ref.find((k) => k.title === 'Quarterly discount rate');
     expect(hit).toBeDefined();
     expect(hit!.memoryText).toMatch(/disputed/);

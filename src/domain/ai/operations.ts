@@ -20,6 +20,9 @@ export interface BeginAiOperationArgs {
   idempotencyKey?: string | null;
   provider?: string | null;
   model?: string | null;
+  /** The Knowledge-use purpose DERIVED from this operation type (a KnowledgeUseIntent). Recorded so the
+   *  operation's own permitted use is inspectable and can never be relabelled by a caller. */
+  knowledgePurpose?: string | null;
   contextHash?: string | null;
 }
 
@@ -54,6 +57,7 @@ export async function beginAiOperation(tx: DbTx, ctx: TenantContext, args: Begin
       status: 'dispatched',
       provider: args.provider ?? null,
       model: args.model ?? null,
+      knowledgePurpose: args.knowledgePurpose ?? null,
       contextHash: args.contextHash ?? null,
       dispatchedAt: now,
       createdBy: ctx.userId,

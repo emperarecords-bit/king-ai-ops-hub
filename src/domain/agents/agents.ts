@@ -1,7 +1,8 @@
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import { type AgentRole, type TenantContext } from '@/types/domain';
 import { type ProviderId } from '@/types/provider';
 import { NotFoundError, ValidationError } from '@/lib/errors';
+import { sha256Hex } from '@/lib/crypto';
 import { type DbTx } from '@/db/client';
 import { agents, departments } from '@/db/schema';
 import { knownModel } from '@/providers/pricing';
@@ -17,6 +18,64 @@ export interface AgentRow {
   temperatureMilli: number;
   maxOutputTokens: number;
   enabled: boolean;
+}
+
+/**
+ * A stable fingerprint of an agent's MATERIAL execution identity — the facts that determine HOW it
+ * processes context and where that context goes: provider, model, system instructions, sampling, and
+ * technical role. It deliberately EXCLUDES descriptive fields (name, title, department, reporting line)
+ * so a harmless rename never invalidates authority, while a real reconfiguration (new provider/model/
+ * instructions) does. Disclosure grants bind to this fingerprint so authority follows the execution
+ * identity that was reviewed, not merely a reusable agent name.
+ */
+export function agentExecutionFingerprint(a: {
+  provider: string;
+  model: string;
+  systemPrompt: string;
+  temperatureMilli: number;
+  maxOutputTokens: number;
+  role: string;
+}): string {
+  return sha256Hex(
+    JSON.stringify({
+      provider: a.provider,
+      model: a.model,
+      systemPrompt: a.systemPrompt,
+      temperatureMilli: a.temperatureMilli,
+      maxOutputTokens: a.maxOutputTokens,
+      role: a.role,
+    }),
+  );
+}
+
+export interface AgentExecutionIdentity {
+  id: string;
+  provider: ProviderId;
+  model: string;
+  fingerprint: string;
+}
+
+/** Current execution identities for a set of agent ids — id → {provider, model, fingerprint}. Used by
+ *  Knowledge selection to match a disclosure grant against the agent's CURRENT execution profile. */
+export async function loadAgentExecutionIdentities(tx: DbTx, ctx: TenantContext, agentIds: string[]): Promise<Map<string, AgentExecutionIdentity>> {
+  const index = new Map<string, AgentExecutionIdentity>();
+  if (agentIds.length === 0) return index;
+  const rows = await tx
+    .select({
+      id: agents.id,
+      provider: agents.provider,
+      model: agents.model,
+      systemPrompt: agents.systemPrompt,
+      temperatureMilli: agents.temperatureMilli,
+      maxOutputTokens: agents.maxOutputTokens,
+      role: agents.role,
+    })
+    .from(agents)
+    .where(and(eq(agents.orgId, ctx.orgId), eq(agents.projectId, ctx.projectId), inArray(agents.id, agentIds)));
+  for (const r of rows) {
+    index.set(r.id, { id: r.id, provider: r.provider, model: r.model, fingerprint: agentExecutionFingerprint(r) });
+  }
+  return index;
 }
 
 export async function listAgents(tx: DbTx, ctx: TenantContext): Promise<AgentRow[]> {

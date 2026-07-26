@@ -20,7 +20,8 @@ import { writeAudit } from '@/domain/audit/audit';
 import { knowledgeRelevance, significantTerms } from '@/domain/knowledge/relevance';
 import { assessProvenance, isProvenanceBroken, resolveKnowledgeSource, type ProvenanceState, type ResolutionOutcome } from '@/domain/knowledge/provenance';
 import { assessKnowledge, type FreshnessState, type KnowledgeUseIntent, type UseState } from '@/domain/knowledge/assess';
-import { loadLiveDisclosureGrants, resolveRestrictedDisclosure } from '@/domain/knowledge/disclosure';
+import { type DisclosureGrantRecord, loadLiveDisclosureGrants, resolveRestrictedDisclosure } from '@/domain/knowledge/disclosure';
+import { loadAgentExecutionIdentities } from '@/domain/agents/agents';
 import {
   type KnowledgeDisclosure,
   type KnowledgeEpistemicBasis,
@@ -510,6 +511,26 @@ export async function archiveKnowledge(
 
 const MAX_KNOWLEDGE = 12;
 
+/** Which AI consumers may apply Knowledge — EVERY consumer leaves the same inspectable record. */
+export type KnowledgeConsumerType = 'task_run' | 'objective_suggestion';
+
+/**
+ * The permitted Knowledge-use purpose is a pure function of the CONSUMER (operation) type — never a
+ * value a caller supplies. This is the whole point: a task run cannot relabel itself "historical
+ * analysis" to receive stale or disputed Knowledge under looser rules. The server derives the purpose
+ * from what the operation actually is.
+ */
+export const KNOWLEDGE_PURPOSE_BY_CONSUMER: Record<KnowledgeConsumerType, KnowledgeUseIntent> = {
+  task_run: 'current_operational_fact',
+  objective_suggestion: 'objective_planning',
+};
+
+export function knowledgePurposeForConsumer(consumerType: KnowledgeConsumerType): KnowledgeUseIntent {
+  const purpose = KNOWLEDGE_PURPOSE_BY_CONSUMER[consumerType];
+  if (!purpose) throw new ValidationError([`Unknown Knowledge consumer '${consumerType}' — no permitted use is defined for it.`]);
+  return purpose;
+}
+
 /**
  * The immutable trust assessment used AT DISPATCH, frozen onto the application record. It lets a past
  * dispatch be explained without recomputing from today's records (sources may have moved, been re-
@@ -531,9 +552,11 @@ export interface KnowledgeTrustSnapshot {
   supplementalSourceIds: string[];
   resolutions: { sourceId: string; outcome: ResolutionOutcome; relied: boolean }[];
   supportJudgmentId: string | null;
-  /** For a supplied RESTRICTED item, the live grant id(s) that authorized this disclosure (one per
-   *  consuming agent). Empty for non-restricted items. Makes a past restricted disclosure explainable. */
-  disclosureGrantIds: string[];
+  /** For a supplied RESTRICTED item, the authorizing grant(s) — one per consuming agent — each carrying
+   *  the agent id, the execution fingerprint that received it, the provider/model actually used, and the
+   *  grant validity in force at dispatch. Empty for non-restricted items. Makes a past restricted
+   *  disclosure fully explainable: the exact execution identity that was authorized to receive it. */
+  disclosureGrants: DisclosureGrantRecord[];
   renderingVersion: string;
 }
 
@@ -600,13 +623,13 @@ export async function selectRelevantKnowledge(
   ctx: TenantContext,
   args: {
     queryText: string;
+    /** WHO is consuming — the purpose is DERIVED from this, never supplied by a caller. */
+    consumerType: KnowledgeConsumerType;
     currentTaskId?: string | null;
     currentObjectiveId?: string | null;
-    /** How the consumer intends to use the records (default: current operational fact). */
-    intendedUse?: KnowledgeUseIntent;
     /** The agent(s) that will consume this selection's context. A RESTRICTED item is permitted only
-     *  when EVERY one of these agents holds a live grant for it + this purpose. Empty (e.g. a non-run
-     *  consumer with no agent) → restricted items are never disclosed. */
+     *  when EVERY one of these agents holds a live grant for it + this purpose AND still matches the
+     *  execution fingerprint the grant was bound to. Empty (no identified recipient) → never disclosed. */
     consumerAgentIds?: string[];
   },
 ): Promise<SelectedKnowledge[]> {
@@ -639,12 +662,16 @@ export async function selectRelevantKnowledge(
 
   const now = new Date();
   const nowMs = now.getTime();
-  const intendedUse: KnowledgeUseIntent = args.intendedUse ?? 'current_operational_fact';
+  // Purpose is DERIVED from the consumer type — a caller cannot relabel the operation to loosen rules.
+  const intendedUse: KnowledgeUseIntent = knowledgePurposeForConsumer(args.consumerType);
   const consumerAgentIds = args.consumerAgentIds ?? [];
   const queryTerms = significantTerms(args.queryText);
-  // Live disclosure grants for THIS purpose, loaded once: restricted items are permitted only via a
-  // matching grant for every consuming agent. Non-restricted items never consult this.
+  // Live disclosure grants for THIS derived purpose, plus the consuming agents' CURRENT execution
+  // identities — both loaded once. A restricted item is permitted only via a matching, fingerprint-
+  // current grant for every consuming agent. Non-restricted items consult neither.
   const liveGrants = await loadLiveDisclosureGrants(tx, ctx, intendedUse, now);
+  const consumerIdentities = await loadAgentExecutionIdentities(tx, ctx, consumerAgentIds);
+  const consumers = consumerAgentIds.map((id) => consumerIdentities.get(id)).filter((x): x is NonNullable<typeof x> => !!x);
 
   const scored: { item: SelectedKnowledge; score: number; createdAt: Date }[] = [];
   for (const r of rows) {
@@ -653,8 +680,8 @@ export async function selectRelevantKnowledge(
     // it + this purpose; the authorizing grant ids are frozen into the application snapshot.
     const disclosure =
       r.disclosure === 'restricted'
-        ? resolveRestrictedDisclosure(liveGrants, r.id, consumerAgentIds)
-        : { permitted: true, grantIds: [] as string[] };
+        ? resolveRestrictedDisclosure(liveGrants, r.id, consumers)
+        : { permitted: true, grants: [] as DisclosureGrantRecord[] };
     const baseAssessInput = {
       status: r.status,
       epistemicBasis: r.epistemicBasis,
@@ -722,7 +749,7 @@ export async function selectRelevantKnowledge(
       supplementalSourceIds: prov.resolutions.map((x) => x.sourceId).filter((id) => !reliedSet.has(id)),
       resolutions: prov.resolutions.map((x) => ({ sourceId: x.sourceId, outcome: x.outcome, relied: x.relied })),
       supportJudgmentId: prov.supportJudgmentId,
-      disclosureGrantIds: disclosure.grantIds,
+      disclosureGrants: disclosure.grants,
       renderingVersion: KNOWLEDGE_RENDERING_VERSION,
     };
 
@@ -744,8 +771,6 @@ export async function selectRelevantKnowledge(
  * per (consumerType, consumerId, item), so a retried operation can't double-count. `runId`/`taskId`
  * are task-run context; other consumers pass a per-operation `consumerId`.
  */
-export type KnowledgeConsumerType = 'task_run' | 'objective_suggestion';
-
 export async function logKnowledgeApplications(
   tx: DbTx,
   ctx: TenantContext,

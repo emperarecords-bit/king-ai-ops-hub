@@ -167,9 +167,9 @@ export async function startRun(
     const knowledgeQuery = [task.input, objective?.title, objective?.description].filter(Boolean).join(' ');
     const knowledge = await selectRelevantKnowledge(tx, ctx, {
       queryText: knowledgeQuery,
+      consumerType: 'task_run', // purpose (current operational fact) is derived from this
       currentTaskId: taskId,
       currentObjectiveId: task.objectiveId,
-      intendedUse: 'current_operational_fact',
       // Restricted Knowledge is disclosed only if EVERY agent that will consume this run's context is
       // granted. Both the primary and (when present) the reviewer read the same context package.
       consumerAgentIds: [primaryRow.id, reviewerRow?.id].filter((id): id is string => !!id),

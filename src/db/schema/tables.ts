@@ -431,7 +431,11 @@ export const knowledgeDisclosureGrants = pgTable(
     knowledgeItemId: uuid('knowledge_item_id').notNull().references(() => knowledgeItems.id, { onDelete: 'cascade' }),
     /** Consumer: the specific agent permitted to receive it. */
     agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
-    /** Purpose: the intended use granted (a KnowledgeUseIntent). Must match the consumer's intended use. */
+    /** The agent's MATERIAL execution fingerprint at grant time. A grant authorizes disclosure only
+     *  while the agent's current execution profile still matches this — a reconfiguration (new provider,
+     *  model, instructions, sampling, role) invalidates the grant and requires a new one. */
+    agentExecutionFingerprint: text('agent_execution_fingerprint').notNull(),
+    /** Purpose: the intended use granted (a KnowledgeUseIntent). Must match the consumer's derived use. */
     purpose: text('purpose').notNull(),
     rationale: text('rationale'),
     grantedBy: uuid('granted_by').references(() => profiles.id, { onDelete: 'set null' }),
@@ -470,6 +474,9 @@ export const aiOperations = pgTable(
     status: text('status').notNull().default('dispatched'), // dispatched | completed | failed
     provider: text('provider'),
     model: text('model'),
+    /** The Knowledge-use purpose DERIVED from this operation's type (a KnowledgeUseIntent), recorded so
+     *  a caller can never relabel an operation to obtain Knowledge under looser rules. Server-derived. */
+    knowledgePurpose: text('knowledge_purpose'),
     contextHash: text('context_hash'),
     dispatchedAt: timestamp('dispatched_at', { withTimezone: true }),
     completedAt: timestamp('completed_at', { withTimezone: true }),

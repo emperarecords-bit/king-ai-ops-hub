@@ -7,14 +7,17 @@ import { ConflictError, ValidationError } from '@/lib/errors';
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { agents, knowledgeDisclosureGrants, memberships, organizations, profiles, projectMembers, projects } from '@/db/schema';
-import { createKnowledge, selectRelevantKnowledge } from '@/domain/knowledge/knowledge';
+import { createKnowledge, selectRelevantKnowledge, type KnowledgeConsumerType } from '@/domain/knowledge/knowledge';
 import { createDisclosureGrant, listDisclosureGrants, revokeDisclosureGrant } from '@/domain/knowledge/disclosure';
+import { updateAgent } from '@/domain/agents/agents';
 
 /**
  * ENFORCEABLE DISCLOSURE GRANTS — the only path by which `restricted` Knowledge reaches a prompt.
- * A grant is scoped per SPECIFIC agent + SPECIFIC purpose inside an explicit window; it must be live
- * (not revoked, not expired) to disclose; a run discloses a restricted item only when EVERY consuming
- * agent is granted; and a supplied disclosure records the authorizing grant id(s) in its snapshot.
+ * A grant is scoped per SPECIFIC agent EXECUTION IDENTITY + SPECIFIC purpose inside an explicit window.
+ * It must be live (not revoked, not expired) AND still match the agent's current execution fingerprint;
+ * a run discloses a restricted item only when EVERY consuming agent is authorized; the purpose is
+ * DERIVED from the operation, never supplied; and a supplied disclosure records the authorizing grant(s)
+ * and the exact execution identity that received it.
  */
 process.env.DATABASE_URL =
   process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL ?? 'postgresql://king:king@localhost:5433/king_ai_hub';
@@ -50,6 +53,8 @@ async function restrictedItem(token: string): Promise<{ id: string; query: strin
 }
 
 const future = () => new Date(Date.now() + 86_400_000);
+/** A task-run selection consuming context for the given agents. */
+const run = (query: string, consumerAgentIds: string[]) => ({ queryText: query, consumerType: 'task_run' as KnowledgeConsumerType, consumerAgentIds });
 
 beforeAll(async () => {
   if (!available) return;
@@ -73,65 +78,66 @@ afterAll(async () => {
 describe.skipIf(!available)('enforceable disclosure grants', () => {
   it('a restricted item is withheld from a consuming agent when no grant exists', async () => {
     const { id, query } = await restrictedItem('zenith');
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: query, consumerAgentIds: [agentA] }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, run(query, [agentA])));
     expect(picked.find((k) => k.id === id)).toBeUndefined();
   });
 
-  it('a live grant for the specific agent + purpose discloses it, and the snapshot records the grant id', async () => {
+  it('a live grant for the specific agent + purpose discloses it, recording the grant and the exact execution identity', async () => {
     const { id, query } = await restrictedItem('cavern');
     const grantId = await withTenant(ctx, (tx) => createDisclosureGrant(tx, ctx, { knowledgeItemId: id, agentId: agentA, purpose: 'current_operational_fact', expiresAt: future(), rationale: 'agent A runs the privileged flow' }));
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: query, consumerAgentIds: [agentA], intendedUse: 'current_operational_fact' }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, run(query, [agentA])));
     const hit = picked.find((k) => k.id === id);
     expect(hit).toBeDefined();
-    expect(hit!.trustSnapshot.disclosureGrantIds).toEqual([grantId]);
+    expect(hit!.trustSnapshot.disclosureGrants).toHaveLength(1);
+    const g = hit!.trustSnapshot.disclosureGrants[0]!;
+    expect(g.grantId).toBe(grantId);
+    expect(g.agentId).toBe(agentA);
+    expect(g.provider).toBe('openai');
+    expect(g.model).toBe('gpt-5.4-mini');
+    expect(typeof g.executionFingerprint).toBe('string');
+    expect(g.expiresAt).toBeTruthy();
   });
 
-  it('a grant for a different PURPOSE does not disclose (purpose is part of the grant)', async () => {
+  it('a grant for a different PURPOSE does not disclose (purpose is derived from the operation, not the grant alone)', async () => {
     const { id, query } = await restrictedItem('lantern');
+    // Granted for historical_analysis, but a task run derives current_operational_fact → no match.
     await withTenant(ctx, (tx) => createDisclosureGrant(tx, ctx, { knowledgeItemId: id, agentId: agentA, purpose: 'historical_analysis', expiresAt: future() }));
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: query, consumerAgentIds: [agentA], intendedUse: 'current_operational_fact' }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, run(query, [agentA])));
     expect(picked.find((k) => k.id === id)).toBeUndefined();
   });
 
   it('every consuming agent must be granted — a grant to only one of two withholds the whole disclosure', async () => {
     const { id, query } = await restrictedItem('summit');
     await withTenant(ctx, (tx) => createDisclosureGrant(tx, ctx, { knowledgeItemId: id, agentId: agentA, purpose: 'current_operational_fact', expiresAt: future() }));
-    // Run consumes context for BOTH agents; only A is granted.
-    let picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: query, consumerAgentIds: [agentA, agentB] }));
+    let picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, run(query, [agentA, agentB])));
     expect(picked.find((k) => k.id === id)).toBeUndefined();
-    // Grant B too → both consuming agents authorized → disclosed, with both grant ids.
     const gB = await withTenant(ctx, (tx) => createDisclosureGrant(tx, ctx, { knowledgeItemId: id, agentId: agentB, purpose: 'current_operational_fact', expiresAt: future() }));
-    picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: query, consumerAgentIds: [agentA, agentB] }));
+    picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, run(query, [agentA, agentB])));
     const hit = picked.find((k) => k.id === id);
     expect(hit).toBeDefined();
-    expect(hit!.trustSnapshot.disclosureGrantIds).toHaveLength(2);
-    expect(hit!.trustSnapshot.disclosureGrantIds).toContain(gB);
+    expect(hit!.trustSnapshot.disclosureGrants.map((g) => g.grantId)).toContain(gB);
+    expect(hit!.trustSnapshot.disclosureGrants).toHaveLength(2);
   });
 
   it('an expired grant is no grant', async () => {
     const { id, query } = await restrictedItem('harbor');
     const grantId = await withTenant(ctx, (tx) => createDisclosureGrant(tx, ctx, { knowledgeItemId: id, agentId: agentA, purpose: 'current_operational_fact', expiresAt: future() }));
-    // Push the expiry into the past (the create guard forbids a past expiry; the selector still must reject it).
     await getSetupDb().update(knowledgeDisclosureGrants).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(knowledgeDisclosureGrants.id, grantId));
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: query, consumerAgentIds: [agentA] }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, run(query, [agentA])));
     expect(picked.find((k) => k.id === id)).toBeUndefined();
   });
 
   it('a revoked grant is no grant, revocation is recorded, and double-revoke conflicts', async () => {
     const { id, query } = await restrictedItem('meadow');
     const grantId = await withTenant(ctx, (tx) => createDisclosureGrant(tx, ctx, { knowledgeItemId: id, agentId: agentA, purpose: 'current_operational_fact', expiresAt: future() }));
-    // Present before revocation.
-    let picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: query, consumerAgentIds: [agentA] }));
+    let picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, run(query, [agentA])));
     expect(picked.find((k) => k.id === id)).toBeDefined();
-    // Revoke → withheld.
     await withTenant(ctx, (tx) => revokeDisclosureGrant(tx, ctx, grantId, 'no longer needed'));
-    picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: query, consumerAgentIds: [agentA] }));
+    picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, run(query, [agentA])));
     expect(picked.find((k) => k.id === id)).toBeUndefined();
-    // The grant row and its revocation survive (a decision with history, not a delete).
     const grants = await withTenant(ctx, (tx) => listDisclosureGrants(tx, ctx, id));
     expect(grants[0]!.revokedAt).not.toBeNull();
     expect(grants[0]!.revokeReason).toBe('no longer needed');
-    // Revoking again conflicts.
     await expect(withTenant(ctx, (tx) => revokeDisclosureGrant(tx, ctx, grantId))).rejects.toThrow(ConflictError);
   });
 
@@ -145,8 +151,49 @@ describe.skipIf(!available)('enforceable disclosure grants', () => {
   it('a non-run consumer (no consuming agent) can never receive restricted Knowledge, even with a grant present', async () => {
     const { id, query } = await restrictedItem('cinder');
     await withTenant(ctx, (tx) => createDisclosureGrant(tx, ctx, { knowledgeItemId: id, agentId: agentA, purpose: 'current_operational_fact', expiresAt: future() }));
-    // Empty consumer set (e.g. objective suggestion) → no agent to authorize → withheld.
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: query, consumerAgentIds: [] }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, run(query, [])));
     expect(picked.find((k) => k.id === id)).toBeUndefined();
+  });
+
+  // --- Constraint 1: grants bind to an immutable execution identity ---------------------------------
+
+  it("reconfiguring the agent's model (a material execution change) invalidates the old grant", async () => {
+    const { id, query } = await restrictedItem('boulder');
+    await withTenant(ctx, (tx) => createDisclosureGrant(tx, ctx, { knowledgeItemId: id, agentId: agentA, purpose: 'current_operational_fact', expiresAt: future() }));
+    // Present while the execution profile matches.
+    expect((await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, run(query, [agentA])))).find((k) => k.id === id)).toBeDefined();
+    // Change the model → new execution fingerprint → the old grant no longer authorizes.
+    await withTenant(ctx, (tx) => updateAgent(tx, ctx, agentA, { model: 'gpt-5.4' }));
+    expect((await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, run(query, [agentA])))).find((k) => k.id === id)).toBeUndefined();
+    // Restore the model so later tests using agentA keep their fingerprint.
+    await withTenant(ctx, (tx) => updateAgent(tx, ctx, agentA, { model: 'gpt-5.4-mini' }));
+  });
+
+  it("changing the agent's provider cannot silently preserve disclosure authority", async () => {
+    const { id, query } = await restrictedItem('canyon');
+    await withTenant(ctx, (tx) => createDisclosureGrant(tx, ctx, { knowledgeItemId: id, agentId: agentB, purpose: 'current_operational_fact', expiresAt: future() }));
+    expect((await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, run(query, [agentB])))).find((k) => k.id === id)).toBeDefined();
+    // Reconfigure the agent to send context to a different provider (its external data boundary changes).
+    await getSetupDb().update(agents).set({ provider: 'anthropic' }).where(eq(agents.id, agentB));
+    expect((await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, run(query, [agentB])))).find((k) => k.id === id)).toBeUndefined();
+    await getSetupDb().update(agents).set({ provider: 'openai' }).where(eq(agents.id, agentB));
+  });
+
+  it('a harmless display-name change does NOT invalidate an existing grant', async () => {
+    const { id, query } = await restrictedItem('willow');
+    await withTenant(ctx, (tx) => createDisclosureGrant(tx, ctx, { knowledgeItemId: id, agentId: agentA, purpose: 'current_operational_fact', expiresAt: future() }));
+    // Rename the agent (descriptive only — not part of the execution fingerprint).
+    await getSetupDb().update(agents).set({ name: `Renamed-${randomUUID().slice(0, 6)}` }).where(eq(agents.id, agentA));
+    const hit = (await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, run(query, [agentA])))).find((k) => k.id === id);
+    expect(hit).toBeDefined(); // authority survives a rename
+  });
+
+  // --- Constraint 3: purpose is derived from the operation, never forged ----------------------------
+
+  it('a forged/unsupported consumer type is rejected (purpose cannot be caller-supplied)', async () => {
+    const { query } = await restrictedItem('forge');
+    await expect(
+      withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: query, consumerType: 'sneaky_relabel' as unknown as KnowledgeConsumerType, consumerAgentIds: [agentA] })),
+    ).rejects.toThrow(ValidationError);
   });
 });

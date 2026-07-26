@@ -1554,6 +1554,47 @@ refusal into a real, revocable, tightly-scoped decision.
   history survives + double-revoke conflicts · only-restricted-accepts-a-grant · no-agent→never). RLS
   regression guard extended to the new table. Full suite **476/476**.
 
+### Trustworthiness increment 3b — disclosure hardening: execution identity, explicit recipient, derived purpose (built 2026-07-26)
+
+Three semantics that make the grant model sound rather than merely present. Reviewer's framing: a grant
+targeting an agent is safe only if the agent's execution identity can't materially change while keeping
+the same id; every restricted recipient must be explicit, not an accident of an empty array; and the
+use-purpose must be derived from the operation, not asserted by a caller.
+
+- **Grants bind to an immutable execution identity.** A grant now stores the agent's material execution
+  FINGERPRINT at grant time (`agentExecutionFingerprint` over provider · model · systemPrompt ·
+  temperature · maxOutputTokens · role — migration 0032). Selection authorizes a restricted item only
+  when the consuming agent's CURRENT fingerprint still matches the grant's. Reconfiguring the agent's
+  provider, model, or instructions changes the fingerprint and silently invalidates the old grant; a
+  harmless display-name change does not (name is excluded). *Principle: disclosure authority follows the
+  execution identity that was reviewed, not merely a reusable agent name.*
+- **Every AI consumer has an explicit execution identity.** Objective suggestion runs AS its primary
+  agent, so that agent is now passed as the consuming identity (it resolves the agent *before*
+  selection). "No restricted Knowledge for a consumer with no agent" is thus an explicit model — the
+  recipient is a named execution identity that may or may not hold a grant — not an accident of an empty
+  array. *Principle: no identified recipient means no restricted disclosure.*
+- **Purpose is derived from the operation, never supplied.** `KNOWLEDGE_PURPOSE_BY_CONSUMER` maps each
+  consumer type to its one permitted `KnowledgeUseIntent` (`task_run → current_operational_fact`,
+  `objective_suggestion → objective_planning`); `selectRelevantKnowledge` now takes `consumerType` and
+  derives the purpose internally, rejecting an unknown/forged type. A task run can no longer relabel
+  itself "historical analysis" to receive stale or disputed Knowledge under looser rules. The derived
+  purpose is recorded on the AI operation (`ai_operations.knowledge_purpose`) and in the application
+  snapshot. *Principle: operation type and configuration determine permitted Knowledge-use intents.*
+- The application snapshot's `disclosureGrantIds` became `disclosureGrants` — per consuming agent:
+  `{ grantId, agentId, executionFingerprint, provider, model, expiresAt }`. A historical application now
+  shows the exact execution identity that received the Knowledge and the grant validity in force.
+- Locked by `knowledge-disclosure.test.ts` (+ model-change-invalidates · provider-change-invalidates ·
+  rename-preserves · forged-consumer-type-rejected, and the snapshot now carries the execution identity)
+  and the updated provenance-selection/idempotency tests. Full suite **480/480**.
+
+**Disclosure boundary CLOSED.** With execution-identity binding, explicit recipients, and derived
+purpose enforced, the operational retrieval + disclosure path is defensible end to end. Selection order:
+1. active current version → 2. disclosure permitted to *every* actual execution identity → 3. scope
+permits possible applicability → 4. relevance established → 5. freshness/verification/provenance permit
+the derived intended use → 6. eligible records ranked → 7. qualified evidence rendered → 8. exact
+dispatch representation + trust decision recorded (immutable). *This closes provenance + disclosure for
+the Knowledge review; the wider Knowledge trust model is NOT yet finished — the ingestion side is next.*
+
 *Remaining Knowledge increments (deferred, not built): (4) the AI extraction/promotion path
-(propose-only, source-identified, human-activated); (5) the operating-partner conversation; (6) then the
-Knowledge Portfolio & Detail — page redesign last.*
+(propose-only, source-identified, human-activated) — NEXT; (5) the operating-partner conversation; (6)
+then the Knowledge Portfolio & Detail — page redesign last.*

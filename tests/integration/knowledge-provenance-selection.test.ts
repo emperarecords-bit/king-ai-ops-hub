@@ -76,7 +76,7 @@ afterAll(async () => {
 describe.skipIf(!available)('provenance in live selection + application trust snapshot', () => {
   it('inspectable source-supported record is selected for current use and names its resolved evidence', async () => {
     await makeSupported({ title: 'Zephyr tariff', body: 'Zephyr tariff schedule for wholesale accounts.', docPath: 'canon/zephyr.md', hash: 'ZEP_V1', label: 'Zephyr.md' });
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'zephyr tariff wholesale schedule', intendedUse: 'current_operational_fact' }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'zephyr tariff wholesale schedule', consumerType: 'task_run' }));
     const hit = picked.find((k) => k.title === 'Zephyr tariff');
     expect(hit).toBeDefined();
     expect(hit!.memoryText).toContain('source-supported');
@@ -89,14 +89,15 @@ describe.skipIf(!available)('provenance in live selection + application trust sn
     const { id } = await makeSupported({ title: 'Quill rate', body: 'Quill rate card for premium partners.', docPath: 'canon/quill.md', hash: 'QUILL_V1', label: 'Quill.md' });
     // The cited version becomes unavailable after dispatch-era verification.
     await getSetupDb().update(documents).set({ sha256: 'QUILL_V2' }).where(eq(documents.relativePath, 'canon/quill.md'));
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'quill rate premium partners card', intendedUse: 'current_operational_fact' }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'quill rate premium partners card', consumerType: 'task_run' }));
     expect(picked.find((k) => k.id === id)).toBeUndefined();
   });
 
-  it('the same broken-provenance record IS usable (qualified) for historical analysis, without leaking the source label', async () => {
+  it('the same broken-provenance record IS usable (qualified) for a non-current-fact purpose, without leaking the source label', async () => {
     const { id } = await makeSupported({ title: 'Marlin fee', body: 'Marlin fee ledger for archived cohorts.', docPath: 'canon/marlin.md', hash: 'MARLIN_V1', label: 'Marlin-secret.md' });
     await getSetupDb().update(documents).set({ sha256: 'MARLIN_V2' }).where(eq(documents.relativePath, 'canon/marlin.md'));
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'marlin fee ledger archived cohorts', intendedUse: 'historical_analysis' }));
+    // objective_suggestion derives to objective_planning — a non-current-fact purpose that tolerates broken provenance with a qualification.
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'marlin fee ledger archived cohorts', consumerType: 'objective_suggestion' }));
     const hit = picked.find((k) => k.id === id);
     expect(hit).toBeDefined();
     expect(hit!.memoryText).toContain('cited source version unavailable');
@@ -117,7 +118,7 @@ describe.skipIf(!available)('provenance in live selection + application trust sn
     // Break only the supplemental source.
     await getSetupDb().update(documents).set({ sha256: 'OS_V2' }).where(eq(documents.relativePath, 'canon/orbit-supp.md'));
 
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'orbit policy reconciliation windows', intendedUse: 'current_operational_fact' }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'orbit policy reconciliation windows', consumerType: 'task_run' }));
     const hit = picked.find((k) => k.id === id);
     expect(hit).toBeDefined(); // relied-upon support intact → not withheld
     expect(hit!.memoryText).toContain('Supported by: Orbit-relied.md');
@@ -128,7 +129,7 @@ describe.skipIf(!available)('provenance in live selection + application trust sn
 
   it('a manual assertion with no source is selected clean — no provenance phrase, no source line', async () => {
     const id = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Nimbus convention', body: 'Nimbus convention: greet partners by workspace handle.', kind: 'fact', activate: true }));
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'nimbus convention greet partners handle', intendedUse: 'current_operational_fact' }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'nimbus convention greet partners handle', consumerType: 'task_run' }));
     const hit = picked.find((k) => k.id === id);
     expect(hit).toBeDefined();
     expect(hit!.memoryText).not.toContain('source-supported');
@@ -138,7 +139,7 @@ describe.skipIf(!available)('provenance in live selection + application trust sn
 
   it('the application snapshot freezes the trust facts used at dispatch (resolutions, relied ids, support judgment)', async () => {
     const { id, srcId } = await makeSupported({ title: 'Cobalt terms', body: 'Cobalt terms for renewal notices.', docPath: 'canon/cobalt.md', hash: 'COB_V1', label: 'Cobalt.md' });
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'cobalt terms renewal notices', intendedUse: 'current_operational_fact' }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'cobalt terms renewal notices', consumerType: 'task_run' }));
     const chosen = picked.filter((k) => k.id === id);
     const op = randomUUID();
     await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: op, injected: chosen }));
@@ -156,7 +157,7 @@ describe.skipIf(!available)('provenance in live selection + application trust sn
 
   it('a retry repeats the frozen snapshot — a source breaking after dispatch does not re-resolve', async () => {
     const { id } = await makeSupported({ title: 'Vesper limit', body: 'Vesper limit for concurrent sessions.', docPath: 'canon/vesper.md', hash: 'VES_V1', label: 'Vesper.md' });
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'vesper limit concurrent sessions', intendedUse: 'current_operational_fact' }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'vesper limit concurrent sessions', consumerType: 'task_run' }));
     const chosen = picked.filter((k) => k.id === id);
     const op = randomUUID();
     await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: op, injected: chosen }));
@@ -173,7 +174,7 @@ describe.skipIf(!available)('provenance in live selection + application trust sn
 
   it('the frozen snapshot is inspectable from the knowledge item side (reverse trail carries the version)', async () => {
     const { id } = await makeSupported({ title: 'Halcyon cap', body: 'Halcyon cap for burst throughput.', docPath: 'canon/halcyon.md', hash: 'HAL_V1', label: 'Halcyon.md' });
-    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'halcyon cap burst throughput', intendedUse: 'current_operational_fact' }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'halcyon cap burst throughput', consumerType: 'task_run' }));
     const op = randomUUID();
     await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: op, injected: picked.filter((k) => k.id === id) }));
     const trail = await withTenant(ctx, (tx) => listInjectionsForKnowledge(tx, ctx, id));

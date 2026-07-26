@@ -5,6 +5,7 @@ import { ConflictError, NotFoundError, ValidationError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { agents, knowledgeDisclosureGrants, knowledgeItems } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
+import { agentExecutionFingerprint, type AgentExecutionIdentity } from '@/domain/agents/agents';
 import { KNOWLEDGE_USE_INTENTS, type KnowledgeUseIntent } from '@/domain/knowledge/assess';
 
 /**
@@ -57,14 +58,25 @@ export async function createDisclosureGrant(
     throw new ValidationError(['Only restricted Knowledge needs a disclosure grant; this item is already disclosable to workspace consumers.']);
   }
 
+  // Load the agent's CURRENT execution profile and bind the grant to that exact fingerprint. A later
+  // material reconfiguration changes the fingerprint, so this grant stops matching (requires a new one).
   const agent = (
     await tx
-      .select({ id: agents.id })
+      .select({
+        id: agents.id,
+        provider: agents.provider,
+        model: agents.model,
+        systemPrompt: agents.systemPrompt,
+        temperatureMilli: agents.temperatureMilli,
+        maxOutputTokens: agents.maxOutputTokens,
+        role: agents.role,
+      })
       .from(agents)
       .where(and(eq(agents.id, data.agentId), eq(agents.orgId, ctx.orgId), eq(agents.projectId, ctx.projectId)))
       .limit(1)
   )[0];
   if (!agent) throw new ValidationError(['That agent does not belong to this project.']);
+  const fingerprint = agentExecutionFingerprint(agent);
 
   if (data.expiresAt.getTime() <= Date.now()) throw new ValidationError(['A grant must expire in the future — an expired grant is no grant.']);
 
@@ -75,6 +87,7 @@ export async function createDisclosureGrant(
       projectId: ctx.projectId,
       knowledgeItemId: data.knowledgeItemId,
       agentId: data.agentId,
+      agentExecutionFingerprint: fingerprint,
       purpose: data.purpose,
       rationale: data.rationale ?? null,
       grantedBy: ctx.userId,
@@ -86,7 +99,7 @@ export async function createDisclosureGrant(
     action: 'knowledge.disclosure_granted',
     entityType: 'knowledge_item',
     entityId: data.knowledgeItemId,
-    detail: { grantId: row[0]!.id, agentId: data.agentId, purpose: data.purpose, expiresAt: data.expiresAt.toISOString(), title: item.title },
+    detail: { grantId: row[0]!.id, agentId: data.agentId, agentExecutionFingerprint: fingerprint, purpose: data.purpose, expiresAt: data.expiresAt.toISOString(), title: item.title },
   });
   return row[0]!.id;
 }
@@ -152,19 +165,32 @@ export async function listDisclosureGrants(tx: DbTx, ctx: TenantContext, knowled
     .orderBy(desc(knowledgeDisclosureGrants.grantedAt));
 }
 
+/** One live grant, with the execution fingerprint it was bound to and its expiry (for snapshotting). */
+export interface LiveGrant {
+  grantId: string;
+  agentExecutionFingerprint: string;
+  expiresAt: Date;
+}
+
 /**
- * All LIVE grants for a given purpose, indexed itemId → (agentId → grantId). The selector loads this
+ * All LIVE grants for a given purpose, indexed itemId → (agentId → LiveGrant). The selector loads this
  * once per selection and, for each restricted candidate, permits it only when every consuming agent
- * appears in that item's map — recording the authorizing grant ids for the application snapshot.
+ * appears in that item's map AND still matches the fingerprint the grant was bound to.
  */
 export async function loadLiveDisclosureGrants(
   tx: DbTx,
   ctx: TenantContext,
   purpose: KnowledgeUseIntent,
   now: Date,
-): Promise<Map<string, Map<string, string>>> {
+): Promise<Map<string, Map<string, LiveGrant>>> {
   const rows = await tx
-    .select({ id: knowledgeDisclosureGrants.id, knowledgeItemId: knowledgeDisclosureGrants.knowledgeItemId, agentId: knowledgeDisclosureGrants.agentId })
+    .select({
+      id: knowledgeDisclosureGrants.id,
+      knowledgeItemId: knowledgeDisclosureGrants.knowledgeItemId,
+      agentId: knowledgeDisclosureGrants.agentId,
+      agentExecutionFingerprint: knowledgeDisclosureGrants.agentExecutionFingerprint,
+      expiresAt: knowledgeDisclosureGrants.expiresAt,
+    })
     .from(knowledgeDisclosureGrants)
     .where(
       and(
@@ -175,36 +201,57 @@ export async function loadLiveDisclosureGrants(
         gt(knowledgeDisclosureGrants.expiresAt, now),
       ),
     );
-  const index = new Map<string, Map<string, string>>();
+  const index = new Map<string, Map<string, LiveGrant>>();
   for (const r of rows) {
     let perItem = index.get(r.knowledgeItemId);
     if (!perItem) {
-      perItem = new Map<string, string>();
+      perItem = new Map<string, LiveGrant>();
       index.set(r.knowledgeItemId, perItem);
     }
-    perItem.set(r.agentId, r.id);
+    perItem.set(r.agentId, { grantId: r.id, agentExecutionFingerprint: r.agentExecutionFingerprint, expiresAt: r.expiresAt });
   }
   return index;
 }
 
+/** What a resolved restricted disclosure records, per consuming agent, into the application snapshot. */
+export interface DisclosureGrantRecord {
+  grantId: string;
+  agentId: string;
+  executionFingerprint: string;
+  provider: string;
+  model: string;
+  /** Grant validity at dispatch (the exact expiry that was in force). */
+  expiresAt: string;
+}
+
 /**
  * Resolve whether a restricted item is disclosable to the run's consuming agents for `purpose`, using
- * a pre-loaded live-grant index. Returns permission + the authorizing grant ids (for the snapshot).
- * Empty consumer set → never permitted (no agent to authorize). Non-restricted items don't call this.
+ * a pre-loaded live-grant index and the agents' CURRENT execution identities. A grant authorizes only
+ * while the agent's execution fingerprint still matches the one the grant was bound to — a reconfigured
+ * agent (new provider/model/instructions) no longer matches, so its old grant does not authorize.
+ * Empty consumer set → never permitted (no identified recipient). Non-restricted items don't call this.
  */
 export function resolveRestrictedDisclosure(
-  grants: Map<string, Map<string, string>>,
+  grants: Map<string, Map<string, LiveGrant>>,
   knowledgeItemId: string,
-  consumerAgentIds: string[],
-): { permitted: boolean; grantIds: string[] } {
-  if (consumerAgentIds.length === 0) return { permitted: false, grantIds: [] };
+  consumers: AgentExecutionIdentity[],
+): { permitted: boolean; grants: DisclosureGrantRecord[] } {
+  if (consumers.length === 0) return { permitted: false, grants: [] };
   const perItem = grants.get(knowledgeItemId);
-  if (!perItem) return { permitted: false, grantIds: [] };
-  const grantIds: string[] = [];
-  for (const agentId of consumerAgentIds) {
-    const gid = perItem.get(agentId);
-    if (!gid) return { permitted: false, grantIds: [] }; // one un-granted consumer withholds the whole disclosure
-    grantIds.push(gid);
+  if (!perItem) return { permitted: false, grants: [] };
+  const resolved: DisclosureGrantRecord[] = [];
+  for (const consumer of consumers) {
+    const grant = perItem.get(consumer.id);
+    // One un-granted OR reconfigured-since-grant consumer withholds the WHOLE disclosure.
+    if (!grant || grant.agentExecutionFingerprint !== consumer.fingerprint) return { permitted: false, grants: [] };
+    resolved.push({
+      grantId: grant.grantId,
+      agentId: consumer.id,
+      executionFingerprint: consumer.fingerprint,
+      provider: consumer.provider,
+      model: consumer.model,
+      expiresAt: grant.expiresAt.toISOString(),
+    });
   }
-  return { permitted: true, grantIds };
+  return { permitted: true, grants: resolved };
 }
