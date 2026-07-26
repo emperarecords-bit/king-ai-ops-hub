@@ -104,6 +104,26 @@ causation, it states the narrower truth or clearly labels the relationship as an
 never a conclusion dressed as fact. Business impact frequently lives right on this line: state
 the correlation as fact, the consequence as a labeled inference.
 
+**Sharper honesty in claims (refined via Objectives, applies Hub-wide):**
+- **Confidence attaches to a specific claim, not the whole thing.** The Hub can be highly
+  confident two criteria are met while barely confident the outcome finishes on time — it should
+  say so. Assessment confidence is *metadata on a judgment*, never a property of the thing judged
+  (an objective's *risk* and the Hub's *confidence* about it are orthogonal — different axes).
+- **Every outcome claim keeps its evidence source.** "Met" is not one thing: verified by external
+  data, human-confirmed, artifact-supported, Hub-inferred, or merely marked without evidence —
+  not equivalent. The Hub knows and communicates the source of any load-bearing claim.
+- **Absence of a recorded problem is not proof of no problem.** Bound negative/exhaustive claims
+  to what the Hub can actually see: "no blockers *recorded*," "no open decisions *linked*" — not
+  "nothing's blocked." Reassure without implying complete visibility. *(Retroactively tightens the
+  Dashboard's "nothing needs a decision / nothing's blocked" copy — a small pending follow-up.)*
+- **No forecast without a basis.** "On track / on time" is a forecast needing a defensible time
+  model (target, trajectory, evidence cadence, dependencies, remaining distance, baseline). Absent
+  it, the honest judgment is "advancing on evidence" — strong without overreaching. Same for
+  "the natural next step, not a stuck one": if unsupported, label it an inference.
+- **Narrow causes without inventing one.** Offer the plausible space ("misdirected, delayed by a
+  dependency, or evidence not yet captured — worth examining"), never a false either/or that
+  implies the cause is known.
+
 **The reasoning contract is universal; its depth is not.** The five dimensions stay consistent
 everywhere, so the operator learns *one* way the Hub thinks. The *presentation* adapts to
 significance: a small prioritization judgment may be two sentences; a major recommendation
@@ -353,13 +373,15 @@ audited, and closed objectives can't be quietly rewritten. That is the foundatio
 2. **Define success.** Criteria + the completion gate are the authoritative definition. Preserve:
    *an objective cannot be completed by activity alone.* Milestones, tasks, and Work Items may
    explain the path but must never silently redefine the destination.
-3. **Judge meaningful progress** — keep four concepts *separate*, never compressed into one
-   number: **lifecycle status** (draft/active/completed/cancelled) · **outcome progress** (what
-   the success evidence currently shows) · **momentum** (whether meaningful movement is
-   occurring) · **risk/confidence** (how likely it is to reach the outcome). A new objective can
-   have low outcome progress but healthy momentum; an objective can have many completed tasks and
-   no outcome movement; an objective can meet criteria while getting riskier as a dependency
-   stalls.
+3. **Judge meaningful progress** — keep *five* concepts separate, never compressed into one
+   number/score/color/label: **lifecycle** (formal state: draft/active/completed/cancelled) ·
+   **outcome progress** (what the success evidence establishes) · **momentum** (whether meaningful
+   *outcome* movement is occurring) · **risk** (what threatens achieving the outcome) ·
+   **assessment confidence** (how strongly the Hub can stand behind each judgment — *metadata on
+   the judgment*, orthogonal to risk). A new objective can have low outcome progress but healthy
+   momentum; an objective can have many completed tasks and no outcome movement; it can meet
+   criteria while getting riskier as a dependency stalls; and the Hub can be highly confident
+   about one of these while unable to assess another.
 4. **Connect work to purpose.** Both human Work Items *and* AI tasks are execution and both must
    be visible (AI work counting while human work is invisible is a defect). But visibility ≠
    success: explain what work is contributing, what changed because of it, what remains, and
@@ -403,12 +425,33 @@ signals, **momentum and risk will often be "not enough evidence to assess" — t
 behavior, not a gap to paper over** (confidence is not certainty). Establish the contract; let the
 measurement earn its way in from real operation.
 
-**Next:** define the experience at two levels — the **list** (the workspace's portfolio of
-commitments) and the **detail** (one commitment: its success contract, its evidence, and the
-Hub's current judgment) — via the operating-partner conversation (what are we trying to
-accomplish · why does it matter · how will we know · what evidence now · is it moving · what
-helps/prevents · what needs the operator). Structure emerges from that conversation. Do not begin
-with cards, bars, filters, or percentages.
+**The accepted conversation model.** Across every state the partner communicates: (1) the outcome
+pursued, (2) the success contract, (3) evidence available now, (4) what that evidence establishes,
+(5) whether meaningful movement is visible, (6) what risk is present, (7) how confident it is in
+each conclusion, (8) what evidence or event would change the assessment, (9) what — if anything —
+needs the operator. Durable vocabulary: *"I can confirm effort, not outcome progress." · "The
+objective is advancing on evidence." · "There isn't enough current evidence to assess momentum
+confidently."*
+
+**Evidence, not maintenance.** Manual confirmation of a criterion is *one* evidence source, not
+the Hub's measurement system. Over time the Hub gathers outcome evidence from work, artifacts,
+decisions, integrations, and business systems (the capability ladder, applied to evidence). The
+operator maintaining the Hub so it *looks* intelligent is not the product. When evidence is
+missing, say what's missing and offer confirmation as one option — never demand it as the answer.
+
+**No fixed age thresholds.** "Too early to judge" depends on the objective's expected evidence
+cadence, not a universal number of days (two days is long for incident response, nothing for a
+quarterly goal). Until cadence is modeled, speak to evidence sufficiency ("not enough history or
+outcome evidence to assess momentum yet"), never a hard-coded age.
+
+**Reference conversations, not screen copy.** The narratives reveal the full reasoning; the
+interface presents it in layers — a concise portfolio verdict, one line per commitment, a deeper
+explanation when warranted, the full reasoning contract when opened. Same mind; the surface
+respects attention.
+
+**Next:** the conversation is set and refined — now let the **list** and **detail** *structure*
+emerge from it (layered as above). Still no cards, bars, filters, or percentages until the
+structure follows the conversation.
 
 **Mobile — scoped follow-up (desktop-first today).** When the persistent rail can't stay visible,
 the mental model *and* the current-location signal must survive. Do **not** collapse into an
