@@ -17,6 +17,11 @@ sketch & evaluate against the goals → only then build.
   charts.
 - **Signals must be trustworthy.** An alert always means something real; a quiet/green state
   means things are genuinely fine. No crying wolf.
+- **Business first, software second.** The Hub always represents the *business* first and the
+  software second. When the business view and the platform view compete, optimize for helping
+  the operator understand the business — not the internal mechanics of the platform. (A
+  business can be healthy though an AI task failed; every AI task can succeed while the
+  business drifts. Health is a business judgment, not a platform status.)
 
 ## Dashboard  — *agreed 2026-07-26*
 
@@ -40,12 +45,26 @@ answer is "nothing," it feels reassuring, not empty.
 - Calm on a quiet day: "everything operating normally" is a confident state, not a void.
 - Explicitly out of scope: trends, charts, reporting.
 
-**"Healthy / operating normally" rubric (proposed — confirming):** the workspace is healthy
-when *all* are true — nothing awaiting your decision · no blocked/failed work · no objective
-genuinely stalled (fixed at-risk logic) · spend within budget · recent AI runs completed
-without error. Any one false → that becomes the attention item, shown with its "why."
+**"Operating normally" — evaluated in layers, business first.** Health is a *business*
+judgment, not a platform status. The layers guide the design (they need not be shown as
+explicit sections), and they lead in this order:
+
+1. **Business health** — Are objectives progressing? Is work moving forward? Is anything
+   *materially* stalled? *(Leads. This is what "is my business okay?" actually means.)*
+2. **Operational health** — Am I waiting on decisions? Is any work blocked? Are approvals
+   backing up?
+3. **System health** — Are AI tasks completing? Are integrations functioning? Is spend within
+   expected limits?
+
+"Everything operating normally" is only honest when the business layer is genuinely moving —
+not merely when the machinery is error-free. Any layer with a real problem becomes an
+attention item, shown with its "why" (responsibility ④).
 
 **Open design questions (for the sketch, step 5):**
-- How much ambient orientation (working-now, objective list, team roster, recent work) stays
-  on-screen vs. subordinated beneath the health/attention layer vs. left to its own pages.
+- Defining "materially stalled" / "work moving forward" honestly, without crying wolf — the
+  business-health signals are the most valuable *and* the least trivial to compute.
+- Whether we can truthfully report "integrations functioning" (may need a health probe we
+  don't yet have) — don't claim a green we can't verify.
+- How much ambient orientation (working-now, team roster, recent work) stays on-screen vs.
+  subordinated vs. left to its own pages.
 - Mechanism for "what changed since I last looked."
