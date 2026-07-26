@@ -18,7 +18,7 @@ import { type DbTx } from '@/db/client';
 import { auditLogs, knowledgeInjections, knowledgeItems, knowledgeSources, knowledgeVerificationEvents, objectives, profiles, tasks } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 import { knowledgeRelevance, significantTerms } from '@/domain/knowledge/relevance';
-import { assessProvenance, resolveKnowledgeSource, type ProvenanceState, type ResolutionOutcome } from '@/domain/knowledge/provenance';
+import { assessProvenance, isProvenanceBroken, resolveKnowledgeSource, type ProvenanceState, type ResolutionOutcome } from '@/domain/knowledge/provenance';
 import { assessKnowledge, qualificationLabel, type KnowledgeUseIntent } from '@/domain/knowledge/assess';
 
 const scopeTask = alias(tasks, 'k_scope_task');
@@ -414,24 +414,30 @@ export async function recordSupportJudgment(
 
 export interface KnowledgeProvenanceAssessment {
   state: ProvenanceState;
-  resolutions: { sourceId: string; label: string; outcome: ResolutionOutcome }[];
+  resolutions: { sourceId: string; label: string; outcome: ResolutionOutcome; relied: boolean }[];
   hasSupportJudgment: boolean;
+  supportJudgmentId: string | null;
+  reliedOnSourceIds: string[];
+  /** A relied-upon source (per the support judgment) does not currently resolve to its cited version. */
+  reliedBroken: boolean;
+  /** The signal the selector uses to withhold from CURRENT-operational use. For a source-supported
+   *  record this is relied-upon breakage (a broken *supplemental* source does NOT invalidate it); for
+   *  a source-dependent record without a judgment, any claimed source breaking is a defect. */
+  brokenForCurrentUse: boolean;
 }
 
 /**
- * Current provenance for a Knowledge version — assessed independently of the historical judgment: it
- * resolves each cited source NOW and combines with whether a support judgment exists. So a record can
- * be verification `source_supported` yet provenance `broken` (cited version no longer inspectable).
+ * Current provenance for a Knowledge version — assessed independently of the historical judgment. It
+ * resolves each cited source NOW, separates the sources the support judgment RELIED upon from merely
+ * supplemental attachments, and reports both the overall state and whether *relied-upon* support is
+ * currently inspectable. So a record can be verification `source_supported` yet provenance `partial`
+ * while its relied-upon support remains intact (a broken supplemental source alone doesn't withhold).
  */
 export async function assessKnowledgeProvenance(tx: DbTx, ctx: TenantContext, itemId: string, version: number): Promise<KnowledgeProvenanceAssessment> {
   const sources = await listKnowledgeSources(tx, ctx, itemId, version);
-  const resolutions = [];
-  for (const s of sources) {
-    const outcome = await resolveKnowledgeSource(tx, ctx, { id: s.id, sourceType: s.sourceType, sourceRef: s.sourceRef, sourceVersionHash: s.sourceVersionHash });
-    resolutions.push({ sourceId: s.id, label: s.sourceLabel, outcome });
-  }
+  // The latest support judgment governs which relationships are relied upon.
   const judgments = await tx
-    .select({ id: knowledgeVerificationEvents.id })
+    .select({ id: knowledgeVerificationEvents.id, reliedOnSourceIds: knowledgeVerificationEvents.reliedOnSourceIds })
     .from(knowledgeVerificationEvents)
     .where(
       and(
@@ -442,9 +448,31 @@ export async function assessKnowledgeProvenance(tx: DbTx, ctx: TenantContext, it
         eq(knowledgeVerificationEvents.judgment, 'source_supported'),
       ),
     )
+    .orderBy(desc(knowledgeVerificationEvents.createdAt))
     .limit(1);
-  const hasSupportJudgment = judgments.length > 0;
-  return { state: assessProvenance(resolutions.map((r) => r.outcome), hasSupportJudgment), resolutions, hasSupportJudgment };
+  const judgment = judgments[0] ?? null;
+  const reliedSet = new Set(judgment?.reliedOnSourceIds ?? []);
+
+  const resolutions = [];
+  for (const s of sources) {
+    const outcome = await resolveKnowledgeSource(tx, ctx, { id: s.id, sourceType: s.sourceType, sourceRef: s.sourceRef, sourceVersionHash: s.sourceVersionHash });
+    resolutions.push({ sourceId: s.id, label: s.sourceLabel, outcome, relied: reliedSet.has(s.id) });
+  }
+
+  const hasSupportJudgment = judgment != null;
+  const reliedBroken = hasSupportJudgment && resolutions.some((r) => r.relied && r.outcome !== 'resolved');
+  const state = assessProvenance(resolutions.map((r) => r.outcome), hasSupportJudgment);
+  const brokenForCurrentUse = hasSupportJudgment ? reliedBroken : isProvenanceBroken(state);
+
+  return {
+    state,
+    resolutions,
+    hasSupportJudgment,
+    supportJudgmentId: judgment?.id ?? null,
+    reliedOnSourceIds: [...reliedSet],
+    reliedBroken,
+    brokenForCurrentUse,
+  };
 }
 
 export async function archiveKnowledge(

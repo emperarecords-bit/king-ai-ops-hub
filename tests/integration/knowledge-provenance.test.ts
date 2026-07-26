@@ -5,7 +5,7 @@ import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
-import { documents, memberships, organizations, profiles, projectMembers, projects } from '@/db/schema';
+import { artifacts, documents, memberships, organizations, profiles, projectMembers, projects } from '@/db/schema';
 import {
   assessKnowledgeProvenance,
   attachKnowledgeSource,
@@ -117,6 +117,45 @@ describe.skipIf(!available)('inspectable provenance', () => {
     // Verification (the historical judgment) is unchanged; current provenance is broken.
     expect((await withTenant(ctx, (tx) => listKnowledge(tx, ctx))).find((k) => k.id === id)!.verification).toBe('source_supported');
     expect((await withTenant(ctx, (tx) => assessKnowledgeProvenance(tx, ctx, id, 1))).state).toBe('broken');
+  });
+
+  it('artifact provenance resolves to the exact original representation, never modified content', async () => {
+    const art = await getSetupDb().insert(artifacts).values({ orgId, projectId: ctx.projectId, name: 'out.md', kind: 'markdown', content: 'v1', sha256: 'ART_V1', sizeBytes: 2 }).returning({ id: artifacts.id });
+    const id = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'From artifact', body: 'b', kind: 'fact', epistemicBasis: 'extracted' }));
+    const srcId = await withTenant(ctx, (tx) => attachKnowledgeSource(tx, ctx, id, { sourceType: 'artifact', sourceRef: art[0]!.id, sourceLabel: 'out.md', sourceVersionHash: 'ART_V1', transformation: 'extracted' }));
+    // Resolves at the cited version → judgment succeeds.
+    await withTenant(ctx, (tx) => recordSupportJudgment(tx, ctx, id, { reliedOnSourceIds: [srcId] }));
+    expect((await withTenant(ctx, (tx) => assessKnowledgeProvenance(tx, ctx, id, 1))).state).toBe('inspectable_support');
+    // The artifact content changes → the old citation must NOT silently resolve to it.
+    await getSetupDb().update(artifacts).set({ sha256: 'ART_V2' }).where(eq(artifacts.id, art[0]!.id));
+    const prov = await withTenant(ctx, (tx) => assessKnowledgeProvenance(tx, ctx, id, 1));
+    expect(prov.resolutions[0]!.outcome).toBe('version_mismatch');
+    expect(prov.reliedBroken).toBe(true);
+  });
+
+  it('a broken supplemental source does not invalidate resolved relied-upon support; a broken relied source does', async () => {
+    await mkDoc('canon/relied.md', 'RELIED_V1');
+    await mkDoc('canon/supp.md', 'SUPP_V1');
+    const id = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Relied vs supp', body: 'b', kind: 'fact', epistemicBasis: 'summarized' }));
+    const reliedId = await withTenant(ctx, (tx) => attachKnowledgeSource(tx, ctx, id, { sourceType: 'document', sourceRef: 'canon/relied.md', sourceLabel: 'Relied', sourceVersionHash: 'RELIED_V1', transformation: 'summarized' }));
+    await withTenant(ctx, (tx) => attachKnowledgeSource(tx, ctx, id, { sourceType: 'document', sourceRef: 'canon/supp.md', sourceLabel: 'Supplemental', sourceVersionHash: 'SUPP_V1', transformation: 'summarized' }));
+    // Judgment relies ONLY on the relied source.
+    await withTenant(ctx, (tx) => recordSupportJudgment(tx, ctx, id, { reliedOnSourceIds: [reliedId] }));
+
+    // Break the SUPPLEMENTAL source → overall partial, but relied-upon support intact → usable.
+    await getSetupDb().update(documents).set({ sha256: 'SUPP_V2' }).where(eq(documents.relativePath, 'canon/supp.md'));
+    let prov = await withTenant(ctx, (tx) => assessKnowledgeProvenance(tx, ctx, id, 1));
+    expect(prov.state).toBe('partial');
+    expect(prov.reliedBroken).toBe(false);
+    expect(prov.brokenForCurrentUse).toBe(false);
+
+    // Now break the RELIED-upon source → present reliance is limited.
+    await getSetupDb().update(documents).set({ sha256: 'RELIED_V2' }).where(eq(documents.relativePath, 'canon/relied.md'));
+    prov = await withTenant(ctx, (tx) => assessKnowledgeProvenance(tx, ctx, id, 1));
+    expect(prov.reliedBroken).toBe(true);
+    expect(prov.brokenForCurrentUse).toBe(true);
+    // The judgment still identifies exactly which relationships govern verification.
+    expect(prov.reliedOnSourceIds).toEqual([reliedId]);
   });
 
   it('provenance is immutable after activation — a source change requires a new version', async () => {

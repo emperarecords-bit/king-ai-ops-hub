@@ -36,12 +36,16 @@ export async function resolveKnowledgeSource(tx: DbTx, ctx: TenantContext, sourc
     return 'resolved';
   }
   if (source.sourceType === 'artifact') {
+    // Artifacts are write-once, but we still verify the cited content hash so an older Knowledge
+    // version can never silently resolve to different artifact content (exact-version contract).
     const rows = await tx
-      .select({ id: artifacts.id })
+      .select({ sha256: artifacts.sha256 })
       .from(artifacts)
       .where(and(eq(artifacts.id, source.sourceRef), eq(artifacts.projectId, ctx.projectId), eq(artifacts.orgId, ctx.orgId)))
       .limit(1);
-    return rows.length === 0 ? 'missing' : 'resolved';
+    if (rows.length === 0) return 'missing';
+    if (source.sourceVersionHash != null && rows[0]!.sha256 !== source.sourceVersionHash) return 'version_mismatch';
+    return 'resolved';
   }
   return 'unsupported';
 }

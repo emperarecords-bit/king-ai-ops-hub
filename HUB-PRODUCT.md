@@ -1461,6 +1461,22 @@ suite **452/452**.
   independently → partial · historical judgment survives a later break · post-activation immutability).
   Full suite **458/458**.
 
+**Provenance Part A refinements (built 2026-07-26):**
+- **Artifacts get the exact-version contract too.** The resolver verifies an artifact's `sha256`
+  against the cited `sourceVersionHash` — write-once artifacts still can't silently resolve to changed
+  content. *Principle: a resolvable identifier is provenance only when it identifies the exact evidence
+  originally used.*
+- **`inaccessible` stays reserved.** The resolver emits only missing / version-mismatch / unsupported /
+  resolved today; `inaccessible` will be emitted only from a real access decision when source
+  permissions land. *Principle: the Hub may call evidence inaccessible only when it can establish the
+  evidence exists and access is denied.*
+- **Relied-upon vs supplemental sources.** `assessKnowledgeProvenance` now separates the sources a
+  support judgment RELIED upon from merely supplemental attachments, and reports `reliedBroken` +
+  `brokenForCurrentUse`: a broken *supplemental* source (overall `partial`) does NOT invalidate resolved
+  relied-upon support; a broken *relied-upon* source limits present reliance and withholds from current
+  use. Locked by tests (artifact version-mismatch; broken-supplemental-usable; broken-relied-withheld;
+  judgment identifies which relationships govern). Full suite **460/460**.
+
 *Provenance Part B (next): wire per-item source resolution into live selection + prompt rendering
 (broken → withheld/qualified by intended use), and store the trust snapshot (epistemic/verification/
 freshness/provenance/source-ids/resolution-summary/rendering-version) on each Knowledge application, so
