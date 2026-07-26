@@ -56,9 +56,17 @@ export function assessKnowledge(i: {
   disclosure: KnowledgeDisclosure;
   /** Whether an explicit grant permits this restricted item for the current consumer (v1: false). */
   disclosurePermitted: boolean;
+  /** Current provenance is broken (a claimed source can't be inspected at its cited version). The
+   *  caller computes this from resolution; default false. Only bites for source-dependent records. */
+  provenanceBroken?: boolean;
   intendedUse: KnowledgeUseIntent;
   now: Date;
 }): KnowledgeAssessment {
+  // A record is source-dependent when its trust rests on a source: extracted/summarized/inferred, or
+  // an explicit source-supported judgment. Broken provenance only limits reliance on those.
+  const sourceDependent =
+    i.epistemicBasis === 'extracted' || i.epistemicBasis === 'summarized' || i.epistemicBasis === 'inferred' || i.verification === 'source_supported';
+  const provenanceBroken = i.provenanceBroken === true && sourceDependent;
   const reasons: string[] = [];
 
   // Freshness (deterministic, from explicit timestamps — never from updatedAt).
@@ -109,6 +117,10 @@ export function assessKnowledge(i: {
   } else if (!scopeValid) {
     useState = 'withheld';
     reasons.push('invalid_scope');
+  } else if (provenanceBroken && forCurrentFact) {
+    // A source-dependent claim whose cited evidence can't be inspected is not settled current fact.
+    useState = 'withheld';
+    reasons.push('broken_provenance');
   } else if (freshness === 'stale' && forCurrentFact) {
     useState = 'withheld';
     reasons.push('expired_for_current_fact');
@@ -120,6 +132,7 @@ export function assessKnowledge(i: {
     reasons.push('disputed_for_current_fact');
   } else {
     // Soft concerns → usable, but qualified.
+    if (provenanceBroken) { useState = 'usable_with_qualification'; reasons.push('broken_provenance'); } // historical/reference use, with a qualification
     if (i.verification === 'disputed') { useState = 'usable_with_qualification'; reasons.push('disputed'); }
     if (freshness === 'stale' || freshness === 'historical') { useState = 'usable_with_qualification'; reasons.push('stale_historical'); }
     if (freshness === 'review_due') { useState = 'usable_with_qualification'; reasons.push('review_due'); }

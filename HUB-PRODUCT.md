@@ -1431,12 +1431,42 @@ reuses the frozen snapshot · changed submission still conflicts after failure).
 idempotency identifies one immutable logical request, not merely one client-generated string.* Full
 suite **452/452**.
 
-*Remaining trustworthiness increments (deferred, not built, never presented as if they exist):
-(2) inspectable provenance — a `knowledge_sources` relationship (type/id/label/version-hash/date/
-transformation/excerpt/locator, multiple sources), a bounded resolution result (resolved/missing/
-inaccessible/version-mismatch/unsupported) the assessment consumes, "source_supported" only when a
-source resolves + a verification event, broken/mismatched source = provenance defect (never silently
-latest), source attached ≠ source inspected ≠ judged-to-support; (3) disclosure GRANTS
+### Trustworthiness increment 2 — inspectable provenance, Part A (built 2026-07-26)
+
+- **Version-specific source relationships** (`knowledge_sources`): type · resolvable ref · label · exact
+  version hash · source date · transformation · locator · added-by/at; multiple independent sources per
+  Knowledge version; only resolvable types (`document`/`artifact`). A manual assertion legitimately has
+  none. Immutable version boundary enforced in the domain: `attachKnowledgeSource` works only on a
+  **draft** — a change to an active/applied version requires a new version.
+- **Bounded, exact-version resolver** (`provenance.ts`, `resolveKnowledgeSource`): resolved / missing /
+  inaccessible / version-mismatch / unsupported. A document resolves by path **and exact sha256** — a
+  differing current hash is `version_mismatch`, never a silent fallback to latest. Access-aware
+  (`inaccessible` reserved for actor/consumer permission). Persisted citation facts stay separate from
+  the current resolution result.
+- **Provenance state** (`assessProvenance`, consumed by `assessKnowledge`): no_source /
+  attached_not_reviewed / inspectable_support / partial / broken / unsupported. Distinguishes "no source
+  claimed" (not a defect) from "a claimed source can't be inspected" (broken). Broken provenance on a
+  **source-dependent** record (extracted/summarized/inferred or source_supported) is **withheld for
+  current-operational use, qualified for historical**.
+- **Attached ≠ inspected ≠ judged-to-support.** Attaching a source never changes verification.
+  `source_supported` is reachable ONLY via `recordSupportJudgment`, which names the relied-upon sources,
+  requires each to resolve to its exact cited version now, and writes an **append-only** judgment event
+  snapshotting the relied ids + their resolution.
+- **Historical support ≠ current inspectability.** A later resolution failure never rewrites the
+  judgment event; verification stays `source_supported` while current provenance reads `broken`.
+  *Principle: a later source-resolution failure does not rewrite the historical verification event, but
+  it may limit present reliance.*
+- Locked by `knowledge-provenance.test.ts` (no-source-not-defect · attach-doesn't-verify · judgment
+  needs relied sources · missing/version-mismatch fail source_supported · multiple sources resolve
+  independently → partial · historical judgment survives a later break · post-activation immutability).
+  Full suite **458/458**.
+
+*Provenance Part B (next): wire per-item source resolution into live selection + prompt rendering
+(broken → withheld/qualified by intended use), and store the trust snapshot (epistemic/verification/
+freshness/provenance/source-ids/resolution-summary/rendering-version) on each Knowledge application, so
+the future Detail explains a past dispatch without recomputing from today's records.*
+
+*Remaining trustworthiness increments after provenance (deferred, not built): (3) disclosure GRANTS
 (provider/agent/consumer/purpose/period/actor) so restricted can be supplied with a matching grant;
 (4) the AI extraction/promotion path (propose-only, source-identified, human-activated); (5) the
 operating-partner conversation; (6) then the Knowledge Portfolio & Detail — page redesign last.*

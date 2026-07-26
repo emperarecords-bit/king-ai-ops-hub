@@ -95,7 +95,7 @@ grant select, insert, update on
   agents, departments, project_context_items, integration_secrets,
   tasks, runs, run_steps, artifacts, approvals,
   objectives, milestones, knowledge_items, task_schedules,
-  documents, document_chunks, task_dependencies, decisions, decision_injections, knowledge_injections, ai_operations, run_jobs, document_jobs,
+  documents, document_chunks, task_dependencies, decisions, decision_injections, knowledge_injections, knowledge_sources, knowledge_verification_events, ai_operations, run_jobs, document_jobs,
   work_items,
   usage_events, spend_limits, rate_limit_buckets, profiles
 to app_server;
@@ -146,6 +146,13 @@ create trigger messages_append_only
 drop trigger if exists audit_logs_append_only on audit_logs;
 create trigger audit_logs_append_only
   before update or delete on audit_logs
+  for each row execute function app.forbid_mutation();
+
+-- Knowledge support-judgment events are append-only: a later resolution failure must never rewrite a
+-- historical judgment.
+drop trigger if exists knowledge_verification_events_append_only on knowledge_verification_events;
+create trigger knowledge_verification_events_append_only
+  before update or delete on knowledge_verification_events
   for each row execute function app.forbid_mutation();
 
 -- Queue-dispatch functions (O-22) --------------------------------------------
@@ -506,7 +513,7 @@ begin
     'tasks', 'runs', 'run_steps', 'messages',
     'artifacts', 'approvals', 'usage_events', 'spend_limits',
     'objectives', 'milestones', 'knowledge_items', 'task_schedules',
-    'documents', 'document_chunks', 'task_dependencies', 'decisions', 'decision_injections', 'knowledge_injections', 'ai_operations', 'run_jobs',
+    'documents', 'document_chunks', 'task_dependencies', 'decisions', 'decision_injections', 'knowledge_injections', 'knowledge_sources', 'knowledge_verification_events', 'ai_operations', 'run_jobs',
     'document_jobs', 'work_items'
   ]
   loop

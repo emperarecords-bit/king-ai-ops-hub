@@ -6,6 +6,8 @@ import {
   KNOWLEDGE_EPISTEMIC_BASES,
   KNOWLEDGE_KINDS,
   KNOWLEDGE_SCOPE_KINDS,
+  KNOWLEDGE_SOURCE_TYPES,
+  KNOWLEDGE_TRANSFORMATIONS,
   type KnowledgeKind,
   type KnowledgeSource,
   type KnowledgeStatus,
@@ -13,9 +15,10 @@ import {
 } from '@/types/domain';
 import { ConflictError, NotFoundError, ValidationError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
-import { auditLogs, knowledgeInjections, knowledgeItems, objectives, profiles, tasks } from '@/db/schema';
+import { auditLogs, knowledgeInjections, knowledgeItems, knowledgeSources, knowledgeVerificationEvents, objectives, profiles, tasks } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 import { knowledgeRelevance, significantTerms } from '@/domain/knowledge/relevance';
+import { assessProvenance, resolveKnowledgeSource, type ProvenanceState, type ResolutionOutcome } from '@/domain/knowledge/provenance';
 import { assessKnowledge, qualificationLabel, type KnowledgeUseIntent } from '@/domain/knowledge/assess';
 
 const scopeTask = alias(tasks, 'k_scope_task');
@@ -85,6 +88,7 @@ export interface KnowledgeRow {
   supersedes: string | null;
   status: KnowledgeStatus;
   source: KnowledgeSource;
+  verification: string;
   approvedAt: Date | null;
   createdAt: Date;
 }
@@ -98,6 +102,7 @@ const rowSelection = {
   supersedes: knowledgeItems.supersedes,
   status: knowledgeItems.status,
   source: knowledgeItems.source,
+  verification: knowledgeItems.verification,
   approvedAt: knowledgeItems.approvedAt,
   createdAt: knowledgeItems.createdAt,
 };
@@ -278,6 +283,168 @@ export async function getKnowledgeVerificationHistory(tx: DbTx, ctx: TenantConte
     const d = x.detail as { verification?: string; reason?: string } | null;
     return { verification: d?.verification ?? null, reason: d?.reason ?? null, actorName: x.actorName, at: x.at };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Inspectable provenance (version-specific evidence relationships)
+// ---------------------------------------------------------------------------
+
+export const attachKnowledgeSourceSchema = z.object({
+  sourceType: z.enum(KNOWLEDGE_SOURCE_TYPES),
+  sourceRef: z.string().trim().min(1).max(400),
+  sourceLabel: z.string().trim().min(1).max(400),
+  sourceVersionHash: z.string().trim().max(200).nullable().default(null),
+  sourceDate: z.coerce.date().nullable().default(null),
+  transformation: z.enum(KNOWLEDGE_TRANSFORMATIONS),
+  locator: z.string().trim().max(2_000).nullable().default(null),
+});
+
+/**
+ * Attach a source to a Knowledge version. Immutable version boundary: only a DRAFT may have sources
+ * attached — once active/applied a change requires a new version. Attaching a source NEVER changes
+ * verification (attached ≠ inspected ≠ judged-to-support).
+ */
+export async function attachKnowledgeSource(
+  tx: DbTx,
+  ctx: TenantContext,
+  itemId: string,
+  input: z.input<typeof attachKnowledgeSourceSchema>,
+): Promise<string> {
+  const parsed = attachKnowledgeSourceSchema.safeParse(input);
+  if (!parsed.success) throw new ValidationError(parsed.error.issues.map((i) => i.message));
+  const item = await getItem(tx, ctx, itemId);
+  if (item.status !== 'draft') {
+    throw new ConflictError('Sources can only be attached to a draft — a change to an active record requires a new version.');
+  }
+  const inserted = await tx
+    .insert(knowledgeSources)
+    .values({
+      orgId: ctx.orgId,
+      projectId: ctx.projectId,
+      knowledgeItemId: itemId,
+      knowledgeVersion: item.version,
+      sourceType: parsed.data.sourceType,
+      sourceRef: parsed.data.sourceRef,
+      sourceLabel: parsed.data.sourceLabel,
+      sourceVersionHash: parsed.data.sourceVersionHash,
+      sourceDate: parsed.data.sourceDate,
+      transformation: parsed.data.transformation,
+      locator: parsed.data.locator,
+      addedBy: ctx.userId,
+    })
+    .returning({ id: knowledgeSources.id });
+  await writeAudit(tx, ctx, { action: 'knowledge.source_attached', entityType: 'knowledge_item', entityId: itemId, detail: { sourceType: parsed.data.sourceType, sourceRef: parsed.data.sourceRef } });
+  return inserted[0]!.id;
+}
+
+export interface KnowledgeSourceRow {
+  id: string;
+  sourceType: string;
+  sourceRef: string;
+  sourceLabel: string;
+  sourceVersionHash: string | null;
+  sourceDate: Date | null;
+  transformation: string;
+  locator: string | null;
+}
+
+export async function listKnowledgeSources(tx: DbTx, ctx: TenantContext, itemId: string, version: number): Promise<KnowledgeSourceRow[]> {
+  return tx
+    .select({
+      id: knowledgeSources.id,
+      sourceType: knowledgeSources.sourceType,
+      sourceRef: knowledgeSources.sourceRef,
+      sourceLabel: knowledgeSources.sourceLabel,
+      sourceVersionHash: knowledgeSources.sourceVersionHash,
+      sourceDate: knowledgeSources.sourceDate,
+      transformation: knowledgeSources.transformation,
+      locator: knowledgeSources.locator,
+    })
+    .from(knowledgeSources)
+    .where(and(eq(knowledgeSources.knowledgeItemId, itemId), eq(knowledgeSources.knowledgeVersion, version), eq(knowledgeSources.orgId, ctx.orgId), eq(knowledgeSources.projectId, ctx.projectId)));
+}
+
+/**
+ * Record a support judgment — the ONLY path to `source_supported`. Preconditions: it must name the
+ * relied-upon source relationships, and every one must resolve to its EXACT cited version now. The
+ * judgment snapshots the relied ids + their resolution, so a later resolution failure can't rewrite
+ * it. An unrelated attached source that is broken does not block a judgment that didn't rely on it.
+ */
+export async function recordSupportJudgment(
+  tx: DbTx,
+  ctx: TenantContext,
+  itemId: string,
+  input: { reliedOnSourceIds: string[]; rationale?: string; limitations?: string },
+): Promise<void> {
+  const item = await getItem(tx, ctx, itemId);
+  const relied = [...new Set(input.reliedOnSourceIds)];
+  if (relied.length === 0) throw new ValidationError(['A support judgment must identify the source relationships it relied upon.']);
+
+  const sources = await listKnowledgeSources(tx, ctx, itemId, item.version);
+  const byId = new Map(sources.map((s) => [s.id, s]));
+  const resolutionSnapshot: Record<string, ResolutionOutcome> = {};
+  for (const id of relied) {
+    const s = byId.get(id);
+    if (!s) throw new ValidationError(['A relied-upon source is not attached to this Knowledge version.']);
+    const outcome = await resolveKnowledgeSource(tx, ctx, { id: s.id, sourceType: s.sourceType, sourceRef: s.sourceRef, sourceVersionHash: s.sourceVersionHash });
+    resolutionSnapshot[id] = outcome;
+    if (outcome !== 'resolved') {
+      throw new ConflictError(`source_supported requires the relied-upon source to resolve to its exact cited version (${s.sourceLabel}: ${outcome}).`);
+    }
+  }
+
+  await tx.insert(knowledgeVerificationEvents).values({
+    orgId: ctx.orgId,
+    projectId: ctx.projectId,
+    knowledgeItemId: itemId,
+    knowledgeVersion: item.version,
+    judgment: 'source_supported',
+    verifier: ctx.userId,
+    reliedOnSourceIds: relied,
+    resolutionSnapshot,
+    rationale: input.rationale?.trim() || null,
+    limitations: input.limitations?.trim() || null,
+  });
+  await tx
+    .update(knowledgeItems)
+    .set({ verification: 'source_supported', verifiedAt: new Date(), updatedAt: new Date() })
+    .where(and(eq(knowledgeItems.id, itemId), scopeWhere(ctx)));
+  await writeAudit(tx, ctx, { action: 'knowledge.verification_set', entityType: 'knowledge_item', entityId: itemId, detail: { title: item.title, verification: 'source_supported', reliedOn: relied.length } });
+}
+
+export interface KnowledgeProvenanceAssessment {
+  state: ProvenanceState;
+  resolutions: { sourceId: string; label: string; outcome: ResolutionOutcome }[];
+  hasSupportJudgment: boolean;
+}
+
+/**
+ * Current provenance for a Knowledge version — assessed independently of the historical judgment: it
+ * resolves each cited source NOW and combines with whether a support judgment exists. So a record can
+ * be verification `source_supported` yet provenance `broken` (cited version no longer inspectable).
+ */
+export async function assessKnowledgeProvenance(tx: DbTx, ctx: TenantContext, itemId: string, version: number): Promise<KnowledgeProvenanceAssessment> {
+  const sources = await listKnowledgeSources(tx, ctx, itemId, version);
+  const resolutions = [];
+  for (const s of sources) {
+    const outcome = await resolveKnowledgeSource(tx, ctx, { id: s.id, sourceType: s.sourceType, sourceRef: s.sourceRef, sourceVersionHash: s.sourceVersionHash });
+    resolutions.push({ sourceId: s.id, label: s.sourceLabel, outcome });
+  }
+  const judgments = await tx
+    .select({ id: knowledgeVerificationEvents.id })
+    .from(knowledgeVerificationEvents)
+    .where(
+      and(
+        eq(knowledgeVerificationEvents.knowledgeItemId, itemId),
+        eq(knowledgeVerificationEvents.knowledgeVersion, version),
+        eq(knowledgeVerificationEvents.orgId, ctx.orgId),
+        eq(knowledgeVerificationEvents.projectId, ctx.projectId),
+        eq(knowledgeVerificationEvents.judgment, 'source_supported'),
+      ),
+    )
+    .limit(1);
+  const hasSupportJudgment = judgments.length > 0;
+  return { state: assessProvenance(resolutions.map((r) => r.outcome), hasSupportJudgment), resolutions, hasSupportJudgment };
 }
 
 export async function archiveKnowledge(

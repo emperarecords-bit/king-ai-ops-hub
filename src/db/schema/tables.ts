@@ -353,6 +353,62 @@ export const knowledgeInjections = pgTable(
 );
 
 /**
+ * Version-specific provenance: the sources a particular Knowledge item VERSION derives from. Immutable
+ * once the version is active/applied — a changed source/version/locator/transformation requires a new
+ * Knowledge version (enforced in the domain). Only resolvable source types (document/artifact); a
+ * manual assertion legitimately has no rows here. The exact cited version (`sourceVersionHash`) is
+ * preserved so a citation is never resolved to the latest.
+ */
+export const knowledgeSources = pgTable(
+  'knowledge_sources',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    knowledgeItemId: uuid('knowledge_item_id').notNull().references(() => knowledgeItems.id, { onDelete: 'cascade' }),
+    knowledgeVersion: integer('knowledge_version').notNull(),
+    sourceType: text('source_type').notNull(), // 'document' | 'artifact'
+    /** Resolvable identifier: a document's relativePath, or an artifact id. */
+    sourceRef: text('source_ref').notNull(),
+    sourceLabel: text('source_label').notNull(),
+    /** Exact cited version — a document's sha256; null for immutable artifacts. */
+    sourceVersionHash: text('source_version_hash'),
+    sourceDate: timestamp('source_date', { withTimezone: true }),
+    transformation: text('transformation').notNull(), // quoted | extracted | summarized | inferred
+    locator: text('locator'),
+    addedBy: uuid('added_by').references(() => profiles.id, { onDelete: 'set null' }),
+    addedAt: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('knowledge_sources_item_version_idx').on(t.knowledgeItemId, t.knowledgeVersion)],
+);
+
+/**
+ * Append-only support-judgment events. A judgment SNAPSHOTS the sources relied upon and their
+ * resolution at verification time, so a later resolution failure never rewrites the historical
+ * judgment (it only limits present reliance). The only path to `source_supported`.
+ */
+export const knowledgeVerificationEvents = pgTable(
+  'knowledge_verification_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    knowledgeItemId: uuid('knowledge_item_id').notNull().references(() => knowledgeItems.id, { onDelete: 'cascade' }),
+    knowledgeVersion: integer('knowledge_version').notNull(),
+    judgment: text('judgment').notNull(), // 'source_supported' | 'human_confirmed' | 'disputed' | 'inspected'
+    verifier: uuid('verifier').references(() => profiles.id, { onDelete: 'set null' }),
+    /** The source-relationship ids the judgment relied upon (jsonb string[]). */
+    reliedOnSourceIds: jsonb('relied_on_source_ids').$type<string[]>().notNull().default([]),
+    /** Per-relied-source resolution outcome AT verification time (jsonb {sourceId: outcome}). */
+    resolutionSnapshot: jsonb('resolution_snapshot').notNull().default({}),
+    rationale: text('rationale'),
+    limitations: text('limitations'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('knowledge_verification_events_item_version_idx').on(t.knowledgeItemId, t.knowledgeVersion)],
+);
+
+/**
  * A durable record of an AI operation that is NOT a task run (e.g. objective suggestion), so that
  * every AI use of Knowledge belongs to an inspectable operation rather than an ephemeral correlation
  * value. Recorded before provider dispatch; its status advances to completed/failed. An

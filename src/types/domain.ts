@@ -320,6 +320,14 @@ export type KnowledgeScopeKind = (typeof KNOWLEDGE_SCOPE_KINDS)[number];
 export const KNOWLEDGE_DISCLOSURES = ['workspace_internal', 'restricted'] as const;
 export type KnowledgeDisclosure = (typeof KNOWLEDGE_DISCLOSURES)[number];
 
+// Only source types the Hub can actually resolve and inspect — never a nominal label.
+export const KNOWLEDGE_SOURCE_TYPES = ['document', 'artifact'] as const;
+export type KnowledgeSourceType = (typeof KNOWLEDGE_SOURCE_TYPES)[number];
+
+// How the Knowledge was derived from a source (independent of, but compatible with, epistemic basis).
+export const KNOWLEDGE_TRANSFORMATIONS = ['quoted', 'extracted', 'summarized', 'inferred'] as const;
+export type KnowledgeTransformation = (typeof KNOWLEDGE_TRANSFORMATIONS)[number];
+
 /** Objectives (OBJECTIVES.md, D-010). Dark schema in Sprint 3; UI in Sprint 4. */
 export const OBJECTIVE_STATUSES = ['draft', 'active', 'completed', 'cancelled'] as const;
 export type ObjectiveStatus = (typeof OBJECTIVE_STATUSES)[number];
