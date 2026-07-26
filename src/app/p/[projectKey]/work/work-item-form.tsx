@@ -53,6 +53,22 @@ export function CreateWorkItemForm({
           </datalist>
         </div>
       </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div>
+          <label className={labelCls}>Condition</label>
+          <select name="condition" defaultValue="planned" className={inputCls}>
+            <option value="planned">Planned</option>
+            <option value="moving">Moving</option>
+            <option value="waiting">Waiting</option>
+            <option value="finished">Finished</option>
+            <option value="stopped">Stopped</option>
+          </select>
+        </div>
+        <div>
+          <label className={labelCls}>Waiting on (if waiting)</label>
+          <input name="waitingOn" maxLength={200} className={inputCls} placeholder="e.g. customer reply, outside counsel…" />
+        </div>
+      </div>
       <div>
         <label className={labelCls}>Objective (optional)</label>
         <select name="objectiveId" defaultValue={defaultObjectiveId ?? ''} className={inputCls}>

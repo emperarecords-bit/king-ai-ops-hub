@@ -7,6 +7,7 @@ import { log } from '@/lib/log';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { createWorkItem, updateWorkItem } from '@/domain/work/work-items';
+import { WORK_ITEM_CONDITIONS } from '@/types/domain';
 
 export interface WorkItemState {
   error: string | null;
@@ -20,6 +21,8 @@ const optionalId = z
 const createSchema = z.object({
   projectKey: z.string().min(1),
   title: z.string().trim().min(1, 'Title is required').max(200),
+  condition: z.enum(WORK_ITEM_CONDITIONS).optional(),
+  waitingOn: z.string().trim().max(200).optional(),
   stage: z.string().trim().max(60).optional(),
   notes: z.string().max(8_000).optional(),
   objectiveId: optionalId,
@@ -29,6 +32,8 @@ const updateSchema = z.object({
   projectKey: z.string().min(1),
   workItemId: z.string().uuid(),
   title: z.string().trim().min(1, 'Title is required').max(200),
+  condition: z.enum(WORK_ITEM_CONDITIONS),
+  waitingOn: z.string().trim().max(200).optional(),
   stage: z.string().trim().max(60),
   notes: z.string().max(8_000),
 });
@@ -41,6 +46,8 @@ export async function createWorkItemAction(
   const parsed = createSchema.safeParse({
     projectKey: formData.get('projectKey'),
     title: formData.get('title'),
+    condition: formData.get('condition') ?? undefined,
+    waitingOn: formData.get('waitingOn') ?? undefined,
     stage: formData.get('stage') ?? undefined,
     notes: formData.get('notes') ?? undefined,
     objectiveId: formData.get('objectiveId') ?? '',
@@ -52,6 +59,8 @@ export async function createWorkItemAction(
     await withTenant(ctx, (tx) =>
       createWorkItem(tx, ctx, {
         title: parsed.data.title,
+        condition: parsed.data.condition ?? 'planned',
+        waitingOn: parsed.data.waitingOn ?? '',
         stage: parsed.data.stage ?? 'New',
         notes: parsed.data.notes ?? '',
         objectiveId: parsed.data.objectiveId,
@@ -74,6 +83,8 @@ export async function updateWorkItemAction(
     projectKey: formData.get('projectKey'),
     workItemId: formData.get('workItemId'),
     title: formData.get('title'),
+    condition: formData.get('condition'),
+    waitingOn: formData.get('waitingOn') ?? undefined,
     stage: formData.get('stage'),
     notes: formData.get('notes'),
   });
@@ -84,6 +95,8 @@ export async function updateWorkItemAction(
     await withTenant(ctx, (tx) =>
       updateWorkItem(tx, ctx, parsed.data.workItemId, {
         title: parsed.data.title,
+        condition: parsed.data.condition,
+        waitingOn: parsed.data.waitingOn ?? '',
         stage: parsed.data.stage,
         notes: parsed.data.notes,
       }),

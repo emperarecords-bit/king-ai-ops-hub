@@ -43,6 +43,7 @@ import {
   milestoneStatusEnum,
   modelTierEnum,
   objectiveStatusEnum,
+  workItemConditionEnum,
   orgRoleEnum,
   projectRoleEnum,
   providerIdEnum,
@@ -708,6 +709,11 @@ export const workItems = pgTable(
       .notNull()
       .references(() => projects.id, { onDelete: 'cascade' }),
     title: text('title').notNull(),
+    /** Structured operational condition — the minimum lifecycle meaning the Hub needs to
+     * coordinate human work (Execution). Sits beside the flexible free-text `stage`. */
+    condition: workItemConditionEnum('condition').notNull().default('planned'),
+    /** Optional: what a "waiting" item is waiting on (e.g. "outside counsel response"). */
+    waitingOn: text('waiting_on'),
     /** Free-text business stage (e.g. "Sourced", "Demo booked"). Not an enum —
      * the vocabulary is the operator's, not the platform's. */
     stage: text('stage').notNull().default('New'),

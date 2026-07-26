@@ -621,6 +621,38 @@ them.
 **Durable vocabulary:** "Execution's part is honest: the work got done. Whether it moved the outcome
 is Objectives' call." · "Different mechanics, one picture."
 
-**Next:** with condition / intervention / reason / source / confidence separated, the language and
-then the two structures (execution portfolio; individual work) emerge — no tables, swimlanes,
-filters, or merged schema until they follow the conversation.
+**Intervention level vs. required action** *(refined 2026-07-26).* Split intervention into two
+fields so the model doesn't accumulate overlapping labels: **Intervention level** — None · Watch ·
+Required; and, only when Required, **Required action** — approve/return · retry/cancel · assign an
+owner · update the reported condition · resolve a dependency · adjust/pause autonomous work · supply
+missing input. The language still reads naturally ("Needs your decision: approve or return the
+draft"). Principle: **intervention says whether involvement is required; the available action says
+what involvement means.**
+
+**Confidence attaches to each claim, not the whole assessment.** A human Work Item can be *high*
+confidence in what was last reported, *low* confidence it still reflects reality, and *limited*
+confidence in the inference that intervention helps — keep **condition confidence** and
+**intervention confidence** separate (the Hub-wide "confidence attaches to a specific claim").
+
+**Owner is not assumed to be the performer.** For human work say "Sam is accountable; a separate
+performer is not recorded" — never "performer assumed." Unknown is more honest than an implicit
+identity between accountability and execution; a future performer field resolves it.
+
+**Available actions need three checks** (capability alone isn't enough): an action appears only when
+it is (1) supported by the work type, (2) valid in the work's current state, and (3) allowed for the
+current operator under the work's authority/permissions. The partner never recommends an action the
+user can't take from the present state.
+
+**Structured human condition — smallest sufficient field (build prerequisite).** Add to Work Items:
+`condition` (planned | moving | waiting | finished | stopped) beside the flexible `stage`, plus
+optional `waitingOn`. *Condition: Waiting · Stage: Legal review · Waiting on: outside counsel.* The
+condition enables coordination; the stage preserves the team's vocabulary. Never infer the
+structured condition permanently from arbitrary stage text.
+
+**The Execution assessment model (conceptual — governs language, not a wall of chips):** Condition ·
+Native reason · Condition source & confidence · Intervention level · Intervention basis & confidence
+· Required/available actions · Accountable owner · Performer (when known) · Objective/operational
+purpose · Autonomy & cost (when applicable).
+
+**Next:** semantics settled (no further philosophy cycle). The structured human condition is being
+added; then the execution portfolio and individual-work structures emerge from this language.

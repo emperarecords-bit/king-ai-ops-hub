@@ -24,6 +24,7 @@ import {
   MILESTONE_STATUSES,
   MODEL_TIERS,
   OBJECTIVE_STATUSES,
+  WORK_ITEM_CONDITIONS,
   ORG_ROLES,
   PROJECT_ROLES,
   REVIEW_VERDICTS,
@@ -57,6 +58,7 @@ export const artifactKindEnum = pgEnum('artifact_kind', ARTIFACT_KINDS);
 export const modelTierEnum = pgEnum('model_tier', MODEL_TIERS);
 export const flagshipCategoryEnum = pgEnum('flagship_category', FLAGSHIP_CATEGORIES);
 export const objectiveStatusEnum = pgEnum('objective_status', OBJECTIVE_STATUSES);
+export const workItemConditionEnum = pgEnum('work_item_condition', WORK_ITEM_CONDITIONS);
 export const milestoneStatusEnum = pgEnum('milestone_status', MILESTONE_STATUSES);
 export const knowledgeScopeEnum = pgEnum('knowledge_scope', KNOWLEDGE_SCOPES);
 export const knowledgeKindEnum = pgEnum('knowledge_kind', KNOWLEDGE_KINDS);

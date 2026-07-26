@@ -3,14 +3,25 @@
 import { useActionState } from 'react';
 import { updateWorkItemAction, type WorkItemState } from './actions';
 import { OwnerPicker, type OwnerOption } from '../owner-picker';
+import { type WorkItemCondition } from '@/types/domain';
 
 const inputCls =
   'w-full rounded border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-sm';
 const labelCls = 'block text-xs text-[var(--muted)] mb-1';
 
+const CONDITION_LABEL: Record<WorkItemCondition, string> = {
+  planned: 'Planned',
+  moving: 'Moving',
+  waiting: 'Waiting',
+  finished: 'Finished',
+  stopped: 'Stopped',
+};
+
 export interface WorkItemView {
   id: string;
   title: string;
+  condition: WorkItemCondition;
+  waitingOn: string | null;
   stage: string;
   notes: string;
   ownerAgentId: string | null;
@@ -43,8 +54,14 @@ export function WorkItemRow({
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm font-medium">{item.title}</span>
         <span className="rounded bg-[var(--surface-raised)] px-2 py-0.5 text-xs text-[var(--foreground)]">
-          {item.stage}
+          {CONDITION_LABEL[item.condition]}
         </span>
+        {item.condition === 'waiting' && item.waitingOn ? (
+          <span className="text-xs text-[var(--muted)]">on {item.waitingOn}</span>
+        ) : null}
+        {item.stage && item.stage !== 'New' ? (
+          <span className="text-xs text-[var(--muted)]">· {item.stage}</span>
+        ) : null}
         {item.objectiveTitle ? (
           <span className="text-xs text-[var(--muted)]">· {item.objectiveTitle}</span>
         ) : null}
@@ -83,7 +100,21 @@ export function WorkItemRow({
                 <input name="title" required maxLength={200} defaultValue={item.title} className={inputCls} />
               </div>
               <div>
-                <label className={labelCls}>Stage</label>
+                <label className={labelCls}>Condition</label>
+                <select name="condition" defaultValue={item.condition} className={inputCls}>
+                  <option value="planned">Planned</option>
+                  <option value="moving">Moving</option>
+                  <option value="waiting">Waiting</option>
+                  <option value="finished">Finished</option>
+                  <option value="stopped">Stopped</option>
+                </select>
+              </div>
+              <div>
+                <label className={labelCls}>Waiting on (if waiting)</label>
+                <input name="waitingOn" maxLength={200} defaultValue={item.waitingOn ?? ''} className={inputCls} placeholder="e.g. customer reply" />
+              </div>
+              <div>
+                <label className={labelCls}>Stage (your label)</label>
                 <input name="stage" maxLength={60} defaultValue={item.stage} className={inputCls} list="work-stages" />
               </div>
             </div>

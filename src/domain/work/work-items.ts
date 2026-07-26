@@ -1,6 +1,6 @@
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { type TenantContext } from '@/types/domain';
+import { type TenantContext, type WorkItemCondition, WORK_ITEM_CONDITIONS } from '@/types/domain';
 import { ValidationError, NotFoundError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { agents, objectives, workItems } from '@/db/schema';
@@ -17,6 +17,8 @@ import { writeAudit } from '@/domain/audit/audit';
 export interface WorkItemRow {
   id: string;
   title: string;
+  condition: WorkItemCondition;
+  waitingOn: string | null;
   stage: string;
   notes: string;
   ownerAgentId: string | null;
@@ -44,6 +46,8 @@ export async function listWorkItems(
     .select({
       id: workItems.id,
       title: workItems.title,
+      condition: workItems.condition,
+      waitingOn: workItems.waitingOn,
       stage: workItems.stage,
       notes: workItems.notes,
       ownerAgentId: workItems.ownerAgentId,
@@ -63,6 +67,8 @@ export async function listWorkItems(
 
 export const createWorkItemSchema = z.object({
   title: z.string().trim().min(1, 'Title is required').max(200),
+  condition: z.enum(WORK_ITEM_CONDITIONS).default('planned'),
+  waitingOn: z.string().trim().max(200).default(''),
   stage: z.string().trim().max(60).default('New'),
   notes: z.string().max(8_000).default(''),
   objectiveId: z.string().uuid().nullable().default(null),
@@ -101,6 +107,8 @@ export async function createWorkItem(
       orgId: ctx.orgId,
       projectId: ctx.projectId,
       title: parsed.data.title,
+      condition: parsed.data.condition,
+      waitingOn: parsed.data.condition === 'waiting' ? parsed.data.waitingOn || null : null,
       stage: parsed.data.stage || 'New',
       notes: parsed.data.notes,
       objectiveId: parsed.data.objectiveId,
@@ -120,6 +128,8 @@ export async function createWorkItem(
 
 export const updateWorkItemSchema = z.object({
   title: z.string().trim().min(1, 'Title is required').max(200),
+  condition: z.enum(WORK_ITEM_CONDITIONS),
+  waitingOn: z.string().trim().max(200).default(''),
   stage: z.string().trim().max(60),
   notes: z.string().max(8_000),
 });
@@ -140,6 +150,8 @@ export async function updateWorkItem(
     .update(workItems)
     .set({
       title: parsed.data.title,
+      condition: parsed.data.condition,
+      waitingOn: parsed.data.condition === 'waiting' ? parsed.data.waitingOn || null : null,
       stage: parsed.data.stage || 'New',
       notes: parsed.data.notes,
       updatedAt: new Date(),

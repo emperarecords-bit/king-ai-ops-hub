@@ -291,6 +291,14 @@ export type KnowledgeSource = (typeof KNOWLEDGE_SOURCES)[number];
 export const OBJECTIVE_STATUSES = ['draft', 'active', 'completed', 'cancelled'] as const;
 export type ObjectiveStatus = (typeof OBJECTIVE_STATUSES)[number];
 
+/**
+ * The minimal structured operational condition for a human Work Item (Execution). It sits beside
+ * the flexible free-text `stage` so the Hub can coordinate the work (planned/moving/waiting/
+ * finished/stopped) without inferring meaning from arbitrary stage text (HUB-PRODUCT.md).
+ */
+export const WORK_ITEM_CONDITIONS = ['planned', 'moving', 'waiting', 'finished', 'stopped'] as const;
+export type WorkItemCondition = (typeof WORK_ITEM_CONDITIONS)[number];
+
 export const MILESTONE_STATUSES = ['planned', 'active', 'completed', 'cancelled'] as const;
 export type MilestoneStatus = (typeof MILESTONE_STATUSES)[number];
 

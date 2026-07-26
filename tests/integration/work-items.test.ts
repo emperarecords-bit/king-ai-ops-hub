@@ -74,11 +74,15 @@ describe.skipIf(!available)('work items — create, list, edit, own', () => {
     expect(it.objectiveTitle).toBe('Pipeline');
   });
 
-  it('edits notes and stage in place (the reason it exists vs a task)', async () => {
+  it('edits condition, notes, and stage in place (the reason it exists vs a task)', async () => {
     const id = await withTenant(ctxA, (tx) => createWorkItem(tx, ctxA, { title: 'ACME HVAC', stage: 'Sourced' }));
-    await withTenant(ctxA, (tx) => updateWorkItem(tx, ctxA, id, { title: 'ACME HVAC', stage: 'Demo booked', notes: 'wants Thursday' }));
+    await withTenant(ctxA, (tx) =>
+      updateWorkItem(tx, ctxA, id, { title: 'ACME HVAC', condition: 'waiting', waitingOn: 'callback', stage: 'Demo booked', notes: 'wants Thursday' }),
+    );
     const items = await withTenant(ctxA, (tx) => listWorkItems(tx, ctxA));
     const it = items.find((w) => w.id === id)!;
+    expect(it.condition).toBe('waiting');
+    expect(it.waitingOn).toBe('callback');
     expect(it.stage).toBe('Demo booked');
     expect(it.notes).toBe('wants Thursday');
   });

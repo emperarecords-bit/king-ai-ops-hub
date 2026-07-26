@@ -56,6 +56,8 @@ export default async function WorkPage({
                 item={{
                   id: it.id,
                   title: it.title,
+                  condition: it.condition,
+                  waitingOn: it.waitingOn,
                   stage: it.stage,
                   notes: it.notes,
                   ownerAgentId: it.ownerAgentId,
