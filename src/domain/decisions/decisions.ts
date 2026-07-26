@@ -184,6 +184,7 @@ export interface DecisionRow {
   originatingTaskId: string | null;
   originatingTaskTitle: string | null;
   supersededBy: string | null;
+  ownerAgentId: string | null;
   createdAt: Date;
 }
 
@@ -200,6 +201,7 @@ export async function listDecisions(tx: DbTx, ctx: TenantContext): Promise<Decis
       originatingTaskId: decisions.originatingTaskId,
       originatingTaskTitle: tasks.title,
       supersededBy: decisions.supersededBy,
+      ownerAgentId: decisions.ownerAgentId,
       createdAt: decisions.createdAt,
       orgId: decisions.orgId,
       projectId: decisions.projectId,
@@ -418,6 +420,7 @@ export async function selectRelevantDecisions(
     originatingTaskId: t.originatingTaskId,
     originatingTaskTitle: null,
     supersededBy: null,
+    ownerAgentId: null,
     createdAt: t.createdAt,
     score: 0,
     supersedes: supersededByNew.get(t.id) ?? [],

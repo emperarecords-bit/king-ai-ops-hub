@@ -129,6 +129,7 @@ export interface TaskDetail {
   status: TaskStatus;
   providerSelection: ProviderSelection;
   reviewEnabled: boolean;
+  ownerAgentId: string | null;
   createdAt: Date;
 }
 
@@ -141,6 +142,7 @@ export async function getTask(tx: DbTx, ctx: TenantContext, taskId: string): Pro
       status: tasks.status,
       providerSelection: tasks.providerSelection,
       reviewEnabled: tasks.reviewEnabled,
+      ownerAgentId: tasks.ownerAgentId,
       createdAt: tasks.createdAt,
     })
     .from(tasks)

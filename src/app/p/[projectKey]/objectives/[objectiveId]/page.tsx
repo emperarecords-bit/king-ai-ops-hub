@@ -18,6 +18,7 @@ import {
   ObjectiveStatusButtons,
 } from './mutation-forms';
 import { AddStandingWorkForm, ToggleScheduleButton } from './standing-forms';
+import { OwnerPicker } from '../../owner-picker';
 
 const CADENCE_LABEL: Record<string, string> = {
   daily: 'Every day',
@@ -54,6 +55,8 @@ export default async function ObjectiveDetailPage({
   }
 
   const open = o.status === 'draft' || o.status === 'active';
+  const isAdmin = ctx.projectRole === 'admin';
+  const ownerOptions = employees.map((e) => ({ id: e.id, name: e.name, title: null }));
 
   return (
     <div>
@@ -61,13 +64,28 @@ export default async function ObjectiveDetailPage({
         title={o.title}
         subtitle={[
           o.sponsoringDepartment ? `Sponsored by ${o.sponsoringDepartment}` : null,
-          o.accountableEmployee ? `accountable: ${o.accountableEmployee}` : null,
           `created ${o.createdAt.toISOString().slice(0, 10)}`,
         ]
           .filter(Boolean)
           .join(' · ')}
         action={<StatusBadge status={o.status} />}
       />
+
+      <div className="mb-6 flex items-center gap-2 text-sm">
+        <span className="text-[var(--muted)]">Owner:</span>
+        {isAdmin ? (
+          <OwnerPicker
+            projectKey={projectKey}
+            object="objective"
+            objectId={o.id}
+            ownerAgentId={o.accountableAgentId}
+            employees={ownerOptions}
+            revalidate={`/p/${projectKey}/objectives/${o.id}`}
+          />
+        ) : (
+          <span>{o.accountableEmployee ?? 'Unassigned'}</span>
+        )}
+      </div>
 
       <div className="mb-6">
         <div className="mb-1 flex items-center justify-between text-sm">

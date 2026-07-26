@@ -52,6 +52,7 @@ export interface WorkspaceSettings {
   name: string;
   description: string;
   archived: boolean;
+  ownerAgentId: string | null;
   monthlyBudgetMicros: bigint;
 }
 
@@ -65,6 +66,7 @@ export async function getWorkspaceSettings(
       name: projects.name,
       description: projects.description,
       archived: projects.archived,
+      ownerAgentId: projects.ownerAgentId,
     })
     .from(projects)
     .where(and(eq(projects.id, ctx.projectId), eq(projects.orgId, ctx.orgId)))

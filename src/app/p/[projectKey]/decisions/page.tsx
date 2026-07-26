@@ -1,8 +1,10 @@
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { listDecisions } from '@/domain/decisions/decisions';
+import { listEmployees } from '@/domain/agents/org';
 import { Card, EmptyState, PageHeader, StatusBadge } from '@/components/ui';
 import { CreateDecisionForm, DecisionButtons } from './decision-forms';
+import { OwnerPicker } from '../owner-picker';
 
 export default async function DecisionsPage({
   params,
@@ -11,8 +13,14 @@ export default async function DecisionsPage({
 }) {
   const { projectKey } = await params;
   const ctx = await requireTenant(projectKey);
-  const decisions = await withTenant(ctx, (tx) => listDecisions(tx, ctx));
+  const { decisions, employees } = await withTenant(ctx, async (tx) => ({
+    decisions: await listDecisions(tx, ctx),
+    employees: await listEmployees(tx, ctx),
+  }));
   const isAdmin = ctx.projectRole === 'admin';
+  const ownerOptions = employees.map((e) => ({ id: e.id, name: e.name, title: e.title }));
+  const ownerName = (id: string | null) =>
+    id ? (employees.find((e) => e.id === id)?.name ?? null) : null;
 
   const proposed = decisions.filter((d) => d.status === 'proposed');
   const accepted = decisions.filter((d) => d.status === 'accepted');
@@ -66,6 +74,21 @@ export default async function DecisionsPage({
                 <div className="mt-1 text-xs text-[var(--muted)]">
                   decided by {d.authorLabel} · {d.createdAt.toISOString().slice(0, 10)}
                   {d.originatingTaskTitle ? ` · from “${d.originatingTaskTitle}”` : ''}
+                </div>
+                <div className="mt-2 flex items-center gap-2 text-xs">
+                  <span className="text-[var(--muted)]">Owner:</span>
+                  {isAdmin ? (
+                    <OwnerPicker
+                      projectKey={projectKey}
+                      object="decision"
+                      objectId={d.id}
+                      ownerAgentId={d.ownerAgentId}
+                      employees={ownerOptions}
+                      revalidate={`/p/${projectKey}/decisions`}
+                    />
+                  ) : (
+                    <span>{ownerName(d.ownerAgentId) ?? 'Unassigned'}</span>
+                  )}
                 </div>
               </li>
             ))}

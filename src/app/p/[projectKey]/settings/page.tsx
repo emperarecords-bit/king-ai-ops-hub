@@ -1,8 +1,10 @@
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { getWorkspaceSettings } from '@/domain/projects/settings';
+import { listEmployees } from '@/domain/agents/org';
 import { Card, PageHeader } from '@/components/ui';
 import { ArchiveWorkspaceButton, WorkspaceSettingsForm } from './settings-forms';
+import { OwnerPicker } from '../owner-picker';
 
 export default async function WorkspaceSettingsPage({
   params,
@@ -11,8 +13,15 @@ export default async function WorkspaceSettingsPage({
 }) {
   const { projectKey } = await params;
   const ctx = await requireTenant(projectKey);
-  const settings = await withTenant(ctx, (tx) => getWorkspaceSettings(tx, ctx));
+  const { settings, employees } = await withTenant(ctx, async (tx) => ({
+    settings: await getWorkspaceSettings(tx, ctx),
+    employees: await listEmployees(tx, ctx),
+  }));
   const isAdmin = ctx.projectRole === 'admin';
+  const ownerOptions = employees.map((e) => ({ id: e.id, name: e.name, title: e.title }));
+  const ownerName = settings.ownerAgentId
+    ? (employees.find((e) => e.id === settings.ownerAgentId)?.name ?? null)
+    : null;
 
   return (
     <div>
@@ -37,6 +46,25 @@ export default async function WorkspaceSettingsPage({
           />
         </Card>
       )}
+
+      <Card title="Owner" className="mb-6">
+        <p className="mb-3 text-sm text-[var(--muted)]">
+          Which employee owns this workspace. Descriptive only — naming an owner records
+          accountability; it does not change permissions or route any work.
+        </p>
+        {isAdmin ? (
+          <OwnerPicker
+            projectKey={projectKey}
+            object="project"
+            objectId={ctx.projectId}
+            ownerAgentId={settings.ownerAgentId}
+            employees={ownerOptions}
+            revalidate={`/p/${projectKey}/settings`}
+          />
+        ) : (
+          <p className="text-sm">{ownerName ?? 'Unassigned'}</p>
+        )}
+      </Card>
 
       <Card title="Workspace address" className="mb-6">
         <p className="font-mono text-sm">{settings.key}</p>

@@ -5,8 +5,10 @@ import { withTenant } from '@/db/tenant';
 import { getTask, listMessages, listRuns, listRunSteps, listTasks } from '@/domain/tasks/tasks';
 import { listDirectDependencies } from '@/domain/dependencies/dependencies';
 import { listCandidatesForTask } from '@/domain/decisions/decisions';
+import { listEmployees } from '@/domain/agents/org';
 import { NotFoundError } from '@/lib/errors';
 import { Card, ModelText, PageHeader, ProviderBadge, StatusBadge } from '@/components/ui';
+import { OwnerPicker } from '../../owner-picker';
 import { CancelTaskButton, RunButton } from './run-button';
 import { AddDependencyForm, RemoveDependencyButton } from './dependency-forms';
 import { CandidateReview } from './candidate-review';
@@ -61,14 +63,19 @@ export default async function TaskDetailPage({
       const deps = await listDirectDependencies(tx, ctx, taskId);
       const allTasks = await listTasks(tx, ctx, 100);
       const candidates = await listCandidatesForTask(tx, ctx, taskId);
-      return { task, msgs, runs, latestRun, steps, deps, allTasks, candidates };
+      const employees = await listEmployees(tx, ctx);
+      return { task, msgs, runs, latestRun, steps, deps, allTasks, candidates, employees };
     });
   } catch (err) {
     if (err instanceof NotFoundError) notFound();
     throw err;
   }
 
-  const { task, msgs, latestRun, steps, deps, allTasks, candidates } = data;
+  const { task, msgs, latestRun, steps, deps, allTasks, candidates, employees } = data;
+  const ownerName = task.ownerAgentId
+    ? (employees.find((e) => e.id === task.ownerAgentId)?.name ?? null)
+    : null;
+  const ownerOptions = employees.map((e) => ({ id: e.id, name: e.name, title: e.title }));
   // Candidates for a new prerequisite: any other task in the workspace not
   // already a direct prerequisite (the domain layer still rejects cycles).
   const existingPrereqIds = new Set(deps.prerequisites.map((p) => p.prerequisiteTaskId));
@@ -94,6 +101,22 @@ export default async function TaskDetailPage({
         subtitle={`${task.providerSelection} · review ${task.reviewEnabled ? 'on' : 'off'} · created ${task.createdAt.toISOString().slice(0, 16).replace('T', ' ')}`}
         action={<StatusBadge status={task.status} />}
       />
+
+      <div className="mb-6 flex items-center gap-2 text-sm">
+        <span className="text-[var(--muted)]">Owner:</span>
+        {isAdmin ? (
+          <OwnerPicker
+            projectKey={projectKey}
+            object="task"
+            objectId={task.id}
+            ownerAgentId={task.ownerAgentId}
+            employees={ownerOptions}
+            revalidate={`/p/${projectKey}/tasks/${task.id}`}
+          />
+        ) : (
+          <span>{ownerName ?? 'Unassigned'}</span>
+        )}
+      </div>
 
       {canRun ? (
         <div className="mb-6 flex flex-wrap items-start gap-3">
