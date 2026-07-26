@@ -695,6 +695,11 @@ export const decisions = pgTable(
     suggestedByRunId: uuid('suggested_by_run_id'),
     suggestionConfidence: decisionConfidenceEnum('suggestion_confidence'),
     suggestionReason: text('suggestion_reason'),
+    // The AI's RECOMMENDED reuse — evidence for the reviewer, kept separate from the actual
+    // applicability/scope above. Suggested reuse is never active scope until the operator promotes.
+    suggestedApplicability: decisionApplicabilityEnum('suggested_applicability'),
+    suggestedScope: decisionScopeEnum('suggested_scope'),
+    suggestedScopeTaskId: uuid('suggested_scope_task_id').references(() => tasks.id, { onDelete: 'set null' }),
     reviewedBy: uuid('reviewed_by').references(() => profiles.id, { onDelete: 'set null' }),
     reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
     /** Slice 1: the employee accountable for this decision ("who owns this?"). */
@@ -725,11 +730,16 @@ export const decisionInjections = pgTable(
     taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'set null' }),
     /** Why it was eligible for this run: 'task' | 'objective' | 'reference'. */
     reason: text('reason').notNull(),
+    /** The EXACT rendered memory line supplied to the AI for this run — an immutable snapshot, so the
+     *  detail can show what the model actually received even after rendering/metadata later change. */
+    memoryText: text('memory_text'),
     injectedAt: timestamp('injected_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index('decision_injections_decision_idx').on(t.decisionId),
     index('decision_injections_org_project_idx').on(t.orgId, t.projectId),
+    // Idempotency: one application record per (run, decision) — a runner retry must not double-count.
+    uniqueIndex('decision_injections_run_decision_uq').on(t.runId, t.decisionId),
   ],
 );
 

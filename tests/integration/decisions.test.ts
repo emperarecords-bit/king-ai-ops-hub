@@ -5,12 +5,16 @@ import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
-import { memberships, objectives, organizations, profiles, projectMembers, projects, tasks } from '@/db/schema';
+import { agents, decisions, memberships, objectives, organizations, profiles, projectMembers, projects, runs, tasks } from '@/db/schema';
 import {
   acceptDecision,
   assembleDecisionMemory,
   createDecision,
+  detectSharedApplicability,
+  getDecisionLifecycle,
   listDecisions,
+  listInjectionsForDecision,
+  logDecisionInjections,
   objectiveTaskIds,
   retireDecision,
 } from '@/domain/decisions/decisions';
@@ -59,6 +63,19 @@ async function mkObjective(ctx: TenantContext, title: string, status: 'draft' | 
     .values({ orgId, projectId: ctx.projectId, title, status, createdBy: userId })
     .returning({ id: objectives.id });
   return o[0]!.id;
+}
+
+/** A run row for injection-trail tests (needs a primary agent). */
+async function mkRun(ctx: TenantContext, taskId: string): Promise<string> {
+  const a = await getSetupDb()
+    .insert(agents)
+    .values({ orgId, projectId: ctx.projectId, name: `A-${randomUUID().slice(0, 6)}`, role: 'primary', provider: 'openai', model: 'gpt-5.4-mini', systemPrompt: 'x' })
+    .returning({ id: agents.id });
+  const r = await getSetupDb()
+    .insert(runs)
+    .values({ orgId, projectId: ctx.projectId, taskId, status: 'completed', primaryAgentId: a[0]!.id })
+    .returning({ id: runs.id });
+  return r[0]!.id;
 }
 
 const noArgs = (taskId: string) => ({ currentTaskId: taskId, currentObjectiveId: null, objectiveTaskIds: [], docPaths: new Set<string>() });
@@ -320,6 +337,97 @@ describe.skipIf(!available)('decision memory', () => {
     expect(after.applicability).toBe('guidance');
     expect(after.scope).toBe('task');
     expect((await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(t)))).contextItem?.content ?? '').toContain('Promote me');
+  });
+
+  it('suggested reuse is evidence for review, never the decision\'s actual scope', async () => {
+    const t = await mkTask(ctxA, 'suggest task', 'running');
+    // Simulate an AI candidate: record-only actual, with a SEPARATE suggested guidance/task target.
+    const ins = await getSetupDb()
+      .insert(decisions)
+      .values({
+        orgId, projectId: ctxA.projectId, title: 'AI conclusion', summary: 's', authorLabel: 'AI suggestion', status: 'proposed',
+        applicability: 'record', suggestedByRunId: null, suggestedApplicability: 'guidance', suggestedScope: 'task', suggestedScopeTaskId: t,
+      })
+      .returning({ id: decisions.id });
+    const id = ins[0]!.id;
+    const before = (await withTenant(ctxA, (tx) => listDecisions(tx, ctxA))).find((x) => x.id === id)!;
+    expect(before.applicability).toBe('record'); // actual
+    expect(before.scopeTaskId).toBeNull(); // actual scope unset
+    expect(before.suggestedApplicability).toBe('guidance'); // suggestion preserved separately
+    expect(before.suggestedScope).toBe('task');
+
+    // Plain accept → stays record-only, no active scope, not injected (selector uses ACTUAL only).
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, id));
+    const accepted = (await withTenant(ctxA, (tx) => listDecisions(tx, ctxA))).find((x) => x.id === id)!;
+    expect(accepted.applicability).toBe('record');
+    expect(accepted.scopeTaskId).toBeNull();
+    expect((await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(t)))).contextItem?.content ?? '').not.toContain('AI conclusion');
+  });
+
+  it('promotion records the operator-selected scope, even when it differs from the AI suggestion', async () => {
+    const t = await mkTask(ctxA, 'promo-diff task', 'running');
+    const ins = await getSetupDb()
+      .insert(decisions)
+      .values({ orgId, projectId: ctxA.projectId, title: 'AI wants task scope', summary: 's', authorLabel: 'AI suggestion', status: 'proposed', applicability: 'record', suggestedApplicability: 'guidance', suggestedScope: 'task', suggestedScopeTaskId: t })
+      .returning({ id: decisions.id });
+    const id = ins[0]!.id;
+    // Operator promotes to WORKSPACE guidance (differs from the suggested task scope).
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, id, { applicability: 'guidance', scope: 'workspace' }));
+    const after = (await withTenant(ctxA, (tx) => listDecisions(tx, ctxA))).find((x) => x.id === id)!;
+    expect(after.applicability).toBe('guidance');
+    expect(after.scope).toBe('workspace'); // operator's choice, not the AI's task suggestion
+    expect(after.suggestedScope).toBe('task'); // suggestion unchanged
+  });
+
+  it('lifecycle provenance is read from the audit log — acceptance and retirement authority', async () => {
+    const t = await mkTask(ctxA, 'provenance task', 'running');
+    const id = await withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'Owner', { title: 'Provenance', summary: 's', scope: 'task', scopeTaskId: t }));
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, id));
+    await withTenant(ctxA, (tx) => retireDecision(tx, ctxA, id, 'context closed'));
+    const events = await withTenant(ctxA, (tx) => getDecisionLifecycle(tx, ctxA, id));
+    const accepted = events.find((e) => e.action === 'decision.accepted')!;
+    const retired = events.find((e) => e.action === 'decision.retired')!;
+    expect(accepted.actorName).toBe('Owner');
+    expect(accepted.at).toBeInstanceOf(Date);
+    expect(retired.reason).toBe('context closed');
+  });
+
+  it('injection trail is idempotent and preserves the exact memory text supplied', async () => {
+    const t = await mkTask(ctxA, 'inj task', 'running');
+    const id = await withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'Owner', { title: 'Injected', summary: 's', scope: 'task', scopeTaskId: t }));
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, id));
+    const run1 = await mkRun(ctxA, t);
+    const snapshot = 'EXACT memory line as supplied';
+    // Log the same (run, decision) twice → one record (runner-retry safe).
+    await withTenant(ctxA, (tx) => logDecisionInjections(tx, ctxA, { runId: run1, taskId: t, injected: [{ decisionId: id, reason: 'task', memoryText: snapshot }] }));
+    await withTenant(ctxA, (tx) => logDecisionInjections(tx, ctxA, { runId: run1, taskId: t, injected: [{ decisionId: id, reason: 'task', memoryText: 'DIFFERENT (should be ignored)' }] }));
+    let trail = await withTenant(ctxA, (tx) => listInjectionsForDecision(tx, ctxA, id));
+    expect(trail).toHaveLength(1);
+    expect(trail[0]!.reason).toBe('task');
+    expect(trail[0]!.memoryText).toBe(snapshot);
+
+    // The snapshot is immutable to later decision changes.
+    await getSetupDb().update(decisions).set({ title: 'Renamed later' }).where(eq(decisions.id, id));
+    trail = await withTenant(ctxA, (tx) => listInjectionsForDecision(tx, ctxA, id));
+    expect(trail[0]!.memoryText).toBe(snapshot);
+
+    // A second run creates a second record.
+    const run2 = await mkRun(ctxA, t);
+    await withTenant(ctxA, (tx) => logDecisionInjections(tx, ctxA, { runId: run2, taskId: t, injected: [{ decisionId: id, reason: 'task', memoryText: snapshot }] }));
+    expect(await withTenant(ctxA, (tx) => listInjectionsForDecision(tx, ctxA, id))).toHaveLength(2);
+  });
+
+  it('shared applicability is observed, not called conflict', async () => {
+    const obj = await mkObjective(ctxA, 'Shared objective', 'active');
+    const d1 = await withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'Owner', { title: 'Flat-fee framing', summary: 's', scope: 'objective', scopeObjectiveId: obj }));
+    const d2 = await withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'Owner', { title: 'Plain language', summary: 's', scope: 'objective', scopeObjectiveId: obj }));
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, d1));
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, d2));
+    const all = await withTenant(ctxA, (tx) => listDecisions(tx, ctxA));
+    const overlaps = detectSharedApplicability(all);
+    const forObj = overlaps.find((o) => o.objectiveId === obj)!;
+    // Two harmonious decisions share applicability — reported as an overlap, never as a conflict.
+    expect(forObj.decisions.length).toBeGreaterThanOrEqual(2);
   });
 
   it('objectiveTaskIds is tenant-scoped and returns attached task ids', async () => {

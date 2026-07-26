@@ -278,12 +278,14 @@ export async function extractCandidatesForRun(
         summary: c.summary,
         rationale: c.rationale,
         decisionType: c.decisionType,
-        // An AI suggestion must NOT silently become reusable guidance. It is proposed as RECORD-ONLY;
-        // only the operator may activate reuse, choosing scope explicitly at acceptance. The task is
-        // stored as a *suggested* scope target for that promotion, but does not make it guidance.
+        // An AI suggestion must NOT silently become reusable guidance. Its ACTUAL applicability is
+        // record-only with no active scope; the AI's recommendation (task-level guidance for the
+        // originating task) is stored SEPARATELY as a suggestion — evidence for the reviewer, never
+        // active scope. Only the operator activates reuse, choosing scope explicitly at acceptance.
         applicability: 'record',
-        scope: 'task',
-        scopeTaskId: run.taskId,
+        suggestedApplicability: 'guidance',
+        suggestedScope: 'task',
+        suggestedScopeTaskId: run.taskId,
         supportingRefs: refs,
         originatingTaskId: run.taskId,
         originatingRunId: runId,

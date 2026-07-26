@@ -1169,7 +1169,35 @@ into a run (with why: task/objective/reference) — recorded in the runner once 
 surfaces *possible* conflicts (2+ active guidance on the same objective) as "may conflict — review,"
 never asserting incompatibility. All verified: full suite **401/401**.
 
+### Four record-model fixes before the pages (built 2026-07-26)
+
+1. **Suggested reuse ≠ actual scope.** AI candidates store their recommendation in *separate*
+   `suggestedApplicability` / `suggestedScope` / `suggestedScopeTaskId` fields; the decision's ACTUAL
+   applicability is `record` with no active scope. The reviewer's promotion sets the actual scope
+   independently — even when it differs from the AI's suggestion. The selector and Portfolio read
+   *actual* applicability only. *Principle: suggested reuse is evidence for review, not active scope.*
+2. **Lifecycle authority is persisted, not conflated.** Who proposed/accepted/rejected/retired/
+   superseded a decision — with when and (where recorded) why — is read from the append-only
+   `audit_logs` via `getDecisionLifecycle`; the author is never used as the acceptor, and the generic
+   `reviewedAt` is never treated as explaining which event occurred. Reject/retire now record a
+   reason. *The Hub must not claim decision authority it has not recorded.*
+3. **Injection trail is idempotent and historical.** A unique `(run_id, decision_id)` boundary +
+   `onConflictDoNothing` means a runner retry never double-counts. Each injection stores the EXACT
+   rendered `memoryText` supplied to the AI — an immutable snapshot, so the detail shows what the
+   model actually received even after the decision or rendering later changes. *Principle: application
+   history preserves what the AI actually received, not what the decision looks like today.*
+4. **Shared applicability ≠ conflict.** `detectSharedApplicability` reports that multiple active
+   guidance decisions *apply to* one objective — an observed overlap, never labeled a conflict. A
+   conflict assessment needs an additional basis (operator flag, opposition/supersession, incompatible
+   directives) — future work. *Principle: shared applicability is not evidence of conflict.* The Needs-
+   review lens must not be fed by mere overlap, and "never injected" is not an automatic defect.
+
+All verified: full suite **406/406**.
+
 *Next increment: the Decisions **Portfolio** (Awaiting review · Active guidance · Record only · Needs
-review lens · Historical) and **Decision Detail** (the 8-section institutional-memory conversation,
-including the eligibility/injection trail and the exact memory text supplied to runs), rendering the
-model above. Do not present Defer until it has real semantics.*
+review lens · Historical) and **Decision Detail** (the institutional-memory conversation: conclusion ·
+rationale · evidence/refs · proposal provenance · acceptance & authority · record-vs-guidance · scope
+& target · effective period + active-state reason · supersession/retirement/rejection history ·
+eligibility/injection trail · exact historical memory supplied · bounded overlap · valid actions),
+rendering the model above. Portfolio/Detail rely only on persisted facts and clearly-labeled
+assessments. Do not present Defer until it has real semantics.*

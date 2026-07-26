@@ -16,7 +16,7 @@ import {
 import { AppError, ConflictError, NotFoundError, TenantViolationError, ValidationError } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { type DbTx } from '@/db/client';
-import { decisionInjections, decisions, objectives, tasks } from '@/db/schema';
+import { auditLogs, decisionInjections, decisions, objectives, profiles, tasks } from '@/db/schema';
 
 // Aliased scope targets, so the selector can read a decision's scope-task / scope-objective status
 // and drop guidance whose scope has closed (guidance does not outlive its scope).
@@ -260,22 +260,50 @@ export async function acceptDecision(
   });
 }
 
-export async function rejectDecision(tx: DbTx, ctx: TenantContext, id: string): Promise<void> {
+export async function rejectDecision(tx: DbTx, ctx: TenantContext, id: string, reason?: string): Promise<void> {
   if (ctx.projectRole !== 'admin') throw new AppError('forbidden', 'Only admins can reject decisions.');
   const d = await loadDecision(tx, ctx, id);
-  if (d.status === 'superseded' || d.status === 'rejected') {
+  if (d.status === 'superseded' || d.status === 'rejected' || d.status === 'retired') {
     throw new ConflictError('This decision is already closed.');
   }
+  const r = (reason ?? '').trim() || null;
   await tx
     .update(decisions)
-    .set({ status: 'rejected', reviewedBy: ctx.userId, reviewedAt: new Date(), updatedAt: new Date() })
+    .set({ status: 'rejected', statusReason: r, reviewedBy: ctx.userId, reviewedAt: new Date(), updatedAt: new Date() })
     .where(eq(decisions.id, id));
   await writeAudit(tx, ctx, {
     action: 'decision.rejected',
     entityType: 'decision',
     entityId: id,
-    detail: { title: d.title },
+    detail: { title: d.title, reason: r },
   });
+}
+
+export interface DecisionLifecycleEvent {
+  action: string;
+  actorName: string | null;
+  reason: string | null;
+  at: Date;
+}
+
+/**
+ * Lifecycle provenance for a decision, read from the append-only audit log — who proposed / accepted
+ * / rejected / retired / superseded it, when, and (where recorded) why. The Hub surfaces only what it
+ * has actually recorded; it never substitutes the author for the acceptor.
+ */
+export async function getDecisionLifecycle(tx: DbTx, ctx: TenantContext, decisionId: string): Promise<DecisionLifecycleEvent[]> {
+  const rows = await tx
+    .select({ action: auditLogs.action, actorName: profiles.displayName, detail: auditLogs.detail, at: auditLogs.createdAt })
+    .from(auditLogs)
+    .leftJoin(profiles, eq(auditLogs.actorId, profiles.id))
+    .where(and(eq(auditLogs.orgId, ctx.orgId), eq(auditLogs.entityType, 'decision'), eq(auditLogs.entityId, decisionId)))
+    .orderBy(auditLogs.createdAt);
+  return rows.map((r) => ({
+    action: r.action,
+    actorName: r.actorName,
+    reason: (r.detail as { reason?: string } | null)?.reason ?? null,
+    at: r.at,
+  }));
 }
 
 /**
@@ -315,6 +343,11 @@ export interface DecisionRow {
   statusReason: string | null;
   authorLabel: string;
   suggestedByRunId: string | null;
+  /** The AI's RECOMMENDED reuse (evidence for review), separate from the actual applicability/scope above. */
+  suggestedApplicability: DecisionApplicability | null;
+  suggestedScope: DecisionScope | null;
+  suggestionConfidence: string | null;
+  suggestionReason: string | null;
   originatingTaskId: string | null;
   originatingTaskTitle: string | null;
   supersededBy: string | null;
@@ -339,6 +372,10 @@ export async function listDecisions(tx: DbTx, ctx: TenantContext): Promise<Decis
       statusReason: decisions.statusReason,
       authorLabel: decisions.authorLabel,
       suggestedByRunId: decisions.suggestedByRunId,
+      suggestedApplicability: decisions.suggestedApplicability,
+      suggestedScope: decisions.suggestedScope,
+      suggestionConfidence: decisions.suggestionConfidence,
+      suggestionReason: decisions.suggestionReason,
       originatingTaskId: decisions.originatingTaskId,
       originatingTaskTitle: tasks.title,
       supersededBy: decisions.supersededBy,
@@ -628,6 +665,10 @@ export async function selectRelevantDecisions(
     statusReason: null,
     authorLabel: t.authorLabel,
     suggestedByRunId: null,
+    suggestedApplicability: null,
+    suggestedScope: null,
+    suggestionConfidence: null,
+    suggestionReason: null,
     originatingTaskId: t.originatingTaskId,
     originatingTaskTitle: null,
     supersededBy: null,
@@ -642,9 +683,9 @@ export async function selectRelevantDecisions(
 export interface DecisionMemoryContext {
   contextItem: ContextItemForPrompt | null;
   manifest: ContextManifestEntry[];
-  /** The decisions actually included in this run's context, with why each was eligible — the honest
-   *  reverse trail records these as INJECTED (not "influenced"). */
-  injected: { decisionId: string; reason: string }[];
+  /** The decisions actually included in this run's context, with why each was eligible and the EXACT
+   *  rendered line supplied — the honest reverse trail records these as INJECTED (not "influenced"). */
+  injected: { decisionId: string; reason: string; memoryText: string }[];
 }
 
 /** Assembles the Level-1 Decision memory block + manifest entries. */
@@ -666,15 +707,17 @@ export async function assembleDecisionMemory(
     'These are settled conclusions. When proposing work, do not contradict an accepted decision; if a proposal would overturn one, say so explicitly and name the decision.',
     '',
   ];
+  const lineByDecision = new Map<string, string>();
   for (const d of chosen) {
-    lines.push(
+    const line =
       `- [${d.decisionType}] "${d.title}" — ${d.summary}` +
-        (d.rationale ? ` (rationale: ${d.rationale})` : '') +
-        ` — decided by ${d.authorLabel} on ${d.createdAt.toISOString().slice(0, 10)}.` +
-        (d.supersedes.length > 0
-          ? ` This supersedes, and replaces as current: ${d.supersedes.map((s) => `"${s.title}"`).join(', ')} (now historical — do not apply).`
-          : ''),
-    );
+      (d.rationale ? ` (rationale: ${d.rationale})` : '') +
+      ` — decided by ${d.authorLabel} on ${d.createdAt.toISOString().slice(0, 10)}.` +
+      (d.supersedes.length > 0
+        ? ` This supersedes, and replaces as current: ${d.supersedes.map((s) => `"${s.title}"`).join(', ')} (now historical — do not apply).`
+        : '');
+    lines.push(line);
+    lineByDecision.set(d.id, line);
   }
 
   const manifest: ContextManifestEntry[] = chosen.map((d) => ({
@@ -689,7 +732,7 @@ export async function assembleDecisionMemory(
   return {
     contextItem: { title: 'Decision memory', content: lines.join('\n') },
     manifest,
-    injected: chosen.map((d) => ({ decisionId: d.id, reason: d.reason })),
+    injected: chosen.map((d) => ({ decisionId: d.id, reason: d.reason, memoryText: lineByDecision.get(d.id) ?? '' })),
   };
 }
 
@@ -700,19 +743,24 @@ export async function assembleDecisionMemory(
 export async function logDecisionInjections(
   tx: DbTx,
   ctx: TenantContext,
-  args: { runId: string; taskId: string; injected: { decisionId: string; reason: string }[] },
+  args: { runId: string; taskId: string; injected: { decisionId: string; reason: string; memoryText: string }[] },
 ): Promise<void> {
   if (args.injected.length === 0) return;
-  await tx.insert(decisionInjections).values(
-    args.injected.map((i) => ({
-      orgId: ctx.orgId,
-      projectId: ctx.projectId,
-      decisionId: i.decisionId,
-      runId: args.runId,
-      taskId: args.taskId,
-      reason: i.reason || 'unspecified',
-    })),
-  );
+  await tx
+    .insert(decisionInjections)
+    .values(
+      args.injected.map((i) => ({
+        orgId: ctx.orgId,
+        projectId: ctx.projectId,
+        decisionId: i.decisionId,
+        runId: args.runId,
+        taskId: args.taskId,
+        reason: i.reason || 'unspecified',
+        memoryText: i.memoryText,
+      })),
+    )
+    // Idempotent: a runner retry must not double-count a (run, decision) application.
+    .onConflictDoNothing({ target: [decisionInjections.runId, decisionInjections.decisionId] });
 }
 
 export interface InjectionRow {
@@ -720,6 +768,7 @@ export interface InjectionRow {
   taskId: string | null;
   taskTitle: string | null;
   reason: string;
+  memoryText: string | null;
   injectedAt: Date;
 }
 
@@ -735,6 +784,7 @@ export async function listInjectionsForDecision(
       taskId: decisionInjections.taskId,
       taskTitle: tasks.title,
       reason: decisionInjections.reason,
+      memoryText: decisionInjections.memoryText,
       injectedAt: decisionInjections.injectedAt,
     })
     .from(decisionInjections)
@@ -750,12 +800,14 @@ export async function listInjectionsForDecision(
 }
 
 /**
- * Surface *potential* overlaps among active guidance — bounded, never asserting incompatibility.
- * v1 signal: two or more active-guidance decisions sharing the same concrete objective target (they
- * govern the same initiative) with no supersession between them. Semantic conflict is future work;
- * this only says "these may conflict — review," which is the honest claim the evidence supports.
+ * Observe where multiple active-guidance decisions APPLY to the same objective. This is a neutral
+ * OVERLAP IN APPLICABILITY, not evidence of conflict: three decisions can govern one objective in
+ * perfect harmony (e.g. flat-fee framing + plain language + no external contact sharing). Shared
+ * applicability is not evidence of conflict — a conflict assessment needs an additional basis
+ * (operator flag, opposition/supersession, incompatible directives), which is future work. So this
+ * only reports the observed overlap for the operator to notice; it must not be elevated as a problem.
  */
-export function detectPotentialOverlaps(rows: DecisionRow[]): { objectiveId: string; decisions: DecisionRow[] }[] {
+export function detectSharedApplicability(rows: DecisionRow[]): { objectiveId: string; decisions: DecisionRow[] }[] {
   const active = rows.filter((d) => d.status === 'accepted' && d.applicability === 'guidance' && d.scope === 'objective' && d.scopeObjectiveId);
   const byObjective = new Map<string, DecisionRow[]>();
   for (const d of active) {
