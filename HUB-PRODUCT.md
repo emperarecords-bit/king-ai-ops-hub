@@ -920,4 +920,42 @@ Authorize/Refuse buttons.** (The conversation is agreed; the queue/detail build 
 swept into an Approvals commit by `git add -A`. Verified after the fact: the committed diff is
 complete and coherent and the test passes 5/5 even against a large local queue backlog (it backdates
 its own job to the FIFO front and cleans up its rows in teardown). Test files don't ship, so the
-deploy was unaffected — but commit provenance still matters.*
+deploy was unaffected — but commit provenance still matters. Full suite subsequently run with no
+exclusions: 388/388.*
+
+### Queue & detail structures (built 2026-07-26)
+
+The interface emerges from the authorization conversation, not from two buttons.
+
+**Queue** (`approvals/page.tsx`, via `listApprovalsForQueue`) — three groups, not a flat wall:
+1. **Needs clarification** — pending proposals whose *material* consequence can't be established
+   (`readConsequence.needsClarification`); surfaced first, flagged, decision only via the detail. This
+   is a decision-quality assessment, not a separate authorization status.
+2. **Awaiting authorization** — the rest, ordered consequential-first. Each reference speaks operator
+   language (action · consequence summary · originating task · objective · owner · level chip ·
+   expiry) — never raw JSON. Only **routine, workspace-internal** actions offer a compact inline
+   Authorize/Refuse; anything **consequential** shows "Open to review & decide" and cannot be
+   authorized without opening the record.
+3. **Decided** — terminal outcomes keep their distinct meaning (Authorized · not executed / Refused /
+   Expired / Withdrawn), each linking to its record.
+
+Consequence **level** and the needs-clarification flag come from `readConsequence(profile)` — evidence
++ nature of the action, never a color-code of the type alone.
+
+**Detail** (`approvals/[approvalId]/page.tsx`, via `getApprovalDetail`) — the decision surface,
+conducting the conversation in order: (1) the exact authority requested; (2) why it was proposed
+(originating task · objective · accountable owner · performer · provider) — explained, not advocated;
+(3) established consequences via `ConsequenceReadPanel` (what the Hub can vs. cannot establish, with
+source + confidence; reversibility stays under *cannot establish*, never defaulted); (4) the three
+lifecycles kept distinct (AI work · authorization · action execution); (5) integrity & validity
+(proposed/deadline times · originating-task-cancelled flag · pending-duplicate flag · collapsible
+exact payload + sha256); (6) the decision — Authorize (records narrow authority; **consequential
+proposals require an explicit consequence-specific confirmation**, not a generic "are you sure?") or
+Refuse (rationale required); (7) once decided, the same page becomes the durable authorization record
+(outcome · who · when · rationale · authorized-not-executed) with the audit-log pointer for full
+history. Locked by unit (`readConsequence` levels) + integration (`getApprovalDetail` context,
+cancelled-task flag, `listApprovalsForQueue`). Full suite: 388/388.
+
+*Still ahead before Approvals fully closes: the executor (authorized-action execution) with its
+revocation and authorization-validity transitions; semantic duplicate/supersession; requestedBy names
+a provider, not an accountable person.*

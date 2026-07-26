@@ -42,6 +42,55 @@ export interface ConsequenceProfile {
 
 const NOT_ESTABLISHED: ConsequenceClaim = { value: null, established: false, source: 'none', confidence: null };
 
+/**
+ * A consequence *level* and a decision-quality flag, derived from the profile — not a color-code of
+ * the action type. `consequential` means the action reaches outside the workspace, moves money, or
+ * mutates/deploys — so it warrants opening the detail, not a casual inline click. `needsClarification`
+ * means the action is consequential-by-nature yet its *defining* consequence could not be established
+ * (an endpoint whose effect is unknown, a charge with no amount, a delete with no predicate); the
+ * proposal stays pending but is flagged as insufficiently explained — an assessment, not a status.
+ */
+export type ConsequenceLevel = 'routine' | 'consequential';
+export interface ConsequenceReadout {
+  readonly level: ConsequenceLevel;
+  readonly needsClarification: boolean;
+  /** One-line operator summary of what the Hub could establish (or that it could not). */
+  readonly summary: string;
+}
+
+const REACHES_OUTSIDE: ReadonlyArray<ActionType> = ['email_send', 'social_publish', 'external_http'];
+const CHANGES_SYSTEMS: ReadonlyArray<ActionType> = ['financial', 'db_mutation', 'destructive', 'deployment', 'git_push', 'git_pr'];
+
+export function readConsequence(profile: ConsequenceProfile): ConsequenceReadout {
+  const t = profile.actionType;
+  const external = profile.externalPartiesAffected.established;
+  const financial = profile.financialExposure.established;
+
+  const consequential = external || financial || REACHES_OUTSIDE.includes(t) || CHANGES_SYSTEMS.includes(t);
+
+  // The defining consequence for this kind of action, and whether it was established.
+  let needsClarification = false;
+  if (t === 'external_http') needsClarification = true; // effect on the receiving system is unknowable here
+  else if (t === 'email_send' || t === 'social_publish') needsClarification = !external;
+  else if (t === 'financial') needsClarification = !financial;
+  else if (t === 'db_mutation' || t === 'destructive') needsClarification = !profile.dataAffected.established;
+  else if (t === 'deployment') needsClarification = !profile.target.established;
+
+  const established = [profile.externalPartiesAffected, profile.financialExposure, profile.dataAffected]
+    .filter((c) => c.established)
+    .map((c) => c.value!)
+    .filter(Boolean);
+  const summary = needsClarification
+    ? 'Consequence not established — needs clarification before authorizing.'
+    : established.length > 0
+      ? established.join(' · ')
+      : consequential
+        ? 'Consequential action — review the detail before authorizing.'
+        : 'Routine, workspace-internal action.';
+
+  return { level: consequential ? 'consequential' : 'routine', needsClarification, summary };
+}
+
 function fromPayload(value: string, confidence: 'high' | 'medium' | 'low' = 'high'): ConsequenceClaim {
   return { value, established: true, source: 'proposal-payload', confidence };
 }

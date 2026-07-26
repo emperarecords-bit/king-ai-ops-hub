@@ -6,7 +6,7 @@ import { type TenantContext } from '@/types/domain';
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { approvals, memberships, organizations, profiles, projectMembers, projects, tasks } from '@/db/schema';
-import { decideApproval, expireStaleApprovals, pendingDuplicateExists } from '@/domain/approvals/approvals';
+import { decideApproval, expireStaleApprovals, getApprovalDetail, listApprovalsForQueue, pendingDuplicateExists } from '@/domain/approvals/approvals';
 import { cancelTask } from '@/domain/tasks/tasks';
 import { listExecution } from '@/domain/execution/execution';
 import { assessTask } from '@/domain/execution/assess';
@@ -168,6 +168,27 @@ describe.skipIf(!available)('authorization reconciles the task lifecycle', () =>
     const a = assessTask({ status: row.status!, ownerAgentId: row.ownerAgentId, authorizedUnexecuted: row.authorizedUnexecuted });
     expect(a.reason).toMatch(/not yet executed/i);
     expect(a.reason).not.toBe('Completed.');
+  });
+
+  it('getApprovalDetail carries originating context and flags a cancelled task', async () => {
+    const { taskId, approvalIds } = await taskAwaitingApproval(1);
+    const before = await withTenant(ctx, (tx) => getApprovalDetail(tx, ctx, approvalIds[0]!));
+    expect(before.taskTitle).toBe('Draft the launch email');
+    expect(before.taskStatus).toBe('awaiting_approval');
+    expect(before.originatingTaskCancelled).toBe(false);
+    // Cancel the task → the pending proposal is withdrawn, and detail reports the task cancelled.
+    await withTenant(ctx, (tx) => cancelTask(tx, ctx, taskId, 'no longer needed'));
+    const after = await withTenant(ctx, (tx) => getApprovalDetail(tx, ctx, approvalIds[0]!));
+    expect(after.originatingTaskCancelled).toBe(true);
+    expect(after.status).toBe('withdrawn');
+  });
+
+  it('listApprovalsForQueue returns pending references with originating context', async () => {
+    const { approvalIds } = await taskAwaitingApproval(1);
+    const rows = await withTenant(ctx, (tx) => listApprovalsForQueue(tx, ctx));
+    const row = rows.find((r) => r.id === approvalIds[0]!)!;
+    expect(row.taskTitle).toBe('Draft the launch email');
+    expect(row.status).toBe('pending');
   });
 
   it('detects an exact pending duplicate by action type and canonical payload hash', async () => {

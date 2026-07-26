@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { assessConsequence } from '@/domain/approvals/consequence';
+import { assessConsequence, readConsequence } from '@/domain/approvals/consequence';
+
+const read = (type: Parameters<typeof assessConsequence>[0]['type'], payload: Record<string, unknown>) =>
+  readConsequence(assessConsequence({ type, summary: 's', payload }));
 
 /**
  * Consequence claims must come from evidence, not action-type templates. These lock that the
@@ -53,5 +56,40 @@ describe('assessConsequence establishes only what the evidence proves', () => {
     expect(a.executionMethod.established).toBe(true);
     expect(a.executionMethod.source).toBe('policy');
     expect(a.executionMethod.value).toMatch(/no automated executor/i);
+  });
+});
+
+describe('readConsequence levels the proposal from evidence, not the type alone', () => {
+  it('a workspace-internal file write is routine and needs no clarification', () => {
+    const r = read('file_write', { path: 'notes.md' });
+    expect(r.level).toBe('routine');
+    expect(r.needsClarification).toBe(false);
+  });
+
+  it('an email with a known recipient is consequential and clear', () => {
+    const r = read('email_send', { to: 'nick@lnmechanical.com' });
+    expect(r.level).toBe('consequential');
+    expect(r.needsClarification).toBe(false);
+  });
+
+  it('an email with no recipient is consequential but needs clarification', () => {
+    const r = read('email_send', {});
+    expect(r.level).toBe('consequential');
+    expect(r.needsClarification).toBe(true);
+  });
+
+  it('an external HTTP call always needs clarification — its effect is unknowable here', () => {
+    const r = read('external_http', { url: 'https://hooks.partner.io/ingest' });
+    expect(r.needsClarification).toBe(true);
+  });
+
+  it('a financial action needs an amount to be clear', () => {
+    expect(read('financial', { amount: '$480' }).needsClarification).toBe(false);
+    expect(read('financial', {}).needsClarification).toBe(true);
+  });
+
+  it('a destructive mutation needs a predicate to be clear', () => {
+    expect(read('destructive', { where: "x < '2025'" }).needsClarification).toBe(false);
+    expect(read('destructive', {}).needsClarification).toBe(true);
   });
 });

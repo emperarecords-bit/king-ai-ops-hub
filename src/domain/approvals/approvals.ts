@@ -1,8 +1,8 @@
 import { and, desc, eq, inArray, lt } from 'drizzle-orm';
-import { type ActionType, type ApprovalStatus, type TenantContext } from '@/types/domain';
+import { type ActionType, type ApprovalStatus, type TaskStatus, type TenantContext } from '@/types/domain';
 import { AppError, NotFoundError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
-import { approvals, tasks } from '@/db/schema';
+import { agents, approvals, objectives, profiles, tasks } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 
 /**
@@ -231,6 +231,124 @@ export async function listApprovals(
     .from(approvals)
     .where(status ? and(scope, eq(approvals.status, status)) : scope)
     .orderBy(desc(approvals.createdAt));
+}
+
+/** A queue reference — enough originating context to triage without opening the full record. */
+export interface QueueApprovalRow {
+  id: string;
+  taskId: string;
+  taskTitle: string;
+  objectiveTitle: string | null;
+  ownerName: string | null;
+  actionType: ActionType;
+  payload: unknown;
+  summary: string;
+  status: ApprovalStatus;
+  decisionNote: string | null;
+  decidedAt: Date | null;
+  expiresAt: Date;
+  createdAt: Date;
+}
+
+export async function listApprovalsForQueue(tx: DbTx, ctx: TenantContext): Promise<QueueApprovalRow[]> {
+  return tx
+    .select({
+      id: approvals.id,
+      taskId: approvals.taskId,
+      taskTitle: tasks.title,
+      objectiveTitle: objectives.title,
+      ownerName: agents.name,
+      actionType: approvals.actionType,
+      payload: approvals.payload,
+      summary: approvals.summary,
+      status: approvals.status,
+      decisionNote: approvals.decisionNote,
+      decidedAt: approvals.decidedAt,
+      expiresAt: approvals.expiresAt,
+      createdAt: approvals.createdAt,
+    })
+    .from(approvals)
+    .innerJoin(tasks, eq(approvals.taskId, tasks.id))
+    .leftJoin(objectives, eq(tasks.objectiveId, objectives.id))
+    .leftJoin(agents, eq(tasks.ownerAgentId, agents.id))
+    .where(and(eq(approvals.projectId, ctx.projectId), eq(approvals.orgId, ctx.orgId)))
+    .orderBy(desc(approvals.createdAt));
+}
+
+/** The full authorization record for the detail surface — the proposal plus its originating context. */
+export interface ApprovalDetail {
+  id: string;
+  taskId: string;
+  taskTitle: string;
+  taskStatus: TaskStatus;
+  runId: string | null;
+  actionType: ActionType;
+  payload: unknown;
+  payloadSha256: string;
+  summary: string;
+  status: ApprovalStatus;
+  requestedBy: string | null;
+  objectiveId: string | null;
+  objectiveTitle: string | null;
+  ownerAgentId: string | null;
+  ownerName: string | null;
+  decidedByName: string | null;
+  decidedAt: Date | null;
+  decisionNote: string | null;
+  expiresAt: Date;
+  createdAt: Date;
+  /** True if an *exact* identical action (type + payload hash) is still pending elsewhere. */
+  hasPendingDuplicate: boolean;
+  /** The originating task was cancelled — a pending authorization here is no longer valid to grant. */
+  originatingTaskCancelled: boolean;
+}
+
+export async function getApprovalDetail(
+  tx: DbTx,
+  ctx: TenantContext,
+  approvalId: string,
+): Promise<ApprovalDetail> {
+  const rows = await tx
+    .select({
+      id: approvals.id,
+      taskId: approvals.taskId,
+      taskTitle: tasks.title,
+      taskStatus: tasks.status,
+      runId: approvals.runId,
+      actionType: approvals.actionType,
+      payload: approvals.payload,
+      payloadSha256: approvals.payloadSha256,
+      summary: approvals.summary,
+      status: approvals.status,
+      requestedBy: approvals.requestedBy,
+      objectiveId: tasks.objectiveId,
+      objectiveTitle: objectives.title,
+      ownerAgentId: tasks.ownerAgentId,
+      ownerName: agents.name,
+      decidedByName: profiles.displayName,
+      decidedAt: approvals.decidedAt,
+      decisionNote: approvals.decisionNote,
+      expiresAt: approvals.expiresAt,
+      createdAt: approvals.createdAt,
+    })
+    .from(approvals)
+    .innerJoin(tasks, eq(approvals.taskId, tasks.id))
+    .leftJoin(objectives, eq(tasks.objectiveId, objectives.id))
+    .leftJoin(agents, eq(tasks.ownerAgentId, agents.id))
+    .leftJoin(profiles, eq(approvals.decidedBy, profiles.id))
+    .where(and(eq(approvals.id, approvalId), eq(approvals.orgId, ctx.orgId), eq(approvals.projectId, ctx.projectId)))
+    .limit(1);
+  const row = rows[0];
+  if (!row) throw new NotFoundError('Approval');
+
+  const hasPendingDuplicate =
+    row.status === 'pending' && (await pendingDuplicateExists(tx, ctx, row.actionType, row.payloadSha256, row.id));
+
+  return {
+    ...row,
+    hasPendingDuplicate,
+    originatingTaskCancelled: row.taskStatus === 'cancelled',
+  };
 }
 
 /**

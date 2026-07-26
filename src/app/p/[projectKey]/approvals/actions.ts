@@ -39,5 +39,6 @@ export async function decide(_prev: DecisionState, formData: FormData): Promise<
   }
 
   revalidatePath(`/p/${parsed.data.projectKey}/approvals`);
+  revalidatePath(`/p/${parsed.data.projectKey}/approvals/${parsed.data.approvalId}`);
   return { error: null };
 }
