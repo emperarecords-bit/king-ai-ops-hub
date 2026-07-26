@@ -159,6 +159,9 @@ means we won't have to reinvent it then.
   a reason to refuse genuinely useful information. Ask only: *does this help me become a better
   operator in the first 30 seconds?* If yes, it earns its place; if not, it belongs on another
   page.
+- **Places, not actions.** Navigation is for *places*; actions live *within* the place they act
+  on. A verb never sits in the nav among the nouns. (Likely resolves dozens of future design
+  questions on its own.)
 - **Business first, software second.** The Hub always represents the *business* first and the
   software second. When the business view and the platform view compete, optimize for helping
   the operator understand the business — not the internal mechanics of the platform. (A
@@ -246,3 +249,40 @@ attention item, shown with its "why" (responsibility ④).
 - How much ambient orientation (working-now, team roster, recent work) stays on-screen vs.
   subordinated vs. left to its own pages.
 - Mechanism for "what changed since I last looked."
+
+## Navigation  — *purpose agreed 2026-07-26*
+
+**Primary question:** "Where am I, and where should I go to operate this business?" And beneath
+it: **navigation maintains the operator's mental model of the business.** It should answer *"where
+does this belong? / which section? / operational work or administration?"* before the operator
+has to ask.
+
+**Responsibilities:**
+1. **Orientation.** I always know which business I'm operating, which part of it I'm in, and
+   whether I'm in a workspace or the portfolio. I never feel lost.
+2. **Mental model.** The structure itself teaches how the Hub thinks about running a business. I
+   shouldn't memorize fourteen destinations — I should understand the *categories* they belong
+   to. *The categories are the product;* they must come from how an operator thinks about running
+   a business, not from how the software is built (business first).
+3. **Flow.** It supports the natural rhythm of operating — the paths I take most often feel
+   encouraged, not equal to everything else. **Reconciled with Stability via fixed emphasis, not
+   adaptive reordering:** the operating paths are permanently weighted higher; the nav never
+   rearranges itself per usage (that would destroy the muscle memory Stability needs).
+4. **Stability.** It becomes invisible. After a few weeks my hand knows where to go because the
+   structure consistently reflects how I think. Consistency over cleverness.
+5. **Identity.** Every element reinforces that I'm *operating this business* — running
+   AccurateBids, running the next company — not "using an application." Carry the business's real
+   name, never a slug.
+
+**Personality (structural).** The same operating partner, expressed as structure: a calm,
+well-run office where everything has an obvious place — not a busy directory. Business-first
+(categories and names reflect the business), confident (a clear map, not a wall of equal
+options), never noisy. Navigation teaches the *organizational* model the way the explanation
+surface teaches the *reasoning* model — one mind, expressed in how the office is arranged.
+
+**Defining principle — navigation reduces decisions, it does not create them.** Every flat list,
+every moment of scanning, is a small cognitive cost. Good navigation removes those costs: I
+shouldn't *decide* where to go — the right destination should feel obvious.
+
+**Next (do not do yet):** derive the mental-model categories from how an operator thinks about
+running a business; the structure emerges from those. Do not rearrange links first.
