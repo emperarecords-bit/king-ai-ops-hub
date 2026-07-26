@@ -5,7 +5,6 @@ import { withTenant } from '@/db/tenant';
 import { getWorkspaceSettings } from '@/domain/projects/settings';
 import { AppError } from '@/lib/errors';
 import { WorkspaceNav } from './workspace-nav';
-import { Breadcrumb } from './breadcrumb';
 
 /**
  * Workspace shell. The rail is the workspace's table of contents (HUB-PRODUCT.md): a persistent
@@ -52,10 +51,7 @@ export default async function ProjectLayout({
       </aside>
 
       <main className="min-w-0 flex-1">
-        <div className="mx-auto max-w-5xl p-6">
-          <Breadcrumb base={base} />
-          {children}
-        </div>
+        <div className="mx-auto max-w-5xl p-6">{children}</div>
       </main>
     </div>
   );

@@ -19,6 +19,7 @@ import {
 } from './mutation-forms';
 import { AddStandingWorkForm, ToggleScheduleButton } from './standing-forms';
 import { OwnerPicker } from '../../owner-picker';
+import { Breadcrumb } from '../../breadcrumb';
 
 const CADENCE_LABEL: Record<string, string> = {
   daily: 'Every day',
@@ -60,6 +61,7 @@ export default async function ObjectiveDetailPage({
 
   return (
     <div>
+      <Breadcrumb leaf={o.title} />
       <PageHeader
         title={o.title}
         subtitle={[

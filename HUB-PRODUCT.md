@@ -316,9 +316,12 @@ stewardship, not administration.)
 **Location is model-driven (a routing model, not per-page).** A single nav model (`nav-model.ts`)
 maps every route to its domain. The rail highlights the parent domain even for routes that aren't
 rail destinations — a task page lights **Execution** — and a breadcrumb shows "Domain › Section"
-(a task reads "Execution › AI work"). Solved once for all nested/detail routes — objectives,
-decisions, documents, artifacts, employees, approvals, tasks, and future workflows — never patched
-page by page. "Which part am I in?" always has an answer.
+(a task reads "Execution › AI work"). Solved once for all nested/detail routes — never patched
+page by page. **Rail = which room; breadcrumb = the exact record inside it.** The breadcrumb's
+*structural* part comes from the model; its *dynamic leaf* — the actual record (task title,
+objective title) — is supplied by the detail page from its loaded entity, never a raw id or route
+param. Detail pages carry the full "Domain › Section › Record"; list/section pages rely on the
+rail's active state and their own title (the room *is* the location).
 
 **Mobile — scoped follow-up (desktop-first today).** When the persistent rail can't stay visible,
 the mental model *and* the current-location signal must survive. Do **not** collapse into an

@@ -9,6 +9,7 @@ import { listEmployees } from '@/domain/agents/org';
 import { NotFoundError } from '@/lib/errors';
 import { Card, ModelText, PageHeader, ProviderBadge, StatusBadge } from '@/components/ui';
 import { OwnerPicker } from '../../owner-picker';
+import { Breadcrumb } from '../../breadcrumb';
 import { CancelTaskButton, RunButton } from './run-button';
 import { AddDependencyForm, RemoveDependencyButton } from './dependency-forms';
 import { CandidateReview } from './candidate-review';
@@ -96,6 +97,7 @@ export default async function TaskDetailPage({
 
   return (
     <div>
+      <Breadcrumb leaf={task.title} />
       <PageHeader
         title={task.title}
         subtitle={`${task.providerSelection} · review ${task.reviewEnabled ? 'on' : 'off'} · created ${task.createdAt.toISOString().slice(0, 16).replace('T', ' ')}`}
