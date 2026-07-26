@@ -494,3 +494,83 @@ the slug (identity). The cycle carries the emphasis (Flow); the structure never 
 
 **Next:** design the navigation *experience* from this model, then evaluate it against the five
 responsibilities (orientation, mental model, flow, stability, identity) before implementation.
+
+## Execution (Work)  — *purpose agreed 2026-07-26*
+
+**Primary question:** "What work is **advancing this workspace**, **who is accountable** for it,
+and **where does execution need intervention?**"
+
+**Purpose.** Execution turns *direction into coordinated action.* It shows what humans and AI are
+doing toward outcomes, how that work is moving, and where the operator must intervene.
+**Direction defines what should change · Execution coordinates the work · Evidence determines
+whether it changed.** Execution avoids two opposite errors: treating completed work as proof of
+outcome progress, and hiding operational work merely because it hasn't yet produced outcome
+evidence. **Objectives judges meaning; Execution manages movement.**
+
+**One system, two engines.** Human Work Items and AI Tasks should feel like two forms of work in
+*one* system — not one identical data model. Human work is flexible/editable/manually updated and
+the Hub only *observes & coordinates* it; AI work has explicit execution states, cost, deps,
+review/approval, autonomy, auditability, and the Hub *executes & governs* it. The differences are
+legitimate. **The unifying layer is not identical mechanics — it is shared operator meaning.**
+
+**Responsibilities:**
+1. **Present one execution picture.** Entering Execution shows *all consequential work* — Work
+   Items, AI Tasks, scheduled autonomous work, work awaiting approval, blocked, failed, recently
+   completed — without the operator assembling it from Dashboard + objectives + approvals + task
+   links. The Dashboard summarizes what needs attention; **Execution provides the complete picture.**
+2. **Translate native states into common meaning.** Engines keep their internal lifecycles, but
+   the operator gets shared conditions: **Planned · Moving · Waiting · Needs attention · Finished ·
+   Stopped** (operator meanings, not DB statuses). An AI task `awaiting_approval` and a Work Item
+   waiting on a customer are both *Waiting*. Preserve native detail; translate to a shared condition.
+3. **Keep accountability and performance distinct — universally.** For any work: who is
+   *accountable*, who/what *performs* it, who can *unblock/approve*, who to *contact* when it stops.
+   (Human work: owner = performer often; AI work: usually not; delegated: provider performs, employee
+   accountable.)
+4. **Connect work to direction.** Show which objective work supports, whether its expected
+   contribution is *stated / known / merely assumed*, and which work has no objective link. Classify
+   **directional · operational · unclassified** — operational/incident/admin work is valid without
+   advancing an objective. Never imply a task advances strategy just because it exists.
+5. **Identify where intervention is needed** — legibly, without alarming every irregularity.
+   Triggers: awaiting decision/approval, blocked, repeatedly failing, over budget, past an expected
+   date, unowned, inactive-without-explanation, missing input, acting beyond authority, "active" by a
+   human but no recent update. Distinguish **observed** ("failed twice, awaiting a retry decision")
+   from **inferred** ("not updated in 9 days; may no longer be moving") — reasoning contract applies,
+   depth ∝ consequence.
+6. **Make autonomy visible and governable.** For autonomous work the operator can tell: what it's
+   authorized to do, whether review is required, whether it can spend, budget/tier limits, whether it
+   can create further work, what triggered it, what would stop/pause it, what happened in the run.
+   Autonomy is operating state, not buried config.
+7. **Preserve lifecycle integrity.** Every work type must expose enough lifecycle meaning to say
+   whether it's planned/moving/waiting/finished/stopped. A free-text `stage` alone is insufficient.
+   Durable shape: **a shared operational condition + optional native detail** (e.g. native stage
+   "Legal review", shared condition "Waiting"). *(Final status model not designed yet.)*
+8. **Distinguish work completion from outcome progress.** Execution confirms what was *done*
+   ("the outreach sequence completed" / "Jordan finished the follow-ups"); Direction judges what
+   *changed* ("no new qualified contractors, so the outcome hasn't advanced").
+9. **Preserve a coherent history.** Creation, ownership changes, transitions, deps, approvals,
+   failures/retries, cancel/complete, material edits, cost, outputs, objective/evidence links —
+   enough that later one can answer "what happened, who was responsible, why did this end this way."
+   (Human work needs understandable history, not an immutable AI-run record.)
+
+**Not a task inventory.** The Work area must not just place AI Tasks beside Work Items in one
+bigger table — that combines records without creating a system. It must first answer *what's
+moving / waiting / needs intervention / recently finished / who's accountable / what purpose it
+serves*, and only then expose each work type's mechanical detail.
+
+**Durable principles:**
+- Execution may have different engines, but it must speak **one operational language.**
+- The Hub **preserves mechanical differences while translating them into common operational meaning.**
+- **Every consequential piece of work needs an accountable owner**, even when someone — or something
+  — else performs it.
+- **Autonomy is a visible property of work, not an invisible implementation detail.**
+- **Every work type must expose enough lifecycle meaning** to determine whether it is planned,
+  moving, waiting, finished, or stopped.
+- **Execution confirms what was done. Direction judges what changed because of it.**
+
+**Boundaries.** Dashboard = *what most deserves my attention?* · Execution = *the complete state of
+the work.* Objectives = *are outcomes advancing?* · Execution = *what is being done toward them.*
+Approvals = a focused intervention queue *within* Execution (not the only place waiting AI work is
+visible). Audit = exhaustive system history; Execution = the operationally relevant history.
+
+**Next:** define the operating-partner conversation at two levels (execution portfolio; individual
+work), across the listed states — before any tables, swimlanes, filters, or merged schema.
