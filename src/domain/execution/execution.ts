@@ -1,7 +1,7 @@
 import { and, desc, eq } from 'drizzle-orm';
 import { type TaskStatus, type TenantContext, type WorkItemCondition } from '@/types/domain';
 import { type DbTx } from '@/db/client';
-import { agents, objectives, tasks, workItems } from '@/db/schema';
+import { agents, objectives, profiles, tasks, workItems } from '@/db/schema';
 
 /**
  * The unified execution feed (Execution). One stream across both engines — human Work Items and
@@ -25,6 +25,10 @@ export interface ExecutionRow {
   notes: string | null;
   /** ai_task only. */
   status: TaskStatus | null;
+  /** Closure record for terminal work (Finished/Stopped). */
+  closureReason: string | null;
+  closedByName: string | null;
+  closedAt: Date | null;
 }
 
 export async function listExecution(tx: DbTx, ctx: TenantContext): Promise<ExecutionRow[]> {
@@ -41,10 +45,14 @@ export async function listExecution(tx: DbTx, ctx: TenantContext): Promise<Execu
       waitingOn: workItems.waitingOn,
       stage: workItems.stage,
       notes: workItems.notes,
+      closureReason: workItems.closureReason,
+      closedByName: profiles.displayName,
+      closedAt: workItems.closedAt,
     })
     .from(workItems)
     .leftJoin(agents, eq(workItems.ownerAgentId, agents.id))
     .leftJoin(objectives, eq(workItems.objectiveId, objectives.id))
+    .leftJoin(profiles, eq(workItems.closedBy, profiles.id))
     .where(and(eq(workItems.projectId, ctx.projectId), eq(workItems.orgId, ctx.orgId)))
     .orderBy(desc(workItems.updatedAt));
 
@@ -58,6 +66,7 @@ export async function listExecution(tx: DbTx, ctx: TenantContext): Promise<Execu
       objectiveTitle: objectives.title,
       updatedAt: tasks.updatedAt,
       status: tasks.status,
+      cancelReason: tasks.cancelReason,
     })
     .from(tasks)
     .leftJoin(agents, eq(tasks.ownerAgentId, agents.id))
@@ -79,6 +88,9 @@ export async function listExecution(tx: DbTx, ctx: TenantContext): Promise<Execu
     stage: r.stage,
     notes: r.notes,
     status: null,
+    closureReason: r.closureReason,
+    closedByName: r.closedByName,
+    closedAt: r.closedAt,
   }));
   const taskRows: ExecutionRow[] = ts.map((r) => ({
     kind: 'ai_task',
@@ -94,6 +106,9 @@ export async function listExecution(tx: DbTx, ctx: TenantContext): Promise<Execu
     stage: null,
     notes: null,
     status: r.status,
+    closureReason: r.cancelReason,
+    closedByName: null,
+    closedAt: null,
   }));
 
   return [...workItemRows, ...taskRows].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());

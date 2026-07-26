@@ -1,7 +1,7 @@
 'use client';
 
 import { useActionState } from 'react';
-import { updateWorkItemAction, type WorkItemState } from './actions';
+import { finishWorkItemAction, stopWorkItemAction, updateWorkItemAction, type WorkItemState } from './actions';
 import { OwnerPicker, type OwnerOption } from '../owner-picker';
 import { type WorkItemCondition } from '@/types/domain';
 
@@ -49,6 +49,8 @@ export function WorkItemRow({
   const [state, action, pending] = useActionState<WorkItemState, FormData>(updateWorkItemAction, {
     error: null,
   });
+  const [fState, fAction, fPending] = useActionState<WorkItemState, FormData>(finishWorkItemAction, { error: null });
+  const [sState, sAction] = useActionState<WorkItemState, FormData>(stopWorkItemAction, { error: null });
 
   return (
     <li className="border-b border-[var(--border)] py-3 last:border-0">
@@ -109,8 +111,6 @@ export function WorkItemRow({
                   <option value="planned">Planned</option>
                   <option value="moving">Moving</option>
                   <option value="waiting">Waiting</option>
-                  <option value="finished">Finished</option>
-                  <option value="stopped">Stopped</option>
                 </select>
               </div>
               <div>
@@ -133,6 +133,29 @@ export function WorkItemRow({
               {state.error ? <span className="text-sm text-[var(--danger)]">{state.error}</span> : null}
             </div>
           </form>
+
+          <div className="mt-4 border-t border-[var(--border)] pt-3">
+            <p className="mb-2 text-xs text-[var(--muted)]">Close this work — the record is frozen afterward.</p>
+            <div className="flex flex-wrap items-start gap-3">
+              <form action={fAction}>
+                <input type="hidden" name="projectKey" value={projectKey} />
+                <input type="hidden" name="workItemId" value={item.id} />
+                <button type="submit" disabled={fPending} className="rounded border border-[var(--border)] px-3 py-1.5 text-sm hover:border-[var(--success)] disabled:opacity-60">
+                  Mark finished
+                </button>
+              </form>
+              <form action={sAction} className="flex flex-col gap-2">
+                <input type="hidden" name="projectKey" value={projectKey} />
+                <input type="hidden" name="workItemId" value={item.id} />
+                <textarea name="reason" required rows={2} placeholder="Why is this being stopped? (required — becomes the record)" className={inputCls} />
+                <button type="submit" className="self-start rounded border border-[var(--border)] px-3 py-1.5 text-sm hover:border-[var(--danger)]">
+                  Stop
+                </button>
+              </form>
+            </div>
+            {fState.error ? <p className="mt-2 text-sm text-[var(--danger)]">{fState.error}</p> : null}
+            {sState.error ? <p className="mt-2 text-sm text-[var(--danger)]">{sState.error}</p> : null}
+          </div>
         </details>
       ) : null}
     </li>

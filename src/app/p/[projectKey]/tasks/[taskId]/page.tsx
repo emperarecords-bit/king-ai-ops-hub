@@ -120,6 +120,12 @@ export default async function TaskDetailPage({
         )}
       </div>
 
+      {task.status === 'cancelled' && task.cancelReason ? (
+        <p className="mb-6 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--muted)]">
+          Cancelled: {task.cancelReason}
+        </p>
+      ) : null}
+
       {canRun ? (
         <div className="mb-6 flex flex-wrap items-start gap-3">
           <RunButton

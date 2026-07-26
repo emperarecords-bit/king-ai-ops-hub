@@ -596,6 +596,9 @@ export const tasks = pgTable(
     createdBy: uuid('created_by')
       .notNull()
       .references(() => profiles.id, { onDelete: 'restrict' }),
+    /** Operator-supplied reason when a person cancels the task (Execution closure). The engine's
+     * technical cancelled status + audit history are preserved separately. */
+    cancelReason: text('cancel_reason'),
     ...timestamps,
   },
   (t) => [
@@ -728,6 +731,12 @@ export const workItems = pgTable(
     createdBy: uuid('created_by')
       .notNull()
       .references(() => profiles.id, { onDelete: 'restrict' }),
+    /** Frozen closure record (Execution) — captured when condition becomes finished/stopped.
+     * A stop requires a reason; the item is immutable afterward, so its condition/stage/owner at
+     * that moment ARE the snapshot. */
+    closedBy: uuid('closed_by').references(() => profiles.id, { onDelete: 'set null' }),
+    closedAt: timestamp('closed_at', { withTimezone: true }),
+    closureReason: text('closure_reason'),
     ...timestamps,
   },
   (t) => [

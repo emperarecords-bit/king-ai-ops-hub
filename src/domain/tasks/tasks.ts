@@ -130,6 +130,7 @@ export interface TaskDetail {
   providerSelection: ProviderSelection;
   reviewEnabled: boolean;
   ownerAgentId: string | null;
+  cancelReason: string | null;
   createdAt: Date;
 }
 
@@ -143,6 +144,7 @@ export async function getTask(tx: DbTx, ctx: TenantContext, taskId: string): Pro
       providerSelection: tasks.providerSelection,
       reviewEnabled: tasks.reviewEnabled,
       ownerAgentId: tasks.ownerAgentId,
+      cancelReason: tasks.cancelReason,
       createdAt: tasks.createdAt,
     })
     .from(tasks)
@@ -182,7 +184,12 @@ export async function setTaskStatus(
  * would leave the run writing steps to a task that claims to be finished.
  * Runs are bounded by RUN_TIMEOUT_MS; waiting is correct.
  */
-export async function cancelTask(tx: DbTx, ctx: TenantContext, taskId: string): Promise<void> {
+export async function cancelTask(
+  tx: DbTx,
+  ctx: TenantContext,
+  taskId: string,
+  reason?: string,
+): Promise<void> {
   const task = await getTask(tx, ctx, taskId);
   if (task.status === 'running') {
     throw new ConflictError(
@@ -193,9 +200,10 @@ export async function cancelTask(tx: DbTx, ctx: TenantContext, taskId: string): 
     throw new ConflictError('This task is already cancelled.');
   }
 
+  const r = (reason ?? '').trim() || null;
   await tx
     .update(tasks)
-    .set({ status: 'cancelled', updatedAt: new Date() })
+    .set({ status: 'cancelled', cancelReason: r, updatedAt: new Date() })
     .where(
       and(eq(tasks.id, taskId), eq(tasks.projectId, ctx.projectId), eq(tasks.orgId, ctx.orgId)),
     );
@@ -204,7 +212,7 @@ export async function cancelTask(tx: DbTx, ctx: TenantContext, taskId: string): 
     action: 'task.cancelled',
     entityType: 'task',
     entityId: taskId,
-    detail: { title: task.title, from: task.status },
+    detail: { title: task.title, from: task.status, reason: r },
   });
 }
 

@@ -6,7 +6,7 @@ import { AppError, toPublicMessage } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
-import { createWorkItem, updateWorkItem } from '@/domain/work/work-items';
+import { createWorkItem, finishWorkItem, stopWorkItem, updateWorkItem } from '@/domain/work/work-items';
 import { WORK_ITEM_CONDITIONS } from '@/types/domain';
 
 export interface WorkItemState {
@@ -32,7 +32,8 @@ const updateSchema = z.object({
   projectKey: z.string().min(1),
   workItemId: z.string().uuid(),
   title: z.string().trim().min(1, 'Title is required').max(200),
-  condition: z.enum(WORK_ITEM_CONDITIONS),
+  // Ordinary edits set only live conditions; finish/stop go through their own actions.
+  condition: z.enum(['planned', 'moving', 'waiting']),
   waitingOn: z.string().trim().max(200).optional(),
   stage: z.string().trim().max(60),
   notes: z.string().max(8_000),
@@ -103,6 +104,58 @@ export async function updateWorkItemAction(
     );
   } catch (err) {
     if (!(err instanceof AppError)) log.error('updateWorkItem failed', { err });
+    return { error: toPublicMessage(err) };
+  }
+  revalidatePath(`/p/${parsed.data.projectKey}/work`);
+  return { error: null };
+}
+
+const terminalSchema = z.object({
+  projectKey: z.string().min(1),
+  workItemId: z.string().uuid(),
+  reason: z.string().trim().max(2_000).optional(),
+});
+
+/** Stop a work item — requires a reason; freezes the record. */
+export async function stopWorkItemAction(
+  _prev: WorkItemState,
+  formData: FormData,
+): Promise<WorkItemState> {
+  const parsed = terminalSchema.safeParse({
+    projectKey: formData.get('projectKey'),
+    workItemId: formData.get('workItemId'),
+    reason: formData.get('reason') ?? undefined,
+  });
+  if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid input.' };
+  try {
+    const ctx = await requireTenant(parsed.data.projectKey);
+    if (ctx.projectRole === 'viewer') return { error: 'Viewers cannot change work.' };
+    await withTenant(ctx, (tx) => stopWorkItem(tx, ctx, parsed.data.workItemId, parsed.data.reason ?? ''));
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('stopWorkItem failed', { err });
+    return { error: toPublicMessage(err) };
+  }
+  revalidatePath(`/p/${parsed.data.projectKey}/work`);
+  return { error: null };
+}
+
+/** Finish a work item — freezes the record; a completion note is optional. */
+export async function finishWorkItemAction(
+  _prev: WorkItemState,
+  formData: FormData,
+): Promise<WorkItemState> {
+  const parsed = terminalSchema.safeParse({
+    projectKey: formData.get('projectKey'),
+    workItemId: formData.get('workItemId'),
+    reason: formData.get('reason') ?? undefined,
+  });
+  if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid input.' };
+  try {
+    const ctx = await requireTenant(parsed.data.projectKey);
+    if (ctx.projectRole === 'viewer') return { error: 'Viewers cannot change work.' };
+    await withTenant(ctx, (tx) => finishWorkItem(tx, ctx, parsed.data.workItemId, parsed.data.reason));
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('finishWorkItem failed', { err });
     return { error: toPublicMessage(err) };
   }
   revalidatePath(`/p/${parsed.data.projectKey}/work`);

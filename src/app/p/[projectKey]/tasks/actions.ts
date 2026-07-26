@@ -119,13 +119,14 @@ export async function cancelTaskAction(
 ): Promise<RunActionState> {
   const projectKey = String(formData.get('projectKey') ?? '');
   const taskId = String(formData.get('taskId') ?? '');
+  const reason = String(formData.get('reason') ?? '');
   if (!projectKey || !z.string().uuid().safeParse(taskId).success) {
     return { error: 'Invalid request.' };
   }
 
   try {
     const ctx = await requireTenant(projectKey);
-    await withTenant(ctx, (tx) => cancelTask(tx, ctx, taskId));
+    await withTenant(ctx, (tx) => cancelTask(tx, ctx, taskId, reason));
   } catch (err) {
     if (!(err instanceof AppError)) log.error('cancelTask failed', { err, taskId });
     return { error: toPublicMessage(err) };

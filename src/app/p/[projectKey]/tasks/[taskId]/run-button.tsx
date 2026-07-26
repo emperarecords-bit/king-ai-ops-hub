@@ -180,21 +180,32 @@ export function CancelTaskButton({
 }) {
   const [state, formAction, pending] = useActionState(cancelTaskAction, { error: null });
   return (
-    <form action={formAction} className="inline">
-      <input type="hidden" name="projectKey" value={projectKey} />
-      <input type="hidden" name="taskId" value={taskId} />
-      <button
-        type="submit"
-        disabled={pending}
-        className="rounded-md border border-[var(--border)] px-3 py-2 text-sm text-[var(--muted)] hover:border-[var(--danger)] hover:text-[var(--danger)] disabled:opacity-50"
-      >
-        {pending ? 'Cancelling…' : 'Cancel task'}
-      </button>
-      {state.error ? (
-        <p role="alert" className="mt-1 text-xs text-[var(--danger)]">
-          {state.error}
-        </p>
-      ) : null}
-    </form>
+    <details className="inline-block align-top">
+      <summary className="cursor-pointer rounded-md border border-[var(--border)] px-3 py-2 text-sm text-[var(--muted)] hover:border-[var(--danger)] hover:text-[var(--danger)]">
+        Cancel task
+      </summary>
+      <form action={formAction} className="mt-2 flex flex-col gap-2">
+        <input type="hidden" name="projectKey" value={projectKey} />
+        <input type="hidden" name="taskId" value={taskId} />
+        <textarea
+          name="reason"
+          rows={2}
+          placeholder="Why are you cancelling? (optional — kept as the closure reason)"
+          className="w-72 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-sm"
+        />
+        <button
+          type="submit"
+          disabled={pending}
+          className="self-start rounded-md border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--muted)] hover:border-[var(--danger)] hover:text-[var(--danger)] disabled:opacity-50"
+        >
+          {pending ? 'Cancelling…' : 'Confirm cancel'}
+        </button>
+        {state.error ? (
+          <p role="alert" className="text-xs text-[var(--danger)]">
+            {state.error}
+          </p>
+        ) : null}
+      </form>
+    </details>
   );
 }

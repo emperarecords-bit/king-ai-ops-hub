@@ -5,8 +5,9 @@ import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
-import { agents, memberships, objectives, organizations, profiles, projectMembers, projects, workItems } from '@/db/schema';
-import { createWorkItem, listWorkItems, updateWorkItem } from '@/domain/work/work-items';
+import { agents, memberships, objectives, organizations, profiles, projectMembers, projects, tasks, workItems } from '@/db/schema';
+import { createWorkItem, finishWorkItem, listWorkItems, stopWorkItem, updateWorkItem } from '@/domain/work/work-items';
+import { cancelTask } from '@/domain/tasks/tasks';
 import { setOwner } from '@/domain/agents/org';
 
 /**
@@ -94,6 +95,39 @@ describe.skipIf(!available)('work items — create, list, edit, own', () => {
     expect(row[0]!.o).toBe(empId);
     const items = await withTenant(ctxA, (tx) => listWorkItems(tx, ctxA));
     expect(items.find((w) => w.id === id)!.ownerName).toBe('Rep');
+  });
+
+  it('stopping requires a reason, and the reason survives (institutional memory)', async () => {
+    const id = await withTenant(ctxA, (tx) => createWorkItem(tx, ctxA, { title: 'Stop me' }));
+    await expect(withTenant(ctxA, (tx) => stopWorkItem(tx, ctxA, id, '   '))).rejects.toThrow(/reason is required/i);
+    await withTenant(ctxA, (tx) => stopWorkItem(tx, ctxA, id, 'superseded by new flow'));
+    const row = await getSetupDb().select({ c: workItems.condition, r: workItems.closureReason, by: workItems.closedBy }).from(workItems).where(eq(workItems.id, id));
+    expect(row[0]!.c).toBe('stopped');
+    expect(row[0]!.r).toBe('superseded by new flow');
+    expect(row[0]!.by).toBe(userId);
+  });
+
+  it('finished and stopped are distinct, and a closed item is frozen', async () => {
+    const fin = await withTenant(ctxA, (tx) => createWorkItem(tx, ctxA, { title: 'Finish me' }));
+    await withTenant(ctxA, (tx) => finishWorkItem(tx, ctxA, fin));
+    const frow = await getSetupDb().select({ c: workItems.condition }).from(workItems).where(eq(workItems.id, fin));
+    expect(frow[0]!.c).toBe('finished');
+    // frozen: ordinary edits and re-closing are rejected once terminal.
+    await expect(
+      withTenant(ctxA, (tx) => updateWorkItem(tx, ctxA, fin, { title: 'x', condition: 'moving', waitingOn: '', stage: 'y', notes: '' })),
+    ).rejects.toThrow(/closed|frozen/i);
+    await expect(withTenant(ctxA, (tx) => stopWorkItem(tx, ctxA, fin, 'again'))).rejects.toThrow(/closed/i);
+  });
+
+  it('an AI task cancellation preserves the operator reason', async () => {
+    const t = await getSetupDb()
+      .insert(tasks)
+      .values({ orgId, projectId: ctxA.projectId, title: 'Cancel me', input: 'x', providerSelection: 'openai', status: 'pending', createdBy: userId })
+      .returning({ id: tasks.id });
+    await withTenant(ctxA, (tx) => cancelTask(tx, ctxA, t[0]!.id, 'no longer needed'));
+    const row = await getSetupDb().select({ s: tasks.status, r: tasks.cancelReason }).from(tasks).where(eq(tasks.id, t[0]!.id));
+    expect(row[0]!.s).toBe('cancelled');
+    expect(row[0]!.r).toBe('no longer needed');
   });
 
   it('filters by objective and isolates across workspaces', async () => {

@@ -145,17 +145,26 @@ export default async function ExecutionPage({
               <h2 className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--muted)]">Recent</h2>
               <div className="divide-y divide-[var(--border)]">
                 {recent.map(({ r, a }) => (
-                  <div key={`rec-${r.id}`} className="flex flex-wrap items-baseline gap-x-2 py-2 text-sm">
-                    <Kind kind={r.kind} />
-                    {r.kind === 'ai_task' ? (
-                      <Link href={`/p/${projectKey}/tasks/${r.id}`} className="text-[var(--foreground)] hover:text-[var(--accent)]">
-                        {r.title}
-                      </Link>
-                    ) : (
-                      <span className="text-[var(--foreground)]">{r.title}</span>
-                    )}
-                    <span className="text-xs text-[var(--muted)]">· {CONDITION_LABEL[a.condition]} — {a.reason}</span>
-                    <span className="ml-auto text-xs text-[var(--muted)]">{r.ownerName ?? ''}</span>
+                  <div key={`rec-${r.id}`} className="py-2 text-sm">
+                    <div className="flex flex-wrap items-baseline gap-x-2">
+                      <Kind kind={r.kind} />
+                      {r.kind === 'ai_task' ? (
+                        <Link href={`/p/${projectKey}/tasks/${r.id}`} className="text-[var(--foreground)] hover:text-[var(--accent)]">
+                          {r.title}
+                        </Link>
+                      ) : (
+                        <span className="text-[var(--foreground)]">{r.title}</span>
+                      )}
+                      <span className="text-xs text-[var(--muted)]">· {CONDITION_LABEL[a.condition]}</span>
+                      <span className="ml-auto text-xs text-[var(--muted)]">{r.ownerName ?? ''}</span>
+                    </div>
+                    {r.closureReason ? (
+                      <p className="mt-0.5 text-xs text-[var(--muted)]">
+                        {a.condition === 'stopped' ? 'Stopped' : 'Note'}
+                        {r.closedByName ? ` by ${r.closedByName}` : ''}
+                        {r.closedAt ? ` on ${r.closedAt.toISOString().slice(0, 10)}` : ''}: {r.closureReason}
+                      </p>
+                    ) : null}
                   </div>
                 ))}
               </div>

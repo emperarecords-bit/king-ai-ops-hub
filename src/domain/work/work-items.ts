@@ -1,7 +1,7 @@
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { type TenantContext, type WorkItemCondition, WORK_ITEM_CONDITIONS } from '@/types/domain';
-import { ValidationError, NotFoundError } from '@/lib/errors';
+import { ConflictError, ValidationError, NotFoundError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { agents, objectives, workItems } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
@@ -127,14 +127,38 @@ export async function createWorkItem(
   return id;
 }
 
+// Ordinary edits can only set a *live* condition — finishing/stopping goes through the closure
+// actions so it captures who/when/why and freezes the record.
+const LIVE_CONDITIONS = ['planned', 'moving', 'waiting'] as const;
+
 export const updateWorkItemSchema = z.object({
   title: z.string().trim().min(1, 'Title is required').max(200),
-  condition: z.enum(WORK_ITEM_CONDITIONS),
+  condition: z.enum(LIVE_CONDITIONS),
   waitingOn: z.string().trim().max(200).default(''),
   stage: z.string().trim().max(60),
   notes: z.string().max(8_000),
 });
 export type UpdateWorkItemInput = z.infer<typeof updateWorkItemSchema>;
+
+async function currentCondition(
+  tx: DbTx,
+  ctx: TenantContext,
+  workItemId: string,
+): Promise<WorkItemCondition | null> {
+  const rows = await tx
+    .select({ condition: workItems.condition })
+    .from(workItems)
+    .where(and(eq(workItems.id, workItemId), eq(workItems.orgId, ctx.orgId), eq(workItems.projectId, ctx.projectId)))
+    .limit(1);
+  if (rows.length === 0) throw new NotFoundError('Work item');
+  return rows[0]!.condition;
+}
+
+function assertNotClosed(condition: WorkItemCondition | null): void {
+  if (condition === 'finished' || condition === 'stopped') {
+    throw new ConflictError('This work item is closed. Its record is frozen and cannot be edited.');
+  }
+}
 
 export async function updateWorkItem(
   tx: DbTx,
@@ -146,6 +170,7 @@ export async function updateWorkItem(
   if (!parsed.success) {
     throw new ValidationError(parsed.error.issues.map((i) => i.message));
   }
+  assertNotClosed(await currentCondition(tx, ctx, workItemId));
 
   const updated = await tx
     .update(workItems)
@@ -173,4 +198,47 @@ export async function updateWorkItem(
     entityId: workItemId,
     detail: { stage: parsed.data.stage },
   });
+}
+
+/**
+ * Stop a work item — a terminal transition that requires a reason and freezes the record. The
+ * item's condition/stage/owner at this moment become the closure snapshot (it can't be edited
+ * afterward). Institutional memory, like an objective's closure.
+ */
+export async function stopWorkItem(
+  tx: DbTx,
+  ctx: TenantContext,
+  workItemId: string,
+  reason: string,
+): Promise<void> {
+  const r = (reason ?? '').trim();
+  if (!r) {
+    throw new ValidationError([
+      'A reason is required to stop work — why it ended is the record that makes it useful later.',
+    ]);
+  }
+  assertNotClosed(await currentCondition(tx, ctx, workItemId));
+  await tx
+    .update(workItems)
+    .set({ condition: 'stopped', waitingOn: null, closedBy: ctx.userId, closedAt: new Date(), closureReason: r, updatedAt: new Date() })
+    .where(and(eq(workItems.id, workItemId), eq(workItems.orgId, ctx.orgId), eq(workItems.projectId, ctx.projectId)));
+
+  await writeAudit(tx, ctx, { action: 'work_item.stopped', entityType: 'work_item', entityId: workItemId, detail: { reason: r } });
+}
+
+/** Finish a work item — terminal, freezes the record. A completion note is optional. */
+export async function finishWorkItem(
+  tx: DbTx,
+  ctx: TenantContext,
+  workItemId: string,
+  note?: string,
+): Promise<void> {
+  assertNotClosed(await currentCondition(tx, ctx, workItemId));
+  const n = (note ?? '').trim() || null;
+  await tx
+    .update(workItems)
+    .set({ condition: 'finished', waitingOn: null, closedBy: ctx.userId, closedAt: new Date(), closureReason: n, updatedAt: new Date() })
+    .where(and(eq(workItems.id, workItemId), eq(workItems.orgId, ctx.orgId), eq(workItems.projectId, ctx.projectId)));
+
+  await writeAudit(tx, ctx, { action: 'work_item.finished', entityType: 'work_item', entityId: workItemId, detail: { note: n } });
 }
