@@ -83,7 +83,7 @@ they've learned the pattern. The panel wins when it becomes unnecessary. Trust i
 *consistently applying the same reasoning*, not by hiding complexity or re-proving itself each
 time. Every explanation should leave the operator thinking "that makes sense."
 
-**The reasoning model (five questions).** Any judgment, recommendation, or autonomous action
+**The reasoning contract (five dimensions).** Any judgment, recommendation, or autonomous action
 must be able to answer:
 
 1. **Why does this matter to the business?** — grounds everything in *outcomes, not mechanics*.
@@ -97,10 +97,24 @@ must be able to answer:
 If the Hub cannot answer these, it has not earned the right to *assert* the opinion — let alone
 act on it. Explainability is the currency of trust and the gate at every rung of the ladder.
 
-**The explanation surface is universal.** Every meaningful judgment, recommendation, and
-automated action anywhere in the Hub exposes this *same* reasoning model — not because every
-operator will open it, but because the Hub should always be able to explain itself the same way.
-That consistency is what creates confidence. Build the surface once; reuse it everywhere.
+**Evidence is not inference — label the difference.** The Hub distinguishes what it can *prove*
+from what it *concludes*. "Onboarding hasn't progressed while this objective has been stalled"
+is evidence; "this objective is delaying activation" is a causal claim. When it can't prove
+causation, it states the narrower truth or clearly labels the relationship as an inference —
+never a conclusion dressed as fact. Business impact frequently lives right on this line: state
+the correlation as fact, the consequence as a labeled inference.
+
+**The reasoning contract is universal; its depth is not.** The five dimensions stay consistent
+everywhere, so the operator learns *one* way the Hub thinks. The *presentation* adapts to
+significance: a small prioritization judgment may be two sentences; a major recommendation
+deserves the fuller model; an autonomous decision carries the full reasoning plus alternatives
+considered, authority used, and an audit record. Consistency should help the operator recognize
+how the Hub thinks — not force every thought into a heavy panel.
+
+**Depth matches consequence.** The higher the impact, uncertainty, or autonomy of a judgment or
+action, the more explanation the Hub owes. Small calls travel light; big or autonomous ones
+carry their full reasoning. Build the reasoning surface once; let the depth it shows scale with
+what's at stake.
 
 **Future — the explanation becomes institutional memory (preserve space, do not build yet).** As
 the Hub earns the right to automate, the explanation surface becomes the business's memory.
