@@ -147,6 +147,18 @@ means we won't have to reinvent it then.
 - **The finished-screen test.** *"After using this page, do I feel more in control than before
   I opened it?"* If yes, it's done. If no, no amount of visual polish will fix it. This is the
   working definition of a finished Hub.
+- **Every page leaves me better prepared to run my business than before I opened it.** Every
+  interaction reduces uncertainty — sometimes by giving confidence, sometimes clarity, sometimes
+  direction, sometimes helping a decision. This is what the Hub ultimately sells: not dashboards,
+  not AI, not automation — *confidence in operating a business.*
+- **One partner everywhere.** The personality is part of the product, not just the Dashboard.
+  Every area — Objectives, Work, Decisions, Knowledge, Settings — sounds like the *same*
+  accountable operating partner. The operator should never feel they're switching between apps;
+  they're always working with one mind.
+- **Earn a place with the 30-second test; don't over-protect whitespace.** A clean sketch is not
+  a reason to refuse genuinely useful information. Ask only: *does this help me become a better
+  operator in the first 30 seconds?* If yes, it earns its place; if not, it belongs on another
+  page.
 - **Business first, software second.** The Hub always represents the *business* first and the
   software second. When the business view and the platform view compete, optimize for helping
   the operator understand the business — not the internal mechanics of the platform. (A
@@ -207,6 +219,8 @@ doorway into the page that handles it · **fades** = the machinery.
 **Design intents:**
 - Whole business represented: human Work Items *and* AI Tasks, not only AI activity.
 - Calm on a quiet day: "everything operating normally" is a confident state, not a void.
+- Front door, not a destination: it orients and points *into* the work (Objectives, Work,
+  Decisions, Knowledge). If the operator sits here ten minutes, we designed it wrong.
 - Explicitly out of scope: trends, charts, reporting.
 
 **"Operating normally" — evaluated in layers, business first.** Health is a *business*
