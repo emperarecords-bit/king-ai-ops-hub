@@ -431,8 +431,9 @@ describe.skipIf(!available)('decision memory', () => {
     expect(forObj.decisions.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('cross-surface — Detail assessment agrees with the selector (active is injected; closed is not)', async () => {
-    // Active guidance: Detail says active AND the selector injects it.
+  it('cross-surface — active guidance is injected ONLY into a relevant run; inactive guidance never', async () => {
+    // Active guidance is a PREREQUISITE for injection, not a guarantee: it must also be relevant to
+    // the run. Detail-active + relevant run → injected.
     const liveTask = await mkTask(ctxA, 'xsurface live', 'running');
     const dLive = await withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'Owner', { title: 'Cross active', summary: 's', scope: 'task', scopeTaskId: liveTask }));
     await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, dLive));
@@ -440,7 +441,11 @@ describe.skipIf(!available)('decision memory', () => {
     expect(detailLive.assessment.isActiveGuidance).toBe(true);
     expect((await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(liveTask)))).contextItem?.content ?? '').toContain('Cross active');
 
-    // Scope-closed guidance: Detail says inactive AND the selector does NOT inject it.
+    // Active but NOT relevant: the same active guidance is NOT injected into an unrelated run.
+    const otherTask = await mkTask(ctxA, 'xsurface other', 'running');
+    expect((await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(otherTask)))).contextItem?.content ?? '').not.toContain('Cross active');
+
+    // Scope-closed guidance: Detail says inactive AND the selector does NOT inject it, even for its own task.
     const doneTask = await mkTask(ctxA, 'xsurface done', 'completed');
     const dClosed = await withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'Owner', { title: 'Cross closed', summary: 's', scope: 'task', scopeTaskId: doneTask }));
     await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, dClosed));

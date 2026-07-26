@@ -74,4 +74,16 @@ describe('assessDecision — one shared state', () => {
     expect(a.actions).toContain('accept_guidance');
     expect(a.actions).toContain('refuse');
   });
+
+  it('shared applicability is not a decision-level concern — objective guidance with an open objective is a clean active state', () => {
+    // Two compatible decisions on the same open objective each assess as active with NO concern
+    // reason. The Portfolio Needs-review lens keys off inactiveReason (invalid_scope / expiry /
+    // scope-closed), so overlapping scope alone can never pull them into Needs review.
+    const one = assessDecision({ ...base, scope: 'objective', scopeObjectiveId: 'o1', scopeObjectiveStatus: 'active' });
+    const two = assessDecision({ ...base, scope: 'objective', scopeObjectiveId: 'o1', scopeObjectiveStatus: 'active' });
+    for (const a of [one, two]) {
+      expect(a.isActiveGuidance).toBe(true);
+      expect(a.inactiveReason).toBeNull();
+    }
+  });
 });

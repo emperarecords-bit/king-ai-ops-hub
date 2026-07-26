@@ -1220,7 +1220,20 @@ All verified: full suite **406/406**.
   or superseded; broader guidance is a new, traceable decision (stated in the Actions section).
 - Verified: `tsc` clean · build clean · full suite **416/416** (no exclusions).
 
-*Decisions is functionally complete for the core institutional-memory model. Deferred (recorded, not
-built): eligible-but-not-injected history (needs an evaluation event persisted at assembly time),
-evidence-backed semantic conflict assessment, and Defer with real semantics. Present none of these as
-if they exist.*
+**Correction (2026-07-26): shared applicability is NOT a Needs-review trigger.** Several decisions may
+legitimately guide one objective. The Needs-review lens fires only on an evidence-backed concern —
+invalid/missing scope target, approaching expiry, or a closed scope that needs deliberate
+promotion/restatement — never on scope overlap alone. Shared applicability stays as *neutral context*
+on Detail only ("N other active guidance decisions also apply to this objective"). Also clarified: the
+selector rule is **active guidance + a relevant run relationship may be injected** — active guidance
+alone is never injected into every run. Regression tests added (`decision-assess.test.ts`: overlapping
+objective guidance is a clean active state; `decisions.test.ts`: active guidance is injected only into
+a relevant run, not an unrelated one). Full suite **417/417**.
+
+**Decisions is CLOSED for this product-review pass (2026-07-26).** It answers *"what has this
+workspace concluded, why, and under what circumstances should that conclusion guide future work?"* and
+preserves the distinctions: history vs instruction · suggestion vs authority · scope vs relevance ·
+injection vs influence · active guidance vs historically-valid record. Deferred (recorded, not built,
+never presented as if they exist): eligible-but-not-injected history (needs an evaluation event
+persisted at assembly time), evidence-backed semantic conflict assessment, and Defer with real
+semantics.

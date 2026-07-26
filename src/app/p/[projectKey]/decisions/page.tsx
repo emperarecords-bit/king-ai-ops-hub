@@ -38,12 +38,13 @@ export default async function DecisionsPage({ params }: { params: Promise<{ proj
   const historical = assessed.filter((x) => x.a.historical);
 
   // Needs review LENS (not a lifecycle state): evidence-backed concerns over items that keep their
-  // canonical home above. "Never injected" is deliberately NOT a concern.
-  const objectiveOverlap = countByObjective(active);
+  // canonical home above. Shared applicability is NOT a concern — several decisions may legitimately
+  // guide one objective (it shows as neutral context on Detail only). "Never injected" is also NOT a
+  // concern. The lens fires only on an actual defect or a decision requiring deliberate attention.
   const needsReview = assessed.filter(({ d, a }) => {
-    if (a.inactiveReason === 'invalid_scope') return true; // missing/invalid target
+    if (a.inactiveReason === 'invalid_scope') return true; // missing/invalid target — a real defect
     if (a.isActiveGuidance && d.effectiveUntil && d.effectiveUntil.getTime() - now.getTime() < EXPIRY_SOON_MS) return true;
-    if (a.isActiveGuidance && d.scope === 'objective' && d.scopeObjectiveId && (objectiveOverlap.get(d.scopeObjectiveId) ?? 0) > 1) return true;
+    if (a.inactiveReason === 'task_closed' || a.inactiveReason === 'objective_closed') return true; // scope closed — promote or restate?
     return false;
   });
 
@@ -65,7 +66,7 @@ export default async function DecisionsPage({ params }: { params: Promise<{ proj
             {needsReview.map(({ d, a }) => (
               <li key={`nr-${d.id}`} className="flex flex-wrap items-baseline gap-x-2">
                 <Link href={`${base}/decisions/${d.id}`} className="hover:text-[var(--accent)]">{d.title}</Link>
-                <span className="text-xs text-[var(--warning,#c99a3a)]">{needsReviewReason(d, a, now, objectiveOverlap)}</span>
+                <span className="text-xs text-[var(--warning,#c99a3a)]">{needsReviewReason(d, a, now)}</span>
               </li>
             ))}
           </ul>
@@ -161,17 +162,9 @@ function scopeTarget(d: DecisionRow): string {
   return 'workspace';
 }
 
-function countByObjective(active: { d: DecisionRow; a: DecisionAssessment }[]): Map<string, number> {
-  const m = new Map<string, number>();
-  for (const { d } of active) {
-    if (d.scope === 'objective' && d.scopeObjectiveId) m.set(d.scopeObjectiveId, (m.get(d.scopeObjectiveId) ?? 0) + 1);
-  }
-  return m;
-}
-
-function needsReviewReason(d: DecisionRow, a: DecisionAssessment, now: Date, overlap: Map<string, number>): string {
+function needsReviewReason(d: DecisionRow, a: DecisionAssessment, now: Date): string {
   if (a.inactiveReason === 'invalid_scope') return 'invalid scope — missing target';
   if (a.isActiveGuidance && d.effectiveUntil && d.effectiveUntil.getTime() - now.getTime() < EXPIRY_SOON_MS) return `expires ${ts(d.effectiveUntil)}`;
-  if (d.scope === 'objective' && d.scopeObjectiveId && (overlap.get(d.scopeObjectiveId) ?? 0) > 1) return 'multiple active guidance apply to this objective';
+  if (a.inactiveReason === 'task_closed' || a.inactiveReason === 'objective_closed') return 'scope closed — promote or restate?';
   return 'review';
 }
