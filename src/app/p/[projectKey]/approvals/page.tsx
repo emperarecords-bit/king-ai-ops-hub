@@ -2,8 +2,18 @@ import Link from 'next/link';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { expireStaleApprovals, listApprovals } from '@/domain/approvals/approvals';
-import { Card, EmptyState, PageHeader, StatusBadge } from '@/components/ui';
+import { Card, EmptyState, PageHeader } from '@/components/ui';
 import { DecisionForm } from './decision-form';
+
+// Operator-facing authorization words (schema keeps approved/rejected). Authorize/Refuse make the
+// grant explicit; Withdrawn/Expired describe how a proposal left the queue without a decision.
+const AUTHORIZATION_LABEL: Record<string, string> = {
+  pending: 'Pending',
+  approved: 'Authorized',
+  rejected: 'Refused',
+  expired: 'Expired',
+  withdrawn: 'Withdrawn',
+};
 
 export default async function ApprovalsPage({
   params,
@@ -89,7 +99,10 @@ export default async function ApprovalsPage({
                     <p className="text-xs text-[var(--muted)]">note: {a.decisionNote}</p>
                   ) : null}
                 </div>
-                <StatusBadge status={a.status} />
+                <span className="shrink-0 rounded bg-[var(--surface-raised)] px-2 py-0.5 text-xs text-[var(--muted)]">
+                  {AUTHORIZATION_LABEL[a.status] ?? a.status}
+                  {a.status === 'approved' ? ' · not executed' : ''}
+                </span>
               </li>
             ))}
           </ul>

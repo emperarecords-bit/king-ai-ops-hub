@@ -5,6 +5,7 @@ import { withTenant } from '@/db/tenant';
 import { getTask, listMessages, listRuns, listRunSteps, listTasks } from '@/domain/tasks/tasks';
 import { listDirectDependencies } from '@/domain/dependencies/dependencies';
 import { listCandidatesForTask } from '@/domain/decisions/decisions';
+import { listApprovals } from '@/domain/approvals/approvals';
 import { listEmployees } from '@/domain/agents/org';
 import { NotFoundError } from '@/lib/errors';
 import { Card, ModelText, PageHeader, ProviderBadge, StatusBadge } from '@/components/ui';
@@ -67,14 +68,19 @@ export default async function TaskDetailPage({
       const allTasks = await listTasks(tx, ctx, 100);
       const candidates = await listCandidatesForTask(tx, ctx, taskId);
       const employees = await listEmployees(tx, ctx);
-      return { task, msgs, runs, latestRun, steps, deps, allTasks, candidates, employees };
+      const taskApprovals = (await listApprovals(tx, ctx)).filter((a) => a.taskId === taskId);
+      return { task, msgs, runs, latestRun, steps, deps, allTasks, candidates, employees, taskApprovals };
     });
   } catch (err) {
     if (err instanceof NotFoundError) notFound();
     throw err;
   }
 
-  const { task, msgs, latestRun, steps, deps, allTasks, candidates, employees } = data;
+  const { task, msgs, latestRun, steps, deps, allTasks, candidates, employees, taskApprovals } = data;
+  // Authorization is a separate lifecycle from the task's own work. A completed task may still hold
+  // an authorized action the Hub has NOT executed — the summary must not imply it did.
+  const authorizedUnexecuted = taskApprovals.some((a) => a.status === 'approved');
+  const refusedCount = taskApprovals.filter((a) => a.status === 'rejected').length;
   const ownerName = task.ownerAgentId
     ? (employees.find((e) => e.id === task.ownerAgentId)?.name ?? null)
     : null;
@@ -125,11 +131,22 @@ export default async function TaskDetailPage({
       <WorkFrame
         kind="ai_task"
         purpose={null}
-        assessment={assessTask({ status: task.status, ownerAgentId: task.ownerAgentId })}
+        assessment={assessTask({ status: task.status, ownerAgentId: task.ownerAgentId, authorizedUnexecuted })}
         accountable={ownerName ?? null}
         performer="the assigned agent"
         recent={null}
       />
+
+      {task.status === 'completed' && (authorizedUnexecuted || refusedCount > 0) ? (
+        <p className="mb-6 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm">
+          <span className="text-[var(--muted)]">AI work:</span> Finished ·{' '}
+          <span className="text-[var(--muted)]">Proposed action:</span>{' '}
+          {authorizedUnexecuted ? 'Authorized, not executed' : 'Refused'}
+          <span className="mt-1 block text-xs text-[var(--muted)]">
+            The task finished producing the action. The action itself has not executed.
+          </span>
+        </p>
+      ) : null}
 
       {task.status === 'cancelled' && task.cancelReason ? (
         <p className="mb-6 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--muted)]">

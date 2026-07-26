@@ -50,7 +50,7 @@ export default async function ExecutionPage({
     a:
       r.kind === 'work_item'
         ? assessWorkItem({ condition: r.condition, waitingOn: r.waitingOn, ownerAgentId: r.ownerAgentId, updatedAt: r.updatedAt, now })
-        : assessTask({ status: r.status!, ownerAgentId: r.ownerAgentId }),
+        : assessTask({ status: r.status!, ownerAgentId: r.ownerAgentId, authorizedUnexecuted: r.authorizedUnexecuted }),
   }));
 
   const requiresYou = assessed.filter((x) => x.a.intervention === 'required');

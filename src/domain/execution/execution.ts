@@ -2,6 +2,7 @@ import { and, desc, eq, inArray } from 'drizzle-orm';
 import { type Cadence, type TaskStatus, type TenantContext, type WorkItemCondition } from '@/types/domain';
 import { type DbTx } from '@/db/client';
 import { agents, objectives, profiles, taskSchedules, tasks, workItems } from '@/db/schema';
+import { tasksWithAuthorizedUnexecutedActions } from '@/domain/approvals/approvals';
 
 /**
  * The unified execution feed (Execution). One stream across both engines — human Work Items and
@@ -25,6 +26,8 @@ export interface ExecutionRow {
   notes: string | null;
   /** ai_task only. */
   status: TaskStatus | null;
+  /** ai_task only: holds an authorized action the Hub has not executed — the read must not imply it did. */
+  authorizedUnexecuted: boolean;
   /** Closure record for terminal work (Finished/Stopped). */
   closureReason: string | null;
   closedByName: string | null;
@@ -74,6 +77,13 @@ export async function listExecution(tx: DbTx, ctx: TenantContext): Promise<Execu
     .where(and(eq(tasks.projectId, ctx.projectId), eq(tasks.orgId, ctx.orgId)))
     .orderBy(desc(tasks.updatedAt));
 
+  // Which completed tasks still hold an authorized-but-unexecuted action, so the read stays honest.
+  const authorizedUnexecuted = await tasksWithAuthorizedUnexecutedActions(
+    tx,
+    ctx,
+    ts.filter((r) => r.status === 'completed').map((r) => r.id),
+  );
+
   const workItemRows: ExecutionRow[] = wi.map((r) => ({
     kind: 'work_item',
     id: r.id,
@@ -88,6 +98,7 @@ export async function listExecution(tx: DbTx, ctx: TenantContext): Promise<Execu
     stage: r.stage,
     notes: r.notes,
     status: null,
+    authorizedUnexecuted: false,
     closureReason: r.closureReason,
     closedByName: r.closedByName,
     closedAt: r.closedAt,
@@ -106,6 +117,7 @@ export async function listExecution(tx: DbTx, ctx: TenantContext): Promise<Execu
     stage: null,
     notes: null,
     status: r.status,
+    authorizedUnexecuted: authorizedUnexecuted.has(r.id),
     closureReason: r.cancelReason,
     closedByName: null,
     closedAt: null,

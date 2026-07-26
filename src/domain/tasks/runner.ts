@@ -47,6 +47,7 @@ function manifestFreshness(
   };
 }
 import { writeAudit } from '@/domain/audit/audit';
+import { pendingDuplicateExists } from '@/domain/approvals/approvals';
 import { assertWithinBudget, recordUsage } from '@/domain/usage/usage';
 import { consumeRateLimit } from '@/domain/usage/rate-limit';
 
@@ -510,8 +511,20 @@ export async function startRun(
       return { runId, status: 'failed' as const, failureReason: result.failureReason };
     }
 
-    // Proposed actions become PENDING approvals — never executions (I4).
+    // Proposed actions become PENDING approvals — never executions (I4). An exact duplicate of an
+    // already-pending authorization (same action type + canonical payload hash) is suppressed so the
+    // operator can never be asked to authorize the same external action twice.
+    let authorizationsRequested = 0;
     for (const action of result.proposedActions) {
+      if (await pendingDuplicateExists(tx, ctx, action.type, action.payloadSha256)) {
+        await writeAudit(tx, ctx, {
+          action: 'approval.duplicate_suppressed',
+          entityType: 'task',
+          entityId: taskId,
+          detail: { actionType: action.type, summary: action.summary, payloadSha256: action.payloadSha256 },
+        });
+        continue;
+      }
       const inserted = await tx
         .insert(approvals)
         .values({
@@ -528,6 +541,7 @@ export async function startRun(
           expiresAt: new Date(Date.now() + APPROVAL_TTL_MS),
         })
         .returning({ id: approvals.id });
+      authorizationsRequested += 1;
       await writeAudit(tx, ctx, {
         action: 'approval.requested',
         entityType: 'approval',
@@ -536,8 +550,10 @@ export async function startRun(
       });
     }
 
+    // The task holds at the gate only if it actually raised a pending authorization. If every
+    // proposal was an exact duplicate of one already pending, there is nothing new to authorize.
     const finalStatus =
-      result.proposedActions.length > 0 ? ('awaiting_approval' as const) : ('completed' as const);
+      authorizationsRequested > 0 ? ('awaiting_approval' as const) : ('completed' as const);
 
     await tx
       .update(runs)

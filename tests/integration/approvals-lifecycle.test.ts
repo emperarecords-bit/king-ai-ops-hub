@@ -6,8 +6,9 @@ import { type TenantContext } from '@/types/domain';
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { approvals, memberships, organizations, profiles, projectMembers, projects, tasks } from '@/db/schema';
-import { decideApproval, expireStaleApprovals } from '@/domain/approvals/approvals';
+import { decideApproval, expireStaleApprovals, pendingDuplicateExists } from '@/domain/approvals/approvals';
 import { cancelTask } from '@/domain/tasks/tasks';
+import { listExecution } from '@/domain/execution/execution';
 import { assessTask } from '@/domain/execution/assess';
 
 /**
@@ -50,23 +51,34 @@ afterAll(async () => {
   await getSetupDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
 });
 
-/** A task whose run finished and produced `count` pending proposals — i.e. it sits at the gate. */
-async function taskAwaitingApproval(count: number, expiresAt = new Date(Date.now() + 60 * 60 * 1000)): Promise<{ taskId: string; approvalIds: string[] }> {
+/**
+ * A task whose run finished and produced `count` pending proposals — i.e. it sits at the gate.
+ * Payload hashes are unique per call so duplicate-detection assertions can't collide with the
+ * pending approvals other tests leave behind in the shared project.
+ */
+async function taskAwaitingApproval(
+  count: number,
+  expiresAt = new Date(Date.now() + 60 * 60 * 1000),
+): Promise<{ taskId: string; approvalIds: string[]; hashes: string[] }> {
   const db = getSetupDb();
+  const nonce = randomUUID().slice(0, 8);
   const t = await db
     .insert(tasks)
     .values({ orgId, projectId: ctx.projectId, title: 'Draft the launch email', input: 'x', providerSelection: 'openai', status: 'awaiting_approval', createdBy: userId })
     .returning({ id: tasks.id });
   const taskId = t[0]!.id;
   const approvalIds: string[] = [];
+  const hashes: string[] = [];
   for (let i = 0; i < count; i += 1) {
+    const sha = `hash-${nonce}-${i}`;
     const a = await db
       .insert(approvals)
-      .values({ orgId, projectId: ctx.projectId, taskId, actionType: 'email_send', payload: { to: 'x@y.z', n: i }, payloadSha256: `hash-${i}`, summary: `Send email ${i}`, status: 'pending', expiresAt })
+      .values({ orgId, projectId: ctx.projectId, taskId, actionType: 'email_send', payload: { to: 'x@y.z', n: i }, payloadSha256: sha, summary: `Send email ${i}`, status: 'pending', expiresAt })
       .returning({ id: approvals.id });
     approvalIds.push(a[0]!.id);
+    hashes.push(sha);
   }
-  return { taskId, approvalIds };
+  return { taskId, approvalIds, hashes };
 }
 
 async function taskStatus(taskId: string): Promise<string> {
@@ -134,6 +146,39 @@ describe.skipIf(!available)('authorization reconciles the task lifecycle', () =>
     // Reconciled away from the gate, so Execution/Dashboard (both via assessTask) stop asking.
     expect(assessTask({ status: (await taskStatus(taskId)) as never, ownerAgentId: null }).intervention).toBe('none');
     // And the same decision cannot be applied again.
-    await expect(withTenant(ctx, (tx) => decideApproval(tx, ctx, approvalIds[0]!, 'rejected'))).rejects.toThrow(/already/i);
+    await expect(withTenant(ctx, (tx) => decideApproval(tx, ctx, approvalIds[0]!, 'rejected', 'x'))).rejects.toThrow(/already/i);
+  });
+
+  it('refusing requires a rationale (it becomes operational memory)', async () => {
+    const { approvalIds } = await taskAwaitingApproval(1);
+    await expect(withTenant(ctx, (tx) => decideApproval(tx, ctx, approvalIds[0]!, 'rejected'))).rejects.toThrow(/rationale is required/i);
+    await expect(withTenant(ctx, (tx) => decideApproval(tx, ctx, approvalIds[0]!, 'rejected', '  '))).rejects.toThrow(/rationale is required/i);
+    // With a rationale it goes through.
+    await withTenant(ctx, (tx) => decideApproval(tx, ctx, approvalIds[0]!, 'rejected', 'not appropriate'));
+    expect(await approvalStatus(approvalIds[0]!)).toBe('rejected');
+  });
+
+  it('a completed task holding an authorized action never reads as the action complete', async () => {
+    const { taskId, approvalIds } = await taskAwaitingApproval(1);
+    await withTenant(ctx, (tx) => decideApproval(tx, ctx, approvalIds[0]!, 'approved'));
+    // Task reconciled to completed, but the approval is authorized-and-unexecuted.
+    const rows = await withTenant(ctx, (tx) => listExecution(tx, ctx));
+    const row = rows.find((r) => r.kind === 'ai_task' && r.id === taskId)!;
+    expect(row.authorizedUnexecuted).toBe(true);
+    const a = assessTask({ status: row.status!, ownerAgentId: row.ownerAgentId, authorizedUnexecuted: row.authorizedUnexecuted });
+    expect(a.reason).toMatch(/not yet executed/i);
+    expect(a.reason).not.toBe('Completed.');
+  });
+
+  it('detects an exact pending duplicate by action type and canonical payload hash', async () => {
+    const { approvalIds, hashes } = await taskAwaitingApproval(1); // one pending email_send with a unique sha
+    const sha = hashes[0]!;
+    expect(await withTenant(ctx, (tx) => pendingDuplicateExists(tx, ctx, 'email_send', sha))).toBe(true);
+    // Different hash → not a duplicate. Different type → not a duplicate.
+    expect(await withTenant(ctx, (tx) => pendingDuplicateExists(tx, ctx, 'email_send', `${sha}-x`))).toBe(false);
+    expect(await withTenant(ctx, (tx) => pendingDuplicateExists(tx, ctx, 'git_push', sha))).toBe(false);
+    // Once decided, it is no longer a *pending* duplicate.
+    await withTenant(ctx, (tx) => decideApproval(tx, ctx, approvalIds[0]!, 'approved'));
+    expect(await withTenant(ctx, (tx) => pendingDuplicateExists(tx, ctx, 'email_send', sha))).toBe(false);
   });
 });

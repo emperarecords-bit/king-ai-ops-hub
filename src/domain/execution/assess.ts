@@ -89,7 +89,16 @@ export function assessWorkItem(i: {
   return { condition, intervention, requiredAction, reason, source: 'human-reported', confidence };
 }
 
-export function assessTask(i: { status: TaskStatus; ownerAgentId: string | null }): ExecutionAssessment {
+export function assessTask(i: {
+  status: TaskStatus;
+  ownerAgentId: string | null;
+  /**
+   * The task's own work finished, but it holds an authorized action the Hub has NOT executed (no
+   * executor yet). The read must say so — never imply the external action happened. See
+   * `tasksWithAuthorizedUnexecutedActions`.
+   */
+  authorizedUnexecuted?: boolean;
+}): ExecutionAssessment {
   let condition: ExecCondition;
   let intervention: InterventionLevel = 'none';
   let requiredAction: string | null = null;
@@ -107,12 +116,15 @@ export function assessTask(i: { status: TaskStatus; ownerAgentId: string | null 
     case 'awaiting_approval':
       condition = 'waiting';
       intervention = 'required';
-      requiredAction = 'Approve or reject';
+      requiredAction = 'Authorize or refuse';
       reason = 'Holding for authorization of a proposed action.';
       break;
     case 'completed':
       condition = 'finished';
-      reason = 'Completed.';
+      // Truthful split: the AI work finished, but an authorized action may still be unexecuted.
+      reason = i.authorizedUnexecuted
+        ? 'AI work finished; a proposed action is authorized but not yet executed.'
+        : 'Completed.';
       break;
     case 'failed':
       condition = 'waiting';

@@ -1,4 +1,4 @@
-import { and, desc, eq, lt } from 'drizzle-orm';
+import { and, desc, eq, inArray, lt } from 'drizzle-orm';
 import { type ActionType, type ApprovalStatus, type TenantContext } from '@/types/domain';
 import { AppError, NotFoundError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
@@ -151,6 +151,62 @@ export async function expireStaleApprovals(tx: DbTx, ctx: TenantContext): Promis
   return expired.length;
 }
 
+/**
+ * Which of the given tasks hold at least one **authorized-but-unexecuted** action. Because no
+ * executor exists yet, every `approved` authorization is unexecuted — so a task summarized as
+ * "completed" must not be allowed to imply its proposed action (send/deploy/charge/mutate) actually
+ * happened. Surfaces pass the result into the translator so the language stays truthful:
+ * *the task finished producing the action; the action itself has not executed.* Returns a Set for
+ * O(1) lookup; empty input → empty Set (no query).
+ */
+export async function tasksWithAuthorizedUnexecutedActions(
+  tx: DbTx,
+  ctx: TenantContext,
+  taskIds: readonly string[],
+): Promise<Set<string>> {
+  if (taskIds.length === 0) return new Set();
+  const rows = await tx
+    .select({ taskId: approvals.taskId })
+    .from(approvals)
+    .where(
+      and(
+        eq(approvals.orgId, ctx.orgId),
+        eq(approvals.projectId, ctx.projectId),
+        eq(approvals.status, 'approved'),
+        inArray(approvals.taskId, [...taskIds]),
+      ),
+    );
+  return new Set(rows.map((r) => r.taskId));
+}
+
+/**
+ * Is an identical action already pending authorization? Exact-duplicate = same action type AND same
+ * canonical payload hash, still `pending`, in this workspace. Used to stop the operator from
+ * unknowingly authorizing the same external action twice (broader semantic/superseded relationships
+ * are future work). Optionally excludes one approval id (itself).
+ */
+export async function pendingDuplicateExists(
+  tx: DbTx,
+  ctx: TenantContext,
+  actionType: ActionType,
+  payloadSha256: string,
+  excludeId?: string,
+): Promise<boolean> {
+  const dupes = await tx
+    .select({ id: approvals.id })
+    .from(approvals)
+    .where(
+      and(
+        eq(approvals.orgId, ctx.orgId),
+        eq(approvals.projectId, ctx.projectId),
+        eq(approvals.status, 'pending'),
+        eq(approvals.actionType, actionType),
+        eq(approvals.payloadSha256, payloadSha256),
+      ),
+    );
+  return dupes.some((d) => d.id !== excludeId);
+}
+
 export async function listApprovals(
   tx: DbTx,
   ctx: TenantContext,
@@ -178,8 +234,8 @@ export async function listApprovals(
 }
 
 /**
- * Approve or reject. Only project admins decide; a pending row that has passed
- * its expiry is marked expired and refuses the decision.
+ * Authorize or refuse (schema words: approved/rejected). Only project admins decide; a pending row
+ * that has passed its expiry is marked expired and refuses the decision.
  */
 export async function decideApproval(
   tx: DbTx,
@@ -190,6 +246,12 @@ export async function decideApproval(
 ): Promise<void> {
   if (ctx.projectRole !== 'admin') {
     throw new AppError('forbidden', 'Only project admins can decide approvals.');
+  }
+
+  // Refusing withholds authority; the reason becomes operational memory that can shape future
+  // proposals, so it is required. (Authorization rationale scales with consequence — future work.)
+  if (decision === 'rejected' && !(note ?? '').trim()) {
+    throw new AppError('validation', 'A rationale is required to refuse — it becomes operational memory.');
   }
 
   const rows = await tx

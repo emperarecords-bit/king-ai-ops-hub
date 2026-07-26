@@ -1,0 +1,57 @@
+import { describe, expect, it } from 'vitest';
+import { assessConsequence } from '@/domain/approvals/consequence';
+
+/**
+ * Consequence claims must come from evidence, not action-type templates. These lock that the
+ * assessor establishes only what the payload proves and never asserts reversibility or external
+ * impact it cannot establish.
+ */
+describe('assessConsequence establishes only what the evidence proves', () => {
+  it('never infers reversibility from the action type', () => {
+    const write = assessConsequence({ type: 'file_write', summary: 'Write notes.md', payload: { path: 'notes.md' } });
+    expect(write.reversibility.established).toBe(false);
+    expect(write.reversibility.value).toBeNull();
+    // "reversibility" is surfaced as an explicit unknown, not silently assumed either way.
+    expect(write.unknowns).toContain('reversibility');
+  });
+
+  it('always establishes the narrow authority requested from the proposal itself', () => {
+    const a = assessConsequence({ type: 'deployment', summary: 'Deploy a1b3c9 to staging', payload: { revision: 'a1b3c9' } });
+    expect(a.authorityRequested.established).toBe(true);
+    expect(a.authorityRequested.source).toBe('proposal-payload');
+    expect(a.authorityRequested.value).toMatch(/exactly as proposed/i);
+  });
+
+  it('establishes financial exposure only when an amount is present', () => {
+    const withAmount = assessConsequence({ type: 'financial', summary: 'Renew domain', payload: { amount: '$480', payee: 'registrar' } });
+    expect(withAmount.financialExposure.established).toBe(true);
+    expect(withAmount.financialExposure.value).toMatch(/480/);
+
+    const noAmount = assessConsequence({ type: 'financial', summary: 'Pay vendor', payload: {} });
+    expect(noAmount.financialExposure.established).toBe(false);
+    expect(noAmount.unknowns).toContain('financial exposure');
+  });
+
+  it('establishes external-party impact only when the payload names an outside recipient/endpoint', () => {
+    const email = assessConsequence({ type: 'email_send', summary: 'Follow up', payload: { to: 'nick@lnmechanical.com' } });
+    expect(email.externalPartiesAffected.established).toBe(true);
+    expect(email.externalPartiesAffected.value).toMatch(/nick@/);
+
+    const write = assessConsequence({ type: 'file_write', summary: 'Write file', payload: { path: 'x.md' } });
+    expect(write.externalPartiesAffected.established).toBe(false);
+  });
+
+  it('describes a delete by its predicate, never by an unproven row count', () => {
+    const del = assessConsequence({ type: 'destructive', summary: 'Purge stale leads', payload: { where: "last_touched < '2025-01-01'" } });
+    expect(del.dataAffected.established).toBe(true);
+    expect(del.dataAffected.value).toMatch(/matching/i);
+    expect(del.dataAffected.value).not.toMatch(/\d+ rows/i);
+  });
+
+  it('always states, from policy, that no executor exists yet', () => {
+    const a = assessConsequence({ type: 'git_push', summary: 'Push', payload: {} });
+    expect(a.executionMethod.established).toBe(true);
+    expect(a.executionMethod.source).toBe('policy');
+    expect(a.executionMethod.value).toMatch(/no automated executor/i);
+  });
+});

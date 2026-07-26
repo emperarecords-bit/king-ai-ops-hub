@@ -100,4 +100,16 @@ describe('Execution reads are consistent across surfaces', () => {
     // The condition survives the required flag — it's still Moving, not relabeled by the intervention.
     expect(a.condition).toBe('moving');
   });
+
+  it('an authorized-but-unexecuted completed task is never described as the action complete', () => {
+    // Same translator every surface uses. A bare "Completed" would imply the send/deploy happened.
+    const unexecuted = assessTask({ status: 'completed', ownerAgentId: 'o1', authorizedUnexecuted: true });
+    expect(unexecuted.condition).toBe('finished'); // the AI *work* did finish
+    expect(unexecuted.reason).not.toBe('Completed.');
+    expect(unexecuted.reason).toMatch(/not yet executed/i);
+
+    // A plain completed task (no authorized action) still reads simply.
+    const plain = assessTask({ status: 'completed', ownerAgentId: 'o1' });
+    expect(plain.reason).toBe('Completed.');
+  });
 });

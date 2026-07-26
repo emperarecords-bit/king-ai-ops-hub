@@ -760,12 +760,37 @@ it makes the authority boundary explicit.)
 Work completion, authorization, and action execution are **distinct facts**, not one lifecycle. The
 old defect came from fusing a task's execution status with its proposal's authorization status.
 - **Task execution:** pending · running · completed · failed · cancelled.
-- **Authorization:** pending · approved · rejected · expired · withdrawn/superseded.
+- **Authorization:** proposed(pending) · authorized(approved) · refused(rejected) · expired ·
+  withdrawn · superseded · **revoked** · executed.
 - **Authorized-action execution** (future executor): not-started · queued · executing · succeeded ·
   failed · cancelled.
 
 A task's own production work has *already completed successfully* when it emits a proposed action.
 The pending authorization belongs to the **proposal**, not to the task's work forever.
+
+**Withdrawn vs. Revoked — the pending/granted boundary.** *Withdrawal* applies **before**
+authorization: a proposal is no longer requesting a decision (its task was cancelled or it was
+superseded). *Revocation* applies **after** authorization but **before** execution: previously
+granted authority is removed. Cancelling a task withdraws its *pending* proposals today; what happens
+to an *approved, unexecuted* proposal must be recorded as an explicit transition, not silently
+assumed. An authorization that has not executed must be able to become: **revoked** by the operator ·
+**invalidated** because its originating context changed · **expired** because its authorization-
+validity window ended · **superseded** by a newly authorized replacement. *(Revocation/authorization-
+expiry transitions are recorded here as contract; they build with the executor + queue, not yet
+wired.)*
+> **Principle: Pending intent may be withdrawn. Granted authority must be revoked.**
+
+**Two clocks, not one.** *Proposal expiry* answers "how long may this proposal remain undecided?"
+(the 24h TTL today). *Authorization validity* answers a different question — "how long after approval
+may this action still execute without a fresh decision?" — and does not exist yet. An authorization
+should not be assumed valid forever: a deployment authorized today may be unsafe tomorrow; a financial
+action goes stale when amount/payee/funds change; an email may be moot once the recipient replies. The
+payload hash protects the exact *parameters*; it does not prove the surrounding *business context*
+still holds. The detail must eventually be able to say "Authorized July 26 · not yet executed ·
+authorization valid until July 27 2:00pm" or "Authorization expired before execution — a new decision
+is required." Do not invent a universal validity period; the right duration depends on action type and
+consequence.
+> **Principle: Authorization is narrow in scope and bounded in time.**
 
 **Reconciliation rule (built 2026-07-26):** a task holds `awaiting_approval` only while ≥1 proposal
 it raised is genuinely pending. Once none remain — every proposal approved, rejected, expired, or
@@ -788,17 +813,43 @@ re-requested and can't be decided twice).
 - **Approval grants the narrow authority shown, not general permission to pursue the intent.** The
   operator authorizes *this exact action with these parameters* — not a standing mandate.
 
-### Button vocabulary follows enforceable operations, not symmetry
+### Operator vocabulary: Authorize / Refuse (built 2026-07-26)
 
-Only surface actions the system can enforce truthfully. **Approve** (authorize within the scope
-shown) and **Reject** (refuse; rationale generally required for consequential actions, since it
-becomes operational memory) are enough for now — provided their consequences are explained exactly.
+Only surface actions the system can enforce truthfully. The operator-facing words are **Authorize**
+(grant the narrow authority shown; records authorization only, does not execute) and **Refuse**
+(withhold authority — **rationale required**, since a refusal becomes operational memory that shapes
+future proposals). The schema keeps `approved`/`rejected`; the surface reads Authorized/Refused.
+Authorization-rationale depth should scale with consequence (routine reversible write → no note; a
+financial/destructive/production/external action → an explicit note) — enforced fully once the
+consequence profile drives it; today Refuse requires a note and Authorize does not.
 - **Return** (request a revised proposal) is *not* just a status — it opens another execution loop
   (what must change? does the task resume or a new run start? cost? does the revision need fresh
   approval? is the old proposal superseded?). Do **not** show Return until those mechanics exist.
 - **Cancel** applies to the underlying task or an originator withdrawing a proposal — it is not a
-  reviewer's authorization decision. A reviewer refusing permission is **Reject**; a proposal made
+  reviewer's authorization decision. A reviewer refusing permission is **Refuse**; a proposal made
   invalid by task cancellation is **Withdrawn/Superseded**.
+
+### What shipped this pass (2026-07-26) — pre-queue integrity refinements
+
+- **Work-finished ≠ action-executed.** `assessTask` takes `authorizedUnexecuted`; a completed task
+  holding an authorized-but-unexecuted action never reads "Completed." — it reads "AI work finished; a
+  proposed action is authorized but not yet executed." `listExecution` and the task-detail page carry
+  the flag (task detail shows an explicit "AI work: Finished · Proposed action: Authorized, not
+  executed" line). Locked cross-surface by `cross-surface.test.ts` + `approvals-lifecycle.test.ts`.
+- **Evidence-backed consequence shape** (`domain/approvals/consequence.ts`): `assessConsequence`
+  establishes only what the payload proves — target, external parties, data affected, financial
+  exposure, authority requested, preconditions, execution method — each claim carrying source +
+  confidence, everything unproven named in `unknowns`. **Reversibility is never inferred from the
+  action type.** The model retains it; the interface must not become a wall of fields. Not yet wired
+  to the queue (that's the queue build).
+  > **Principle: the Hub may explain only consequences it can establish from the proposal, connected
+  > systems, or explicit policy.**
+- **Exact-duplicate detection** (`pendingDuplicateExists`): the runner suppresses a proposed action
+  that exactly matches an already-pending authorization (same action type + canonical payload hash),
+  so the operator is never asked to authorize the same external action twice; suppression is audited,
+  and a task whose every proposal was a duplicate does not enter the gate. Broader semantic/superseded
+  relationships remain future work — the "deciding one supersedes the other" wording stays out until
+  the system can enforce it.
 
 ### Responsibilities (the north-star for the coming redesign — not yet built)
 
@@ -842,12 +893,31 @@ duplicate decisions prevented. This is the safety foundation.
 
 ### The central product failure (what the redesign must close)
 
-Today Approvals answers *"what did the model propose?"* It does not yet answer *"what authority am I
+The queue answers *"what did the model propose?"* It does not yet answer *"what authority am I
 granting, what consequence follows, and what evidence supports granting it?"* — that is the purpose
-gap. **Next design step (not yet done):** define the operating-partner conversation across the
-representative authorization states (routine file write · external email · financial · destructive DB
-mutation · production deploy · unclear-consequence proposal · task-cancelled proposal ·
-duplicate/superseded · expired · authorized-not-executed · executed · rejected-with-rationale) —
-distinguishing Proposed · Authorized · Executed · Rejected · Expired · Withdrawn/Superseded — *before*
-sketching the queue. The queue and detail structure emerge from that conversation, not from
-Approve/Reject buttons.
+gap the **queue redesign** must close. The primary question wording is now *"Why was this proposed,
+and what evidence supports authorizing it?"* — the Hub explains the proposal (purpose · reasoning ·
+evidence · uncertainty · consequence · policy) rather than *selling* it; it may recommend only when a
+statable policy/risk assessment backs the recommendation (a bounded judgment like "I cannot recommend
+authorization because the endpoint's effect is unknown and no trusted integration record is linked"),
+never generic caution.
+
+**Accepted conversation states** the operating-partner read must cover: proposed & awaiting ·
+authorized-not-executed · executed · execution-failed-after-authorization · refused-with-rationale ·
+expired-before-decision · withdrawn-before-decision · superseded-by-replacement · revoked-after-
+authorization · authorization-expired-before-execution · duplicate-detected · consequence-cannot-be-
+established. Each keeps the three lifecycles distinct (task execution · authorization · authorized-
+action execution). **The queue and approval-detail structure emerge from that conversation — not from
+Authorize/Refuse buttons.** (The conversation is agreed; the queue/detail build is the next step.)
+
+### Engineering rule — parallel work must be isolated
+
+> **Parallel implementation work must use isolated working trees.** Concurrent agents must never edit
+> the same working tree. Use separate git worktrees or branches; stage only intended files (never
+> blanket `git add -A` while another session is live); review the staged diff before committing.
+
+*Origin: during this pass a background task's in-progress `run-jobs.test.ts` fix was unintentionally
+swept into an Approvals commit by `git add -A`. Verified after the fact: the committed diff is
+complete and coherent and the test passes 5/5 even against a large local queue backlog (it backdates
+its own job to the FIFO front and cleans up its rows in teardown). Test files don't ship, so the
+deploy was unaffected — but commit provenance still matters.*
