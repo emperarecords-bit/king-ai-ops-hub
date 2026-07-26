@@ -162,6 +162,9 @@ means we won't have to reinvent it then.
 - **Places, not actions.** Navigation is for *places*; actions live *within* the place they act
   on. A verb never sits in the nav among the nouns. (Likely resolves dozens of future design
   questions on its own.)
+- **Objectives measure movement toward outcomes, not the volume of work performed.** Effort
+  belongs to Execution; meaning belongs to Direction. The Hub never calls activity "progress"
+  unless it can explain how that activity changed the outcome.
 - **Navigation reflects the enduring domains of operating a workspace, not the architecture of
   the software.** Group by the operator's cycle — set direction → move execution → capture what's
   learned, enabled by resources and kept honest by governance — not by software-object type. And
@@ -321,7 +324,91 @@ page by page. **Rail = which room; breadcrumb = the exact record inside it.** Th
 *structural* part comes from the model; its *dynamic leaf* — the actual record (task title,
 objective title) — is supplied by the detail page from its loaded entity, never a raw id or route
 param. Detail pages carry the full "Domain › Section › Record"; list/section pages rely on the
-rail's active state and their own title (the room *is* the location).
+rail's active state and their own title (the room *is* the location). **Rule:** a breadcrumb
+appears only when the user has moved *deeper* than the permanent nav structure (a specific
+record) and restores context the rail and title can't provide alone — never merely because the
+component exists. Applies to all future detail and nested-workflow pages.
+
+*Navigation accepted 2026-07-26 (pending authenticated visual check). Area closed for this pass.*
+
+## Objectives  — *purpose agreed 2026-07-26* (Direction domain)
+
+**Primary question:** "What are we trying to accomplish, **how will we know**, and **is it
+actually moving?**"
+
+**Purpose.** Objectives is the workspace's *direction-and-accountability* system — it connects
+**intent to evidence.** It does not manage the work (Execution owns that); it shows *why* work
+exists and *whether it is producing the intended result.* The relationship:
+**Direction defines the outcome · Execution performs the work · Objectives judge whether the work
+is changing the outcome.**
+
+**What is genuinely strong and must be preserved:** the success contract — criteria must be
+defined, completion cannot be declared while criteria are unmet, changes to the definition are
+audited, and closed objectives can't be quietly rewritten. That is the foundation.
+
+**Responsibilities:**
+1. **Establish direction.** Make active priorities explicit: what matters now, why, who's
+   accountable, primary vs secondary, and what's no longer pursued. An intentional commitment,
+   not a labeled container for tasks.
+2. **Define success.** Criteria + the completion gate are the authoritative definition. Preserve:
+   *an objective cannot be completed by activity alone.* Milestones, tasks, and Work Items may
+   explain the path but must never silently redefine the destination.
+3. **Judge meaningful progress** — keep four concepts *separate*, never compressed into one
+   number: **lifecycle status** (draft/active/completed/cancelled) · **outcome progress** (what
+   the success evidence currently shows) · **momentum** (whether meaningful movement is
+   occurring) · **risk/confidence** (how likely it is to reach the outcome). A new objective can
+   have low outcome progress but healthy momentum; an objective can have many completed tasks and
+   no outcome movement; an objective can meet criteria while getting riskier as a dependency
+   stalls.
+4. **Connect work to purpose.** Both human Work Items *and* AI tasks are execution and both must
+   be visible (AI work counting while human work is invisible is a defect). But visibility ≠
+   success: explain what work is contributing, what changed because of it, what remains, and
+   whether the work appears *sufficient to advance the outcome.*
+5. **Preserve accountability and integrity.** Make visible: ownership, who changed criteria and
+   why, what evidence supports a progress claim, which conclusions are observed vs inferred, and
+   why an objective was completed or cancelled. These are consequential acts — they leave an
+   institutional record.
+
+**Progress is evidence-first (semantic contract, not an algorithm yet).** The current single %
+is incoherent — it means task-completion when tasks exist and criteria-satisfaction when they
+don't, so one visual represents two different concepts. It does not survive merely because it
+exists. Before *any* headline progress signal, the Hub must answer *"what exactly does this number
+claim?"* Assessment begins with **evidence of the intended outcome** (criteria, measured results,
+completed milestones, verified artifacts, dependency-resolving decisions, human confirmation,
+external data). Tasks and Work Items are evidence of *effort*; they become evidence of *progress*
+only when connected to a real change in the outcome. **The contract: the Hub never calls activity
+progress unless it can explain how the activity changed the outcome.** *(Do not design the scoring
+algorithm yet — establish the contract first.)*
+
+**Milestones / Decisions / Artifacts.** Milestones are checkpoints in the path, not automatic
+fractions of success. (Criteria describe success · milestones describe expected stages · work
+describes activity · evidence describes what changed · judgment interprets whether it's
+advancing.) Decisions and artifacts attach to an objective only when *meaningful* — they explain
+why it changed, what evidence supports progress, what dependency resolved, what was learned, or
+the basis of the Hub's judgment — never a foreign key added for completeness.
+
+**The experience — a disciplined executive review.** Not "63% complete," but capable of: *"active
+and work is continuing, but there's no evidence yet that contractor activation has improved"*;
+*"two of three conditions are met; the last depends on onboarding, which hasn't changed in eight
+days"*; or *"not enough current evidence to assess meaningful progress confidently."* The same
+operating partner as the Dashboard — calm, honest, outcome-focused, evidence-aware, willing to
+say it doesn't know, and unimpressed by activity that hasn't produced a result.
+
+**Reuses what we've already built (not a new mechanism):** "is it moving?" is a chief-of-staff
+judgment carrying the **five-dimension reasoning contract** (business impact / evidence /
+reasoning / confidence / what-would-change) and the **observed-vs-inference** labeling — the same
+explanation surface, applied to one outcome. The four concepts above mirror the Dashboard's
+layered health, for one consistent mind across the product. Honest consequence: with today's
+signals, **momentum and risk will often be "not enough evidence to assess" — that is correct
+behavior, not a gap to paper over** (confidence is not certainty). Establish the contract; let the
+measurement earn its way in from real operation.
+
+**Next:** define the experience at two levels — the **list** (the workspace's portfolio of
+commitments) and the **detail** (one commitment: its success contract, its evidence, and the
+Hub's current judgment) — via the operating-partner conversation (what are we trying to
+accomplish · why does it matter · how will we know · what evidence now · is it moving · what
+helps/prevents · what needs the operator). Structure emerges from that conversation. Do not begin
+with cards, bars, filters, or percentages.
 
 **Mobile — scoped follow-up (desktop-first today).** When the persistent rail can't stay visible,
 the mental model *and* the current-location signal must survive. Do **not** collapse into an
