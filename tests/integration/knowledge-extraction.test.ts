@@ -20,6 +20,7 @@ import {
   promoteKnowledgeProposal,
   rejectKnowledgeProposal,
   reviseKnowledgeProposalDraft,
+  splitKnowledgeProposal,
   type ExtractFn,
 } from '@/domain/knowledge/extraction';
 import { declassifyDocument, restrictDocument } from '@/domain/documents/documents';
@@ -246,6 +247,44 @@ describe.skipIf(!available)('AI knowledge extraction & promotion', () => {
     expect(revised.title).toBe('Oscar refined');
     await withTenant(ctx, (tx) => promoteKnowledgeProposal(tx, ctx, prop.id, { scopeKind: 'workspace', disclosure: 'workspace_internal', activate: false }));
     await expect(withTenant(ctx, (tx) => reviseKnowledgeProposalDraft(tx, ctx, prop.id, { title: 'too late' }))).rejects.toThrow(ConflictError);
+  });
+
+  it('a multi-claim proposal can be split into separately reviewable drafts with intact provenance + inheritance', async () => {
+    // A restricted-source proposal bundling two claims.
+    const runId = await mkRun('Sierra bundled fact.');
+    await withTenant(ctx, (tx) => extractKnowledgeForRun(tx, ctx, runId, returning(candidate({ title: 'Sierra bundle', claim: 'two claims here', supportingRefs: [{ path: 'canon/secret.md' }] })), meta));
+    const item = (await withTenant(ctx, (tx) => listKnowledge(tx, ctx))).find((k) => k.title === 'Sierra bundle')!;
+    const prop = (await withTenant(ctx, (tx) => listKnowledgeProposals(tx, ctx, 'pending'))).find((p) => p.knowledgeItemId === item.id)!;
+
+    const childIds = await withTenant(ctx, (tx) =>
+      splitKnowledgeProposal(tx, ctx, prop.id, {
+        reason: 'two independent claims',
+        children: [
+          { title: 'Sierra claim A', claim: 'first independent claim', suggestedScope: 'workspace' },
+          { title: 'Sierra claim B', claim: 'second independent claim', suggestedScope: 'task' },
+        ],
+      }),
+    );
+    expect(childIds).toHaveLength(2);
+
+    const children = (await withTenant(ctx, (tx) => listKnowledgeProposals(tx, ctx, 'pending'))).filter((p) => childIds.includes(p.id));
+    expect(children).toHaveLength(2);
+    for (const c of children) {
+      expect(c.suggestedByRunId).toBe(runId); // extraction provenance preserved
+      expect(c.suggestedDisclosure).toBe('restricted'); // inheritance not weakened by the split
+      const childItem = (await withTenant(ctx, (tx) => listKnowledge(tx, ctx))).find((k) => k.id === c.knowledgeItemId)!;
+      expect(childItem.status).toBe('draft'); // splitting activates nothing
+      expect(childItem.verification).toBe('unverified'); // and verifies nothing
+      const srcs = await withTenant(ctx, (tx) => listKnowledgeSources(tx, ctx, childItem.id, childItem.version));
+      expect(srcs[0]!.sourceVersionHash).toBe('SECRET_V1'); // exact source version carried to the child
+    }
+
+    // The original is retired `split` and its draft archived → it can never be promoted.
+    const originals = (await withTenant(ctx, (tx) => listKnowledgeProposals(tx, ctx))).find((p) => p.id === prop.id)!;
+    expect(originals.reviewStatus).toBe('split');
+    await expect(
+      withTenant(ctx, (tx) => promoteKnowledgeProposal(tx, ctx, prop.id, { scopeKind: 'workspace', disclosure: 'restricted', activate: true })),
+    ).rejects.toThrow(ConflictError);
   });
 
   it('a rejected proposal is preserved (archived + reason), not deleted; re-review conflicts', async () => {

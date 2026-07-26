@@ -16,7 +16,7 @@ import { knowledgeItems, knowledgeProposals, objectives, runs, tasks } from '@/d
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN, wrapUntrusted } from '@/orchestration/prompts';
 import { writeAudit } from '@/domain/audit/audit';
 import { beginAiOperation, completeAiOperation, failAiOperation } from '@/domain/ai/operations';
-import { activateKnowledge, attachKnowledgeSource } from '@/domain/knowledge/knowledge';
+import { activateKnowledge, attachKnowledgeSource, listKnowledgeSources } from '@/domain/knowledge/knowledge';
 
 /**
  * AI EXTRACTION & PROMOTION (K2). A completed run's output is mined by a SEPARATE, bounded, fail-safe
@@ -484,6 +484,168 @@ export async function reviseKnowledgeProposalDraft(
     .set({ ...(patch.title !== undefined ? { title: patch.title } : {}), ...(patch.claim !== undefined ? { body: patch.claim } : {}), updatedAt: new Date() })
     .where(and(eq(knowledgeItems.id, proposal.knowledgeItemId), eq(knowledgeItems.orgId, ctx.orgId), eq(knowledgeItems.projectId, ctx.projectId)));
   await writeAudit(tx, ctx, { action: 'knowledge.proposal_revised', entityType: 'knowledge_item', entityId: proposal.knowledgeItemId, detail: { proposalId, fields: Object.keys(patch) } });
+}
+
+export const splitKnowledgeProposalSchema = z.object({
+  reason: z.string().trim().max(2_000).optional(),
+  children: z
+    .array(
+      z.object({
+        title: z.string().trim().min(1).max(200),
+        claim: z.string().trim().min(1).max(20_000),
+        /** Subset of the ORIGINAL proposal's cited document paths this child relies on. Default: all. */
+        sourceRefs: z.array(z.string().trim()).optional(),
+        suggestedScope: z.enum(KNOWLEDGE_SCOPE_KINDS).default('task'),
+        asOf: z.coerce.date().nullable().default(null),
+        rationale: z.string().trim().max(1_000).optional().default(''),
+      }),
+    )
+    .min(2)
+    .max(10),
+});
+
+/**
+ * Split one quarantined proposal into two or more independently-reviewable drafts — for when a single
+ * proposal bundles claims that need DIFFERENT trust assessments. Each child is a fresh draft/unverified
+ * proposal with its own claim, scope, temporal facts, and rationale, carrying the SAME extraction
+ * provenance (run + operation) and citing a chosen subset of the original's sources at their exact
+ * versions. Inherited disclosure is preserved and never weakened. The original is marked `split` and its
+ * draft archived — so neither the original nor a duplicate can later be promoted; only the children can.
+ * Splitting activates and verifies nothing.
+ */
+export async function splitKnowledgeProposal(
+  tx: DbTx,
+  ctx: TenantContext,
+  proposalId: string,
+  input: z.input<typeof splitKnowledgeProposalSchema>,
+): Promise<string[]> {
+  const data = splitKnowledgeProposalSchema.parse(input);
+
+  const orig = (
+    await tx
+      .select({
+        id: knowledgeProposals.id,
+        knowledgeItemId: knowledgeProposals.knowledgeItemId,
+        reviewStatus: knowledgeProposals.reviewStatus,
+        suggestedByRunId: knowledgeProposals.suggestedByRunId,
+        extractionOperationId: knowledgeProposals.extractionOperationId,
+        provider: knowledgeProposals.provider,
+        model: knowledgeProposals.model,
+        promptVersion: knowledgeProposals.promptVersion,
+        confidence: knowledgeProposals.confidence,
+        suggestedDisclosure: knowledgeProposals.suggestedDisclosure,
+      })
+      .from(knowledgeProposals)
+      .where(and(eq(knowledgeProposals.id, proposalId), eq(knowledgeProposals.orgId, ctx.orgId), eq(knowledgeProposals.projectId, ctx.projectId)))
+      .limit(1)
+  )[0];
+  if (!orig) throw new NotFoundError('Knowledge proposal');
+  if (orig.reviewStatus !== 'pending') throw new ConflictError('Only a pending proposal can be split.');
+
+  const item = (
+    await tx
+      .select({ id: knowledgeItems.id, status: knowledgeItems.status, epistemicBasis: knowledgeItems.epistemicBasis, version: knowledgeItems.version, scopeTaskId: knowledgeItems.scopeTaskId })
+      .from(knowledgeItems)
+      .where(and(eq(knowledgeItems.id, orig.knowledgeItemId), eq(knowledgeItems.orgId, ctx.orgId), eq(knowledgeItems.projectId, ctx.projectId)))
+      .limit(1)
+  )[0];
+  if (!item) throw new NotFoundError('Knowledge item');
+  if (item.status !== 'draft') throw new ConflictError('Only a draft proposal can be split.');
+
+  const origSources = await listKnowledgeSources(tx, ctx, item.id, item.version);
+  const byPath = new Map(origSources.map((s) => [s.sourceRef, s]));
+
+  const objectiveIdForScope = async (): Promise<string | null> => {
+    if (!item.scopeTaskId) return null;
+    const t = (await tx.select({ objectiveId: tasks.objectiveId }).from(tasks).where(and(eq(tasks.id, item.scopeTaskId), eq(tasks.projectId, ctx.projectId))).limit(1))[0];
+    return t?.objectiveId ?? null;
+  };
+
+  const childProposalIds: string[] = [];
+  for (const child of data.children) {
+    const refs = child.sourceRefs ?? origSources.map((s) => s.sourceRef);
+    const chosen = refs.map((r) => byPath.get(r));
+    if (chosen.length === 0 || chosen.some((s) => s == null)) {
+      throw new ValidationError(['Each split child must cite at least one of the original proposal\'s sources.']);
+    }
+
+    const insertedItem = await tx
+      .insert(knowledgeItems)
+      .values({
+        orgId: ctx.orgId,
+        projectId: ctx.projectId,
+        scope: 'project',
+        kind: 'fact',
+        title: child.title,
+        body: child.claim,
+        status: 'draft', // hardcoded — a split child is quarantined like any proposal
+        source: 'promoted_context',
+        epistemicBasis: item.epistemicBasis,
+        verification: 'unverified', // hardcoded — splitting verifies nothing
+        scopeKind: 'task',
+        scopeTaskId: item.scopeTaskId,
+        scopeObjectiveId: null,
+        disclosure: orig.suggestedDisclosure, // inherited; a split may NEVER weaken disclosure
+        createdBy: ctx.userId,
+      })
+      .returning({ id: knowledgeItems.id });
+    const childItemId = insertedItem[0]!.id;
+
+    for (const s of chosen) {
+      await attachKnowledgeSource(tx, ctx, childItemId, {
+        // Values originate from a prior validated attach; re-validated by attachKnowledgeSource anyway.
+        sourceType: s!.sourceType as 'document' | 'artifact',
+        sourceRef: s!.sourceRef,
+        sourceLabel: s!.sourceLabel,
+        sourceVersionHash: s!.sourceVersionHash,
+        transformation: s!.transformation as (typeof PROPOSAL_TRANSFORMATIONS)[number] | 'quoted',
+        locator: s!.locator ?? undefined,
+      });
+    }
+
+    const suggestedScopeObjectiveId = child.suggestedScope === 'objective' ? await objectiveIdForScope() : null;
+    const insertedProp = await tx
+      .insert(knowledgeProposals)
+      .values({
+        orgId: ctx.orgId,
+        projectId: ctx.projectId,
+        knowledgeItemId: childItemId,
+        suggestedByRunId: orig.suggestedByRunId, // provenance preserved
+        extractionOperationId: orig.extractionOperationId,
+        provider: orig.provider,
+        model: orig.model,
+        promptVersion: orig.promptVersion,
+        confidence: orig.confidence,
+        reason: child.rationale,
+        suggestedScopeKind: child.suggestedScope,
+        suggestedScopeTaskId: child.suggestedScope === 'task' ? item.scopeTaskId : null,
+        suggestedScopeObjectiveId,
+        suggestedDisclosure: orig.suggestedDisclosure,
+        suggestedAsOf: child.asOf,
+        reviewStatus: 'pending',
+      })
+      .returning({ id: knowledgeProposals.id });
+    childProposalIds.push(insertedProp[0]!.id);
+  }
+
+  // The original is retired as `split` (preserved, not deleted) and its draft archived, so it — and any
+  // accidental double-promotion — is impossible; only the children remain promotable.
+  await tx
+    .update(knowledgeProposals)
+    .set({ reviewStatus: 'split', reviewedBy: ctx.userId, reviewedAt: new Date(), rejectionReason: data.reason?.trim() || null })
+    .where(and(eq(knowledgeProposals.id, proposalId), eq(knowledgeProposals.orgId, ctx.orgId), eq(knowledgeProposals.projectId, ctx.projectId)));
+  await tx
+    .update(knowledgeItems)
+    .set({ status: 'archived', updatedAt: new Date() })
+    .where(and(eq(knowledgeItems.id, orig.knowledgeItemId), eq(knowledgeItems.orgId, ctx.orgId), eq(knowledgeItems.projectId, ctx.projectId)));
+
+  await writeAudit(tx, ctx, {
+    action: 'knowledge.proposal_split',
+    entityType: 'knowledge_item',
+    entityId: orig.knowledgeItemId,
+    detail: { proposalId, children: childProposalIds.length, reason: data.reason?.trim() || null },
+  });
+  return childProposalIds;
 }
 
 /** Reject a proposal — preserved, never deleted: the draft is archived and the reason recorded. */
