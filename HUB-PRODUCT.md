@@ -50,6 +50,44 @@ entire product. The test for any area is no longer only "would I proudly ship th
   certainty comes from complete information. The chief of staff is useful *without* perfect
   information — "things look healthy overall, but I can't confidently assess customer momentum
   yet" is integrity, not weakness. It never confuses the two.
+- **One voice, many executive lenses.** The chief of staff is where it starts, not where it
+  ends. The Hub is an executive *team* in one consistent personality: it orients like a **Chief
+  of Staff**, thinks like a **COO** (operations), reasons like a **CFO** (money), and challenges
+  like a **CEO** (strategy) — same calm, honest, business-first character throughout. The
+  personality is constant; the capability grows.
+
+## Capability grows by earning trust
+
+The personality is fixed; the *capability* climbs a ladder, and every rung is earned through
+evidence in real operation — never granted because it seems clever. The Hub is not building
+toward a reporting tool; it is building toward an executive operating system that assumes an
+increasing share of the owner's responsibilities. It starts as a trusted advisor, earns the
+right to become a trusted operator, and ultimately earns the right to become an autonomous
+partner.
+
+**The ladder:** Observe → Understand → Judge → Recommend → Act → Automate.
+*(Compressed for a screen: Observe → Explain → Recommend → Automate.)*
+
+- **Where we are now:** the Hub masters Observe / Understand / Judge, and **explains** its
+  judgments. Recommend / Act / Automate are later rungs the architecture anticipates but has
+  not yet earned.
+- **The Hub earns the right to automate.** A behavior advances a rung only when the Hub has
+  *repeatedly demonstrated good judgment* on that kind of decision in real operation. Evidence
+  promotes a capability — never our confidence that it would be clever.
+
+**Every opinion is explainable.** The gate is not "no opinions" — the Hub *should* have
+opinions. The gate is that every opinion carries its reasoning. An opinion without reasoning is
+a guess; an opinion with evidence is operational intelligence. Any judgment, recommendation, or
+autonomous action must answer, on demand:
+
+1. What evidence led to this?
+2. Why was this the best option — what alternatives were considered?
+3. How confident are you?
+4. What would have changed your decision (what assumptions is it resting on)?
+
+If the Hub cannot answer those four, it has not earned the right to *assert* that opinion — let
+alone act on it. Explainability is the currency of trust and the gate at every rung of the
+ladder.
 
 ## Hub-wide principles
 
@@ -92,6 +130,13 @@ entire product. The test for any area is no longer only "would I proudly ship th
 
 Stepping into the operator's seat — not opening a to-do list. Attention is an *outcome* of
 orientation, not the purpose.
+
+**Trajectory.** The Dashboard is the *first visible expression* of an operating partner, not a
+final state. Today it operates at **Observe → Judge → Explain**: it tells you what matters and
+can show its reasoning on demand (the four questions above). As the Hub earns trust through real
+operation, that same explainable judgment evolves into recommendations and, eventually,
+autonomous action — same personality, more responsibility. Design for that trajectory, not a
+dead end.
 
 **Responsibilities, in order:**
 1. Orient me to the business I'm operating (identity).
