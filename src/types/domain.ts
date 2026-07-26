@@ -67,6 +67,9 @@ export const APPROVAL_STATUSES = [
   'approved',
   'rejected',
   'expired',
+  // The proposal was invalidated before a decision because its originating task was cancelled
+  // (or otherwise superseded). Distinct from `expired` (past due) and from a reviewer's `rejected`.
+  'withdrawn',
 ] as const;
 export type ApprovalStatus = (typeof APPROVAL_STATUSES)[number];
 

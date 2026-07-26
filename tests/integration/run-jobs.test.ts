@@ -56,6 +56,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!available) return;
+  // Clear this suite's own run_jobs. The durable-queue tests share one Postgres,
+  // and claimNextJob() drains a GLOBAL FIFO — so a run must neither inherit nor
+  // contribute to an accumulated queue of leftover `queued`/`running` jobs.
+  await getSetupDb().delete(runJobs).where(eq(runJobs.orgId, orgId));
   await getSetupDb().update(projects).set({ archived: true }).where(eq(projects.orgId, orgId));
 });
 
@@ -110,13 +114,28 @@ describe.skipIf(!available)('durable run jobs', () => {
   it('claimNextJob claims across the queue and returns provenance', async () => {
     const t = await mkTask(ctxA);
     await withTenant(ctxA, (tx) => enqueueRun(tx, ctxA, t));
-    // Drain the queue until we find ours (other tests may have left jobs).
-    let found = null;
-    for (let i = 0; i < 20; i += 1) {
+    // claimNextJob() drains a GLOBAL FIFO ordered by created_at, so any backlog
+    // of unrelated `queued` jobs (left by prior runs, or concurrent suites)
+    // would sit ahead of ours. Pin our job to the front by backdating it, so the
+    // claim is deterministic no matter how large that backlog is — this test
+    // asserts cross-queue claiming + provenance, not FIFO fairness, and must not
+    // depend on, or drain, the shared queue's accumulated state.
+    await getSetupDb()
+      .update(runJobs)
+      .set({ createdAt: new Date(0) })
+      .where(and(eq(runJobs.taskId, t), eq(runJobs.status, 'queued')));
+
+    // Our job now sorts first. The short guard loop only tolerates an equally
+    // backdated stray from a crashed prior run: claiming it once hands it a fresh
+    // lease so it won't reappear, and we continue. It never reaches — let alone
+    // drains — the real (now()-dated) backlog, which always sorts after ours.
+    let found: Awaited<ReturnType<typeof claimNextJob>> = null;
+    for (let i = 0; i < 25 && !found; i += 1) {
       const j = await claimNextJob();
       if (!j) break;
-      if (j.taskId === t) { found = j; break; }
+      if (j.taskId === t) found = j;
     }
+    expect(found?.taskId).toBe(t);
     expect(found?.projectId).toBe(ctxA.projectId);
     expect(found?.createdBy).toBe(userId);
   });
@@ -128,5 +147,4 @@ async function anAgent(ctx: TenantContext): Promise<string> {
   return a[0]!.id;
 }
 
-void and;
 void sql;

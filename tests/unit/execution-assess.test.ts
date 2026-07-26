@@ -17,7 +17,7 @@ describe('execution translator — condition, intervention, and reason stay sepa
     const a = assessTask({ status: 'awaiting_approval', ownerAgentId: 'o1' });
     expect(a.condition).toBe('waiting');
     expect(a.intervention).toBe('required');
-    expect(a.requiredAction).toBe('Approve or return');
+    expect(a.requiredAction).toBe('Approve or reject');
   });
 
   it('a legacy Work Item with no condition reads Unknown, never Planned', () => {
@@ -46,7 +46,7 @@ describe('execution translator — condition, intervention, and reason stay sepa
   });
 
   it('required action changes with state', () => {
-    expect(assessTask({ status: 'awaiting_approval', ownerAgentId: 'o1' }).requiredAction).toBe('Approve or return');
+    expect(assessTask({ status: 'awaiting_approval', ownerAgentId: 'o1' }).requiredAction).toBe('Approve or reject');
     expect(assessTask({ status: 'failed', ownerAgentId: 'o1' }).requiredAction).toBe('Retry or cancel');
     expect(assessTask({ status: 'completed', ownerAgentId: 'o1' }).intervention).toBe('none');
   });

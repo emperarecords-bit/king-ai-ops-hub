@@ -141,6 +141,13 @@
       "when": 1785078019871,
       "tag": "0019_classy_miracleman",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1785083948651,
+      "tag": "0020_rainy_skullbuster",
+      "breakpoints": true
     }
   ]
 }

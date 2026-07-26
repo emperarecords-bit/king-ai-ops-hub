@@ -742,3 +742,112 @@ The through-line holds: one pure, tested translator (`domain/execution/assess.ts
 source of the operational read, consumed identically by Execution, Objectives, Dashboard, and both
 detail pages. Execution (2a closure integrity · 2b schedule/instance · 2c shared detail · 2d
 cross-surface) is complete.
+
+---
+
+## Approvals — the authorization system
+
+Approvals is where autonomous intent crosses into operator-granted authority. Its job is not to show
+an AI output and collect a binary answer; it is to help the operator determine: **should the Hub be
+authorized to take this specific action, under these stated consequences and limits?**
+
+**Primary question:** *What action is the Hub asking permission to take, why is it appropriate, and
+what exactly will happen if I authorize or refuse it?* (Stronger than "what requires my decision?" —
+it makes the authority boundary explicit.)
+
+### Three separate lifecycles (the model that ends the stranded-task defect)
+
+Work completion, authorization, and action execution are **distinct facts**, not one lifecycle. The
+old defect came from fusing a task's execution status with its proposal's authorization status.
+- **Task execution:** pending · running · completed · failed · cancelled.
+- **Authorization:** pending · approved · rejected · expired · withdrawn/superseded.
+- **Authorized-action execution** (future executor): not-started · queued · executing · succeeded ·
+  failed · cancelled.
+
+A task's own production work has *already completed successfully* when it emits a proposed action.
+The pending authorization belongs to the **proposal**, not to the task's work forever.
+
+**Reconciliation rule (built 2026-07-26):** a task holds `awaiting_approval` only while ≥1 proposal
+it raised is genuinely pending. Once none remain — every proposal approved, rejected, expired, or
+withdrawn — the task reconciles to `completed` (its work succeeded), while each authorization keeps
+its independent outcome. Implemented in `reconcileTaskAuthorization` (called after every decision and
+after the expiry sweep); a cancelled task withdraws its still-pending proposals via
+`withdrawPendingApprovalsForTask`. `withdrawn` is a real authorization state — distinct from
+`rejected` (a reviewer refused) and `expired` (it lapsed): the thing it would authorize no longer
+exists. Locked by `approvals-lifecycle.test.ts` (approve/reject/expire the final proposal frees the
+task; a second pending proposal keeps it waiting; cancel withdraws; a decided proposal is never
+re-requested and can't be decided twice).
+
+### Two load-bearing principles
+
+- **Authorization is not execution. The Hub must never describe one as the other.** Until an executor
+  exists, approving *records authorization only* — it does not perform the action. The UI says so
+  plainly ("Approving records that you authorized this action; this version does not carry it out
+  automatically"). Never say "this will deploy/send/charge/publish" unless the product will actually
+  do it after authorization. The record must distinguish **Authorized** from **Executed**.
+- **Approval grants the narrow authority shown, not general permission to pursue the intent.** The
+  operator authorizes *this exact action with these parameters* — not a standing mandate.
+
+### Button vocabulary follows enforceable operations, not symmetry
+
+Only surface actions the system can enforce truthfully. **Approve** (authorize within the scope
+shown) and **Reject** (refuse; rationale generally required for consequential actions, since it
+becomes operational memory) are enough for now — provided their consequences are explained exactly.
+- **Return** (request a revised proposal) is *not* just a status — it opens another execution loop
+  (what must change? does the task resume or a new run start? cost? does the revision need fresh
+  approval? is the old proposal superseded?). Do **not** show Return until those mechanics exist.
+- **Cancel** applies to the underlying task or an originator withdrawing a proposal — it is not a
+  reviewer's authorization decision. A reviewer refusing permission is **Reject**; a proposal made
+  invalid by task cancellation is **Withdrawn/Superseded**.
+
+### Responsibilities (the north-star for the coming redesign — not yet built)
+
+1. **State the proposed action precisely** — what the Hub will do; which system/account/file/
+   audience/asset it affects; the meaningful parameters; whether it's one action or part of a
+   sequence; who/what proposed it. Raw payload stays available for inspection but is *not* the
+   primary explanation.
+2. **Explain the business purpose** — link to the originating task, the objective/operational
+   purpose, the accountable owner, the evidence that produced the proposal, and why now.
+3. **Explain the consequence** — what changes if approved; what stays the same; external-party
+   impact; reversibility; money spent/committed; data created/modified/disclosed/deleted; whether it
+   grants further autonomy; whether later approval will be needed. If the Hub can't establish a
+   consequence, it says so.
+4. **Show the authority being requested** — the exact scope (send *this* email to *these*
+   recipients; deploy *this* revision to staging; spend up to *this* amount). Never interpreted as
+   broader permission than the proposal presented.
+5. **Scale explanation with consequence** — a routine reversible `file_write` shouldn't demand the
+   depth of a financial transaction, destructive mutation, external publication, production deploy,
+   or customer communication. Depth scales with consequence · irreversibility · external impact ·
+   financial exposure · uncertainty · autonomy granted. Not color-coded action types masquerading as
+   judgment — explain why *this* proposal carries *its* consequence.
+6. **Preserve decision validity** — at decision time confirm: still pending · not expired · task not
+   cancelled · not superseded · payload still matches the stored hash · action still permitted ·
+   operator still has authority. (Pending + expiry checks exist and are strong; task-cancellation is
+   now handled via withdrawal; supersession/hash-recheck extend this.)
+7. **Preserve the decision and its reasoning** — proposed action · exact payload + integrity hash ·
+   context presented · who/when · outcome · rationale · whether execution later occurred + its
+   result. Audit log stays the exhaustive technical history; the approval record stays the durable
+   authorization record.
+8. **Reconcile the related work** — once decided, the approval leaves the pending queue, the task's
+   assessment recomputes, Dashboard/Execution stop requesting the resolved decision, remaining
+   approvals stay visible, and the task reflects a defensible execution state independent of the
+   authorization outcome. *(This responsibility is now met by the reconciliation rule above.)*
+
+### What is genuinely strong (preserve — expose and complete, don't replace)
+
+The gate integrity: the model cannot execute directly; a fixed validated action vocabulary; malformed
+proposals rejected at the extraction boundary (TB-4); payloads canonicalized + hashed; decision state
+re-read before mutation; expired proposals can't be approved; append-only audited decisions;
+duplicate decisions prevented. This is the safety foundation.
+
+### The central product failure (what the redesign must close)
+
+Today Approvals answers *"what did the model propose?"* It does not yet answer *"what authority am I
+granting, what consequence follows, and what evidence supports granting it?"* — that is the purpose
+gap. **Next design step (not yet done):** define the operating-partner conversation across the
+representative authorization states (routine file write · external email · financial · destructive DB
+mutation · production deploy · unclear-consequence proposal · task-cancelled proposal ·
+duplicate/superseded · expired · authorized-not-executed · executed · rejected-with-rationale) —
+distinguishing Proposed · Authorized · Executed · Rejected · Expired · Withdrawn/Superseded — *before*
+sketching the queue. The queue and detail structure emerge from that conversation, not from
+Approve/Reject buttons.

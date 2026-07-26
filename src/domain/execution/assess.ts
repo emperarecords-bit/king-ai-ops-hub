@@ -107,8 +107,8 @@ export function assessTask(i: { status: TaskStatus; ownerAgentId: string | null 
     case 'awaiting_approval':
       condition = 'waiting';
       intervention = 'required';
-      requiredAction = 'Approve or return';
-      reason = 'Held at the approval gate.';
+      requiredAction = 'Approve or reject';
+      reason = 'Holding for authorization of a proposed action.';
       break;
     case 'completed':
       condition = 'finished';

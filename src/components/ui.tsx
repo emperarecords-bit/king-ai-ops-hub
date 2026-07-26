@@ -42,6 +42,7 @@ const STATUS_STYLES: Record<string, string> = {
   proposed: 'bg-[#2a3247] text-[var(--info)]',
   accepted: 'bg-[#1f3a2a] text-[var(--success)]',
   superseded: 'bg-[#2a2a2a] text-[var(--muted)]',
+  withdrawn: 'bg-[#2a2a2a] text-[var(--muted)]',
 };
 
 export function StatusBadge({ status }: { status: string }) {

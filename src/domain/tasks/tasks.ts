@@ -17,6 +17,7 @@ import { ConflictError, NotFoundError, ValidationError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { messages, runs, runSteps, tasks } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
+import { withdrawPendingApprovalsForTask } from '@/domain/approvals/approvals';
 
 /**
  * Task CRUD and history reads. Run EXECUTION lives in runner.ts — this module
@@ -210,6 +211,16 @@ export async function cancelTask(
     .where(
       and(eq(tasks.id, taskId), eq(tasks.projectId, ctx.projectId), eq(tasks.orgId, ctx.orgId)),
     );
+
+  // Any actions this task proposed are no longer valid to authorize — the work they'd act on is
+  // being cancelled. Withdraw them (distinct from reject/expire) so they leave the pending queue
+  // and can't be approved for cancelled work.
+  await withdrawPendingApprovalsForTask(
+    tx,
+    ctx,
+    taskId,
+    r ? `Task cancelled: ${r}` : 'Task cancelled.',
+  );
 
   await writeAudit(tx, ctx, {
     action: 'task.cancelled',

@@ -24,8 +24,14 @@ export default async function ApprovalsPage({
     <div>
       <PageHeader
         title="Approval queue"
-        subtitle="Every consequential action a model proposes stops here. Nothing executes without your explicit decision, and every decision is audited."
+        subtitle="Every consequential action a model proposes stops here for your authorization. Nothing is authorized without your explicit decision, and every decision is audited."
       />
+
+      <p className="mb-6 rounded-md border border-[var(--border)] bg-[var(--surface)] px-4 py-3 text-sm text-[var(--muted)]">
+        <span className="font-medium text-[var(--foreground)]">Authorization is not execution.</span>{' '}
+        Approving records that you authorized this action; this version does not carry it out
+        automatically. Execution still happens separately.
+      </p>
 
       <Card title={`Pending (${pending.length})`} className="mb-6">
         {pending.length === 0 ? (
