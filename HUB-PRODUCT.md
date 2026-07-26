@@ -75,19 +75,40 @@ partner.
   *repeatedly demonstrated good judgment* on that kind of decision in real operation. Evidence
   promotes a capability — never our confidence that it would be clever.
 
-**Every opinion is explainable.** The gate is not "no opinions" — the Hub *should* have
-opinions. The gate is that every opinion carries its reasoning. An opinion without reasoning is
-a guess; an opinion with evidence is operational intelligence. Any judgment, recommendation, or
-autonomous action must answer, on demand:
+**Every opinion is explainable — and the explanation *teaches*, it does not justify.** The gate
+is not "no opinions"; the Hub *should* have opinions. The gate is that every opinion carries its
+reasoning. But the panel's job is not to defend the Hub against doubt — it is to **teach the
+operator how the Hub thinks.** Done well, the operator eventually stops opening it, because
+they've learned the pattern. The panel wins when it becomes unnecessary. Trust is built by
+*consistently applying the same reasoning*, not by hiding complexity or re-proving itself each
+time. Every explanation should leave the operator thinking "that makes sense."
 
-1. What evidence led to this?
-2. Why was this the best option — what alternatives were considered?
-3. How confident are you?
-4. What would have changed your decision (what assumptions is it resting on)?
+**The reasoning model (five questions).** Any judgment, recommendation, or autonomous action
+must be able to answer:
 
-If the Hub cannot answer those four, it has not earned the right to *assert* that opinion — let
-alone act on it. Explainability is the currency of trust and the gate at every rung of the
-ladder.
+1. **Why does this matter to the business?** — grounds everything in *outcomes, not mechanics*.
+   "The onboarding objective stalled, delaying activation of new contractors," never just
+   "stalled." Reinforces *business first, software second*.
+2. What evidence led to this?
+3. Why was this the best option — what alternatives were considered?
+4. How confident are you?
+5. What would have changed your decision (what assumptions is it resting on)?
+
+If the Hub cannot answer these, it has not earned the right to *assert* the opinion — let alone
+act on it. Explainability is the currency of trust and the gate at every rung of the ladder.
+
+**The explanation surface is universal.** Every meaningful judgment, recommendation, and
+automated action anywhere in the Hub exposes this *same* reasoning model — not because every
+operator will open it, but because the Hub should always be able to explain itself the same way.
+That consistency is what creates confidence. Build the surface once; reuse it everywhere.
+
+**Future — the explanation becomes institutional memory (preserve space, do not build yet).** As
+the Hub earns the right to automate, the explanation surface becomes the business's memory.
+Today it answers *"why do you say this matters?"* Later: *"why did you make this decision?"*
+Months on: *"why did we do it that way?"* At that point the reasoning behind every important
+recommendation and autonomous action is organizational knowledge — where explainable judgment,
+Decision Memory, and Knowledge converge. Not today. But designing the reasoning model well now
+means we won't have to reinvent it then.
 
 ## Hub-wide principles
 
@@ -133,7 +154,7 @@ orientation, not the purpose.
 
 **Trajectory.** The Dashboard is the *first visible expression* of an operating partner, not a
 final state. Today it operates at **Observe → Judge → Explain**: it tells you what matters and
-can show its reasoning on demand (the four questions above). As the Hub earns trust through real
+can show its reasoning on demand (the five-question reasoning model above). As the Hub earns trust through real
 operation, that same explainable judgment evolves into recommendations and, eventually,
 autonomous action — same personality, more responsibility. Design for that trajectory, not a
 dead end.
