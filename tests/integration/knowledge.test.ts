@@ -15,6 +15,7 @@ import {
   listKnowledge,
   logKnowledgeApplications,
   getKnowledgeVerificationHistory,
+  listConsumerKnowledgeApplications,
   reviseKnowledge,
   selectRelevantKnowledge,
   setKnowledgeVerification,
@@ -318,6 +319,37 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
     const b = await withTenant(ctx, (tx) => beginOrReuseAiOperation(tx, ctx, { operationType: 'objective_suggestion', provider: 'openai' }));
     expect(a.decision).toBe('dispatch');
     expect(b.id).not.toBe(a.id);
+  });
+
+  it('an idempotency key is bound to a request fingerprint — reuse with different input conflicts', async () => {
+    const KEY = `fp-${randomUUID().slice(0, 8)}`;
+    const mk = (contextHash: string) => ({ operationType: 'objective_suggestion' as const, idempotencyKey: KEY, contextHash, provider: 'openai' });
+    // First request establishes the fingerprint.
+    const first = await withTenant(ctx, (tx) => beginOrReuseAiOperation(tx, ctx, mk('fingerprint-A')));
+    expect(first.decision).toBe('dispatch');
+    // Same key, SAME fingerprint, still running → in-progress (no conflict, no new op).
+    expect((await withTenant(ctx, (tx) => beginOrReuseAiOperation(tx, ctx, mk('fingerprint-A')))).decision).toBe('in_progress');
+    // Same key, DIFFERENT fingerprint → idempotency conflict (cannot alias a different request).
+    await expect(withTenant(ctx, (tx) => beginOrReuseAiOperation(tx, ctx, mk('fingerprint-B')))).rejects.toThrow(/different request/i);
+    // A retry after failure keeps the SAME fingerprint and dispatches under the same op.
+    await withTenant(ctx, (tx) => failAiOperation(tx, ctx, first.id, 'timeout'));
+    const retry = await withTenant(ctx, (tx) => beginOrReuseAiOperation(tx, ctx, mk('fingerprint-A')));
+    expect(retry.id).toBe(first.id);
+    expect(retry.isRetry).toBe(true);
+    // The changed submission still conflicts even after a failure — it needs a new key.
+    await withTenant(ctx, (tx) => failAiOperation(tx, ctx, first.id, 'timeout again'));
+    await expect(withTenant(ctx, (tx) => beginOrReuseAiOperation(tx, ctx, mk('fingerprint-B')))).rejects.toThrow(/different request/i);
+  });
+
+  it('a retry repeats the frozen Knowledge snapshot, not a fresh selection', async () => {
+    // Simulate a first dispatch that logged one application under an operation.
+    const op = await withTenant(ctx, (tx) => beginAiOperation(tx, ctx, { operationType: 'objective_suggestion', provider: 'openai' }));
+    const k = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Frozen note', body: 'b', kind: 'fact', activate: true }));
+    await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: op, injected: [{ id: k, version: 1, title: 'Frozen note', body: 'b', reason: 'subject: x', memoryText: 'FROZEN SNAPSHOT TEXT' }] }));
+    // The retry path reads exactly what was frozen — even if the record changes afterward.
+    await withTenant(ctx, (tx) => reviseKnowledge(tx, ctx, k, { body: 'changed after dispatch', activate: true }));
+    const frozen = await withTenant(ctx, (tx) => listConsumerKnowledgeApplications(tx, ctx, 'objective_suggestion', op));
+    expect(frozen.map((f) => f.memoryText)).toEqual(['FROZEN SNAPSHOT TEXT']);
   });
 
   it('a durable operation anchors non-run Knowledge applications inspectably', async () => {

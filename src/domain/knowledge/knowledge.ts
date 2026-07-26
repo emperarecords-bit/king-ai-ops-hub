@@ -477,6 +477,31 @@ export interface KnowledgeInjectionRow {
   injectedAt: Date;
 }
 
+/**
+ * The FROZEN knowledge a consumer already received — the exact rendered snapshots recorded at first
+ * dispatch. A retry of the same operation repeats these instead of re-selecting, so a failed retry
+ * never silently receives a different Knowledge set because records changed between attempts.
+ */
+export async function listConsumerKnowledgeApplications(
+  tx: DbTx,
+  ctx: TenantContext,
+  consumerType: string,
+  consumerId: string,
+): Promise<{ memoryText: string | null }[]> {
+  return tx
+    .select({ memoryText: knowledgeInjections.memoryText })
+    .from(knowledgeInjections)
+    .where(
+      and(
+        eq(knowledgeInjections.consumerType, consumerType),
+        eq(knowledgeInjections.consumerId, consumerId),
+        eq(knowledgeInjections.orgId, ctx.orgId),
+        eq(knowledgeInjections.projectId, ctx.projectId),
+      ),
+    )
+    .orderBy(desc(knowledgeInjections.injectedAt));
+}
+
 /** The reverse trail for one knowledge item: the AI operations it was supplied to, newest first. */
 export async function listInjectionsForKnowledge(tx: DbTx, ctx: TenantContext, itemId: string): Promise<KnowledgeInjectionRow[]> {
   return tx

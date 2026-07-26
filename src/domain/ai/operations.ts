@@ -1,5 +1,6 @@
 import { and, eq } from 'drizzle-orm';
 import { type TenantContext } from '@/types/domain';
+import { ConflictError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { aiOperations } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
@@ -74,23 +75,27 @@ export type OperationDecision = 'dispatch' | 'return_result' | 'in_progress';
 
 /**
  * Resolve the operation for a request that carries an idempotency key — the real enforcement of
- * "the same logical retry uses the same operation identity":
- *  - no existing op → create one and DISPATCH.
+ * "the same logical retry uses the same operation identity". The key is bound to a request
+ * FINGERPRINT (`contextHash`): a client cannot reuse a key for materially different input and receive
+ * the earlier result — a mismatch is an idempotency conflict.
+ *  - no existing op → create one and DISPATCH (isRetry=false).
+ *  - existing, fingerprint MISMATCH → throw ConflictError (the key aliases a different request).
  *  - existing completed → RETURN_RESULT (its stored resultData); never re-dispatch.
  *  - existing still running (dispatched) → IN_PROGRESS; do not dispatch a second provider request.
- *  - existing failed → retry under the SAME operation (status back to dispatched, attempt++) → DISPATCH.
+ *  - existing failed → retry under the SAME operation (status back to dispatched, attempt++) →
+ *    DISPATCH with isRetry=true, so the caller repeats the FROZEN context rather than rebuilding it.
  * With no key, always a fresh operation to DISPATCH (a genuinely new request).
  */
 export async function beginOrReuseAiOperation(
   tx: DbTx,
   ctx: TenantContext,
   args: BeginAiOperationArgs,
-): Promise<{ id: string; decision: OperationDecision; resultData: unknown }> {
+): Promise<{ id: string; decision: OperationDecision; resultData: unknown; isRetry: boolean }> {
   if (!args.idempotencyKey) {
-    return { id: await beginAiOperation(tx, ctx, args), decision: 'dispatch', resultData: null };
+    return { id: await beginAiOperation(tx, ctx, args), decision: 'dispatch', resultData: null, isRetry: false };
   }
   const existing = await tx
-    .select({ id: aiOperations.id, status: aiOperations.status, resultData: aiOperations.resultData, attempt: aiOperations.attempt })
+    .select({ id: aiOperations.id, status: aiOperations.status, resultData: aiOperations.resultData, attempt: aiOperations.attempt, contextHash: aiOperations.contextHash })
     .from(aiOperations)
     .where(
       and(
@@ -102,15 +107,22 @@ export async function beginOrReuseAiOperation(
     )
     .limit(1);
   const op = existing[0];
-  if (!op) return { id: await beginAiOperation(tx, ctx, args), decision: 'dispatch', resultData: null };
-  if (op.status === 'completed') return { id: op.id, decision: 'return_result', resultData: op.resultData };
-  if (op.status === 'dispatched') return { id: op.id, decision: 'in_progress', resultData: null };
-  // failed → retry under the same logical operation, recording a new attempt.
+  if (!op) return { id: await beginAiOperation(tx, ctx, args), decision: 'dispatch', resultData: null, isRetry: false };
+
+  // The key must identify ONE immutable logical request. A different fingerprint under the same key
+  // is a conflict, never a silent alias to the earlier result.
+  if (args.contextHash != null && op.contextHash != null && op.contextHash !== args.contextHash) {
+    throw new ConflictError('This request key was already used for a different request. Start a new request.');
+  }
+
+  if (op.status === 'completed') return { id: op.id, decision: 'return_result', resultData: op.resultData, isRetry: false };
+  if (op.status === 'dispatched') return { id: op.id, decision: 'in_progress', resultData: null, isRetry: false };
+  // failed → retry under the same logical operation with the same input; caller repeats frozen context.
   await tx
     .update(aiOperations)
     .set({ status: 'dispatched', dispatchedAt: new Date(), failedAt: null, error: null, attempt: op.attempt + 1, updatedAt: new Date() })
     .where(and(eq(aiOperations.id, op.id), eq(aiOperations.orgId, ctx.orgId), eq(aiOperations.projectId, ctx.projectId)));
-  return { id: op.id, decision: 'dispatch', resultData: null };
+  return { id: op.id, decision: 'dispatch', resultData: null, isRetry: true };
 }
 
 export async function failAiOperation(tx: DbTx, ctx: TenantContext, id: string, error: string): Promise<void> {

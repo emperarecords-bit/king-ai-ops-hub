@@ -1419,6 +1419,18 @@ Verified: full suite **447/447**.
   historical-analysis qualification. *Principle: an observation date establishes historical position,
   not continuing validity.* Full suite **450/450**.
 
+**Increment 1d — operation-integrity: idempotency fingerprint + frozen retry context (built 2026-07-26):**
+An idempotency key now identifies ONE immutable logical request. `beginOrReuseAiOperation` binds the
+key to a request **fingerprint** (`contextHash` = hash of workspace · type · objective content ·
+prompt version): same key + same fingerprint reuses the operation; **same key + different fingerprint
+is rejected as a conflict** (a changed submission needs a new key). Retries repeat the **frozen**
+Knowledge context recorded at first dispatch (`listConsumerKnowledgeApplications`) rather than
+re-selecting — a failed retry can't silently receive a different Knowledge set because records changed
+between attempts. Locked by tests (key can't alias two requests · retry preserves fingerprint · retry
+reuses the frozen snapshot · changed submission still conflicts after failure). *Principle:
+idempotency identifies one immutable logical request, not merely one client-generated string.* Full
+suite **452/452**.
+
 *Remaining trustworthiness increments (deferred, not built, never presented as if they exist):
 (2) inspectable provenance — a `knowledge_sources` relationship (type/id/label/version-hash/date/
 transformation/excerpt/locator, multiple sources), a bounded resolution result (resolved/missing/
