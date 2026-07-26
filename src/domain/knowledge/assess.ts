@@ -65,16 +65,19 @@ export function assessKnowledge(i: {
   const scopeClosed =
     (i.scopeKind === 'task' && i.scopeTaskStatus != null && TERMINAL_TASK.has(i.scopeTaskStatus)) ||
     (i.scopeKind === 'objective' && i.scopeObjectiveStatus != null && CLOSED_OBJECTIVE.has(i.scopeObjectiveStatus));
-  // Freshness comes ONLY from explicit validity facts, never the age of a database row. `expiresAt`
-  // and `reviewAfter` are compared as absolute instants (timezone-independent) at the exact boundary
-  // (<= now). "Current" requires an `asOf` (the date the claim describes) — a `verifiedAt` alone is
-  // when a verification happened, NOT evidence the content is still current.
+  // Freshness comes ONLY from explicit validity facts, never the age of a database row, and NEVER
+  // from `asOf` alone. `asOf` is when the claim described reality (historical position) — it does not
+  // establish continuing validity. Only an explicit validity WINDOW still open — a future `expiresAt`
+  // (valid through that instant) or a future `reviewAfter` (validity granted until review) — makes a
+  // record "current". A `verifiedAt` records when verification happened, not currency. Instants are
+  // compared absolutely (timezone-independent) at the exact boundary (<= now = passed).
+  const nowT = i.now.getTime();
   let freshness: FreshnessState;
-  if (i.expiresAt && i.expiresAt.getTime() <= i.now.getTime()) freshness = 'stale';
+  if (i.expiresAt && i.expiresAt.getTime() <= nowT) freshness = 'stale';
   else if (scopeClosed) freshness = 'historical';
-  else if (i.reviewAfter && i.reviewAfter.getTime() <= i.now.getTime()) freshness = 'review_due';
-  else if (i.asOf) freshness = 'current';
-  else freshness = 'unknown';
+  else if (i.reviewAfter && i.reviewAfter.getTime() <= nowT) freshness = 'review_due';
+  else if ((i.expiresAt && i.expiresAt.getTime() > nowT) || (i.reviewAfter && i.reviewAfter.getTime() > nowT)) freshness = 'current';
+  else freshness = 'unknown'; // includes asOf-only: known as of that time, current status not established
 
   const scopeValid =
     i.scopeKind === 'workspace' || (i.scopeKind === 'task' ? i.scopeTaskId != null : i.scopeObjectiveId != null);
@@ -82,7 +85,16 @@ export function assessKnowledge(i: {
   const disclosureDecision: 'permitted' | 'withheld' =
     i.disclosure === 'restricted' && !i.disclosurePermitted ? 'withheld' : 'permitted';
 
-  const qualifications = [i.epistemicBasis, i.verification, FRESH_LABEL[freshness], SCOPE_LABEL[i.scopeKind]];
+  // The as-of date is historical position, shown as a qualification — and, when nothing else
+  // establishes currency, stated plainly as "current status not established".
+  const asOfStr = i.asOf ? `as of ${i.asOf.toISOString().slice(0, 10)}` : null;
+  const freshLabel =
+    freshness === 'unknown' && asOfStr
+      ? `${asOfStr}; current status not established`
+      : asOfStr
+        ? `${FRESH_LABEL[freshness]} · ${asOfStr}`
+        : FRESH_LABEL[freshness];
+  const qualifications = [i.epistemicBasis, i.verification, freshLabel, SCOPE_LABEL[i.scopeKind]];
 
   // Hard gates → withheld (order matters: lifecycle, disclosure, scope validity come first).
   let useState: UseState = 'usable';

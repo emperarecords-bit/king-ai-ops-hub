@@ -102,6 +102,9 @@ export async function suggestCriteria(
     const suggestions = await suggestSuccessCriteria(ctx, {
       title: String(formData.get('title') ?? ''),
       description: String(formData.get('description') ?? ''),
+      // Stable per-submission key from the client — a network replay / double-submit of the SAME
+      // submission reuses the operation; a fresh submission carries a new key.
+      idempotencyKey: String(formData.get('idempotencyKey') ?? '') || undefined,
     });
     if (suggestions.length === 0) {
       return { suggestions: [], error: 'No usable suggestions came back — write them yourself.' };

@@ -197,6 +197,13 @@
       "when": 1785099368760,
       "tag": "0027_sticky_lady_ursula",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1785100227954,
+      "tag": "0028_black_manta",
+      "breakpoints": true
     }
   ]
 }

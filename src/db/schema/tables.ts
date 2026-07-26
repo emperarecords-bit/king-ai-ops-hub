@@ -379,6 +379,10 @@ export const aiOperations = pgTable(
     completedAt: timestamp('completed_at', { withTimezone: true }),
     failedAt: timestamp('failed_at', { withTimezone: true }),
     resultRef: uuid('result_ref'),
+    /** The operation's result payload, so a replay of the same key returns it without re-dispatching. */
+    resultData: jsonb('result_data'),
+    /** Attempt counter — a retry under the same logical operation increments this. */
+    attempt: integer('attempt').notNull().default(1),
     error: text('error'),
     retryOf: uuid('retry_of'),
     createdBy: uuid('created_by').references(() => profiles.id, { onDelete: 'set null' }),

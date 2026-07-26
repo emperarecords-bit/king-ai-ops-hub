@@ -20,7 +20,7 @@ import {
   setKnowledgeVerification,
 } from '@/domain/knowledge/knowledge';
 import { listAllActiveKnowledgeForAdministration } from '@/domain/knowledge/admin';
-import { beginAiOperation, completeAiOperation, getAiOperation } from '@/domain/ai/operations';
+import { beginAiOperation, beginOrReuseAiOperation, completeAiOperation, failAiOperation, getAiOperation } from '@/domain/ai/operations';
 
 /**
  * K1 rules that must never regress: only ACTIVE knowledge is injected;
@@ -283,24 +283,50 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
     expect(hit!.memoryText).toMatch(/disputed/);
   });
 
-  it('a durable AI operation is idempotent by key and inspectable, and anchors non-run applications', async () => {
-    // Same logical retry (same key) → same operation identity.
-    const first = await withTenant(ctx, (tx) => beginAiOperation(tx, ctx, { operationType: 'objective_suggestion', idempotencyKey: 'draft-abc', provider: 'openai' }));
-    const retry = await withTenant(ctx, (tx) => beginAiOperation(tx, ctx, { operationType: 'objective_suggestion', idempotencyKey: 'draft-abc', provider: 'openai' }));
-    expect(retry).toBe(first);
-    // A new request (no key) → a distinct operation.
-    const other = await withTenant(ctx, (tx) => beginAiOperation(tx, ctx, { operationType: 'objective_suggestion', provider: 'openai' }));
-    expect(other).not.toBe(first);
-    // Status advances and the operation is inspectable.
-    await withTenant(ctx, (tx) => completeAiOperation(tx, ctx, first));
-    const op = await withTenant(ctx, (tx) => getAiOperation(tx, ctx, first));
-    expect(op?.status).toBe('completed');
-    expect(op?.dispatchedAt).toBeInstanceOf(Date);
-    // A Knowledge application can be anchored to it (consumerId = operation id).
+  it('idempotency: replay/retry reuse one operation; new requests get new ones', async () => {
+    const KEY = `req-${randomUUID().slice(0, 8)}`;
+    const args = { operationType: 'objective_suggestion' as const, idempotencyKey: KEY, provider: 'openai' };
+
+    // First submission → dispatch, a new operation.
+    const first = await withTenant(ctx, (tx) => beginOrReuseAiOperation(tx, ctx, args));
+    expect(first.decision).toBe('dispatch');
+
+    // Double submission / network replay while still running → same op, do NOT dispatch again.
+    const replay = await withTenant(ctx, (tx) => beginOrReuseAiOperation(tx, ctx, args));
+    expect(replay.decision).toBe('in_progress');
+    expect(replay.id).toBe(first.id);
+
+    // After completion, a replay returns the stored result — no second provider call.
+    await withTenant(ctx, (tx) => completeAiOperation(tx, ctx, first.id, [{ label: 'x', target: 1, unit: '' }]));
+    const afterDone = await withTenant(ctx, (tx) => beginOrReuseAiOperation(tx, ctx, args));
+    expect(afterDone.decision).toBe('return_result');
+    expect(afterDone.id).toBe(first.id);
+    expect(afterDone.resultData).toEqual([{ label: 'x', target: 1, unit: '' }]);
+
+    // Retry after a recorded failure → dispatch under the SAME operation (new attempt).
+    const KEY2 = `req-${randomUUID().slice(0, 8)}`;
+    const args2 = { operationType: 'objective_suggestion' as const, idempotencyKey: KEY2, provider: 'openai' };
+    const op2 = await withTenant(ctx, (tx) => beginOrReuseAiOperation(tx, ctx, args2));
+    await withTenant(ctx, (tx) => failAiOperation(tx, ctx, op2.id, 'dispatch timeout'));
+    const retry = await withTenant(ctx, (tx) => beginOrReuseAiOperation(tx, ctx, args2));
+    expect(retry.decision).toBe('dispatch');
+    expect(retry.id).toBe(op2.id); // same logical operation
+    expect((await withTenant(ctx, (tx) => getAiOperation(tx, ctx, op2.id)))?.status).toBe('dispatched');
+
+    // A genuinely new request (no key) → a distinct operation each time.
+    const a = await withTenant(ctx, (tx) => beginOrReuseAiOperation(tx, ctx, { operationType: 'objective_suggestion', provider: 'openai' }));
+    const b = await withTenant(ctx, (tx) => beginOrReuseAiOperation(tx, ctx, { operationType: 'objective_suggestion', provider: 'openai' }));
+    expect(a.decision).toBe('dispatch');
+    expect(b.id).not.toBe(a.id);
+  });
+
+  it('a durable operation anchors non-run Knowledge applications inspectably', async () => {
+    const op = await withTenant(ctx, (tx) => beginAiOperation(tx, ctx, { operationType: 'objective_suggestion', provider: 'openai' }));
     const k = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Op-anchored note', body: 'b', kind: 'fact', activate: true }));
-    await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: first, injected: [{ id: k, version: 1, title: 'Op-anchored note', body: 'b', reason: 'subject: x', memoryText: 'snap' }] }));
+    await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: op, injected: [{ id: k, version: 1, title: 'Op-anchored note', body: 'b', reason: 'subject: x', memoryText: 'snap' }] }));
     const trail = await withTenant(ctx, (tx) => listInjectionsForKnowledge(tx, ctx, k));
-    expect(trail[0]!.consumerId).toBe(first); // resolves to the durable operation
+    expect(trail[0]!.consumerId).toBe(op);
+    expect((await withTenant(ctx, (tx) => getAiOperation(tx, ctx, op)))?.operationType).toBe('objective_suggestion');
   });
 
   it('objective suggestion (a non-run consumer) leaves the same application record, idempotent per operation', async () => {

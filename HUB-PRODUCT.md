@@ -1404,6 +1404,21 @@ selection, stale in rendering, and trusted in inspection at once.
 
 Verified: full suite **447/447**.
 
+**Increment 1c — idempotency threaded through the real caller + freshness corrected (built 2026-07-26):**
+- **Idempotency is now enforced end to end.** The objective-suggestion form generates a stable
+  per-click request key (a network replay/double-submit of the same click reuses it; a fresh click is
+  a new key), threaded action → domain. `beginOrReuseAiOperation` decides: no op → dispatch; completed
+  op → **return the stored result (no second provider call)**; running op → in-progress (no re-dispatch);
+  failed op → retry under the same operation (attempt++). The suggestion result is stored on the
+  operation (`resultData`) so a replay returns it. Locked by tests (double-submit, replay-while-running,
+  post-completion replay returns stored result, failure→retry-same-op, keyless→new op).
+- **`asOf` alone no longer means current.** An observation date establishes *historical position, not
+  continuing validity*: `asOf`-only → freshness unknown, rendered "as of <date>; current status not
+  established", and never handed to a current-operational consumer as settled fact. "Current" requires
+  an open validity window — a future `reviewAfter` or `expiresAt`. Locked by boundary/timezone tests +
+  historical-analysis qualification. *Principle: an observation date establishes historical position,
+  not continuing validity.* Full suite **450/450**.
+
 *Remaining trustworthiness increments (deferred, not built, never presented as if they exist):
 (2) inspectable provenance — a `knowledge_sources` relationship (type/id/label/version-hash/date/
 transformation/excerpt/locator, multiple sources), a bounded resolution result (resolved/missing/

@@ -63,11 +63,54 @@ export async function beginAiOperation(tx: DbTx, ctx: TenantContext, args: Begin
   return id;
 }
 
-export async function completeAiOperation(tx: DbTx, ctx: TenantContext, id: string, resultRef?: string | null): Promise<void> {
+export async function completeAiOperation(tx: DbTx, ctx: TenantContext, id: string, resultData?: unknown): Promise<void> {
   await tx
     .update(aiOperations)
-    .set({ status: 'completed', completedAt: new Date(), resultRef: resultRef ?? null, updatedAt: new Date() })
+    .set({ status: 'completed', completedAt: new Date(), resultData: resultData ?? null, updatedAt: new Date() })
     .where(and(eq(aiOperations.id, id), eq(aiOperations.orgId, ctx.orgId), eq(aiOperations.projectId, ctx.projectId)));
+}
+
+export type OperationDecision = 'dispatch' | 'return_result' | 'in_progress';
+
+/**
+ * Resolve the operation for a request that carries an idempotency key — the real enforcement of
+ * "the same logical retry uses the same operation identity":
+ *  - no existing op → create one and DISPATCH.
+ *  - existing completed → RETURN_RESULT (its stored resultData); never re-dispatch.
+ *  - existing still running (dispatched) → IN_PROGRESS; do not dispatch a second provider request.
+ *  - existing failed → retry under the SAME operation (status back to dispatched, attempt++) → DISPATCH.
+ * With no key, always a fresh operation to DISPATCH (a genuinely new request).
+ */
+export async function beginOrReuseAiOperation(
+  tx: DbTx,
+  ctx: TenantContext,
+  args: BeginAiOperationArgs,
+): Promise<{ id: string; decision: OperationDecision; resultData: unknown }> {
+  if (!args.idempotencyKey) {
+    return { id: await beginAiOperation(tx, ctx, args), decision: 'dispatch', resultData: null };
+  }
+  const existing = await tx
+    .select({ id: aiOperations.id, status: aiOperations.status, resultData: aiOperations.resultData, attempt: aiOperations.attempt })
+    .from(aiOperations)
+    .where(
+      and(
+        eq(aiOperations.projectId, ctx.projectId),
+        eq(aiOperations.orgId, ctx.orgId),
+        eq(aiOperations.operationType, args.operationType),
+        eq(aiOperations.idempotencyKey, args.idempotencyKey),
+      ),
+    )
+    .limit(1);
+  const op = existing[0];
+  if (!op) return { id: await beginAiOperation(tx, ctx, args), decision: 'dispatch', resultData: null };
+  if (op.status === 'completed') return { id: op.id, decision: 'return_result', resultData: op.resultData };
+  if (op.status === 'dispatched') return { id: op.id, decision: 'in_progress', resultData: null };
+  // failed → retry under the same logical operation, recording a new attempt.
+  await tx
+    .update(aiOperations)
+    .set({ status: 'dispatched', dispatchedAt: new Date(), failedAt: null, error: null, attempt: op.attempt + 1, updatedAt: new Date() })
+    .where(and(eq(aiOperations.id, op.id), eq(aiOperations.orgId, ctx.orgId), eq(aiOperations.projectId, ctx.projectId)));
+  return { id: op.id, decision: 'dispatch', resultData: null };
 }
 
 export async function failAiOperation(tx: DbTx, ctx: TenantContext, id: string, error: string): Promise<void> {

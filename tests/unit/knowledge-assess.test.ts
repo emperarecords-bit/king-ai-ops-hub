@@ -29,8 +29,9 @@ describe('assessKnowledge — one shared trust assessment', () => {
     expect(a.reasons).toContain('unverified_or_unknown');
   });
 
-  it('a human-confirmed, current, workspace record is cleanly usable', () => {
-    const a = assessKnowledge({ ...base, verification: 'human_confirmed', verifiedAt: new Date('2026-07-25'), asOf: new Date('2026-07-25') });
+  it('a human-confirmed record with an open validity window is cleanly usable', () => {
+    // Currency comes from an explicit validity window still open (future expiry), not from asOf.
+    const a = assessKnowledge({ ...base, verification: 'human_confirmed', verifiedAt: new Date('2026-07-25'), expiresAt: new Date('2026-12-31') });
     expect(a.freshness).toBe('current');
     expect(a.useState).toBe('usable');
   });
@@ -79,23 +80,37 @@ describe('assessKnowledge — one shared trust assessment', () => {
     expect(a.reasons).toContain('review_due');
   });
 
-  it('freshness comes from explicit facts, not row age — verifiedAt alone is not "current"', () => {
-    // Verified last week but with NO as-of date → freshness unknown, not current.
+  it('an observation date establishes historical position, not continuing validity', () => {
+    // asOf alone → NOT current; current status is explicitly "not established".
+    const old = assessKnowledge({ ...base, asOf: new Date('2026-01-01') });
+    expect(old.freshness).toBe('unknown');
+    expect(old.qualifications.join(' ')).toMatch(/current status not established/i);
+    // verifiedAt alone is also not currency.
     expect(assessKnowledge({ ...base, verifiedAt: new Date('2026-07-20') }).freshness).toBe('unknown');
-    // An as-of date is the basis for currency.
-    expect(assessKnowledge({ ...base, asOf: new Date('2026-07-20') }).freshness).toBe('current');
     // No temporal evidence at all → unknown.
     expect(assessKnowledge(base).freshness).toBe('unknown');
+    // A current-operational consumer does NOT get an old asOf-only record as settled current fact.
+    expect(old.useState).toBe('usable_with_qualification');
+  });
+
+  it('an open validity window (future review or expiry) supports current use', () => {
+    expect(assessKnowledge({ ...base, reviewAfter: new Date('2026-12-01') }).freshness).toBe('current');
+    expect(assessKnowledge({ ...base, expiresAt: new Date('2026-12-01') }).freshness).toBe('current');
   });
 
   it('boundary timestamps are inclusive and compared as absolute instants (timezone-independent)', () => {
     // Exactly at the boundary counts as passed.
     expect(assessKnowledge({ ...base, expiresAt: new Date(NOW.getTime()) }).freshness).toBe('stale');
-    expect(assessKnowledge({ ...base, asOf: new Date('2026-01-01'), reviewAfter: new Date(NOW.getTime()) }).freshness).toBe('review_due');
-    // One millisecond in the future is not yet expired.
-    expect(assessKnowledge({ ...base, asOf: new Date('2026-07-01'), expiresAt: new Date(NOW.getTime() + 1) }).freshness).toBe('current');
-    // Same instant expressed in a different timezone offset must behave identically.
-    const sameInstantOtherTz = new Date('2026-07-26T00:00:00.000Z'); // == NOW
-    expect(assessKnowledge({ ...base, expiresAt: sameInstantOtherTz }).freshness).toBe('stale');
+    expect(assessKnowledge({ ...base, reviewAfter: new Date(NOW.getTime()) }).freshness).toBe('review_due');
+    // One millisecond in the future is still within the validity window.
+    expect(assessKnowledge({ ...base, expiresAt: new Date(NOW.getTime() + 1) }).freshness).toBe('current');
+    // Same instant expressed in a different timezone offset behaves identically.
+    expect(assessKnowledge({ ...base, expiresAt: new Date('2026-07-26T00:00:00.000Z') }).freshness).toBe('stale');
+  });
+
+  it('historical-analysis use receives an old record with its as-of qualification, not withheld', () => {
+    const a = assessKnowledge({ ...base, asOf: new Date('2026-01-01'), intendedUse: 'historical_analysis' });
+    expect(a.useState).not.toBe('withheld');
+    expect(a.qualifications.join(' ')).toMatch(/as of 2026-01-01/);
   });
 });

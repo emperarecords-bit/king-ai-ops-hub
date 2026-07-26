@@ -127,6 +127,9 @@ export function ObjectiveForm({
               data.set('projectKey', projectKey);
               data.set('title', titleRef.current?.value ?? '');
               data.set('description', descriptionRef.current?.value ?? '');
+              // Stable per-click request key: a network replay of THIS click reuses the operation;
+              // a fresh click is a new logical request with a new key.
+              data.set('idempotencyKey', crypto.randomUUID());
               suggestAction(data);
             }}
             className="text-xs text-[var(--accent)] hover:underline disabled:opacity-50"

@@ -8,7 +8,7 @@ import { withTenant } from '@/db/tenant';
 import { getProvider } from '@/providers/registry';
 import { findAgentForRole } from '@/domain/agents/agents';
 import { selectRelevantKnowledge, logKnowledgeApplications } from '@/domain/knowledge/knowledge';
-import { beginAiOperation, completeAiOperation, failAiOperation } from '@/domain/ai/operations';
+import { beginOrReuseAiOperation, completeAiOperation, failAiOperation } from '@/domain/ai/operations';
 import { wrapUntrusted } from '@/orchestration/prompts';
 import { assertWithinBudget } from '@/domain/usage/usage';
 
@@ -84,21 +84,26 @@ export async function suggestSuccessCriteria(
   const env = serverEnv();
 
   // Objective suggestion is an AI call, so it must use the SAME relevance gate as task runs — never
-  // the wholesale loader — AND leave the same application record, tied to a DURABLE operation recorded
-  // BEFORE dispatch (so the reverse trail is inspectable and retries are idempotent by key).
-  const { operationId, agent, knowledge } = await withTenant(ctx, async (tx) => {
+  // the wholesale loader — AND belong to a DURABLE operation recorded BEFORE dispatch. The
+  // idempotency key makes a logical retry reuse the operation: a completed op returns its stored
+  // result WITHOUT a second provider call; a running op does not dispatch again; a failed op retries.
+  const resolved = await withTenant(ctx, async (tx) => {
     await assertWithinBudget(tx, ctx.projectId);
-    const op = await beginAiOperation(tx, ctx, {
+    const op = await beginOrReuseAiOperation(tx, ctx, {
       operationType: 'objective_suggestion',
       subjectType: 'objective_draft',
       idempotencyKey: input.idempotencyKey ?? null,
       provider: 'openai',
     });
+    if (op.decision === 'return_result') return { done: true as const, result: (op.resultData as CriterionSuggestion[] | null) ?? [] };
+    if (op.decision === 'in_progress') return { done: true as const, result: [] as CriterionSuggestion[] };
+    // Dispatch: select relevant knowledge and record the applications against this durable operation.
     const selected = await selectRelevantKnowledge(tx, ctx, { queryText: `${title} ${input.description}`, intendedUse: 'objective_planning' });
-    // Logged at dispatch time, referencing the durable operation — even if the provider later fails.
-    await logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: op, injected: selected });
-    return { operationId: op, agent: await findAgentForRole(tx, ctx, 'primary', 'openai'), knowledge: selected };
+    await logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: op.id, injected: selected });
+    return { done: false as const, operationId: op.id, agent: await findAgentForRole(tx, ctx, 'primary', 'openai'), knowledge: selected };
   });
+  if (resolved.done) return resolved.result; // idempotent replay — no second dispatch
+  const { operationId, agent, knowledge } = resolved;
   if (!agent) throw new ValidationError(['No primary employee is configured in this workspace.']);
 
   const knowledgeBlock =
@@ -144,28 +149,30 @@ Rules:
     await withTenant(ctx, (tx) => failAiOperation(tx, ctx, operationId, err instanceof Error ? err.message : String(err)));
     throw err;
   }
-  await withTenant(ctx, (tx) => completeAiOperation(tx, ctx, operationId));
+  // Untrusted output: parse defensively, degrade to nothing rather than throw. The parsed criteria
+  // (or []) become the operation's stored result, so an idempotent replay returns them without a
+  // second provider call. The prompt asks for usable criteria; usableSuggestions is the backstop.
+  const criteria = ((): CriterionSuggestion[] => {
+    const jsonMatch = response.text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      log.warn('criteria suggestion returned no JSON array', { projectId: ctx.projectId });
+      return [];
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(jsonMatch[0]);
+    } catch {
+      log.warn('criteria suggestion was not valid JSON', { projectId: ctx.projectId });
+      return [];
+    }
+    const validated = suggestionsSchema.safeParse(parsed);
+    if (!validated.success) {
+      log.warn('criteria suggestion failed validation', { projectId: ctx.projectId });
+      return [];
+    }
+    return usableSuggestions(validated.data, ctx.projectId);
+  })();
 
-  // Untrusted output: parse defensively, degrade to nothing rather than throw.
-  const jsonMatch = response.text.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) {
-    log.warn('criteria suggestion returned no JSON array', { projectId: ctx.projectId });
-    return [];
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonMatch[0]);
-  } catch {
-    log.warn('criteria suggestion was not valid JSON', { projectId: ctx.projectId });
-    return [];
-  }
-  const validated = suggestionsSchema.safeParse(parsed);
-  if (!validated.success) {
-    log.warn('criteria suggestion failed validation', { projectId: ctx.projectId });
-    return [];
-  }
-  // The prompt asks for usable criteria; this enforces it (O-11). Backstop,
-  // not the primary control — a model that ignores the rules produces fewer
-  // suggestions rather than unmeasurable ones.
-  return usableSuggestions(validated.data, ctx.projectId);
+  await withTenant(ctx, (tx) => completeAiOperation(tx, ctx, operationId, criteria));
+  return criteria;
 }
