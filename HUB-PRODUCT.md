@@ -973,3 +973,119 @@ when nothing material is concealed. Correctly deferred as **future capabilities*
 the product states plainly that authorization does not execute): authorized-action execution (the
 executor); revocation after authorization; authorization-validity enforcement; semantic
 duplication/supersession; a richer identity for the proposal originator than the provider name.
+
+---
+
+## Decisions — bounded institutional memory
+
+Decisions preserves conclusions that may guide later work — converting a moment of judgment into
+bounded institutional memory. It is not for every event, opinion, authorization, or model suggestion;
+it preserves conclusions with enough context that the Hub can later determine whether one remains
+authoritative, whether it applies to the current work, what replaced or limits it, why it was made,
+what evidence supported it, and where it has influenced later work.
+
+- **Knowledge** preserves what the workspace *knows*.
+- **Decisions** preserves what the workspace *concluded* from what it knew.
+- **Decision Memory** applies those conclusions *only where they belong*.
+
+**Primary question:** *What has this workspace concluded, why, and under what circumstances should
+that conclusion guide future work?* The added clause is the purpose gap — a trustworthy record must
+answer both *what was concluded* and *where it applies*.
+
+### Immediate integrity fix — relevance is an eligibility rule (built 2026-07-26)
+
+Decision Memory selection is now two distinct stages, not one score:
+1. **Eligibility** — a decision may be considered only when a structural relationship to the run
+   establishes relevance: same originating task, same objective's tasks, or a shared supporting
+   reference. No relationship means omitted. Until explicit scope exists, this narrow default is
+   deliberate: silently applying unrelated guidance is worse than reduced recall.
+2. **Ranking** — recency (and, later, precedence) orders only decisions already eligible.
+
+Previously every accepted decision got a recency score, so an unrelated one could enter a run merely
+because fewer than ten better candidates existed. Fixed in `selectRelevantDecisions`; locked by
+`decisions.test.ts` (an unrelated accepted decision is not injected even as the only candidate; a
+shared supporting reference makes a decision eligible) and `decision-extraction.test.ts` (an accepted
+decision does not leak into an unrelated run).
+> Principle: Recency may rank applicable memory; it may not create applicability.
+
+### Record vs. active guidance are different concepts
+
+A decision can be worth preserving without being reusable guidance. "Use the shorter email for this
+contractor" (task-specific) is not "all contractor outreach should be concise" (workspace policy),
+which is not "don't renew this vendor this month" (time-bound), which is not "the pricing test failed
+because the sample was too small" (historical conclusion — informs analysis, is not an instruction).
+The model must separate:
+- **Record status** — was the conclusion accepted as a legitimate record? (proposed, accepted,
+  rejected, superseded, retired)
+- **Guidance applicability** — should it actively guide later work? (record-only, or reusable within a
+  bounded scope)
+> Principle: Acceptance preserves the conclusion; scope determines where it may guide.
+
+### Responsibilities (north-star for the redesign — not yet built beyond the eligibility fix)
+
+1. **Preserve the conclusion** — what, why, who had authority, when, evidence, human-vs-AI origin,
+   residual caveat. Summary stays joined to the rationale that makes it understandable.
+2. **Define intended reuse** — one-time conclusion / task guidance / objective guidance / standing
+   workspace guidance / historical precedent (informs but does not control). The Hub must know whether
+   a decision is a record, an instruction, a precedent, or a bounded combination. A one-off must not
+   become policy merely because it was accepted.
+3. **Bound its scope** — task / objective / workspace (narrower scopes only when operation demands).
+   Where scope can't be established, default narrow.
+   > Principle: Institutional memory should default to the narrowest scope its evidence supports.
+4. **Preserve time boundaries** — permanent / time-bounded / condition-dependent / historical. Do not
+   assume an old accepted decision remains authoritative forever.
+   > Principle: A decision may be historically valid without remaining operationally active.
+5. **Establish authority** — why it may guide (operator accepted, owner within authority, implements a
+   policy, superseded by a more authoritative decision, AI-proposed but human-accepted). AI suggestion
+   confidence is not authority. Distinguish who proposed, who accepted, who is accountable, what scope
+   they could establish.
+6. **Manage supersession, retirement, reversal** — Superseded (replaced), Retired (no longer active,
+   no replacement), Rejected (never accepted), Reversed (a later decision concludes the opposite). An
+   accepted decision must be removable from active guidance without a replacement, and never disappear
+   or be silently rewritten.
+7. **Detect potential conflicts** — do not inject two incompatible active decisions and instruct the
+   AI to obey both. v1 need not resolve semantic conflict — it must not hide known ambiguity; it should
+   say "two active decisions may conflict within this objective; I cannot determine which governs
+   without your review."
+   > Principle: Conflicting memory must be surfaced for resolution, not silently blended.
+
+### Scope & precedence (contract first, no complex algorithm yet)
+
+Defensible initial ordering: (1) explicit supersession/replacement; (2) explicit applicability to the
+current work; (3) narrower applicable scope over broader guidance when the narrower is an intended
+exception; (4) authority and effective period; (5) recency only among otherwise applicable decisions.
+Recency alone never overrides an active decision. The Hub should be able to explain why a decision was
+selected.
+
+### Decision Memory must be explainable (reverse view)
+
+The run manifest records which decisions were injected (forward view). The missing experience is the
+reverse: from this decision, where has it influenced work — which run, why applicable, which scope
+matched, what text was supplied, which competing decisions were omitted, how it was used, what
+followed.
+> Principle: Reusable memory should leave a visible trail of where it was applied.
+
+### Category ≠ scope
+
+`decisionType` describes subject matter, not applicability. A decision has a Type and a Scope and an
+intended reuse and a validity period — each answers a different question.
+
+### AI suggestions & Defer
+
+The AI proposal gate is correct and preserved (propose, explain worth, cite refs, estimate confidence,
+never self-activate). Review must help the operator decide not just *is this reasonable?* but *should
+the workspace remember it, and at what scope?* — an AI suggestion must not default to workspace-wide.
+**Defer** currently only stamps `reviewedAt` (invisible bookkeeping); it must gain real semantics
+(until when, why, who revisits, still visible?) or be removed from the primary workflow.
+
+### Boundaries
+
+- **Approvals** grants narrow authority for one action; an authorization does not become standing
+  guidance because it was granted.
+- **Decisions** preserves a conclusion intended to inform/govern future work within a stated boundary.
+- **Knowledge** preserves facts/documents/evidence; may support a decision without becoming a directive.
+- **Audit** preserves exhaustive event history; may explain how a decision was made but does not become
+  guidance.
+
+*Next design step: define the operating-partner conversation across the representative decision states,
+then the page emerges — do not sketch the page first.*

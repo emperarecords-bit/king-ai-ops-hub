@@ -370,16 +370,28 @@ export async function selectRelevantDecisions(
 
   const objTasks = new Set(args.objectiveTaskIds);
   const now = Date.now();
-  const scored = rows.map((r) => {
-    let score = 0;
-    if (r.originatingTaskId === args.currentTaskId) score += 1000;
-    if (r.originatingTaskId && objTasks.has(r.originatingTaskId)) score += 100;
-    if (r.supportingRefs.some((ref) => args.docPaths.has(ref))) score += 10;
-    // Recency: newer decisions get a small monotonic boost, always below the
-    // relationship tiers so relevance dominates recency.
+
+  // Two distinct stages. ELIGIBILITY: a decision may be considered ONLY when a structural
+  // relationship to this run establishes relevance (same task · same objective's tasks · shared
+  // supporting reference). Until explicit scope exists, no relationship → omit it: silently applying
+  // unrelated guidance is worse than reduced recall. RANKING: recency (and, later, precedence) only
+  // orders decisions already found eligible — it can never make an irrelevant memory relevant.
+  const eligible = rows
+    .map((r) => {
+      let relationship = 0;
+      if (r.originatingTaskId === args.currentTaskId) relationship += 1000;
+      if (r.originatingTaskId && objTasks.has(r.originatingTaskId)) relationship += 100;
+      if (r.supportingRefs.some((ref) => args.docPaths.has(ref))) relationship += 10;
+      return { r, relationship };
+    })
+    .filter((s) => s.relationship > 0);
+  if (eligible.length === 0) return [];
+
+  const scored = eligible.map(({ r, relationship }) => {
+    // Recency boost stays strictly below the smallest relationship tier, so it only breaks ties
+    // among eligible decisions — never lifts an ineligible one into range.
     const ageDays = (now - r.createdAt.getTime()) / 86_400_000;
-    score += Math.max(0, 5 - ageDays / 30);
-    return { r, score };
+    return { r, score: relationship + Math.max(0, 5 - ageDays / 30) };
   });
   scored.sort((a, b) => b.score - a.score || b.r.createdAt.getTime() - a.r.createdAt.getTime());
   const top = scored.slice(0, MAX_DECISIONS).map((s) => s.r);

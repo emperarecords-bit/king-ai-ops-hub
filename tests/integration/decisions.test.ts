@@ -88,13 +88,14 @@ describe.skipIf(!available)('decision memory', () => {
     expect(mem.contextItem?.content ?? '').not.toContain('Not yet approved');
   });
 
-  it('Test 1 — an accepted decision is present in the memory block', async () => {
+  it('Test 1 — an accepted decision related to the run is present in the memory block', async () => {
     const t = await mkTask(ctxA, 'runtime task');
     const id = await withTenant(ctxA, (tx) =>
       createDecision(tx, ctxA, 'Owner', {
         title: 'Episode runtime fixed at 22:00',
         summary: 'All Season 1 episodes target a 22:00 runtime.',
         decisionType: 'creative',
+        originatingTaskId: t, // structural relationship → eligible for this run
       }),
     );
     await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, id));
@@ -107,7 +108,7 @@ describe.skipIf(!available)('decision memory', () => {
   it('Test 2 — supersession: B replaces A; A becomes historical, B current', async () => {
     const t = await mkTask(ctxA, 'super task');
     const a = await withTenant(ctxA, (tx) =>
-      createDecision(tx, ctxA, 'Owner', { title: 'Runtime 22 minutes', summary: '22 min', decisionType: 'creative' }),
+      createDecision(tx, ctxA, 'Owner', { title: 'Runtime 22 minutes', summary: '22 min', decisionType: 'creative', originatingTaskId: t }),
     );
     await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, a));
     const b = await withTenant(ctxA, (tx) =>
@@ -115,6 +116,7 @@ describe.skipIf(!available)('decision memory', () => {
         title: 'Runtime 24 minutes',
         summary: '24 min',
         decisionType: 'creative',
+        originatingTaskId: t, // related to the run → eligible; A is excluded as superseded
         supersedesId: a,
       }),
     );
@@ -144,6 +146,39 @@ describe.skipIf(!available)('decision memory', () => {
     const mem = await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(t)));
     const lines = (mem.contextItem?.content ?? '').split('\n').filter((l) => l.startsWith('- ['));
     expect(lines[0]).toContain('Near decision');
+  });
+
+  it('eligibility — an UNRELATED accepted decision is not injected, even as the only candidate', async () => {
+    // Recency may rank applicable memory; it may not create applicability.
+    const originTask = await mkTask(ctxA, 'unrelated origin task');
+    const runTask = await mkTask(ctxA, 'run with no relationship');
+    const d = await withTenant(ctxA, (tx) =>
+      createDecision(tx, ctxA, 'Owner', { title: 'Unrelated conclusion', summary: 's', originatingTaskId: originTask }),
+    );
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, d));
+    // runTask shares no task, no objective, no supporting reference with the decision. Even though it
+    // is accepted, recent, and there are far fewer than ten candidates, it must NOT be injected.
+    const mem = await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(runTask)));
+    expect(mem.contextItem?.content ?? '').not.toContain('Unrelated conclusion');
+  });
+
+  it('eligibility — a shared supporting reference makes a decision eligible (not only task match)', async () => {
+    const originTask = await mkTask(ctxA, 'doc-origin task');
+    const runTask = await mkTask(ctxA, 'doc-run task');
+    const d = await withTenant(ctxA, (tx) =>
+      createDecision(tx, ctxA, 'Owner', {
+        title: 'Doc-grounded conclusion',
+        summary: 's',
+        originatingTaskId: originTask, // NOT the run task
+        supportingRefs: ['canon/bible.md'],
+      }),
+    );
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, d));
+    // The run references the same document → structural relationship established.
+    const mem = await withTenant(ctxA, (tx) =>
+      assembleDecisionMemory(tx, ctxA, { currentTaskId: runTask, objectiveTaskIds: [], docPaths: new Set(['canon/bible.md']) }),
+    );
+    expect(mem.contextItem?.content ?? '').toContain('Doc-grounded conclusion');
   });
 
   it('objectiveTaskIds is tenant-scoped and returns attached task ids', async () => {
