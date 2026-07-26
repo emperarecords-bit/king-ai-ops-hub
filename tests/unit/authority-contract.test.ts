@@ -59,7 +59,7 @@ describe('buildPrimaryUserTurn — tiered, labeled context', () => {
       title: 'Charter',
       content: 'The workspace charter.',
       authority: AUTHORITY.WORKSPACE_CONTROL,
-      kind: 'Approved workspace control',
+      kind: 'Knowledge context',
     },
     {
       title: 'S01E01_Screenplay.md',
@@ -72,7 +72,7 @@ describe('buildPrimaryUserTurn — tiered, labeled context', () => {
 
   it('emits a header per authority level present', () => {
     expect(turn).toContain('LEVEL 1 — CURRENT HUB OPERATIONAL STATE');
-    expect(turn).toContain('LEVEL 2 — APPROVED WORKSPACE CONTROLS');
+    expect(turn).toContain('LEVEL 2 — KNOWLEDGE CONTEXT');
     expect(turn).toContain('LEVEL 3 — LINKED PROJECT DOCUMENTS');
   });
 

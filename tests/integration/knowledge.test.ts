@@ -17,7 +17,7 @@ import {
   reviseKnowledge,
   selectRelevantKnowledge,
 } from '@/domain/knowledge/knowledge';
-import { loadApprovedContext } from '@/domain/projects/context';
+import { listAllActiveKnowledgeForAdministration } from '@/domain/projects/context';
 
 /**
  * K1 rules that must never regress: only ACTIVE knowledge is injected;
@@ -87,13 +87,13 @@ describe.skipIf(!available)('company knowledge K1', () => {
         activate: false,
       }),
     );
-    const injected = await withTenant(ctx, (tx) => loadApprovedContext(tx, ctx));
+    const injected = await withTenant(ctx, (tx) => listAllActiveKnowledgeForAdministration(tx, ctx));
     expect(injected.find((i) => i.title === 'Draft standard')).toBeUndefined();
   });
 
   it('activation makes an item injectable, with approver recorded', async () => {
     await withTenant(ctx, (tx) => activateKnowledge(tx, ctx, draftId));
-    const injected = await withTenant(ctx, (tx) => loadApprovedContext(tx, ctx));
+    const injected = await withTenant(ctx, (tx) => listAllActiveKnowledgeForAdministration(tx, ctx));
     expect(injected.find((i) => i.title === 'Draft standard')?.content).toBe('Not yet approved.');
     activeId = draftId;
   });
@@ -107,7 +107,7 @@ describe.skipIf(!available)('company knowledge K1', () => {
         activate: true,
       }),
     );
-    const injected = await withTenant(ctx, (tx) => loadApprovedContext(tx, ctx));
+    const injected = await withTenant(ctx, (tx) => listAllActiveKnowledgeForAdministration(tx, ctx));
     expect(injected.find((i) => i.title === 'House style')).toBeDefined();
   });
 
@@ -115,7 +115,7 @@ describe.skipIf(!available)('company knowledge K1', () => {
     await withTenant(ctx, (tx) =>
       reviseKnowledge(tx, ctx, activeId, { body: 'Approved, v2.', activate: true }),
     );
-    const injected = await withTenant(ctx, (tx) => loadApprovedContext(tx, ctx));
+    const injected = await withTenant(ctx, (tx) => listAllActiveKnowledgeForAdministration(tx, ctx));
     const versions = injected.filter((i) => i.title === 'Draft standard');
     expect(versions).toHaveLength(1);
     expect(versions[0]!.content).toBe('Approved, v2.');
@@ -134,7 +134,7 @@ describe.skipIf(!available)('company knowledge K1', () => {
     await withTenant(ctx, (tx) =>
       reviseKnowledge(tx, ctx, current.id, { body: 'v3 pending.', activate: false }),
     );
-    const injected = await withTenant(ctx, (tx) => loadApprovedContext(tx, ctx));
+    const injected = await withTenant(ctx, (tx) => listAllActiveKnowledgeForAdministration(tx, ctx));
     expect(injected.find((i) => i.title === 'Draft standard')?.content).toBe('Approved, v2.');
   });
 
@@ -142,7 +142,7 @@ describe.skipIf(!available)('company knowledge K1', () => {
     const all = await withTenant(ctx, (tx) => listKnowledge(tx, ctx, 'active'));
     const house = all.find((i) => i.title === 'House style')!;
     await withTenant(ctx, (tx) => archiveKnowledge(tx, ctx, house.id));
-    const injected = await withTenant(ctx, (tx) => loadApprovedContext(tx, ctx));
+    const injected = await withTenant(ctx, (tx) => listAllActiveKnowledgeForAdministration(tx, ctx));
     expect(injected.find((i) => i.title === 'House style')).toBeUndefined();
     await expect(
       withTenant(ctx, (tx) => archiveKnowledge(tx, ctx, house.id)),
@@ -171,7 +171,8 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
     const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'migrate the postgres database schema safely' }));
     const hit = picked.find((k) => k.title === 'Database migration policy')!;
     expect(hit).toBeDefined();
-    expect(hit.reason).toBe('subject');
+    expect(hit.reason).toMatch(/^subject:/); // matched terms preserved for the trail
+    expect(hit.reason).toMatch(/postgres|database|schema/);
   });
 
   it('drafts, archived, and superseded versions are never selected; one version at most', async () => {

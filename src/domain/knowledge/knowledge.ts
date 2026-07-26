@@ -230,16 +230,18 @@ export async function selectRelevantKnowledge(
     .map((s) => {
       const ageDays = (now - s.r.createdAt.getTime()) / 86_400_000;
       // Recency stays a small tiebreak below relationship strength — it never lifts an irrelevant item.
-      return { r: s.r, score: s.rel.score + Math.max(0, 1 - ageDays / 90) };
+      return { r: s.r, rel: s.rel, score: s.rel.score + Math.max(0, 1 - ageDays / 90) };
     });
   scored.sort((a, b) => b.score - a.score || b.r.createdAt.getTime() - a.r.createdAt.getTime());
 
-  return scored.slice(0, MAX_KNOWLEDGE).map(({ r }) => ({
+  return scored.slice(0, MAX_KNOWLEDGE).map(({ r, rel }) => ({
     id: r.id,
     version: r.version,
     title: r.title,
     body: r.body,
-    reason: 'subject',
+    // Provisional relevance by shared terminology — the matched terms are preserved so the trail
+    // shows WHY it was eligible (not a claim of structural applicability).
+    reason: `subject: ${rel.sharedTerms.join(', ')}`,
     memoryText: `${r.title}\n${r.body}`,
   }));
 }

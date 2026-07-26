@@ -33,4 +33,12 @@ describe('knowledgeRelevance', () => {
     expect(one.score).toBe(1);
     expect(one.eligible).toBe(false);
   });
+
+  it('generic business vocabulary is excluded and cannot create relevance', () => {
+    // These share only generic words (customer, project, process, price, task, work, company).
+    const query = significantTerms('customer project process price task work company');
+    expect(query.size).toBe(0); // all generic → no significant terms
+    const rel = knowledgeRelevance('Customer project process price task work company handbook', query);
+    expect(rel.eligible).toBe(false);
+  });
 });

@@ -252,7 +252,7 @@ export async function startRun(
         title: k.title,
         content: k.body,
         authority: AUTHORITY.WORKSPACE_CONTROL,
-        kind: 'Approved workspace control',
+        kind: 'Knowledge context',
       })),
       ...retrieved.map((r) => ({
         title: r.relativePath,

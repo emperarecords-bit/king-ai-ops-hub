@@ -7,7 +7,7 @@ import { serverEnv } from '@/lib/env.server';
 import { withTenant } from '@/db/tenant';
 import { getProvider } from '@/providers/registry';
 import { findAgentForRole } from '@/domain/agents/agents';
-import { loadApprovedContext } from '@/domain/projects/context';
+import { selectRelevantKnowledge } from '@/domain/knowledge/knowledge';
 import { wrapUntrusted } from '@/orchestration/prompts';
 import { assertWithinBudget } from '@/domain/usage/usage';
 
@@ -82,21 +82,23 @@ export async function suggestSuccessCriteria(
 
   const env = serverEnv();
 
+  // Objective suggestion is an AI call, so it must use the SAME relevance gate as task runs — never
+  // the wholesale loader. The query is the objective the operator is drafting.
   const { agent, knowledge } = await withTenant(ctx, async (tx) => {
     await assertWithinBudget(tx, ctx.projectId);
     return {
       agent: await findAgentForRole(tx, ctx, 'primary', 'openai'),
-      knowledge: await loadApprovedContext(tx, ctx),
+      knowledge: await selectRelevantKnowledge(tx, ctx, { queryText: `${title} ${input.description}` }),
     };
   });
   if (!agent) throw new ValidationError(['No primary employee is configured in this workspace.']);
 
   const knowledgeBlock =
     knowledge.length === 0
-      ? '(no company knowledge yet)'
+      ? '(no relevant company knowledge)'
       : knowledge
           .slice(0, 5)
-          .map((k) => wrapUntrusted(`Knowledge — ${k.title}`, k.content))
+          .map((k) => wrapUntrusted(`Knowledge context — ${k.title}`, k.body))
           .join('\n\n');
 
   const system = `You propose measurable success criteria for a business objective.

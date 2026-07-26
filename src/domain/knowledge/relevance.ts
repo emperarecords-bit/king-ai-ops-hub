@@ -19,11 +19,25 @@ const STOPWORDS = new Set([
   'out', 'off', 'per', 'via', 'use', 'used', 'using', 'make', 'made',
 ]);
 
-/** Significant terms of a text: lowercased alphanumeric tokens ≥3 chars, minus stopwords. */
+/**
+ * Generic business vocabulary that co-occurs across unrelated work, so it must NOT create relevance.
+ * A shared "customer"/"project"/"process" term is not evidence that two records concern the same
+ * subject. Excluded from the significant-term set entirely (lexical relevance is transitional — real
+ * structural scope/entity signals will supersede it).
+ */
+const GENERIC = new Set([
+  'customer', 'customers', 'client', 'clients', 'project', 'projects', 'process', 'processes',
+  'price', 'prices', 'pricing', 'task', 'tasks', 'work', 'working', 'company', 'business',
+  'team', 'workspace', 'objective', 'objectives', 'goal', 'goals', 'data', 'info', 'information',
+  'system', 'systems', 'service', 'services', 'product', 'products', 'update', 'updates',
+  'general', 'standard', 'standards', 'policy', 'policies', 'note', 'notes', 'item', 'items',
+]);
+
+/** Significant terms of a text: lowercased alphanumeric tokens ≥3 chars, minus stopwords AND generics. */
 export function significantTerms(text: string): Set<string> {
   const out = new Set<string>();
   for (const raw of (text ?? '').toLowerCase().split(/[^a-z0-9]+/)) {
-    if (raw.length >= 3 && !STOPWORDS.has(raw)) out.add(raw);
+    if (raw.length >= 3 && !STOPWORDS.has(raw) && !GENERIC.has(raw)) out.add(raw);
   }
   return out;
 }

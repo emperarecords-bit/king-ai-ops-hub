@@ -1317,6 +1317,26 @@ prescriptive; **a subject category must not create authority** — Knowledge is 
 never as instructions that override Decision Memory. (Prompt reframing + the trustworthiness schema are
 the next step.)
 
+### Two live context-path fixes (built 2026-07-26)
+
+- **Every AI consumer uses the safe path.** Objective suggestion (`suggest.ts`) — an AI call — now
+  uses `selectRelevantKnowledge` with the drafted objective as its query, not the wholesale loader.
+  The wholesale loader is renamed **`listAllActiveKnowledgeForAdministration`** (was
+  `loadApprovedContext`) so its risk is explicit; it is for admin/inspection/migration only. A
+  guard test asserts no prompt-producing module (`runner.ts`, `suggest.ts`) references it.
+  > Principle: Every AI context consumer must pass through an explicit relevance and disclosure gate.
+- **Knowledge enters prompts as evidence, not charter.** Level 2 is reframed from "APPROVED WORKSPACE
+  CONTROLS (authoritative)" to **"KNOWLEDGE CONTEXT — evidence to weigh, NOT instructions"**; the
+  authority contract states Knowledge is not authority/instructions and defers directive authority to
+  Decision Memory (Level 1) — even for a record titled policy/standard/decision. The run item label is
+  now "Knowledge context." Locked by `knowledge-prompt-framing.test.ts` (policy-titled item renders as
+  context, not an approved control; contract defers to Decisions).
+- **Lexical relevance hardened + labeled transitional.** Generic business vocabulary (customer /
+  project / process / price / task / work / company / …) is excluded so it can't create false
+  relevance; the matched terms are preserved in the application record's reason (`subject: <terms>`) —
+  provisional relevance by shared terminology, *not* structural applicability. When scope/entity
+  fields exist, structural scope becomes primary and vocabulary supporting. Full suite **429/429**.
+
 *Next steps (deferred, not built, never presented as if they exist): the minimum provenance /
 epistemic-basis / verification / freshness / scope / sensitivity model; presenting Knowledge as
 evidence-not-directive in the prompt; an AI extraction/promotion path (propose-only, source-identified,
