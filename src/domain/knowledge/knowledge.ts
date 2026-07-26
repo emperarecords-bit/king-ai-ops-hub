@@ -19,7 +19,13 @@ import { auditLogs, knowledgeInjections, knowledgeItems, knowledgeSources, knowl
 import { writeAudit } from '@/domain/audit/audit';
 import { knowledgeRelevance, significantTerms } from '@/domain/knowledge/relevance';
 import { assessProvenance, isProvenanceBroken, resolveKnowledgeSource, type ProvenanceState, type ResolutionOutcome } from '@/domain/knowledge/provenance';
-import { assessKnowledge, qualificationLabel, type KnowledgeUseIntent } from '@/domain/knowledge/assess';
+import { assessKnowledge, type FreshnessState, type KnowledgeUseIntent, type UseState } from '@/domain/knowledge/assess';
+import {
+  type KnowledgeDisclosure,
+  type KnowledgeEpistemicBasis,
+  type KnowledgeScopeKind,
+  type KnowledgeVerification,
+} from '@/types/domain';
 
 const scopeTask = alias(tasks, 'k_scope_task');
 const scopeObjective = alias(objectives, 'k_scope_objective');
@@ -503,6 +509,30 @@ export async function archiveKnowledge(
 
 const MAX_KNOWLEDGE = 12;
 
+/**
+ * The immutable trust assessment used AT DISPATCH, frozen onto the application record. It lets a past
+ * dispatch be explained without recomputing from today's records (sources may have moved, been re-
+ * verified, or gone stale since). Source IDs + per-source resolution outcomes are stored; human-
+ * readable source labels/locators are NOT — the snapshot is an internal audit fact, and labels can be
+ * sensitive. `renderingVersion` pins the rendering-format contract so old snapshots stay interpretable.
+ */
+export interface KnowledgeTrustSnapshot {
+  epistemicBasis: KnowledgeEpistemicBasis;
+  verification: KnowledgeVerification;
+  freshness: FreshnessState;
+  provenanceState: ProvenanceState;
+  useState: UseState;
+  scopeKind: KnowledgeScopeKind;
+  disclosure: KnowledgeDisclosure;
+  disclosureDecision: 'permitted' | 'withheld';
+  intendedUse: KnowledgeUseIntent;
+  reliedOnSourceIds: string[];
+  supplementalSourceIds: string[];
+  resolutions: { sourceId: string; outcome: ResolutionOutcome; relied: boolean }[];
+  supportJudgmentId: string | null;
+  renderingVersion: string;
+}
+
 export interface SelectedKnowledge {
   id: string;
   version: number;
@@ -512,6 +542,45 @@ export interface SelectedKnowledge {
   reason: string;
   /** The exact text supplied to the AI — snapshotted into the application record. */
   memoryText: string;
+  /** Immutable trust facts as assessed at dispatch — frozen onto the application record. */
+  trustSnapshot: KnowledgeTrustSnapshot;
+}
+
+/** Current rendering-format contract version, pinned into every application snapshot. */
+const KNOWLEDGE_RENDERING_VERSION = 'kv1';
+
+/**
+ * The provenance phrase added to a supplied record's qualification bracket, plus the source line (if
+ * any) rendered beneath it. SENSITIVE-METADATA GUARD: a source's human-readable label is rendered into
+ * the prompt ONLY when it currently RESOLVES to its cited version. Broken / missing / mismatched /
+ * inaccessible sources contribute a generic phrase but never leak their label, ref, or hash.
+ */
+function renderProvenance(prov: KnowledgeProvenanceAssessment): { phrase: string; sourceLine: string | null } {
+  const resolvedRelied = prov.resolutions.filter((r) => r.relied && r.outcome === 'resolved');
+  switch (prov.state) {
+    case 'inspectable_support': {
+      // All sources resolve AND a support judgment exists — safe to name the relied-upon evidence.
+      const labels = resolvedRelied.map((r) => r.label).filter((l): l is string => !!l);
+      return { phrase: 'source-supported', sourceLine: labels.length ? `Supported by: ${labels.join(', ')}` : null };
+    }
+    case 'partial':
+      // Some support inspectable, some not: name only what resolves; never the broken source's label.
+      return {
+        phrase: prov.reliedBroken ? 'relied-upon source version unavailable' : 'some supplemental sources unavailable',
+        sourceLine: resolvedRelied.length
+          ? `Supported by: ${resolvedRelied.map((r) => r.label).filter((l): l is string => !!l).join(', ')}`
+          : null,
+      };
+    case 'broken':
+      return { phrase: 'cited source version unavailable', sourceLine: null };
+    case 'unsupported':
+      return { phrase: 'cited source type not resolvable', sourceLine: null };
+    case 'attached_not_reviewed':
+      return { phrase: 'source attached, support not yet reviewed', sourceLine: null };
+    case 'no_source':
+    default:
+      return { phrase: '', sourceLine: null };
+  }
 }
 
 /**
@@ -565,11 +634,11 @@ export async function selectRelevantKnowledge(
   const intendedUse: KnowledgeUseIntent = args.intendedUse ?? 'current_operational_fact';
   const queryTerms = significantTerms(args.queryText);
 
-  const scored: { r: (typeof rows)[number]; reason: string; qualification: string; score: number }[] = [];
+  const scored: { item: SelectedKnowledge; score: number; createdAt: Date }[] = [];
   for (const r of rows) {
     // Order: lifecycle → version(active) → disclosure → scope validity → freshness/verification.
     // v1 disclosure: `restricted` has no grant path yet, so it is not permitted for any consumer.
-    const a = assessKnowledge({
+    const baseAssessInput = {
       status: r.status,
       epistemicBasis: r.epistemicBasis,
       verification: r.verification,
@@ -586,8 +655,10 @@ export async function selectRelevantKnowledge(
       disclosurePermitted: r.disclosure !== 'restricted',
       intendedUse,
       now,
-    });
-    if (a.useState === 'withheld') continue; // failed a hard gate before relevance — no scoring, no text
+    };
+    // First pass WITHOUT provenance — cheap gates (lifecycle/disclosure/scope/freshness/dispute) run
+    // before we pay for source resolution, and before relevance scoring.
+    if (assessKnowledge(baseAssessInput).useState === 'withheld') continue;
 
     // Scope RELEVANCE: a record failing scope is not rescued by lexical overlap.
     let relScore = 0;
@@ -602,21 +673,51 @@ export async function selectRelevantKnowledge(
     }
     if (relScore === 0) continue;
 
-    const ageDays = (nowMs - r.createdAt.getTime()) / 86_400_000;
-    const qualification = a.useState === 'usable_with_qualification' ? qualificationLabel(a) : '';
-    scored.push({ r, reason, qualification, score: relScore + Math.max(0, 1 - ageDays / 90) });
-  }
-  scored.sort((x, y) => y.score - x.score || y.r.createdAt.getTime() - x.r.createdAt.getTime());
+    // Only NOW, for a relevant + otherwise-usable candidate, resolve provenance against today's
+    // workspace and re-assess with the current-use breakage signal. A source-dependent record whose
+    // relied-upon evidence can't be inspected at its cited version is withheld from current fact.
+    const prov = await assessKnowledgeProvenance(tx, ctx, r.id, r.version);
+    const a = assessKnowledge({ ...baseAssessInput, provenanceBroken: prov.brokenForCurrentUse });
+    if (a.useState === 'withheld') continue;
 
-  return scored.slice(0, MAX_KNOWLEDGE).map(({ r, reason, qualification }) => ({
-    id: r.id,
-    version: r.version,
-    title: r.title,
-    body: r.body,
-    reason,
-    // Qualified rendering: a qualified record carries its bracket label so the model uses it responsibly.
-    memoryText: qualification ? `${qualification}\n${r.title}\n${r.body}` : `${r.title}\n${r.body}`,
-  }));
+    const provRender = renderProvenance(prov);
+    const bracketParts = [...a.qualifications];
+    if (provRender.phrase) bracketParts.push(provRender.phrase);
+    // A record carries its qualification bracket only when not cleanly usable OR provenance adds a note,
+    // so the model uses it responsibly; source labels appear only for currently-resolved evidence.
+    const showBracket = a.useState === 'usable_with_qualification' || !!provRender.phrase;
+    const bracket = showBracket ? `[${bracketParts.join(' · ')}]` : '';
+    const bodyBlock = provRender.sourceLine ? `${r.title}\n${r.body}\n${provRender.sourceLine}` : `${r.title}\n${r.body}`;
+    const memoryText = bracket ? `${bracket}\n${bodyBlock}` : bodyBlock;
+
+    const reliedSet = new Set(prov.reliedOnSourceIds);
+    const snapshot: KnowledgeTrustSnapshot = {
+      epistemicBasis: r.epistemicBasis,
+      verification: r.verification,
+      freshness: a.freshness,
+      provenanceState: prov.state,
+      useState: a.useState,
+      scopeKind: r.scopeKind,
+      disclosure: r.disclosure,
+      disclosureDecision: a.disclosureDecision,
+      intendedUse,
+      reliedOnSourceIds: prov.reliedOnSourceIds,
+      supplementalSourceIds: prov.resolutions.map((x) => x.sourceId).filter((id) => !reliedSet.has(id)),
+      resolutions: prov.resolutions.map((x) => ({ sourceId: x.sourceId, outcome: x.outcome, relied: x.relied })),
+      supportJudgmentId: prov.supportJudgmentId,
+      renderingVersion: KNOWLEDGE_RENDERING_VERSION,
+    };
+
+    const ageDays = (nowMs - r.createdAt.getTime()) / 86_400_000;
+    scored.push({
+      item: { id: r.id, version: r.version, title: r.title, body: r.body, reason, memoryText, trustSnapshot: snapshot },
+      score: relScore + Math.max(0, 1 - ageDays / 90),
+      createdAt: r.createdAt,
+    });
+  }
+  scored.sort((x, y) => y.score - x.score || y.createdAt.getTime() - x.createdAt.getTime());
+
+  return scored.slice(0, MAX_KNOWLEDGE).map((s) => s.item);
 }
 
 /**
@@ -653,6 +754,7 @@ export async function logKnowledgeApplications(
         taskId: args.taskId ?? null,
         reason: k.reason,
         memoryText: k.memoryText,
+        trustSnapshot: k.trustSnapshot,
       })),
     )
     .onConflictDoNothing({
@@ -682,9 +784,9 @@ export async function listConsumerKnowledgeApplications(
   ctx: TenantContext,
   consumerType: string,
   consumerId: string,
-): Promise<{ memoryText: string | null }[]> {
-  return tx
-    .select({ memoryText: knowledgeInjections.memoryText })
+): Promise<{ memoryText: string | null; trustSnapshot: KnowledgeTrustSnapshot | null }[]> {
+  const rows = await tx
+    .select({ memoryText: knowledgeInjections.memoryText, trustSnapshot: knowledgeInjections.trustSnapshot })
     .from(knowledgeInjections)
     .where(
       and(
@@ -695,6 +797,8 @@ export async function listConsumerKnowledgeApplications(
       ),
     )
     .orderBy(desc(knowledgeInjections.injectedAt));
+  // The jsonb column is untyped at the DB boundary; the shape is guaranteed by logKnowledgeApplications.
+  return rows.map((r) => ({ memoryText: r.memoryText, trustSnapshot: (r.trustSnapshot as KnowledgeTrustSnapshot | null) ?? null }));
 }
 
 /** The reverse trail for one knowledge item: the AI operations it was supplied to, newest first. */

@@ -342,6 +342,11 @@ export const knowledgeInjections = pgTable(
     reason: text('reason').notNull(),
     /** Immutable snapshot of the exact rendered text supplied to the AI. */
     memoryText: text('memory_text'),
+    /** Immutable trust snapshot AT DISPATCH — epistemic basis, verification, freshness, provenance,
+     *  use-state, scope, disclosure, intended use, relied/supplemental source ids, per-source
+     *  resolution, support-judgment id, rendering-format version. Explains a past dispatch without
+     *  recomputing from today's records; never rewritten by later events. */
+    trustSnapshot: jsonb('trust_snapshot'),
     injectedAt: timestamp('injected_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

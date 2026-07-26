@@ -11,6 +11,7 @@ import {
   activateKnowledge,
   archiveKnowledge,
   createKnowledge,
+  type KnowledgeTrustSnapshot,
   listInjectionsForKnowledge,
   listKnowledge,
   logKnowledgeApplications,
@@ -20,6 +21,24 @@ import {
   selectRelevantKnowledge,
   setKnowledgeVerification,
 } from '@/domain/knowledge/knowledge';
+
+/** A minimal trust snapshot for tests that log an application directly (not via selection). */
+const fakeSnapshot: KnowledgeTrustSnapshot = {
+  epistemicBasis: 'human_asserted',
+  verification: 'unverified',
+  freshness: 'unknown',
+  provenanceState: 'no_source',
+  useState: 'usable',
+  scopeKind: 'workspace',
+  disclosure: 'workspace_internal',
+  disclosureDecision: 'permitted',
+  intendedUse: 'current_operational_fact',
+  reliedOnSourceIds: [],
+  supplementalSourceIds: [],
+  resolutions: [],
+  supportJudgmentId: null,
+  renderingVersion: 'kv1',
+};
 import { listAllActiveKnowledgeForAdministration } from '@/domain/knowledge/admin';
 import { beginAiOperation, beginOrReuseAiOperation, completeAiOperation, failAiOperation, getAiOperation } from '@/domain/ai/operations';
 
@@ -198,7 +217,7 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
     const a = await getSetupDb().insert(agents).values({ orgId, projectId: ctx.projectId, name: `A-${randomUUID().slice(0, 6)}`, role: 'primary', provider: 'openai', model: 'gpt-5.4-mini', systemPrompt: 'x' }).returning({ id: agents.id });
     const t = await getSetupDb().insert(tasks).values({ orgId, projectId: ctx.projectId, title: 'Vendor task', input: 'x', providerSelection: 'openai', status: 'completed', createdBy: userId }).returning({ id: tasks.id });
     const r = await getSetupDb().insert(runs).values({ orgId, projectId: ctx.projectId, taskId: t[0]!.id, status: 'completed', primaryAgentId: a[0]!.id }).returning({ id: runs.id });
-    const selected = [{ id, version: 1, title: 'Vendor onboarding steps', body: 'original', reason: 'subject: vendor, onboarding', memoryText: 'EXACT vendor text v1' }];
+    const selected = [{ id, version: 1, title: 'Vendor onboarding steps', body: 'original', reason: 'subject: vendor, onboarding', memoryText: 'EXACT vendor text v1', trustSnapshot: fakeSnapshot }];
     await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'task_run', consumerId: r[0]!.id, runId: r[0]!.id, taskId: t[0]!.id, injected: selected }));
     await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'task_run', consumerId: r[0]!.id, runId: r[0]!.id, taskId: t[0]!.id, injected: [{ ...selected[0]!, memoryText: 'DIFFERENT (ignored)' }] }));
     let trail = await withTenant(ctx, (tx) => listInjectionsForKnowledge(tx, ctx, id));
@@ -345,7 +364,7 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
     // Simulate a first dispatch that logged one application under an operation.
     const op = await withTenant(ctx, (tx) => beginAiOperation(tx, ctx, { operationType: 'objective_suggestion', provider: 'openai' }));
     const k = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Frozen note', body: 'b', kind: 'fact', activate: true }));
-    await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: op, injected: [{ id: k, version: 1, title: 'Frozen note', body: 'b', reason: 'subject: x', memoryText: 'FROZEN SNAPSHOT TEXT' }] }));
+    await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: op, injected: [{ id: k, version: 1, title: 'Frozen note', body: 'b', reason: 'subject: x', memoryText: 'FROZEN SNAPSHOT TEXT', trustSnapshot: fakeSnapshot }] }));
     // The retry path reads exactly what was frozen — even if the record changes afterward.
     await withTenant(ctx, (tx) => reviseKnowledge(tx, ctx, k, { body: 'changed after dispatch', activate: true }));
     const frozen = await withTenant(ctx, (tx) => listConsumerKnowledgeApplications(tx, ctx, 'objective_suggestion', op));
@@ -355,7 +374,7 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
   it('a durable operation anchors non-run Knowledge applications inspectably', async () => {
     const op = await withTenant(ctx, (tx) => beginAiOperation(tx, ctx, { operationType: 'objective_suggestion', provider: 'openai' }));
     const k = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Op-anchored note', body: 'b', kind: 'fact', activate: true }));
-    await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: op, injected: [{ id: k, version: 1, title: 'Op-anchored note', body: 'b', reason: 'subject: x', memoryText: 'snap' }] }));
+    await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: op, injected: [{ id: k, version: 1, title: 'Op-anchored note', body: 'b', reason: 'subject: x', memoryText: 'snap', trustSnapshot: fakeSnapshot }] }));
     const trail = await withTenant(ctx, (tx) => listInjectionsForKnowledge(tx, ctx, k));
     expect(trail[0]!.consumerId).toBe(op);
     expect((await withTenant(ctx, (tx) => getAiOperation(tx, ctx, op)))?.operationType).toBe('objective_suggestion');
@@ -364,7 +383,7 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
   it('objective suggestion (a non-run consumer) leaves the same application record, idempotent per operation', async () => {
     const id = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Pilot pricing note', body: 'Pilot pricing flat fee guarantee contractor conversion.', kind: 'fact', activate: true }));
     const operationId = randomUUID();
-    const supplied = [{ id, version: 1, title: 'Pilot pricing note', body: 'b', reason: 'subject: pilot, pricing', memoryText: 'EXACT suggestion snapshot' }];
+    const supplied = [{ id, version: 1, title: 'Pilot pricing note', body: 'b', reason: 'subject: pilot, pricing', memoryText: 'EXACT suggestion snapshot', trustSnapshot: fakeSnapshot }];
     // No run, no task — a suggestion operation. Same table, same trail.
     await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: operationId, injected: supplied }));
     await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: operationId, injected: supplied }));

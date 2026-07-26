@@ -1477,10 +1477,47 @@ suite **452/452**.
   use. Locked by tests (artifact version-mismatch; broken-supplemental-usable; broken-relied-withheld;
   judgment identifies which relationships govern). Full suite **460/460**.
 
-*Provenance Part B (next): wire per-item source resolution into live selection + prompt rendering
-(broken → withheld/qualified by intended use), and store the trust snapshot (epistemic/verification/
-freshness/provenance/source-ids/resolution-summary/rendering-version) on each Knowledge application, so
-the future Detail explains a past dispatch without recomputing from today's records.*
+### Trustworthiness increment 2 — inspectable provenance, Part B (built 2026-07-26)
+
+Provenance is now resolved into the LIVE retrieval path and frozen onto every application — the trust
+model stops being an inspection-only artifact and starts governing what actually reaches a prompt.
+
+- **Resolve provenance during selection, but only where it can bite.** `selectRelevantKnowledge` runs
+  the cheap gates first (lifecycle / disclosure / scope / freshness / dispute) and the relevance gate,
+  then — for the surviving relevant candidates only — resolves each cited source against today's
+  workspace via `assessKnowledgeProvenance` and re-runs the shared `assessKnowledge` with
+  `provenanceBroken = brokenForCurrentUse`. Source resolution is never paid for on irrelevant or
+  already-withheld rows. *Principle: the same assessment governs inspection, rendering, and selection —
+  a record can't be trusted in one and withheld in another.*
+- **Intended use decides the verdict, not the defect alone.** A source-dependent claim whose
+  relied-upon evidence can't be inspected at its cited version is **withheld** from
+  `current_operational_fact` use, yet remains **usable-with-qualification** for `historical_analysis` /
+  `reference`. Broken provenance limits reliance; it does not erase the record. *Principle: broken
+  evidence changes what a record may be used FOR, not whether it exists.*
+- **Qualified rendering carries provenance, and the sensitive-metadata guard holds.** The prompt bracket
+  gains a provenance phrase (`source-supported` · `cited source version unavailable` ·
+  `relied-upon source version unavailable` · `some supplemental sources unavailable` · `cited source
+  type not resolvable` · `source attached, support not yet reviewed`). A human-readable source label is
+  rendered into the prompt **only when that source currently resolves to its cited version** — broken /
+  missing / mismatched / inaccessible sources contribute a generic phrase but never leak their label,
+  ref, or hash. *Principle: name the evidence you can stand behind now; never leak a pointer to evidence
+  the consumer can't inspect.*
+- **Immutable trust snapshot on every application.** `knowledge_injections.trust_snapshot` (migration
+  0030) freezes the facts used AT DISPATCH: epistemic basis, verification, freshness, provenance state,
+  use-state, scope, disclosure decision, intended use, relied + supplemental source IDs, per-source
+  resolution outcomes, support-judgment ID, and a pinned `renderingVersion` (`kv1`). Source IDs and
+  outcomes are stored; human-readable labels are NOT (the snapshot is an internal audit fact and labels
+  can be sensitive). *Principle: a past dispatch must be explainable from what was true then, without
+  recomputing from records that have since moved.*
+- **A retry repeats the frozen snapshot — it never re-resolves.** Selection (and therefore resolution)
+  runs only at first dispatch; retries read the frozen `memoryText` + snapshot via
+  `listConsumerKnowledgeApplications`. A source breaking between attempts cannot silently change the
+  Knowledge a retried operation receives. *Principle: one immutable logical request receives one frozen
+  evidence set, whatever happens to the underlying records mid-flight.*
+- Locked by `knowledge-provenance-selection.test.ts` (inspectable→selected+named · broken-relied→withheld
+  for current · broken→usable-qualified for historical + no label leak · broken-supplemental→usable,
+  names only resolved relied · no-source→clean · snapshot freezes resolutions/relied-ids/judgment ·
+  retry repeats frozen state after a break · reverse trail carries the version). Full suite **468/468**.
 
 *Remaining trustworthiness increments after provenance (deferred, not built): (3) disclosure GRANTS
 (provider/agent/consumer/purpose/period/actor) so restricted can be supplied with a matching grant;

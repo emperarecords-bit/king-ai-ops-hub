@@ -211,6 +211,13 @@
       "when": 1785101906895,
       "tag": "0029_flaky_typhoid_mary",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1785103685396,
+      "tag": "0030_special_secret_warriors",
+      "breakpoints": true
     }
   ]
 }

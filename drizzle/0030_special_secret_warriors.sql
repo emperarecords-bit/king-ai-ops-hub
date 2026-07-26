@@ -1,0 +1,1 @@
+ALTER TABLE "knowledge_injections" ADD COLUMN "trust_snapshot" jsonb;
