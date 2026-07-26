@@ -673,3 +673,15 @@ secondary; explicit Unknown. **Still to build (increment 2), all accepted, none 
 4. **Cross-surface reuse** — Dashboard "Recent work" and the objective "Work contributing" should
    read through the execution translator (required build-test #10), so the same work reads
    identically everywhere.
+
+**Execution 2b closed (2026-07-26) — model-limit classifications (accepted, not blockers):**
+- **Watch ≠ Requires-you.** Run-health degradation is a *Watch* shown in Ongoing Automations with
+  elevated-but-non-demanding language; only `intervention: required` enters Requires-you. v1 has no
+  signal that makes a schedule Required (no budget boundary, no decision gate), so v1 never returns
+  Required for a schedule. Regression test added.
+- **Per-schedule budget = future autonomy-governance capability.** Show attributable spend only;
+  never describe it as "within/approaching a budget" unless a stored, enforceable limit exists.
+- **Stopped schedule state = future.** Paused is the only disabled state today; don't say "Stopped"
+  for schedules until a terminal transition distinct from pause exists.
+- **Control-location usability follow-up:** valid schedule actions should eventually live on the
+  canonical Ongoing-Automations record, not require knowing the control sits under an objective.

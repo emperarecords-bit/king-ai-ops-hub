@@ -38,13 +38,16 @@ export function assessAutomation(i: {
     };
   }
 
-  // Enabled. Elevate the *schedule itself* only when its own run history supports it.
+  // Enabled. Run-health is a *Watch*, never Required — a concern does not demand involvement
+  // (the same rule as legitimately-Waiting work). Required is reserved for states the operator
+  // must resolve (a hard authority/spend boundary, a decision gate) — none of which v1 can detect,
+  // so v1 never returns Required for a schedule.
   if (i.recentFailures >= 2) {
     return {
       state: 'degraded',
-      intervention: 'required',
-      requiredAction: 'Pause or inspect recent runs',
-      reason: `Enabled — but its ${i.recentFailures} most recent generated runs failed. The schedule is still enabled.`,
+      intervention: 'watch',
+      requiredAction: null,
+      reason: `Its ${i.recentFailures} most recent generated runs failed. The schedule remains enabled.`,
       actions: ['Pause', 'Inspect recent runs'],
     };
   }
@@ -53,7 +56,7 @@ export function assessAutomation(i: {
       state: 'enabled',
       intervention: 'watch',
       requiredAction: null,
-      reason: 'Enabled — one recent generated run failed. Not yet a pattern.',
+      reason: 'One recent generated run failed. Not yet a pattern; the schedule remains enabled.',
       actions: ['Pause', 'Inspect recent runs'],
     };
   }

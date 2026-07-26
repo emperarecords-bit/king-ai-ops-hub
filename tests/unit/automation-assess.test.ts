@@ -17,15 +17,18 @@ describe('assessAutomation — authority is not an execution instance', () => {
     expect(twoFailed.state).toBe('degraded');
     expect(twoFailed.state).not.toBe('paused');
     expect(twoFailed.state).not.toBe('stopped' as AutomationState);
-    expect(twoFailed.intervention).toBe('required');
-    expect(twoFailed.requiredAction).toMatch(/pause or inspect/i);
-    expect(twoFailed.reason).toMatch(/still enabled/i);
+    expect(twoFailed.reason).toMatch(/remains enabled/i);
   });
 
-  it('one recent failure is a watch, not yet a required intervention', () => {
-    const a = assessAutomation({ enabled: true, recentRuns: 3, recentFailures: 1 });
-    expect(a.state).toBe('enabled');
-    expect(a.intervention).toBe('watch');
+  it('a Degraded automation is a Watch, never Required — it stays OUT of Requires You', () => {
+    // Requires You contains only intervention === 'required'; a run-health concern is not that.
+    const degraded = assessAutomation({ enabled: true, recentRuns: 3, recentFailures: 2 });
+    expect(degraded.intervention).toBe('watch');
+    expect(degraded.intervention).not.toBe('required');
+    expect(degraded.requiredAction).toBeNull();
+
+    const oneFailed = assessAutomation({ enabled: true, recentRuns: 3, recentFailures: 1 });
+    expect(oneFailed.intervention).toBe('watch');
   });
 
   it('a disabled schedule is Paused, and says prior runs are unaffected', () => {
