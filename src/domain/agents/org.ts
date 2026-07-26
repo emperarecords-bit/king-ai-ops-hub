@@ -54,6 +54,18 @@ export async function listEmployees(tx: DbTx, ctx: TenantContext): Promise<Emplo
   }));
 }
 
+/** Departments available in this org, for the employee form's picker. */
+export async function listDepartments(
+  tx: DbTx,
+  ctx: TenantContext,
+): Promise<{ id: string; name: string }[]> {
+  return tx
+    .select({ id: departments.id, name: departments.name })
+    .from(departments)
+    .where(eq(departments.orgId, ctx.orgId))
+    .orderBy(asc(departments.name));
+}
+
 export interface CreateEmployeeInput {
   name: string;
   title?: string | null;
