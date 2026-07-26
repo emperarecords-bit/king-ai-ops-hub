@@ -956,6 +956,20 @@ Refuse (rationale required); (7) once decided, the same page becomes the durable
 history. Locked by unit (`readConsequence` levels) + integration (`getApprovalDetail` context,
 cancelled-task flag, `listApprovalsForQueue`). Full suite: 388/388.
 
-*Still ahead before Approvals fully closes: the executor (authorized-action execution) with its
-revocation and authorization-validity transitions; semantic duplicate/supersession; requestedBy names
-a provider, not an accountable person.*
+**Inline authorization requires complete context (built 2026-07-26).** A decision may occur inline in
+the queue *only* when no material authorization context is hidden elsewhere. `isInlineAuthorizable`
+(evidence-driven, not type-tied) allows the compact inline Authorize/Refuse only for a routine
+proposal whose payload conceals no material parameter (`hasHiddenMaterialParameters`) — content, diff,
+recipients, amount, predicate, environment, URL, etc. Because the compact reference shows summary +
+consequence but never payload *values*, any non-trivial payload field forces the decision onto the
+detail page. A file creation with hidden content does not qualify; an empty-payload routine action
+does. Locked by `consequence.test.ts` ("a proposal with a hidden material parameter can never be
+authorized inline").
+
+**Approvals is closed for this product-review pass (2026-07-26).** It answers *"should this exact
+action receive narrow authority?"* — with the gate integrity intact, the authorization conversation
+on the detail surface, honest authorization≠execution language, and inline decisions permitted only
+when nothing material is concealed. Correctly deferred as **future capabilities** (not blockers while
+the product states plainly that authorization does not execute): authorized-action execution (the
+executor); revocation after authorization; authorization-validity enforcement; semantic
+duplication/supersession; a richer identity for the proposal originator than the provider name.

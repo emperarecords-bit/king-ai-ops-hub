@@ -61,6 +61,34 @@ export interface ConsequenceReadout {
 const REACHES_OUTSIDE: ReadonlyArray<ActionType> = ['email_send', 'social_publish', 'external_http'];
 const CHANGES_SYSTEMS: ReadonlyArray<ActionType> = ['financial', 'db_mutation', 'destructive', 'deployment', 'git_push', 'git_pr'];
 
+/**
+ * Does the payload carry a material parameter the compact queue reference does not surface — content,
+ * a diff, recipients, an amount, a predicate, an environment, a URL, etc.? The queue shows the
+ * summary and the consequence read, never payload *values*, so any non-trivial payload field is
+ * "hidden" for the purpose of an inline decision. A value is material when it is a non-empty string,
+ * a non-zero number, `true`, or a non-empty array/object; empty/null/false fields are cosmetic.
+ */
+export function hasHiddenMaterialParameters(payload: Record<string, unknown>): boolean {
+  return Object.values(payload ?? {}).some((v) => {
+    if (v == null || v === false || v === '' || v === 0) return false;
+    if (Array.isArray(v)) return v.length > 0;
+    if (typeof v === 'object') return Object.keys(v as object).length > 0;
+    return true;
+  });
+}
+
+/**
+ * A decision may occur **inline** only when no material authorization context is hidden elsewhere.
+ * Evidence-driven, not tied to the action type: a routine, well-established proposal whose every
+ * material parameter is already visible may be authorized from the queue; if the operator would have
+ * to open the payload/diff/recipients/amount/predicate/environment to understand the authority, the
+ * decision must happen on the detail page. A file *creation* may qualify; an overwrite with hidden
+ * content may not — the difference is whether anything material is concealed, not the type.
+ */
+export function isInlineAuthorizable(readout: ConsequenceReadout, payload: Record<string, unknown>): boolean {
+  return readout.level === 'routine' && !readout.needsClarification && !hasHiddenMaterialParameters(payload);
+}
+
 export function readConsequence(profile: ConsequenceProfile): ConsequenceReadout {
   const t = profile.actionType;
   const external = profile.externalPartiesAffected.established;

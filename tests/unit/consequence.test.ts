@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { assessConsequence, readConsequence } from '@/domain/approvals/consequence';
+import { assessConsequence, isInlineAuthorizable, readConsequence } from '@/domain/approvals/consequence';
 
 const read = (type: Parameters<typeof assessConsequence>[0]['type'], payload: Record<string, unknown>) =>
   readConsequence(assessConsequence({ type, summary: 's', payload }));
+const inline = (type: Parameters<typeof assessConsequence>[0]['type'], payload: Record<string, unknown>) =>
+  isInlineAuthorizable(read(type, payload), payload);
 
 /**
  * Consequence claims must come from evidence, not action-type templates. These lock that the
@@ -91,5 +93,23 @@ describe('readConsequence levels the proposal from evidence, not the type alone'
   it('a destructive mutation needs a predicate to be clear', () => {
     expect(read('destructive', { where: "x < '2025'" }).needsClarification).toBe(false);
     expect(read('destructive', {}).needsClarification).toBe(true);
+  });
+});
+
+describe('inline authorization requires complete context', () => {
+  it('a proposal with a hidden material parameter can NEVER be authorized inline', () => {
+    // A routine file write, but the actual content is hidden from the compact queue reference.
+    expect(read('file_write', { path: 'notes.md', content: 'material body' }).level).toBe('routine');
+    expect(inline('file_write', { path: 'notes.md', content: 'material body' })).toBe(false);
+    // Even a bare path is a hidden material parameter → detail required.
+    expect(inline('file_write', { path: 'notes.md' })).toBe(false);
+  });
+
+  it('only a routine proposal with no hidden material parameter may be inline', () => {
+    expect(inline('file_write', {})).toBe(true); // nothing material concealed
+    // Consequential is never inline regardless of payload.
+    expect(inline('email_send', { to: 'x@y.z' })).toBe(false);
+    // Cosmetic/empty fields do not count as material.
+    expect(inline('file_write', { note: '', draft: false, tags: [] })).toBe(true);
   });
 });

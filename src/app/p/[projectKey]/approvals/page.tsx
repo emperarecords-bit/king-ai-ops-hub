@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { expireStaleApprovals, listApprovalsForQueue, type QueueApprovalRow } from '@/domain/approvals/approvals';
-import { assessConsequence, readConsequence } from '@/domain/approvals/consequence';
+import { assessConsequence, isInlineAuthorizable, readConsequence } from '@/domain/approvals/consequence';
 import { Card, EmptyState, PageHeader } from '@/components/ui';
 import { DecisionForm } from './decision-form';
 import { ConsequenceLevelChip } from './consequence-view';
@@ -20,8 +20,10 @@ function ts(d: Date): string {
 }
 
 function readRow(a: QueueApprovalRow) {
-  const profile = assessConsequence({ type: a.actionType, summary: a.summary, payload: (a.payload ?? {}) as Record<string, unknown> });
-  return readConsequence(profile);
+  const payload = (a.payload ?? {}) as Record<string, unknown>;
+  const readout = readConsequence(assessConsequence({ type: a.actionType, summary: a.summary, payload }));
+  // Inline authorization is allowed ONLY when nothing material is hidden from the compact reference.
+  return { readout, inline: isInlineAuthorizable(readout, payload) };
 }
 
 /**
@@ -43,7 +45,10 @@ export default async function ApprovalsPage({
     return listApprovalsForQueue(tx, ctx);
   });
 
-  const assessed = rows.map((a) => ({ a, r: readRow(a) }));
+  const assessed = rows.map((a) => {
+    const { readout, inline } = readRow(a);
+    return { a, r: readout, inline };
+  });
   const pending = assessed.filter((x) => x.a.status === 'pending');
   const needsClarification = pending.filter((x) => x.r.needsClarification);
   const awaiting = pending
@@ -82,8 +87,8 @@ export default async function ApprovalsPage({
           <EmptyState>No actions awaiting authorization.</EmptyState>
         ) : (
           <ul className="space-y-3">
-            {awaiting.map(({ a, r }) => (
-              <QueueReference key={a.id} projectKey={projectKey} a={a} r={r} inline={r.level === 'routine'} />
+            {awaiting.map(({ a, r, inline }) => (
+              <QueueReference key={a.id} projectKey={projectKey} a={a} r={r} inline={inline} />
             ))}
           </ul>
         )}
