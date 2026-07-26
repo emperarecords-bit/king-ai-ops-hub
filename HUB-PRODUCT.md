@@ -1087,5 +1087,63 @@ the workspace remember it, and at what scope?* — an AI suggestion must not def
 - **Audit** preserves exhaustive event history; may explain how a decision was made but does not become
   guidance.
 
-*Next design step: define the operating-partner conversation across the representative decision states,
-then the page emerges — do not sketch the page first.*
+### Conversation refinements (accepted 2026-07-26) — six language/contract corrections
+
+1. **Eligibility ≠ injection ≠ reference ≠ influence.** The manifest can show a decision was *injected*,
+   not that the model *followed* it. Preserve four levels: **eligible** (matched applicability) →
+   **injected** (in the run context) → **referenced** (the output cited it, when detectable) →
+   **influenced** (materially changed the work — usually an inference). Say "included in the context for
+   five runs," not "shaped five runs"; where effect is unknown, say so.
+   > Principle: Memory application must distinguish eligibility, injection, explicit reference, and inferred influence.
+2. **Scope is a boundary, not inject-everywhere.** Workspace scope means a decision *may* apply anywhere
+   when its subject is relevant — not that it enters every run. Relevance still gates.
+   > Principle: Scope defines where guidance may apply; relevance determines whether it applies now.
+3. **Guidance should not outlive its scope by default.** Task guidance normally goes inactive when the
+   task closes; objective guidance when the objective completes/cancels; kept afterward only as record,
+   or deliberately extended. "Active while this objective remains open, unless you retire, supersede, or
+   extend it" — not "open-ended."
+   > Principle: Guidance should not outlive the scope that gave it meaning unless explicitly extended.
+4. **Permanence belongs to the record, not active authority.** Use "open-ended workspace guidance," not
+   "permanent." The record may be permanent; authority to guide stays reviewable and retirable.
+   > Principle: The record may be permanent; operational authority remains reviewable.
+5. **Distinguish proposal, authorship, acceptance, authority.** Preserve *proposed by · accepted by ·
+   accountable owner · authority/role under which accepted*. AI confidence is evidence, never authority.
+6. **Rationale ≠ evidence.** Rationale explains the judgment; evidence supports the factual/causal
+   claims; supporting references are where it's inspectable; caveats are what's uncertain. Say "the
+   decision cites three call records as support," not "three calls proved this works."
+   > Principle: A decision rationale explains the judgment; it does not substitute for evidence.
+
+**Language guards:** conflict → "these decisions *may* conflict within the same objective" (offer
+supersede/retire/narrow/exception paths; don't pre-decide the relation or claim "can't apply together"
+unless incompatibility is established). No unsupported promises: "scheduled to lapse on July 30," not
+"I'll warn you a day out" (no scheduler yet); "the refusal and rationale remain in the record," not "the
+suggestion carries your reasoning next time" (no rejected-learning yet). **Defer** stays out of the
+workflow until it records revisit-trigger · reason · owner · queue-behavior.
+
+**Accepted conversation spine** (every decision experience answers): what concluded · why · who proposed
+· who accepted & under what authority · what evidence · record-or-guidance · scope · what makes it
+relevant now · how long active · what limits/retires/replaces it · where eligible/injected · where
+explicitly referenced · what conflicts.
+
+### Semantic model built (2026-07-26) — the substrate the structure renders
+
+- **Scope + applicability + validity** are now first-class on a decision (`applicability`
+  record|guidance · `scope` task|objective|workspace + `scopeObjectiveId` · `effectiveUntil`). Only
+  **active guidance** (accepted · applicability=guidance · not past `effectiveUntil`) is ever injected,
+  and **scope is the ceiling on which relationships count**: task-scoped reaches only its own task,
+  objective-scoped its objective's work, workspace-scoped any relevant run. **AI candidates default to
+  task-scoped guidance — never workspace-wide.** Category (`decisionType`) stays separate from scope.
+- **Retired** is a real status (`retireDecision`): an accepted decision can leave active guidance
+  *without* a replacement (distinct from superseded), remaining a historical record.
+- Locked by `decisions.test.ts`: record-only never injected · expired historical / future active ·
+  task-scope doesn't leak to a sibling task · objective-scope reaches siblings · retire stops guidance.
+  Full suite 397/397.
+- The Decisions page now lets a human set mode/scope/objective/validity and retire an accepted decision,
+  and shows each accepted decision's *guides-{scope}* / *record-only* / *until/expired* read.
+
+*Next increment: the Decisions **Portfolio** (what currently guides · awaiting review · approaching
+expiry · potential conflicts · historical · injection status) and **Decision Detail** (conclusion ·
+rationale/evidence · proposal/acceptance provenance · record-vs-guidance · scope · effective period ·
+supersession/retirement · potential conflicts · eligibility/injection history · the exact form supplied
+to future runs). The reverse influence trail (from a decision, where it was injected) and conflict
+surfacing build here.*

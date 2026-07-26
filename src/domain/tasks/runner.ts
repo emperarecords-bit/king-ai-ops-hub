@@ -190,6 +190,7 @@ export async function startRun(
     const objTaskIds = await objectiveTaskIds(tx, ctx, task.objectiveId);
     const decisionMemory = await assembleDecisionMemory(tx, ctx, {
       currentTaskId: taskId,
+      currentObjectiveId: task.objectiveId,
       objectiveTaskIds: objTaskIds,
       docPaths: new Set(retrieved.map((r) => r.relativePath)),
     });

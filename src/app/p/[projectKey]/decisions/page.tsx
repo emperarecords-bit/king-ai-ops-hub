@@ -1,10 +1,17 @@
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { listDecisions } from '@/domain/decisions/decisions';
+import { listObjectives } from '@/domain/objectives/objectives';
 import { listEmployees } from '@/domain/agents/org';
 import { Card, EmptyState, PageHeader, StatusBadge } from '@/components/ui';
-import { CreateDecisionForm, DecisionButtons } from './decision-forms';
+import { CreateDecisionForm, DecisionButtons, RetireButton } from './decision-forms';
 import { OwnerPicker } from '../owner-picker';
+
+const SCOPE_LABEL: Record<string, string> = {
+  task: 'this task',
+  objective: 'an objective',
+  workspace: 'workspace-wide',
+};
 
 export default async function DecisionsPage({
   params,
@@ -13,19 +20,22 @@ export default async function DecisionsPage({
 }) {
   const { projectKey } = await params;
   const ctx = await requireTenant(projectKey);
-  const { decisions, employees } = await withTenant(ctx, async (tx) => ({
+  const { decisions, employees, objectives } = await withTenant(ctx, async (tx) => ({
     decisions: await listDecisions(tx, ctx),
     employees: await listEmployees(tx, ctx),
+    objectives: await listObjectives(tx, ctx),
   }));
   const isAdmin = ctx.projectRole === 'admin';
   const ownerOptions = employees.map((e) => ({ id: e.id, name: e.name, title: e.title }));
   const ownerName = (id: string | null) =>
     id ? (employees.find((e) => e.id === id)?.name ?? null) : null;
+  const objectiveOptions = objectives.map((o) => ({ id: o.id, title: o.title }));
 
   const proposed = decisions.filter((d) => d.status === 'proposed');
   const accepted = decisions.filter((d) => d.status === 'accepted');
-  const closed = decisions.filter((d) => d.status === 'superseded' || d.status === 'rejected');
+  const closed = decisions.filter((d) => d.status === 'superseded' || d.status === 'rejected' || d.status === 'retired');
   const supersedable = accepted.map((d) => ({ id: d.id, title: d.title }));
+  const now = new Date();
 
   return (
     <div>
@@ -35,7 +45,7 @@ export default async function DecisionsPage({
       />
 
       <Card title="Propose a decision" className="mb-6">
-        <CreateDecisionForm projectKey={projectKey} supersedable={supersedable} />
+        <CreateDecisionForm projectKey={projectKey} supersedable={supersedable} objectives={objectiveOptions} />
       </Card>
 
       {proposed.length > 0 ? (
@@ -65,30 +75,45 @@ export default async function DecisionsPage({
           <ul className="space-y-3">
             {accepted.map((d) => (
               <li key={d.id} className="border-b border-[var(--border)] pb-3 last:border-0">
-                <div className="flex items-center gap-2">
-                  <StatusBadge status={d.status} />
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="text-sm font-medium">{d.title}</span>
                   <span className="text-xs text-[var(--muted)]">{d.decisionType}</span>
+                  {/* Record vs guidance, and — for guidance — its scope and validity: the "where it applies" the memory model needs. */}
+                  {d.applicability === 'record' ? (
+                    <span className="rounded bg-[var(--surface-raised)] px-2 py-0.5 text-xs text-[var(--muted)]">record only</span>
+                  ) : (
+                    <span className="rounded bg-[#1f3a2a] px-2 py-0.5 text-xs text-[var(--success)]">
+                      guides {SCOPE_LABEL[d.scope]}
+                    </span>
+                  )}
+                  {d.effectiveUntil ? (
+                    <span className={`rounded px-2 py-0.5 text-xs ${d.effectiveUntil < now ? 'bg-[#2a2a2a] text-[var(--muted)]' : 'bg-[#3a3220] text-[var(--warning,#c99a3a)]'}`}>
+                      {d.effectiveUntil < now ? 'expired' : 'until'} {d.effectiveUntil.toISOString().slice(0, 10)}
+                    </span>
+                  ) : null}
                 </div>
                 <div className="mt-1 text-sm text-[var(--muted)]">{d.summary}</div>
                 <div className="mt-1 text-xs text-[var(--muted)]">
                   decided by {d.authorLabel} · {d.createdAt.toISOString().slice(0, 10)}
                   {d.originatingTaskTitle ? ` · from “${d.originatingTaskTitle}”` : ''}
                 </div>
-                <div className="mt-2 flex items-center gap-2 text-xs">
-                  <span className="text-[var(--muted)]">Owner:</span>
-                  {isAdmin ? (
-                    <OwnerPicker
-                      projectKey={projectKey}
-                      object="decision"
-                      objectId={d.id}
-                      ownerAgentId={d.ownerAgentId}
-                      employees={ownerOptions}
-                      revalidate={`/p/${projectKey}/decisions`}
-                    />
-                  ) : (
-                    <span>{ownerName(d.ownerAgentId) ?? 'Unassigned'}</span>
-                  )}
+                <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
+                  <span className="flex items-center gap-2">
+                    <span className="text-[var(--muted)]">Owner:</span>
+                    {isAdmin ? (
+                      <OwnerPicker
+                        projectKey={projectKey}
+                        object="decision"
+                        objectId={d.id}
+                        ownerAgentId={d.ownerAgentId}
+                        employees={ownerOptions}
+                        revalidate={`/p/${projectKey}/decisions`}
+                      />
+                    ) : (
+                      <span>{ownerName(d.ownerAgentId) ?? 'Unassigned'}</span>
+                    )}
+                  </span>
+                  {isAdmin ? <RetireButton projectKey={projectKey} decisionId={d.id} /> : null}
                 </div>
               </li>
             ))}

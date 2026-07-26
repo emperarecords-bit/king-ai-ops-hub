@@ -168,9 +168,12 @@ export type ContextSource = (typeof CONTEXT_SOURCES)[number];
  * history. Only `accepted` decisions are retrieved into context; `superseded`
  * are historical, `proposed` await human approval, `rejected` are discarded.
  */
-export const DECISION_STATUSES = ['proposed', 'accepted', 'superseded', 'rejected'] as const;
+// Record status: was the conclusion accepted as a legitimate record? `retired` = no longer active
+// guidance, with no direct replacement (distinct from `superseded`, which points at a replacement).
+export const DECISION_STATUSES = ['proposed', 'accepted', 'superseded', 'rejected', 'retired'] as const;
 export type DecisionStatus = (typeof DECISION_STATUSES)[number];
 
+// Category — subject matter. NOT scope (see DECISION_SCOPE) and NOT applicability.
 export const DECISION_TYPES = [
   'operational',
   'creative',
@@ -180,6 +183,17 @@ export const DECISION_TYPES = [
   'other',
 ] as const;
 export type DecisionType = (typeof DECISION_TYPES)[number];
+
+// Guidance applicability — should the conclusion actively guide later work, or is it kept only as a
+// record? Acceptance preserves the conclusion; applicability + scope decide where it may guide. Only
+// `guidance` decisions are ever injected into a run.
+export const DECISION_APPLICABILITY = ['record', 'guidance'] as const;
+export type DecisionApplicability = (typeof DECISION_APPLICABILITY)[number];
+
+// Scope — the maximum applicability boundary for a guidance decision. Scope defines where guidance
+// MAY apply; relevance still determines whether it applies to a given run. Default narrow.
+export const DECISION_SCOPES = ['task', 'objective', 'workspace'] as const;
+export type DecisionScope = (typeof DECISION_SCOPES)[number];
 
 /** Confidence of an AI-suggested candidate (O-20). Never approval authority. */
 export const DECISION_CONFIDENCE = ['low', 'medium', 'high'] as const;

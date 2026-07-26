@@ -1,9 +1,13 @@
 import 'server-only';
-import { and, desc, eq, inArray, ne } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNull, ne, or } from 'drizzle-orm';
 import { z } from 'zod';
 import {
+  DECISION_APPLICABILITY,
+  DECISION_SCOPES,
   DECISION_TYPES,
   type ContextManifestEntry,
+  type DecisionApplicability,
+  type DecisionScope,
   type DecisionStatus,
   type DecisionType,
   type TenantContext,
@@ -46,6 +50,12 @@ export const createDecisionSchema = z.object({
   summary: z.string().trim().min(1, 'Summary is required').max(2_000),
   rationale: z.string().trim().max(4_000).default(''),
   decisionType: z.enum(DECISION_TYPES).default('operational'),
+  // Record-only vs active guidance, and — for guidance — its scope + optional validity. Default
+  // narrow (task guidance): institutional memory defaults to the narrowest scope its evidence supports.
+  applicability: z.enum(DECISION_APPLICABILITY).default('guidance'),
+  scope: z.enum(DECISION_SCOPES).default('task'),
+  scopeObjectiveId: z.string().uuid().nullable().default(null),
+  effectiveUntil: z.coerce.date().nullable().default(null),
   originatingTaskId: z.string().uuid().nullable().default(null),
   originatingRunId: z.string().uuid().nullable().default(null),
   supportingRefs: z.array(z.string().trim().max(400)).max(50).default([]),
@@ -76,6 +86,10 @@ export async function createDecision(
       summary: parsed.data.summary,
       rationale: parsed.data.rationale,
       decisionType: parsed.data.decisionType,
+      applicability: parsed.data.applicability,
+      scope: parsed.data.scope,
+      scopeObjectiveId: parsed.data.scope === 'objective' ? parsed.data.scopeObjectiveId : null,
+      effectiveUntil: parsed.data.effectiveUntil,
       originatingTaskId: parsed.data.originatingTaskId,
       originatingRunId: parsed.data.originatingRunId,
       supportingRefs: parsed.data.supportingRefs,
@@ -173,6 +187,22 @@ export async function rejectDecision(tx: DbTx, ctx: TenantContext, id: string): 
   });
 }
 
+/**
+ * Retire an accepted decision — it remains a historically valid record but stops guiding future work,
+ * with no replacement (distinct from supersession). A record may be permanent; operational authority
+ * remains reviewable. Only an admin, only from `accepted`.
+ */
+export async function retireDecision(tx: DbTx, ctx: TenantContext, id: string): Promise<void> {
+  if (ctx.projectRole !== 'admin') throw new AppError('forbidden', 'Only admins can retire decisions.');
+  const d = await loadDecision(tx, ctx, id);
+  if (d.status !== 'accepted') throw new ConflictError(`Only an accepted decision can be retired (is ${d.status}).`);
+  await tx
+    .update(decisions)
+    .set({ status: 'retired', reviewedBy: ctx.userId, reviewedAt: new Date(), updatedAt: new Date() })
+    .where(eq(decisions.id, id));
+  await writeAudit(tx, ctx, { action: 'decision.retired', entityType: 'decision', entityId: id, detail: { title: d.title } });
+}
+
 export interface DecisionRow {
   id: string;
   title: string;
@@ -180,6 +210,10 @@ export interface DecisionRow {
   rationale: string;
   decisionType: DecisionType;
   status: DecisionStatus;
+  applicability: DecisionApplicability;
+  scope: DecisionScope;
+  scopeObjectiveId: string | null;
+  effectiveUntil: Date | null;
   authorLabel: string;
   originatingTaskId: string | null;
   originatingTaskTitle: string | null;
@@ -197,6 +231,10 @@ export async function listDecisions(tx: DbTx, ctx: TenantContext): Promise<Decis
       rationale: decisions.rationale,
       decisionType: decisions.decisionType,
       status: decisions.status,
+      applicability: decisions.applicability,
+      scope: decisions.scope,
+      scopeObjectiveId: decisions.scopeObjectiveId,
+      effectiveUntil: decisions.effectiveUntil,
       authorLabel: decisions.authorLabel,
       originatingTaskId: decisions.originatingTaskId,
       originatingTaskTitle: tasks.title,
@@ -339,8 +377,14 @@ interface ScoredDecision extends DecisionRow {
 export async function selectRelevantDecisions(
   tx: DbTx,
   ctx: TenantContext,
-  args: { currentTaskId: string; objectiveTaskIds: readonly string[]; docPaths: ReadonlySet<string> },
+  args: {
+    currentTaskId: string;
+    currentObjectiveId: string | null;
+    objectiveTaskIds: readonly string[];
+    docPaths: ReadonlySet<string>;
+  },
 ): Promise<ScoredDecision[]> {
+  const now = new Date();
   const rows = await tx
     .select({
       id: decisions.id,
@@ -349,6 +393,10 @@ export async function selectRelevantDecisions(
       rationale: decisions.rationale,
       decisionType: decisions.decisionType,
       status: decisions.status,
+      applicability: decisions.applicability,
+      scope: decisions.scope,
+      scopeObjectiveId: decisions.scopeObjectiveId,
+      effectiveUntil: decisions.effectiveUntil,
       authorLabel: decisions.authorLabel,
       originatingTaskId: decisions.originatingTaskId,
       supportingRefs: decisions.supportingRefs,
@@ -362,6 +410,10 @@ export async function selectRelevantDecisions(
         eq(decisions.projectId, ctx.projectId),
         eq(decisions.orgId, ctx.orgId),
         eq(decisions.status, 'accepted'),
+        // Only ACTIVE GUIDANCE is ever injected: record-only conclusions are never applied, and a
+        // time-bounded decision past its validity is historical, not active.
+        eq(decisions.applicability, 'guidance'),
+        or(isNull(decisions.effectiveUntil), gt(decisions.effectiveUntil, now)),
       ),
     )
     .orderBy(desc(decisions.createdAt));
@@ -369,19 +421,28 @@ export async function selectRelevantDecisions(
   if (rows.length === 0) return [];
 
   const objTasks = new Set(args.objectiveTaskIds);
-  const now = Date.now();
+  const nowMs = now.getTime();
 
   // Two distinct stages. ELIGIBILITY: a decision may be considered ONLY when a structural
-  // relationship to this run establishes relevance (same task · same objective's tasks · shared
-  // supporting reference). Until explicit scope exists, no relationship → omit it: silently applying
-  // unrelated guidance is worse than reduced recall. RANKING: recency (and, later, precedence) only
-  // orders decisions already found eligible — it can never make an irrelevant memory relevant.
+  // relationship to this run establishes relevance, WITHIN THE DECISION'S SCOPE — scope is the
+  // ceiling on which relationships count, not an instruction to inject everywhere. Task-scoped:
+  // only its own task. Objective-scoped: its objective's work. Workspace-scoped: any relevant run.
+  // No relationship → omit it (silently applying unrelated guidance is worse than reduced recall).
+  // RANKING: recency only orders already-eligible decisions — it can never make one relevant.
   const eligible = rows
     .map((r) => {
+      const taskMatch = r.originatingTaskId === args.currentTaskId ? 1000 : 0;
+      const objMatch =
+        (r.scopeObjectiveId != null && r.scopeObjectiveId === args.currentObjectiveId) ||
+        (r.originatingTaskId != null && objTasks.has(r.originatingTaskId))
+          ? 100
+          : 0;
+      const docMatch = r.supportingRefs.some((ref) => args.docPaths.has(ref)) ? 10 : 0;
+
       let relationship = 0;
-      if (r.originatingTaskId === args.currentTaskId) relationship += 1000;
-      if (r.originatingTaskId && objTasks.has(r.originatingTaskId)) relationship += 100;
-      if (r.supportingRefs.some((ref) => args.docPaths.has(ref))) relationship += 10;
+      if (r.scope === 'task') relationship = taskMatch; // only its own task counts
+      else if (r.scope === 'objective') relationship = Math.max(taskMatch, objMatch);
+      else relationship = Math.max(taskMatch, objMatch, docMatch); // workspace: any relevance
       return { r, relationship };
     })
     .filter((s) => s.relationship > 0);
@@ -390,7 +451,7 @@ export async function selectRelevantDecisions(
   const scored = eligible.map(({ r, relationship }) => {
     // Recency boost stays strictly below the smallest relationship tier, so it only breaks ties
     // among eligible decisions — never lifts an ineligible one into range.
-    const ageDays = (now - r.createdAt.getTime()) / 86_400_000;
+    const ageDays = (nowMs - r.createdAt.getTime()) / 86_400_000;
     return { r, score: relationship + Math.max(0, 5 - ageDays / 30) };
   });
   scored.sort((a, b) => b.score - a.score || b.r.createdAt.getTime() - a.r.createdAt.getTime());
@@ -428,6 +489,10 @@ export async function selectRelevantDecisions(
     rationale: t.rationale,
     decisionType: t.decisionType,
     status: t.status,
+    applicability: t.applicability,
+    scope: t.scope,
+    scopeObjectiveId: t.scopeObjectiveId,
+    effectiveUntil: t.effectiveUntil,
     authorLabel: t.authorLabel,
     originatingTaskId: t.originatingTaskId,
     originatingTaskTitle: null,
@@ -448,7 +513,12 @@ export interface DecisionMemoryContext {
 export async function assembleDecisionMemory(
   tx: DbTx,
   ctx: TenantContext,
-  args: { currentTaskId: string; objectiveTaskIds: readonly string[]; docPaths: ReadonlySet<string> },
+  args: {
+    currentTaskId: string;
+    currentObjectiveId: string | null;
+    objectiveTaskIds: readonly string[];
+    docPaths: ReadonlySet<string>;
+  },
 ): Promise<DecisionMemoryContext> {
   const chosen = await selectRelevantDecisions(tx, ctx, args);
   if (chosen.length === 0) return { contextItem: null, manifest: [] };

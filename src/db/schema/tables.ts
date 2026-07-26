@@ -24,7 +24,9 @@ import {
   approvalStatusEnum,
   artifactKindEnum,
   cadenceEnum,
+  decisionApplicabilityEnum,
   decisionConfidenceEnum,
+  decisionScopeEnum,
   decisionStatusEnum,
   decisionTypeEnum,
   dependencyKindEnum,
@@ -673,6 +675,16 @@ export const decisions = pgTable(
     authorLabel: text('author_label').notNull(),
     decisionType: decisionTypeEnum('decision_type').notNull().default('operational'),
     status: decisionStatusEnum('status').notNull().default('proposed'),
+    // Guidance applicability + scope + validity: acceptance preserves the conclusion; these decide
+    // WHERE and HOW LONG it may guide future work. `record` decisions are never injected. Scope is
+    // the ceiling; relevance still gates each run. Existing rows keep prior behavior (guidance,
+    // workspace) via defaults; new decisions default to the narrowest useful scope in the domain layer.
+    applicability: decisionApplicabilityEnum('applicability').notNull().default('guidance'),
+    scope: decisionScopeEnum('scope').notNull().default('workspace'),
+    /** For objective-scoped guidance: the objective whose work it may guide. */
+    scopeObjectiveId: uuid('scope_objective_id').references(() => objectives.id, { onDelete: 'set null' }),
+    /** Time-bounded validity: after this, the decision is historically valid but not active. */
+    effectiveUntil: timestamp('effective_until', { withTimezone: true }),
     supersededBy: uuid('superseded_by'),
     // AI-suggested candidates (O-20). Null suggested_by_run_id ⇒ human-filed;
     // set ⇒ a model suggestion from that run, awaiting human review.

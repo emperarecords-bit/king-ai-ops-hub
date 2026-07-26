@@ -2,7 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
-import { DECISION_TYPES } from '@/types/domain';
+import { DECISION_APPLICABILITY, DECISION_SCOPES, DECISION_TYPES } from '@/types/domain';
 import { AppError, toPublicMessage } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { requireUser, requireTenant } from '@/domain/auth/guard';
@@ -11,6 +11,7 @@ import {
   acceptDecision,
   createDecision,
   rejectDecision,
+  retireDecision,
 } from '@/domain/decisions/decisions';
 
 export interface DecisionState {
@@ -30,6 +31,10 @@ export async function createDecisionAction(
       summary: z.string().trim().min(1).max(2_000),
       rationale: z.string().trim().max(4_000).optional().default(''),
       decisionType: z.enum(DECISION_TYPES).default('operational'),
+      applicability: z.enum(DECISION_APPLICABILITY).default('guidance'),
+      scope: z.enum(DECISION_SCOPES).default('task'),
+      scopeObjectiveId: z.string().uuid().nullable().optional().default(null),
+      effectiveUntil: z.coerce.date().nullable().optional().default(null),
       originatingTaskId: z.string().uuid().nullable().optional().default(null),
       supersedesId: z.string().uuid().nullable().optional().default(null),
     })
@@ -38,6 +43,10 @@ export async function createDecisionAction(
       summary: formData.get('summary'),
       rationale: formData.get('rationale') ?? '',
       decisionType: formData.get('decisionType') ?? 'operational',
+      applicability: formData.get('applicability') ?? 'guidance',
+      scope: formData.get('scope') ?? 'task',
+      scopeObjectiveId: emptyToNull(formData.get('scopeObjectiveId')),
+      effectiveUntil: emptyToNull(formData.get('effectiveUntil')),
       originatingTaskId: emptyToNull(formData.get('originatingTaskId')),
       supersedesId: emptyToNull(formData.get('supersedesId')),
     });
@@ -52,6 +61,10 @@ export async function createDecisionAction(
         summary: parsed.data.summary,
         rationale: parsed.data.rationale,
         decisionType: parsed.data.decisionType,
+        applicability: parsed.data.applicability,
+        scope: parsed.data.scope,
+        scopeObjectiveId: parsed.data.scopeObjectiveId,
+        effectiveUntil: parsed.data.effectiveUntil,
         originatingTaskId: parsed.data.originatingTaskId,
         supersedesId: parsed.data.supersedesId,
       }),
@@ -71,13 +84,17 @@ export async function decideDecisionAction(
   const projectKey = String(formData.get('projectKey') ?? '');
   const id = String(formData.get('decisionId') ?? '');
   const verb = String(formData.get('verb') ?? '');
-  if (!idSchema.safeParse(id).success || (verb !== 'accept' && verb !== 'reject')) {
+  if (!idSchema.safeParse(id).success || (verb !== 'accept' && verb !== 'reject' && verb !== 'retire')) {
     return { error: 'Invalid request.' };
   }
   try {
     const ctx = await requireTenant(projectKey);
     await withTenant(ctx, (tx) =>
-      verb === 'accept' ? acceptDecision(tx, ctx, id) : rejectDecision(tx, ctx, id),
+      verb === 'accept'
+        ? acceptDecision(tx, ctx, id)
+        : verb === 'retire'
+          ? retireDecision(tx, ctx, id)
+          : rejectDecision(tx, ctx, id),
     );
   } catch (err) {
     if (!(err instanceof AppError)) log.error('decideDecision failed', { err });

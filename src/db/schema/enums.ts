@@ -6,7 +6,9 @@ import {
   ARTIFACT_KINDS,
   CADENCES,
   CONTEXT_ITEM_STATUSES,
+  DECISION_APPLICABILITY,
   DECISION_CONFIDENCE,
+  DECISION_SCOPES,
   DECISION_STATUSES,
   DECISION_TYPES,
   DEPENDENCY_KINDS,
@@ -72,6 +74,8 @@ export const documentJobStatusEnum = pgEnum('document_job_status', DOCUMENT_JOB_
 export const dependencyKindEnum = pgEnum('dependency_kind', DEPENDENCY_KINDS);
 export const decisionStatusEnum = pgEnum('decision_status', DECISION_STATUSES);
 export const decisionTypeEnum = pgEnum('decision_type', DECISION_TYPES);
+export const decisionApplicabilityEnum = pgEnum('decision_applicability', DECISION_APPLICABILITY);
+export const decisionScopeEnum = pgEnum('decision_scope', DECISION_SCOPES);
 export const decisionConfidenceEnum = pgEnum('decision_confidence', DECISION_CONFIDENCE);
 export const extractionStatusEnum = pgEnum('extraction_status', EXTRACTION_STATUSES);
 export const runJobStatusEnum = pgEnum('run_job_status', RUN_JOB_STATUSES);

@@ -84,7 +84,7 @@ describe.skipIf(!available)('decision extraction orchestration', () => {
     expect(cands[0]!.suggestedByRunId).toBe(runId);
 
     // Not in Decision Memory yet (proposed, not accepted) — even for its own originating task.
-    const own = { currentTaskId: taskId, objectiveTaskIds: [] as string[], docPaths: new Set<string>() };
+    const own = { currentTaskId: taskId, currentObjectiveId: null, objectiveTaskIds: [] as string[], docPaths: new Set<string>() };
     let mem = await withTenant(ctx, (tx) => assembleDecisionMemory(tx, ctx, own));
     expect(mem.contextItem?.content ?? '').not.toContain('runtime locked at 22:00');
 
@@ -96,7 +96,7 @@ describe.skipIf(!available)('decision extraction orchestration', () => {
     // But it must NOT leak into an unrelated run — acceptance is not workspace-wide eligibility.
     const other = await completedRun('later run', 'unrelated');
     const otherMem = await withTenant(ctx, (tx) =>
-      assembleDecisionMemory(tx, ctx, { currentTaskId: other.taskId, objectiveTaskIds: [], docPaths: new Set() }),
+      assembleDecisionMemory(tx, ctx, { currentTaskId: other.taskId, currentObjectiveId: null, objectiveTaskIds: [], docPaths: new Set() }),
     );
     expect(otherMem.contextItem?.content ?? '').not.toContain('runtime locked at 22:00');
   });

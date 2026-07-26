@@ -278,6 +278,10 @@ export async function extractCandidatesForRun(
         summary: c.summary,
         rationale: c.rationale,
         decisionType: c.decisionType,
+        // An AI suggestion must NOT default to workspace-wide guidance. It is proposed as
+        // task-scoped guidance; the reviewer widens the scope only deliberately.
+        applicability: 'guidance',
+        scope: 'task',
         supportingRefs: refs,
         originatingTaskId: run.taskId,
         originatingRunId: runId,

@@ -12,6 +12,7 @@ import {
   createDecision,
   listDecisions,
   objectiveTaskIds,
+  retireDecision,
 } from '@/domain/decisions/decisions';
 
 /**
@@ -51,7 +52,7 @@ async function mkTask(ctx: TenantContext, title: string): Promise<string> {
   return t[0]!.id;
 }
 
-const noArgs = (taskId: string) => ({ currentTaskId: taskId, objectiveTaskIds: [], docPaths: new Set<string>() });
+const noArgs = (taskId: string) => ({ currentTaskId: taskId, currentObjectiveId: null, objectiveTaskIds: [], docPaths: new Set<string>() });
 
 beforeAll(async () => {
   if (!available) return;
@@ -169,6 +170,7 @@ describe.skipIf(!available)('decision memory', () => {
       createDecision(tx, ctxA, 'Owner', {
         title: 'Doc-grounded conclusion',
         summary: 's',
+        scope: 'workspace', // workspace scope lets a shared doc reference count as relevance
         originatingTaskId: originTask, // NOT the run task
         supportingRefs: ['canon/bible.md'],
       }),
@@ -176,9 +178,81 @@ describe.skipIf(!available)('decision memory', () => {
     await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, d));
     // The run references the same document → structural relationship established.
     const mem = await withTenant(ctxA, (tx) =>
-      assembleDecisionMemory(tx, ctxA, { currentTaskId: runTask, objectiveTaskIds: [], docPaths: new Set(['canon/bible.md']) }),
+      assembleDecisionMemory(tx, ctxA, { currentTaskId: runTask, currentObjectiveId: null, objectiveTaskIds: [], docPaths: new Set(['canon/bible.md']) }),
     );
     expect(mem.contextItem?.content ?? '').toContain('Doc-grounded conclusion');
+  });
+
+  it('applicability — a record-only decision is preserved but never injected', async () => {
+    const t = await mkTask(ctxA, 'record-only task');
+    const d = await withTenant(ctxA, (tx) =>
+      createDecision(tx, ctxA, 'Owner', { title: 'Historical: sample too small', summary: 's', applicability: 'record', originatingTaskId: t }),
+    );
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, d));
+    const mem = await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(t)));
+    // Related and accepted, but record-only → never applied as guidance.
+    expect(mem.contextItem?.content ?? '').not.toContain('sample too small');
+    // Still preserved as a legitimate record.
+    const all = await withTenant(ctxA, (tx) => listDecisions(tx, ctxA));
+    expect(all.find((x) => x.id === d)!.applicability).toBe('record');
+  });
+
+  it('validity — an expired decision is historical, not active; a future one is still active', async () => {
+    const t = await mkTask(ctxA, 'validity task');
+    const past = await withTenant(ctxA, (tx) =>
+      createDecision(tx, ctxA, 'Owner', { title: 'Freeze deploys (lapsed)', summary: 's', originatingTaskId: t, effectiveUntil: new Date('2020-01-01') }),
+    );
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, past));
+    const future = await withTenant(ctxA, (tx) =>
+      createDecision(tx, ctxA, 'Owner', { title: 'Freeze deploys (active)', summary: 's', originatingTaskId: t, effectiveUntil: new Date('2099-01-01') }),
+    );
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, future));
+    const content = (await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(t)))).contextItem?.content ?? '';
+    expect(content).not.toContain('lapsed');
+    expect(content).toContain('active');
+  });
+
+  it('scope — a task-scoped decision does not leak to a sibling task via the shared objective', async () => {
+    const owningTask = await mkTask(ctxA, 'scope owner');
+    const siblingTask = await mkTask(ctxA, 'scope sibling');
+    const d = await withTenant(ctxA, (tx) =>
+      createDecision(tx, ctxA, 'Owner', { title: 'Task-only convention', summary: 's', scope: 'task', originatingTaskId: owningTask }),
+    );
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, d));
+    // The sibling shares the objective's task set, but the decision is TASK-scoped → not eligible.
+    const mem = await withTenant(ctxA, (tx) =>
+      assembleDecisionMemory(tx, ctxA, { currentTaskId: siblingTask, currentObjectiveId: null, objectiveTaskIds: [owningTask], docPaths: new Set() }),
+    );
+    expect(mem.contextItem?.content ?? '').not.toContain('Task-only convention');
+    // Its own task still sees it.
+    const own = await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(owningTask)));
+    expect(own.contextItem?.content ?? '').toContain('Task-only convention');
+  });
+
+  it('scope — objective guidance reaches sibling tasks in the same objective', async () => {
+    const owningTask = await mkTask(ctxA, 'obj owner');
+    const siblingTask = await mkTask(ctxA, 'obj sibling');
+    const d = await withTenant(ctxA, (tx) =>
+      createDecision(tx, ctxA, 'Owner', { title: 'Objective-wide convention', summary: 's', scope: 'objective', originatingTaskId: owningTask }),
+    );
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, d));
+    const mem = await withTenant(ctxA, (tx) =>
+      assembleDecisionMemory(tx, ctxA, { currentTaskId: siblingTask, currentObjectiveId: null, objectiveTaskIds: [owningTask], docPaths: new Set() }),
+    );
+    expect(mem.contextItem?.content ?? '').toContain('Objective-wide convention');
+  });
+
+  it('retirement — an accepted decision can be retired without a replacement and stops guiding', async () => {
+    const t = await mkTask(ctxA, 'retire task');
+    const d = await withTenant(ctxA, (tx) =>
+      createDecision(tx, ctxA, 'Owner', { title: 'Retire me', summary: 's', originatingTaskId: t }),
+    );
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, d));
+    await withTenant(ctxA, (tx) => retireDecision(tx, ctxA, d));
+    const all = await withTenant(ctxA, (tx) => listDecisions(tx, ctxA));
+    expect(all.find((x) => x.id === d)!.status).toBe('retired');
+    const mem = await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(t)));
+    expect(mem.contextItem?.content ?? '').not.toContain('Retire me');
   });
 
   it('objectiveTaskIds is tenant-scoped and returns attached task ids', async () => {
