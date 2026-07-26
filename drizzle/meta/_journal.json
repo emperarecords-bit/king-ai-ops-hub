@@ -127,6 +127,13 @@
       "when": 1785074137471,
       "tag": "0017_daffy_stark_industries",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1785075455831,
+      "tag": "0018_even_carmella_unuscione",
+      "breakpoints": true
     }
   ]
 }

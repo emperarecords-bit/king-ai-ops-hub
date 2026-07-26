@@ -17,7 +17,8 @@ import { writeAudit } from '@/domain/audit/audit';
 export interface WorkItemRow {
   id: string;
   title: string;
-  condition: WorkItemCondition;
+  /** null = never established → "Unknown" in the shared execution model. */
+  condition: WorkItemCondition | null;
   waitingOn: string | null;
   stage: string;
   notes: string;

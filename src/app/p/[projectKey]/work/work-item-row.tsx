@@ -20,7 +20,8 @@ const CONDITION_LABEL: Record<WorkItemCondition, string> = {
 export interface WorkItemView {
   id: string;
   title: string;
-  condition: WorkItemCondition;
+  /** null = never established → "Unknown", pending review. */
+  condition: WorkItemCondition | null;
   waitingOn: string | null;
   stage: string;
   notes: string;
@@ -54,8 +55,11 @@ export function WorkItemRow({
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm font-medium">{item.title}</span>
         <span className="rounded bg-[var(--surface-raised)] px-2 py-0.5 text-xs text-[var(--foreground)]">
-          {CONDITION_LABEL[item.condition]}
+          {item.condition ? CONDITION_LABEL[item.condition] : 'Unknown'}
         </span>
+        {item.condition === null ? (
+          <span className="text-xs text-[var(--danger)]">needs review</span>
+        ) : null}
         {item.condition === 'waiting' && item.waitingOn ? (
           <span className="text-xs text-[var(--muted)]">on {item.waitingOn}</span>
         ) : null}
@@ -101,7 +105,7 @@ export function WorkItemRow({
               </div>
               <div>
                 <label className={labelCls}>Condition</label>
-                <select name="condition" defaultValue={item.condition} className={inputCls}>
+                <select name="condition" defaultValue={item.condition ?? 'planned'} className={inputCls}>
                   <option value="planned">Planned</option>
                   <option value="moving">Moving</option>
                   <option value="waiting">Waiting</option>

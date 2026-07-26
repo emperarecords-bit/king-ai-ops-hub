@@ -710,8 +710,10 @@ export const workItems = pgTable(
       .references(() => projects.id, { onDelete: 'cascade' }),
     title: text('title').notNull(),
     /** Structured operational condition — the minimum lifecycle meaning the Hub needs to
-     * coordinate human work (Execution). Sits beside the flexible free-text `stage`. */
-    condition: workItemConditionEnum('condition').notNull().default('planned'),
+     * coordinate human work (Execution). Sits beside the flexible free-text `stage`. NULLABLE on
+     * purpose: null = never established (→ "Unknown" in the shared model). A DB default must never
+     * masquerade as a real condition, so legacy rows stay null until a human sets one. */
+    condition: workItemConditionEnum('condition'),
     /** Optional: what a "waiting" item is waiting on (e.g. "outside counsel response"). */
     waitingOn: text('waiting_on'),
     /** Free-text business stage (e.g. "Sourced", "Demo booked"). Not an enum —
