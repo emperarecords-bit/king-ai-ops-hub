@@ -572,5 +572,55 @@ the work.* Objectives = *are outcomes advancing?* · Execution = *what is being 
 Approvals = a focused intervention queue *within* Execution (not the only place waiting AI work is
 visible). Audit = exhaustive system history; Execution = the operationally relevant history.
 
-**Next:** define the operating-partner conversation at two levels (execution portfolio; individual
-work), across the listed states — before any tables, swimlanes, filters, or merged schema.
+**The translation model — three distinct layers** *(refined 2026-07-26).* "Needs attention" is not
+a condition; it's the operator's *relationship* to a condition. Keep three separate things (the
+same correction as objective risk vs. assessment confidence):
+1. **Execution condition** — *what the work is doing*: **Planned · Moving · Waiting · Finished ·
+   Stopped · Unknown** (Unknown = the record doesn't establish it). Stable and mutually
+   understandable across both engines.
+2. **Intervention state** — *what the operator must do*: **None · Watch · Needs attention · Needs
+   decision.** An overlay on the condition, never a replacement (Moving+Watch; Waiting+None when
+   legitimately scheduled; Finished+Needs-decision when output needs review).
+3. **Native reason** — *why it's in that condition*: awaiting approval · blocked by dependency ·
+   waiting for customer · scheduled · failed, holding for retry · paused by owner · budget limit ·
+   no update recorded · cancelled as superseded. Translate the state without hiding the mechanics.
+
+**Source + confidence on the translation.** The condition is itself a judgment for some work: an AI
+task's is system-observed; human work may be human-reported, from a structured field, inferred from
+stage text, inferred from inactivity, or Unknown. The result carries the condition, its **source**
+(system-observed / human-reported / inferred), **confidence**, and the observed facts behind it.
+
+**Semantic contract (governs language, not decorative chips):** Condition · Intervention · Native
+reason · Accountable owner · Performer (when known) · Source · Confidence · Available actions.
+
+**Human lifecycle gap — a BUILD PREREQUISITE, not a future enhancement.** The partner's honesty
+("its stage doesn't tell me whether it's waiting or stuck") is fine in conversation but can't be the
+*foundation* of a unified view — else the Hub just sets two record types side by side and apologizes
+for one. Human Work Items need a **minimal structured condition** beside the flexible stage:
+`condition` (planned|moving|waiting|finished|stopped) · `stage` (optional label) · `waitingOn` /
+conditionReason (optional) · existing ownership + timestamps. So: *Condition: Waiting · Stage: Legal
+review · Waiting on: outside counsel.* New principle: **flexible workflow labels may describe human
+work, but they cannot replace the minimum lifecycle meaning the Hub needs to operate it.**
+
+**Accountability vs performer — explicit, not overloaded.** Don't block the first view on it: for
+human work treat the owner as performer *when none is separately recorded* — but model that as an
+explicit assumption, not a claimed fact. The performer may later be the owner, another employee, a
+provider, an AI agent, or a mixed group; never permanently overload the owner field to mean all of
+them.
+
+**Tightened claims (durable):**
+- Bound negatives to visibility: "No recorded work is currently waiting on your decision, and no AI
+  failures are open" — not "nothing's waiting and nothing has failed."
+- A general update ≠ movement: "update its condition or record what it's waiting on."
+- Dependencies gate *eligibility*, not motion: "becomes eligible to continue once the dependency
+  finishes," unless auto-continuation is actually guaranteed by the engine/authority.
+- **Suggested actions come from actual, enforceable capabilities** — "edit and retry," "detach," "it
+  pauses before anything leaves," "can't create further work" appear only when stored and
+  enforceable, generated from available actions, never generic prose.
+
+**Durable vocabulary:** "Execution's part is honest: the work got done. Whether it moved the outcome
+is Objectives' call." · "Different mechanics, one picture."
+
+**Next:** with condition / intervention / reason / source / confidence separated, the language and
+then the two structures (execution portfolio; individual work) emerge — no tables, swimlanes,
+filters, or merged schema until they follow the conversation.
