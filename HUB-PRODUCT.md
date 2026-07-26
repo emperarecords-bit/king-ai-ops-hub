@@ -162,12 +162,13 @@ means we won't have to reinvent it then.
 - **Places, not actions.** Navigation is for *places*; actions live *within* the place they act
   on. A verb never sits in the nav among the nouns. (Likely resolves dozens of future design
   questions on its own.)
-- **Navigation reflects the lifecycle of operating a business, not the architecture of the
-  software.** Group by the operator's cycle — set direction → move execution → capture what's
-  learned, enabled by the organization and kept honest by governance — not by software-object
-  type. You don't wake up thinking "I'll go to Objectives"; you think "what are we trying to
-  achieve, what needs to happen, what do we know." The structure should reinforce that rhythm
-  every day.
+- **Navigation reflects the enduring domains of operating a workspace, not the architecture of
+  the software.** Group by the operator's cycle — set direction → move execution → capture what's
+  learned, enabled by resources and kept honest by governance — not by software-object type. And
+  by *enduring domains of a workspace*, not a particular business or today's implementation: the
+  Hub will operate many workspaces, so the model must outlast any one of them. You don't wake up
+  thinking "I'll go to Objectives"; you think "what are we trying to achieve, what needs to
+  happen, what do we know." The structure reinforces that rhythm every day.
 - **Business first, software second.** The Hub always represents the *business* first and the
   software second. When the business view and the platform view compete, optimize for helping
   the operator understand the business — not the internal mechanics of the platform. (A
@@ -290,25 +291,32 @@ surface teaches the *reasoning* model — one mind, expressed in how the office 
 every moment of scanning, is a small cognitive cost. Good navigation removes those costs: I
 shouldn't *decide* where to go — the right destination should feel obvious.
 
-**The mental model — the operating cycle** *(agreed 2026-07-26; Dashboard placement resolving).*
-Navigation groups by the *lifecycle of operating*, not by software objects.
+**The mental model — the operating cycle** *(locked 2026-07-26).* Navigation groups by the
+*enduring domains of operating a workspace*, not by software objects — durable across whatever
+business runs in the workspace.
+
+Three roles, kept distinct: **the Dashboard orients · Navigation organizes · pages let you
+operate.**
+
+**Lobby — the Dashboard.** Sits *above* the operating model, not part of it: orientation,
+business briefing, workspace state. You orient here, then enter the model.
 
 The daily **cycle** (primary, emphasized):
-- **Direction** — "what are we trying to accomplish?" → Objectives.
-- **Execution** — "how do we make progress?" → Work, Approvals.
-- **Knowledge** — "what have we learned?" → Knowledge, Decisions, Documents, Artifacts.
-  *(A decision isn't an action — it's what the business remembers; Decision Memory already
-  feeds accepted decisions back into every run. Artifacts are work outputs that become part of
-  the body of knowledge.)*
+- **Direction** — "where are we going?" → Objectives.
+- **Execution** — "how do we make progress?" → Work, Approvals *(approvals unblock work)*.
+- **Knowledge** — "what does this workspace remember?" → Knowledge, Decisions, Documents,
+  Artifacts. *(A decision isn't an action — it's memory, and already feeds Decision Memory;
+  artifacts are work outputs that become part of the body of knowledge.)*
 
-The **supporting layers** (standing capabilities & oversight, secondary — touched far less):
-- **Organization** — "who and what enable the business?" → Employees, Providers.
-- **Governance** — "is the business healthy and accountable?" → Usage, Audit, Settings.
+The **supporting domains** (secondary — touched far less):
+- **Resources** — "who and what enable the work?" → Employees, Providers (and eventually AI
+  agents, tools, integrations, other operational capabilities).
+- **Governance** — "is this workspace trustworthy, accountable, and well run?" → Usage, Audit,
+  Settings.
 
-The **Dashboard** is the front door — where you arrive each morning, briefing across the *whole*
-cycle (leaning: the lobby *above* the cycle, not a Direction destination). "New task" leaves the
-nav (places, not actions). The workspace's real name replaces the slug. The cycle carries the
-emphasis (Flow); the structure never reorders itself (Stability).
+"New task" leaves navigation entirely (places, not actions). The workspace's real name replaces
+the slug (identity). The cycle carries the emphasis (Flow); the structure never reorders itself
+(Stability).
 
-**Next:** confirm the model (incl. Dashboard placement), then let the layout/experience emerge
-from it — structure is the consequence of the model, not the reverse.
+**Next:** design the navigation *experience* from this model, then evaluate it against the five
+responsibilities (orientation, mental model, flow, stability, identity) before implementation.
