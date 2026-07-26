@@ -13,7 +13,7 @@ import {
 } from '@/types/domain';
 import { ConflictError, NotFoundError, ValidationError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
-import { knowledgeInjections, knowledgeItems, objectives, tasks } from '@/db/schema';
+import { auditLogs, knowledgeInjections, knowledgeItems, objectives, profiles, tasks } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 import { knowledgeRelevance, significantTerms } from '@/domain/knowledge/relevance';
 import { assessKnowledge, qualificationLabel, type KnowledgeUseIntent } from '@/domain/knowledge/assess';
@@ -217,22 +217,36 @@ export async function activateKnowledge(
 }
 
 /**
- * Set a record's VERIFICATION state — an explicit, audited review separate from activation. Records
- * who/when for a positive verification; marking `disputed` flags competing evidence. Never implied by
- * activation. (A record-wide numeric confidence is intentionally NOT modeled — one body may hold many
- * claims with different support.)
+ * Set a record's VERIFICATION state — an evidenced, audited lifecycle event, never a free label.
+ * Preconditions are enforced: `human_confirmed` is an explicit human affirmation (actor + timestamp
+ * recorded); `disputed` requires a rationale; `source_supported` requires at least one RESOLVED
+ * supporting source and `system_verified` a recorded deterministic check — neither exists until the
+ * provenance increment, so both are rejected here rather than allowing an unsupported label. Who/when/
+ * why live in the append-only audit event. A record-wide numeric confidence is intentionally NOT
+ * modeled — one body may hold many claims with different support.
  */
 export async function setKnowledgeVerification(
   tx: DbTx,
   ctx: TenantContext,
   itemId: string,
   verification: 'unverified' | 'human_confirmed' | 'source_supported' | 'system_verified' | 'disputed',
+  reason?: string,
 ): Promise<void> {
   const item = await getItem(tx, ctx, itemId);
-  const verifiedAt =
-    verification === 'human_confirmed' || verification === 'source_supported' || verification === 'system_verified'
-      ? new Date()
-      : null;
+  const r = (reason ?? '').trim() || null;
+
+  if (verification === 'source_supported') {
+    throw new ConflictError('source_supported requires at least one resolvable supporting source — attach and resolve a source first (provenance increment).');
+  }
+  if (verification === 'system_verified') {
+    throw new ConflictError('system_verified requires a recorded deterministic check and verifier identity, which is not yet available.');
+  }
+  if (verification === 'disputed' && !r) {
+    throw new ValidationError(['A rationale is required to mark a record disputed — the reason is operational memory.']);
+  }
+
+  // `human_confirmed` is a positive verification event → stamp verifiedAt; others clear it.
+  const verifiedAt = verification === 'human_confirmed' ? new Date() : null;
   await tx
     .update(knowledgeItems)
     .set({ verification, verifiedAt, updatedAt: new Date() })
@@ -241,7 +255,28 @@ export async function setKnowledgeVerification(
     action: 'knowledge.verification_set',
     entityType: 'knowledge_item',
     entityId: itemId,
-    detail: { title: item.title, verification },
+    detail: { title: item.title, verification, reason: r },
+  });
+}
+
+export interface KnowledgeVerificationEvent {
+  verification: string | null;
+  reason: string | null;
+  actorName: string | null;
+  at: Date;
+}
+
+/** Verification history from the append-only audit log — who set each state, when, and why. */
+export async function getKnowledgeVerificationHistory(tx: DbTx, ctx: TenantContext, itemId: string): Promise<KnowledgeVerificationEvent[]> {
+  const rows = await tx
+    .select({ detail: auditLogs.detail, actorName: profiles.displayName, at: auditLogs.createdAt })
+    .from(auditLogs)
+    .leftJoin(profiles, eq(auditLogs.actorId, profiles.id))
+    .where(and(eq(auditLogs.orgId, ctx.orgId), eq(auditLogs.entityType, 'knowledge_item'), eq(auditLogs.entityId, itemId), eq(auditLogs.action, 'knowledge.verification_set')))
+    .orderBy(auditLogs.createdAt);
+  return rows.map((x) => {
+    const d = x.detail as { verification?: string; reason?: string } | null;
+    return { verification: d?.verification ?? null, reason: d?.reason ?? null, actorName: x.actorName, at: x.at };
   });
 }
 

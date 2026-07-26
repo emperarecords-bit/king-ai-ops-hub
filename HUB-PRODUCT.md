@@ -1382,11 +1382,34 @@ selection, stale in rendering, and trusted in inspection at once.
   same-workspace target, closed-scope doesn't leak, disputed withheld for current / qualified for
   reference, `kind` plays no role). Full suite **443/443**.
 
+### Trustworthiness increment 1b — foundation hardening (built 2026-07-26)
+
+- **Durable AI operations** (`ai_operations` + `domain/ai/operations.ts`). Objective suggestion now
+  records a durable operation BEFORE provider dispatch, references it as the Knowledge-application
+  `consumerId`, logs applications at dispatch (even if the provider later fails), and advances the op
+  to completed/failed. `idempotencyKey` makes the same logical retry reuse the same operation; no key
+  → a new operation per request. Inspectable via `getAiOperation`. *Principle: an AI application is
+  inspectable only when it belongs to a durable operation record.* (A client-supplied idempotency key
+  is threadable but not yet passed by the form — each call is currently its own durable op.)
+- **Verification is an evidenced event, not a label** (`setKnowledgeVerification`). Preconditions
+  enforced: `disputed` requires a rationale; `source_supported` requires a resolvable source and
+  `system_verified` a deterministic check — **both rejected until provenance exists** (no unsupported
+  labels); `human_confirmed` is an explicit affirmation; activation never verifies. Who/when/why live
+  in the append-only audit event (`getKnowledgeVerificationHistory`). *Principle: verification is an
+  evidenced lifecycle event, not an editable label.*
+- **Freshness locked to explicit facts.** "Current" now requires an `asOf` (a `verifiedAt` alone is
+  not currency); boundaries are inclusive and compared as absolute instants (timezone-independent);
+  age of a row never implies staleness. *Principle: freshness is derived from explicit validity facts,
+  not the age of a database row.* Locked by boundary/timezone tests.
+
+Verified: full suite **447/447**.
+
 *Remaining trustworthiness increments (deferred, not built, never presented as if they exist):
 (2) inspectable provenance — a `knowledge_sources` relationship (type/id/label/version-hash/date/
-transformation/excerpt), "source_supported" only when a source resolves, broken-source = provenance
-defect; (3) disclosure GRANTS (provider/agent/consumer/purpose/period/actor) so restricted can be
-supplied with a matching grant; (4) a durable objective-suggestion operation record (stable id,
-recorded before dispatch, inspectable) so its application trail points to a real operation; (5) the AI
-extraction/promotion path (propose-only, source-identified, human-activated); (6) qualified-rendering
-polish + Portfolio/Detail; then the operating-partner conversation, and only then the page redesign.*
+transformation/excerpt/locator, multiple sources), a bounded resolution result (resolved/missing/
+inaccessible/version-mismatch/unsupported) the assessment consumes, "source_supported" only when a
+source resolves + a verification event, broken/mismatched source = provenance defect (never silently
+latest), source attached ≠ source inspected ≠ judged-to-support; (3) disclosure GRANTS
+(provider/agent/consumer/purpose/period/actor) so restricted can be supplied with a matching grant;
+(4) the AI extraction/promotion path (propose-only, source-identified, human-activated); (5) the
+operating-partner conversation; (6) then the Knowledge Portfolio & Detail — page redesign last.*

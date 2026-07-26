@@ -65,11 +65,15 @@ export function assessKnowledge(i: {
   const scopeClosed =
     (i.scopeKind === 'task' && i.scopeTaskStatus != null && TERMINAL_TASK.has(i.scopeTaskStatus)) ||
     (i.scopeKind === 'objective' && i.scopeObjectiveStatus != null && CLOSED_OBJECTIVE.has(i.scopeObjectiveStatus));
+  // Freshness comes ONLY from explicit validity facts, never the age of a database row. `expiresAt`
+  // and `reviewAfter` are compared as absolute instants (timezone-independent) at the exact boundary
+  // (<= now). "Current" requires an `asOf` (the date the claim describes) — a `verifiedAt` alone is
+  // when a verification happened, NOT evidence the content is still current.
   let freshness: FreshnessState;
   if (i.expiresAt && i.expiresAt.getTime() <= i.now.getTime()) freshness = 'stale';
   else if (scopeClosed) freshness = 'historical';
   else if (i.reviewAfter && i.reviewAfter.getTime() <= i.now.getTime()) freshness = 'review_due';
-  else if (i.asOf || i.verifiedAt) freshness = 'current';
+  else if (i.asOf) freshness = 'current';
   else freshness = 'unknown';
 
   const scopeValid =

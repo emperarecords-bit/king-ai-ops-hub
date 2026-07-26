@@ -1,5 +1,4 @@
 import 'server-only';
-import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { type TenantContext } from '@/types/domain';
 import { ValidationError } from '@/lib/errors';
@@ -9,6 +8,7 @@ import { withTenant } from '@/db/tenant';
 import { getProvider } from '@/providers/registry';
 import { findAgentForRole } from '@/domain/agents/agents';
 import { selectRelevantKnowledge, logKnowledgeApplications } from '@/domain/knowledge/knowledge';
+import { beginAiOperation, completeAiOperation, failAiOperation } from '@/domain/ai/operations';
 import { wrapUntrusted } from '@/orchestration/prompts';
 import { assertWithinBudget } from '@/domain/usage/usage';
 
@@ -76,7 +76,7 @@ export type CriterionSuggestion = z.infer<typeof suggestionSchema>;
 
 export async function suggestSuccessCriteria(
   ctx: TenantContext,
-  input: { title: string; description: string },
+  input: { title: string; description: string; idempotencyKey?: string },
 ): Promise<CriterionSuggestion[]> {
   const title = input.title.trim();
   if (title.length === 0) throw new ValidationError(['Give the objective a title first.']);
@@ -84,17 +84,20 @@ export async function suggestSuccessCriteria(
   const env = serverEnv();
 
   // Objective suggestion is an AI call, so it must use the SAME relevance gate as task runs — never
-  // the wholesale loader — AND leave the same application record. `operationId` is this suggestion's
-  // stable consumer id (idempotent per operation).
-  const operationId = randomUUID();
-  const { agent, knowledge } = await withTenant(ctx, async (tx) => {
+  // the wholesale loader — AND leave the same application record, tied to a DURABLE operation recorded
+  // BEFORE dispatch (so the reverse trail is inspectable and retries are idempotent by key).
+  const { operationId, agent, knowledge } = await withTenant(ctx, async (tx) => {
     await assertWithinBudget(tx, ctx.projectId);
+    const op = await beginAiOperation(tx, ctx, {
+      operationType: 'objective_suggestion',
+      subjectType: 'objective_draft',
+      idempotencyKey: input.idempotencyKey ?? null,
+      provider: 'openai',
+    });
     const selected = await selectRelevantKnowledge(tx, ctx, { queryText: `${title} ${input.description}`, intendedUse: 'objective_planning' });
-    await logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: operationId, injected: selected });
-    return {
-      agent: await findAgentForRole(tx, ctx, 'primary', 'openai'),
-      knowledge: selected,
-    };
+    // Logged at dispatch time, referencing the durable operation — even if the provider later fails.
+    await logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: op, injected: selected });
+    return { operationId: op, agent: await findAgentForRole(tx, ctx, 'primary', 'openai'), knowledge: selected };
   });
   if (!agent) throw new ValidationError(['No primary employee is configured in this workspace.']);
 
@@ -126,14 +129,22 @@ Rules:
     `${title}\n\n${input.description.trim()}`,
   )}\n\nPropose success criteria for this objective.`;
 
-  const response = await getProvider(agent.provider).execute({
-    model: agent.model, // standard tier — suggestions are not flagship work
-    system,
-    turns: [{ role: 'user', content: userTurn }],
-    temperature: agent.temperatureMilli / 1000,
-    maxOutputTokens: 600,
-    timeoutMs: Math.min(env.PROVIDER_TIMEOUT_MS, 30_000),
-  });
+  let response;
+  try {
+    response = await getProvider(agent.provider).execute({
+      model: agent.model, // standard tier — suggestions are not flagship work
+      system,
+      turns: [{ role: 'user', content: userTurn }],
+      temperature: agent.temperatureMilli / 1000,
+      maxOutputTokens: 600,
+      timeoutMs: Math.min(env.PROVIDER_TIMEOUT_MS, 30_000),
+    });
+  } catch (err) {
+    // The operation (and its Knowledge applications) remain recorded; mark it failed, not vanished.
+    await withTenant(ctx, (tx) => failAiOperation(tx, ctx, operationId, err instanceof Error ? err.message : String(err)));
+    throw err;
+  }
+  await withTenant(ctx, (tx) => completeAiOperation(tx, ctx, operationId));
 
   // Untrusted output: parse defensively, degrade to nothing rather than throw.
   const jsonMatch = response.text.match(/\[[\s\S]*\]/);

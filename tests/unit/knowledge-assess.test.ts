@@ -78,4 +78,24 @@ describe('assessKnowledge — one shared trust assessment', () => {
     expect(a.useState).toBe('usable_with_qualification');
     expect(a.reasons).toContain('review_due');
   });
+
+  it('freshness comes from explicit facts, not row age — verifiedAt alone is not "current"', () => {
+    // Verified last week but with NO as-of date → freshness unknown, not current.
+    expect(assessKnowledge({ ...base, verifiedAt: new Date('2026-07-20') }).freshness).toBe('unknown');
+    // An as-of date is the basis for currency.
+    expect(assessKnowledge({ ...base, asOf: new Date('2026-07-20') }).freshness).toBe('current');
+    // No temporal evidence at all → unknown.
+    expect(assessKnowledge(base).freshness).toBe('unknown');
+  });
+
+  it('boundary timestamps are inclusive and compared as absolute instants (timezone-independent)', () => {
+    // Exactly at the boundary counts as passed.
+    expect(assessKnowledge({ ...base, expiresAt: new Date(NOW.getTime()) }).freshness).toBe('stale');
+    expect(assessKnowledge({ ...base, asOf: new Date('2026-01-01'), reviewAfter: new Date(NOW.getTime()) }).freshness).toBe('review_due');
+    // One millisecond in the future is not yet expired.
+    expect(assessKnowledge({ ...base, asOf: new Date('2026-07-01'), expiresAt: new Date(NOW.getTime() + 1) }).freshness).toBe('current');
+    // Same instant expressed in a different timezone offset must behave identically.
+    const sameInstantOtherTz = new Date('2026-07-26T00:00:00.000Z'); // == NOW
+    expect(assessKnowledge({ ...base, expiresAt: sameInstantOtherTz }).freshness).toBe('stale');
+  });
 });

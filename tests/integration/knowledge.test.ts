@@ -14,11 +14,13 @@ import {
   listInjectionsForKnowledge,
   listKnowledge,
   logKnowledgeApplications,
+  getKnowledgeVerificationHistory,
   reviseKnowledge,
   selectRelevantKnowledge,
   setKnowledgeVerification,
 } from '@/domain/knowledge/knowledge';
 import { listAllActiveKnowledgeForAdministration } from '@/domain/knowledge/admin';
+import { beginAiOperation, completeAiOperation, getAiOperation } from '@/domain/ai/operations';
 
 /**
  * K1 rules that must never regress: only ACTIVE knowledge is injected;
@@ -209,6 +211,25 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
     expect(trail[0]!.version).toBe(1);
   });
 
+  it('verification is an evidenced event: activation never verifies; unsupported states are rejected', async () => {
+    const id = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Verify subject', body: 'b', kind: 'fact', activate: true }));
+    // Activation created no verification event.
+    expect(await withTenant(ctx, (tx) => getKnowledgeVerificationHistory(tx, ctx, id))).toHaveLength(0);
+    // source_supported / system_verified cannot be assigned yet (no resolvable source / deterministic check).
+    await expect(withTenant(ctx, (tx) => setKnowledgeVerification(tx, ctx, id, 'source_supported'))).rejects.toThrow(/resolvable supporting source/i);
+    await expect(withTenant(ctx, (tx) => setKnowledgeVerification(tx, ctx, id, 'system_verified'))).rejects.toThrow(/deterministic check/i);
+    // disputed requires a rationale.
+    await expect(withTenant(ctx, (tx) => setKnowledgeVerification(tx, ctx, id, 'disputed'))).rejects.toThrow(/rationale is required/i);
+    // human_confirmed is allowed and does NOT imply source support; history records who/when/why.
+    await withTenant(ctx, (tx) => setKnowledgeVerification(tx, ctx, id, 'human_confirmed'));
+    await withTenant(ctx, (tx) => setKnowledgeVerification(tx, ctx, id, 'disputed', 'a second source disagrees'));
+    const history = await withTenant(ctx, (tx) => getKnowledgeVerificationHistory(tx, ctx, id));
+    expect(history.map((h) => h.verification)).toEqual(['human_confirmed', 'disputed']);
+    expect(history[0]!.actorName).toBe('Knowledge Tester');
+    expect(history[0]!.at).toBeInstanceOf(Date);
+    expect(history[1]!.reason).toBe('a second source disagrees');
+  });
+
   it('active manual knowledge stays unverified — selection qualifies it, and it never claims verification', async () => {
     await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Kubernetes cluster autoscaler', body: 'Kubernetes cluster autoscaler nodepool provisioning tuning parameters.', kind: 'fact', activate: true }));
     const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'tune the kubernetes cluster autoscaler nodepool provisioning' }));
@@ -251,7 +272,7 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
 
   it('a disputed record is withheld from a task run but the same record is not gated by kind', async () => {
     const id = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Quarterly discount rate', body: 'Quarterly discount rate margin promotion percentage.', kind: 'policy', activate: true }));
-    await withTenant(ctx, (tx) => setKnowledgeVerification(tx, ctx, id, 'disputed'));
+    await withTenant(ctx, (tx) => setKnowledgeVerification(tx, ctx, id, 'disputed', 'two active records disagree on the rate'));
     // Task run = current operational fact → disputed is withheld (not settled context for execution).
     const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'quarterly discount rate margin promotion percentage', intendedUse: 'current_operational_fact' }));
     expect(picked.find((k) => k.title === 'Quarterly discount rate')).toBeUndefined();
@@ -260,6 +281,26 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
     const hit = ref.find((k) => k.title === 'Quarterly discount rate');
     expect(hit).toBeDefined();
     expect(hit!.memoryText).toMatch(/disputed/);
+  });
+
+  it('a durable AI operation is idempotent by key and inspectable, and anchors non-run applications', async () => {
+    // Same logical retry (same key) → same operation identity.
+    const first = await withTenant(ctx, (tx) => beginAiOperation(tx, ctx, { operationType: 'objective_suggestion', idempotencyKey: 'draft-abc', provider: 'openai' }));
+    const retry = await withTenant(ctx, (tx) => beginAiOperation(tx, ctx, { operationType: 'objective_suggestion', idempotencyKey: 'draft-abc', provider: 'openai' }));
+    expect(retry).toBe(first);
+    // A new request (no key) → a distinct operation.
+    const other = await withTenant(ctx, (tx) => beginAiOperation(tx, ctx, { operationType: 'objective_suggestion', provider: 'openai' }));
+    expect(other).not.toBe(first);
+    // Status advances and the operation is inspectable.
+    await withTenant(ctx, (tx) => completeAiOperation(tx, ctx, first));
+    const op = await withTenant(ctx, (tx) => getAiOperation(tx, ctx, first));
+    expect(op?.status).toBe('completed');
+    expect(op?.dispatchedAt).toBeInstanceOf(Date);
+    // A Knowledge application can be anchored to it (consumerId = operation id).
+    const k = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Op-anchored note', body: 'b', kind: 'fact', activate: true }));
+    await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: first, injected: [{ id: k, version: 1, title: 'Op-anchored note', body: 'b', reason: 'subject: x', memoryText: 'snap' }] }));
+    const trail = await withTenant(ctx, (tx) => listInjectionsForKnowledge(tx, ctx, k));
+    expect(trail[0]!.consumerId).toBe(first); // resolves to the durable operation
   });
 
   it('objective suggestion (a non-run consumer) leaves the same application record, idempotent per operation', async () => {

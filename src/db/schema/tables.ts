@@ -353,6 +353,46 @@ export const knowledgeInjections = pgTable(
 );
 
 /**
+ * A durable record of an AI operation that is NOT a task run (e.g. objective suggestion), so that
+ * every AI use of Knowledge belongs to an inspectable operation rather than an ephemeral correlation
+ * value. Recorded before provider dispatch; its status advances to completed/failed. An
+ * `idempotencyKey` lets the same logical retry reuse the same operation identity; a new request
+ * creates a new one. `knowledge_injections.consumerId` points here for non-run consumers.
+ */
+export const aiOperations = pgTable(
+  'ai_operations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    operationType: text('operation_type').notNull(),
+    /** What the operation concerned (e.g. 'objective_draft'); id is polymorphic, not an FK. */
+    subjectType: text('subject_type'),
+    subjectId: uuid('subject_id'),
+    /** Stable logical-request key — the same retry reuses the same operation; null = each call distinct. */
+    idempotencyKey: text('idempotency_key'),
+    status: text('status').notNull().default('dispatched'), // dispatched | completed | failed
+    provider: text('provider'),
+    model: text('model'),
+    contextHash: text('context_hash'),
+    dispatchedAt: timestamp('dispatched_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    failedAt: timestamp('failed_at', { withTimezone: true }),
+    resultRef: uuid('result_ref'),
+    error: text('error'),
+    retryOf: uuid('retry_of'),
+    createdBy: uuid('created_by').references(() => profiles.id, { onDelete: 'set null' }),
+    ...timestamps,
+  },
+  (t) => [
+    index('ai_operations_org_project_type_idx').on(t.orgId, t.projectId, t.operationType),
+    // Idempotency: one operation per (project, type, key). NULL keys are distinct, so keyless calls
+    // never collide.
+    uniqueIndex('ai_operations_idempotency_uq').on(t.projectId, t.operationType, t.idempotencyKey),
+  ],
+);
+
+/**
  * Project Folder documents (D-020). One row per indexed file. We store the
  * extracted TEXT and a content hash, never the binary — refresh re-reads from
  * the source folder, so no file content lands in a blob store, and an
