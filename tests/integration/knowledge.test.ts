@@ -13,11 +13,11 @@ import {
   createKnowledge,
   listInjectionsForKnowledge,
   listKnowledge,
-  logKnowledgeInjections,
+  logKnowledgeApplications,
   reviseKnowledge,
   selectRelevantKnowledge,
 } from '@/domain/knowledge/knowledge';
-import { listAllActiveKnowledgeForAdministration } from '@/domain/projects/context';
+import { listAllActiveKnowledgeForAdministration } from '@/domain/knowledge/admin';
 
 /**
  * K1 rules that must never regress: only ACTIVE knowledge is injected;
@@ -194,16 +194,32 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
     const a = await getSetupDb().insert(agents).values({ orgId, projectId: ctx.projectId, name: `A-${randomUUID().slice(0, 6)}`, role: 'primary', provider: 'openai', model: 'gpt-5.4-mini', systemPrompt: 'x' }).returning({ id: agents.id });
     const t = await getSetupDb().insert(tasks).values({ orgId, projectId: ctx.projectId, title: 'Vendor task', input: 'x', providerSelection: 'openai', status: 'completed', createdBy: userId }).returning({ id: tasks.id });
     const r = await getSetupDb().insert(runs).values({ orgId, projectId: ctx.projectId, taskId: t[0]!.id, status: 'completed', primaryAgentId: a[0]!.id }).returning({ id: runs.id });
-    const selected = [{ id, version: 1, title: 'Vendor onboarding steps', body: 'original', reason: 'subject', memoryText: 'EXACT vendor text v1' }];
-    await withTenant(ctx, (tx) => logKnowledgeInjections(tx, ctx, { runId: r[0]!.id, taskId: t[0]!.id, injected: selected }));
-    await withTenant(ctx, (tx) => logKnowledgeInjections(tx, ctx, { runId: r[0]!.id, taskId: t[0]!.id, injected: [{ ...selected[0]!, memoryText: 'DIFFERENT (ignored)' }] }));
+    const selected = [{ id, version: 1, title: 'Vendor onboarding steps', body: 'original', reason: 'subject: vendor, onboarding', memoryText: 'EXACT vendor text v1' }];
+    await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'task_run', consumerId: r[0]!.id, runId: r[0]!.id, taskId: t[0]!.id, injected: selected }));
+    await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'task_run', consumerId: r[0]!.id, runId: r[0]!.id, taskId: t[0]!.id, injected: [{ ...selected[0]!, memoryText: 'DIFFERENT (ignored)' }] }));
     let trail = await withTenant(ctx, (tx) => listInjectionsForKnowledge(tx, ctx, id));
-    expect(trail).toHaveLength(1); // idempotent per (run, item)
+    expect(trail).toHaveLength(1); // idempotent per (consumer, item)
     expect(trail[0]!.memoryText).toBe('EXACT vendor text v1');
+    expect(trail[0]!.reason).toMatch(/^subject:/); // records WHY it was selected
     // Revise the item; the historical snapshot is unchanged.
     await withTenant(ctx, (tx) => reviseKnowledge(tx, ctx, id, { body: 'Rewritten entirely.', activate: true }));
     trail = await withTenant(ctx, (tx) => listInjectionsForKnowledge(tx, ctx, id));
     expect(trail[0]!.memoryText).toBe('EXACT vendor text v1');
     expect(trail[0]!.version).toBe(1);
+  });
+
+  it('objective suggestion (a non-run consumer) leaves the same application record, idempotent per operation', async () => {
+    const id = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Pilot pricing note', body: 'Pilot pricing flat fee guarantee contractor conversion.', kind: 'fact', activate: true }));
+    const operationId = randomUUID();
+    const supplied = [{ id, version: 1, title: 'Pilot pricing note', body: 'b', reason: 'subject: pilot, pricing', memoryText: 'EXACT suggestion snapshot' }];
+    // No run, no task — a suggestion operation. Same table, same trail.
+    await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: operationId, injected: supplied }));
+    await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: operationId, injected: supplied }));
+    const trail = await withTenant(ctx, (tx) => listInjectionsForKnowledge(tx, ctx, id));
+    const forOp = trail.filter((t) => t.consumerType === 'objective_suggestion');
+    expect(forOp).toHaveLength(1); // idempotent per (consumer, item)
+    expect(forOp[0]!.consumerId).toBe(operationId);
+    expect(forOp[0]!.memoryText).toBe('EXACT suggestion snapshot');
+    expect(forOp[0]!.runId).toBeNull();
   });
 });

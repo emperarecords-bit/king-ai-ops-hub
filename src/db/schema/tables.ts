@@ -309,11 +309,17 @@ export const knowledgeInjections = pgTable(
     orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
     projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
     knowledgeItemId: uuid('knowledge_item_id').notNull().references(() => knowledgeItems.id, { onDelete: 'cascade' }),
-    /** The exact version supplied, so the trail is pinned to what the run actually received. */
+    /** The exact version supplied, so the trail is pinned to what the consumer received. */
     version: integer('version').notNull(),
+    /** The AI consumer that received it — every consumer leaves the same record. 'task_run' |
+     *  'objective_suggestion' | future operation types. */
+    consumerType: text('consumer_type').notNull().default('task_run'),
+    /** The consumer's stable id (a run id for a task run; a per-call operation id for a suggestion). */
+    consumerId: uuid('consumer_id'),
+    /** Task-run context (kept for convenience); null for consumers that are not a task run. */
     runId: uuid('run_id').references(() => runs.id, { onDelete: 'set null' }),
     taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'set null' }),
-    /** Why it was eligible: 'subject' | 'objective' | 'task' | 'reference'. */
+    /** Why it was eligible (with matched terms): e.g. 'subject: postgres, schema'. */
     reason: text('reason').notNull(),
     /** Immutable snapshot of the exact rendered text supplied to the AI. */
     memoryText: text('memory_text'),
@@ -322,7 +328,8 @@ export const knowledgeInjections = pgTable(
   (t) => [
     index('knowledge_injections_item_idx').on(t.knowledgeItemId),
     index('knowledge_injections_org_project_idx').on(t.orgId, t.projectId),
-    uniqueIndex('knowledge_injections_run_item_uq').on(t.runId, t.knowledgeItemId),
+    // Idempotent per (consumer, item): one application per operation, so a retry can't double-count.
+    uniqueIndex('knowledge_injections_consumer_item_uq').on(t.consumerType, t.consumerId, t.knowledgeItemId),
   ],
 );
 

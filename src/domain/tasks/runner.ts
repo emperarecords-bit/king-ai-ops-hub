@@ -23,7 +23,7 @@ import {
   type StepKind,
 } from '@/types/domain';
 import { findAgentForRole, type AgentRow } from '@/domain/agents/agents';
-import { selectRelevantKnowledge, logKnowledgeInjections } from '@/domain/knowledge/knowledge';
+import { selectRelevantKnowledge, logKnowledgeApplications } from '@/domain/knowledge/knowledge';
 import { loadObjectiveForRun } from '@/domain/objectives/objectives';
 import {
   retrieveRelevant,
@@ -356,7 +356,7 @@ export async function startRun(
     // The honest reverse trail: record which decisions and knowledge were INJECTED into this run
     // (supplied, not "influenced").
     await logDecisionInjections(tx, ctx, { runId, taskId, injected: decisionMemory.injected });
-    await logKnowledgeInjections(tx, ctx, { runId, taskId, injected: knowledge });
+    await logKnowledgeApplications(tx, ctx, { consumerType: 'task_run', consumerId: runId, runId, taskId, injected: knowledge });
 
     await tx
       .update(tasks)

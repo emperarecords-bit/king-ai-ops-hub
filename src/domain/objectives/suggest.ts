@@ -1,4 +1,5 @@
 import 'server-only';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { type TenantContext } from '@/types/domain';
 import { ValidationError } from '@/lib/errors';
@@ -7,7 +8,7 @@ import { serverEnv } from '@/lib/env.server';
 import { withTenant } from '@/db/tenant';
 import { getProvider } from '@/providers/registry';
 import { findAgentForRole } from '@/domain/agents/agents';
-import { selectRelevantKnowledge } from '@/domain/knowledge/knowledge';
+import { selectRelevantKnowledge, logKnowledgeApplications } from '@/domain/knowledge/knowledge';
 import { wrapUntrusted } from '@/orchestration/prompts';
 import { assertWithinBudget } from '@/domain/usage/usage';
 
@@ -83,12 +84,16 @@ export async function suggestSuccessCriteria(
   const env = serverEnv();
 
   // Objective suggestion is an AI call, so it must use the SAME relevance gate as task runs — never
-  // the wholesale loader. The query is the objective the operator is drafting.
+  // the wholesale loader — AND leave the same application record. `operationId` is this suggestion's
+  // stable consumer id (idempotent per operation).
+  const operationId = randomUUID();
   const { agent, knowledge } = await withTenant(ctx, async (tx) => {
     await assertWithinBudget(tx, ctx.projectId);
+    const selected = await selectRelevantKnowledge(tx, ctx, { queryText: `${title} ${input.description}` });
+    await logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: operationId, injected: selected });
     return {
       agent: await findAgentForRole(tx, ctx, 'primary', 'openai'),
-      knowledge: await selectRelevantKnowledge(tx, ctx, { queryText: `${title} ${input.description}` }),
+      knowledge: selected,
     };
   });
   if (!agent) throw new ValidationError(['No primary employee is configured in this workspace.']);

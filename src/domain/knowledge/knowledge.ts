@@ -246,11 +246,24 @@ export async function selectRelevantKnowledge(
   }));
 }
 
-/** Record that these knowledge items were INJECTED into a run — idempotent, immutable text snapshot. */
-export async function logKnowledgeInjections(
+/**
+ * Record that these knowledge items were supplied to an AI consumer — EVERY consumer (task run,
+ * objective suggestion, future operations) leaves the same inspectable, immutable record. Idempotent
+ * per (consumerType, consumerId, item), so a retried operation can't double-count. `runId`/`taskId`
+ * are task-run context; other consumers pass a per-operation `consumerId`.
+ */
+export type KnowledgeConsumerType = 'task_run' | 'objective_suggestion';
+
+export async function logKnowledgeApplications(
   tx: DbTx,
   ctx: TenantContext,
-  args: { runId: string; taskId: string; injected: SelectedKnowledge[] },
+  args: {
+    consumerType: KnowledgeConsumerType;
+    consumerId: string;
+    runId?: string | null;
+    taskId?: string | null;
+    injected: SelectedKnowledge[];
+  },
 ): Promise<void> {
   if (args.injected.length === 0) return;
   await tx
@@ -261,16 +274,22 @@ export async function logKnowledgeInjections(
         projectId: ctx.projectId,
         knowledgeItemId: k.id,
         version: k.version,
-        runId: args.runId,
-        taskId: args.taskId,
+        consumerType: args.consumerType,
+        consumerId: args.consumerId,
+        runId: args.runId ?? null,
+        taskId: args.taskId ?? null,
         reason: k.reason,
         memoryText: k.memoryText,
       })),
     )
-    .onConflictDoNothing({ target: [knowledgeInjections.runId, knowledgeInjections.knowledgeItemId] });
+    .onConflictDoNothing({
+      target: [knowledgeInjections.consumerType, knowledgeInjections.consumerId, knowledgeInjections.knowledgeItemId],
+    });
 }
 
 export interface KnowledgeInjectionRow {
+  consumerType: string;
+  consumerId: string | null;
   runId: string | null;
   taskId: string | null;
   taskTitle: string | null;
@@ -280,10 +299,12 @@ export interface KnowledgeInjectionRow {
   injectedAt: Date;
 }
 
-/** The reverse trail for one knowledge item: the runs it was supplied to, newest first. */
+/** The reverse trail for one knowledge item: the AI operations it was supplied to, newest first. */
 export async function listInjectionsForKnowledge(tx: DbTx, ctx: TenantContext, itemId: string): Promise<KnowledgeInjectionRow[]> {
   return tx
     .select({
+      consumerType: knowledgeInjections.consumerType,
+      consumerId: knowledgeInjections.consumerId,
       runId: knowledgeInjections.runId,
       taskId: knowledgeInjections.taskId,
       taskTitle: tasks.title,
