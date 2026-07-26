@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
-import { listExecution } from '@/domain/execution/execution';
+import { listAutomations, listExecution } from '@/domain/execution/execution';
 import {
   assessTask,
   assessWorkItem,
@@ -9,6 +9,7 @@ import {
   CONDITION_LABEL,
   type ExecutionAssessment,
 } from '@/domain/execution/assess';
+import { assessAutomation, AUTOMATION_STATE_LABEL } from '@/domain/execution/automation';
 import { listEmployees } from '@/domain/agents/org';
 import { listObjectives } from '@/domain/objectives/objectives';
 import { Card, EmptyState, PageHeader } from '@/components/ui';
@@ -30,11 +31,18 @@ export default async function ExecutionPage({
   const ctx = await requireTenant(projectKey);
   const canEdit = ctx.projectRole !== 'viewer';
 
-  const { rows, employees, objectives } = await withTenant(ctx, async (tx) => ({
+  const { rows, automations, employees, objectives } = await withTenant(ctx, async (tx) => ({
     rows: await listExecution(tx, ctx),
+    automations: await listAutomations(tx, ctx),
     employees: await listEmployees(tx, ctx),
     objectives: await listObjectives(tx, ctx),
   }));
+
+  const assessedAutomations = automations.map((x) => ({
+    x,
+    aa: assessAutomation({ enabled: x.enabled, recentRuns: x.recentRuns, recentFailures: x.recentFailures }),
+  }));
+  const automationsRequiring = assessedAutomations.filter((a) => a.aa.intervention === 'required');
 
   const now = new Date();
   const assessed = rows.map((r) => ({
@@ -76,14 +84,28 @@ export default async function ExecutionPage({
         <EmptyState>No work yet. Add a work item, or assign an AI task from the Dashboard or an objective.</EmptyState>
       ) : (
         <>
-          <p className="mb-5 text-[15px] text-[var(--foreground)]">
-            {activeCount} piece{activeCount === 1 ? '' : 's'} of work in flight
-            {requiresYou.length > 0 ? `; ${requiresYou.length} need${requiresYou.length === 1 ? 's' : ''} you.` : '; nothing needs you right now.'}
-          </p>
+          {(() => {
+            const needCount = requiresYou.length + automationsRequiring.length;
+            return (
+              <p className="mb-5 text-[15px] text-[var(--foreground)]">
+                {activeCount} piece{activeCount === 1 ? '' : 's'} of work in flight
+                {automations.length > 0 ? ` · ${automations.length} ongoing automation${automations.length === 1 ? '' : 's'}` : ''}
+                {needCount > 0 ? `; ${needCount} need${needCount === 1 ? 's' : ''} you.` : '; nothing needs you right now.'}
+              </p>
+            );
+          })()}
 
-          {requiresYou.length > 0 ? (
+          {requiresYou.length > 0 || automationsRequiring.length > 0 ? (
             <Card title="Requires you" className="mb-6 border-l-2 border-l-[var(--accent-strong)]">
               <ul className="space-y-2">
+                {automationsRequiring.map(({ x, aa }) => (
+                  <li key={`req-auto-${x.id}`} className="flex flex-wrap items-baseline gap-x-2 text-sm">
+                    <span className="rounded border border-[var(--border)] px-1.5 text-[10px] uppercase tracking-wide text-[var(--muted)]">Automation</span>
+                    <a href={`#auto-${x.id}`} className="text-[var(--foreground)] hover:text-[var(--accent)]">{x.title}</a>
+                    <span className="text-xs text-[var(--muted)]">· {AUTOMATION_STATE_LABEL[aa.state]}</span>
+                    <span className="text-xs text-[var(--accent)]">· {aa.requiredAction}</span>
+                  </li>
+                ))}
                 {requiresYou.map(({ r, a }) => (
                   <li key={`req-${r.kind}-${r.id}`} className="flex flex-wrap items-baseline gap-x-2 text-sm">
                     <Kind kind={r.kind} />
@@ -139,6 +161,40 @@ export default async function ExecutionPage({
               </div>
             </section>
           ))}
+
+          {assessedAutomations.length > 0 ? (
+            <section className="mb-6">
+              <h2 className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--muted)]">Ongoing automations</h2>
+              <p className="mb-2 text-xs text-[var(--muted)]">Recurring authority to create work — not currently-executing tasks. The tasks they produce appear above as their own records.</p>
+              <div className="space-y-2">
+                {assessedAutomations.map(({ x, aa }) => (
+                  <div key={x.id} id={`auto-${x.id}`} className="rounded-md border border-[var(--border)] p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded border border-[var(--border)] px-1.5 text-[10px] uppercase tracking-wide text-[var(--muted)]">Automation</span>
+                      <span className="text-sm font-medium">{x.title}</span>
+                      <span className="text-xs text-[var(--muted)]">· {AUTOMATION_STATE_LABEL[aa.state]}</span>
+                      <span className="ml-auto">
+                        {aa.intervention === 'required' ? (
+                          <span className="text-xs text-[var(--accent)]">needs you</span>
+                        ) : aa.intervention === 'watch' ? (
+                          <span className="text-xs text-[var(--warning,#c99a3a)]">watch</span>
+                        ) : null}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-[var(--muted)]">
+                      {aa.reason} · {x.cadence} · next run {x.nextRunAt.toISOString().slice(0, 16).replace('T', ' ')} UTC · {x.producedCount} produced
+                      {x.recentFailures > 0 ? ` · ${x.recentFailures} of last ${x.recentRuns} runs failed` : ''}
+                    </p>
+                    {x.objectiveId ? (
+                      <Link href={`/p/${projectKey}/objectives/${x.objectiveId}`} className="mt-1 inline-block text-xs text-[var(--accent)]">
+                        Manage (pause / inspect) on {x.objectiveTitle ?? 'its objective'} →
+                      </Link>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
 
           {recent.length > 0 ? (
             <section>

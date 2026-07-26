@@ -1,7 +1,7 @@
-import { and, desc, eq } from 'drizzle-orm';
-import { type TaskStatus, type TenantContext, type WorkItemCondition } from '@/types/domain';
+import { and, desc, eq, inArray } from 'drizzle-orm';
+import { type Cadence, type TaskStatus, type TenantContext, type WorkItemCondition } from '@/types/domain';
 import { type DbTx } from '@/db/client';
-import { agents, objectives, profiles, tasks, workItems } from '@/db/schema';
+import { agents, objectives, profiles, taskSchedules, tasks, workItems } from '@/db/schema';
 
 /**
  * The unified execution feed (Execution). One stream across both engines — human Work Items and
@@ -112,4 +112,76 @@ export async function listExecution(tx: DbTx, ctx: TenantContext): Promise<Execu
   }));
 
   return [...workItemRows, ...taskRows].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+}
+
+/**
+ * Ongoing automations — recurring schedules, workspace-wide. A schedule is authority to create
+ * work, NOT an execution instance, so it lives in its own layer (never in the condition groups).
+ * Recent-run health is derived from its identifiable generated tasks (linked via scheduleId),
+ * never a generic status. No per-schedule spend is reported in v1 — per-instance cost stays on the
+ * tasks, so nothing is double-counted.
+ */
+export interface AutomationRow {
+  id: string;
+  title: string;
+  enabled: boolean;
+  cadence: Cadence;
+  nextRunAt: Date;
+  objectiveId: string | null;
+  objectiveTitle: string | null;
+  producedCount: number;
+  recentRuns: number;
+  recentFailures: number;
+}
+
+export async function listAutomations(tx: DbTx, ctx: TenantContext): Promise<AutomationRow[]> {
+  const schedules = await tx
+    .select({
+      id: taskSchedules.id,
+      title: taskSchedules.title,
+      enabled: taskSchedules.enabled,
+      cadence: taskSchedules.cadence,
+      nextRunAt: taskSchedules.nextRunAt,
+      objectiveId: taskSchedules.objectiveId,
+      objectiveTitle: objectives.title,
+    })
+    .from(taskSchedules)
+    .leftJoin(objectives, eq(taskSchedules.objectiveId, objectives.id))
+    .where(and(eq(taskSchedules.projectId, ctx.projectId), eq(taskSchedules.orgId, ctx.orgId)))
+    .orderBy(desc(taskSchedules.nextRunAt));
+
+  if (schedules.length === 0) return [];
+  const ids = schedules.map((s) => s.id);
+
+  // Generated tasks for these schedules, newest first — health is computed from real runs.
+  const generated = await tx
+    .select({ scheduleId: tasks.scheduleId, status: tasks.status, createdAt: tasks.createdAt })
+    .from(tasks)
+    .where(and(eq(tasks.projectId, ctx.projectId), inArray(tasks.scheduleId, ids)))
+    .orderBy(desc(tasks.createdAt));
+
+  const bySchedule = new Map<string, { status: TaskStatus }[]>();
+  for (const g of generated) {
+    if (!g.scheduleId) continue;
+    const arr = bySchedule.get(g.scheduleId) ?? [];
+    arr.push({ status: g.status });
+    bySchedule.set(g.scheduleId, arr);
+  }
+
+  return schedules.map((s) => {
+    const runs = bySchedule.get(s.id) ?? [];
+    const recent = runs.slice(0, 3); // already newest-first
+    return {
+      id: s.id,
+      title: s.title,
+      enabled: s.enabled,
+      cadence: s.cadence,
+      nextRunAt: s.nextRunAt,
+      objectiveId: s.objectiveId,
+      objectiveTitle: s.objectiveTitle,
+      producedCount: runs.length,
+      recentRuns: recent.length,
+      recentFailures: recent.filter((r) => r.status === 'failed').length,
+    };
+  });
 }
