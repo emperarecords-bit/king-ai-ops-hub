@@ -145,8 +145,9 @@ export async function changeObjectiveStatus(
   const next = String(formData.get('next') ?? '');
   const parsed = z.enum(['active', 'completed', 'cancelled']).safeParse(next);
   if (!parsed.success) return { error: 'Invalid status.' };
+  const reason = String(formData.get('reason') ?? '');
   return objectiveMutation(formData, (ctx, objectiveId) =>
-    withTenant(ctx, (tx) => setObjectiveStatus(tx, ctx, objectiveId, parsed.data)),
+    withTenant(ctx, (tx) => setObjectiveStatus(tx, ctx, objectiveId, parsed.data, reason)),
   );
 }
 

@@ -275,11 +275,12 @@ export function ObjectiveStatusButtons({
 }) {
   const [state, formAction, pending] = useActionState(changeObjectiveStatus, initialState);
   if (status === 'completed' || status === 'cancelled') return null;
-  return (
-    <form action={formAction} className="flex items-center gap-2">
-      <input type="hidden" name="projectKey" value={projectKey} />
-      <input type="hidden" name="objectiveId" value={objectiveId} />
-      {status === 'draft' ? (
+
+  if (status === 'draft') {
+    return (
+      <form action={formAction} className="flex items-center gap-2">
+        <input type="hidden" name="projectKey" value={projectKey} />
+        <input type="hidden" name="objectiveId" value={objectiveId} />
         <button
           name="next"
           value="active"
@@ -288,7 +289,22 @@ export function ObjectiveStatusButtons({
         >
           Activate
         </button>
-      ) : (
+        <ErrorNote error={state.error} />
+      </form>
+    );
+  }
+
+  return (
+    <form action={formAction} className="space-y-3">
+      <input type="hidden" name="projectKey" value={projectKey} />
+      <input type="hidden" name="objectiveId" value={objectiveId} />
+      <textarea
+        name="reason"
+        rows={2}
+        placeholder="Reason — required to cancel (strategy changed, assumption proved false, deprioritized, outcome became impossible, created by mistake…); optional caveat when completing."
+        className="w-full rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm"
+      />
+      <div className="flex items-center gap-2">
         <button
           name="next"
           value="completed"
@@ -297,11 +313,11 @@ export function ObjectiveStatusButtons({
         >
           Mark completed
         </button>
-      )}
-      <button name="next" value="cancelled" disabled={pending} className={smallBtn}>
-        Cancel objective
-      </button>
-      <ErrorNote error={state.error} />
+        <button name="next" value="cancelled" disabled={pending} className={smallBtn}>
+          Cancel objective
+        </button>
+        <ErrorNote error={state.error} />
+      </div>
     </form>
   );
 }

@@ -472,6 +472,14 @@ export const objectives = pgTable(
     createdBy: uuid('created_by')
       .notNull()
       .references(() => profiles.id, { onDelete: 'restrict' }),
+    /**
+     * Frozen closure record — the durable executive conclusion when the objective became
+     * terminal (completed/cancelled). Captured at the transition, not reconstructed later.
+     * A cancellation reason is required; a completion may carry an optional caveat.
+     */
+    closedBy: uuid('closed_by').references(() => profiles.id, { onDelete: 'set null' }),
+    closedAt: timestamp('closed_at', { withTimezone: true }),
+    closureReason: text('closure_reason'),
     ...timestamps,
   },
   (t) => [

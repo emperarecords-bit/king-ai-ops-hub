@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { buildBriefing } from '@/domain/dashboard/briefing';
 import { type ObjectiveListRow } from '@/domain/objectives/objectives';
+import { type SuccessCriterion } from '@/types/domain';
+
+function crit(status: SuccessCriterion['status'] = 'met'): SuccessCriterion {
+  return { label: 'c', metric: 'c', target: 1, unit: '', source: 'manual', status, verifiedBy: status === 'unmet' ? null : 'u', verifiedAt: status === 'unmet' ? null : '2026-07-25T00:00:00.000Z' };
+}
 
 function obj(over: Partial<ObjectiveListRow> & { tasksTotal: number; tasksCompleted: number; percent: number }): ObjectiveListRow {
   const { tasksTotal, tasksCompleted, percent, ...rest } = over;
@@ -43,11 +48,12 @@ describe('buildBriefing — the honest health verdict', () => {
     expect(b.verdict).toContain('one thing stands out');
   });
 
-  it('labels the business consequence as an inference, never a fact', () => {
+  it('the standout carries the shared assessment reasoning (busy work, no outcome evidence)', () => {
     const b = buildBriefing({ ...base, objectives: [obj({ tasksTotal: 2, tasksCompleted: 2, percent: 50 })] });
-    expect(b.standout?.reasoning.businessImpact).toMatch(/likely, not confirmed/i);
-    // Evidence is what it can prove — no causal claim.
-    expect(b.standout?.reasoning.evidence).toContain('2 of 2 tasks complete');
+    expect(b.standout).not.toBeNull();
+    // Same read the Objectives area gives — effort, not a fabricated causal claim.
+    expect(b.standout!.surface).toMatch(/effort/i);
+    expect(b.standout!.reasoning.evidence).toMatch(/AI task/);
   });
 
   it('is uncertain — not falsely green — when there are no active objectives to judge', () => {
@@ -58,7 +64,8 @@ describe('buildBriefing — the honest health verdict', () => {
   });
 
   it('treats waiting approvals as attention without a standout', () => {
-    const b = buildBriefing({ ...base, pendingApprovals: 3, objectives: [obj({ tasksTotal: 1, tasksCompleted: 0, percent: 0 })] });
+    // An objective advancing on evidence is not flagged, so approvals alone drive attention.
+    const b = buildBriefing({ ...base, pendingApprovals: 3, objectives: [obj({ tasksTotal: 1, tasksCompleted: 0, percent: 0, successCriteria: [crit('met')] })] });
     expect(b.mood).toBe('attention');
     expect(b.standout).toBeNull();
     expect(b.verdict).toContain('approvals are waiting');
@@ -81,10 +88,11 @@ describe('buildBriefing — the honest health verdict', () => {
     const b = buildBriefing({
       ...base,
       objectives: [
-        obj({ id: 'stalled', priority: 1, tasksTotal: 2, tasksCompleted: 2, percent: 50 }),
-        obj({ id: 'moving', priority: 2, tasksTotal: 4, tasksCompleted: 1, percent: 25 }),
+        obj({ id: 'flagged', priority: 1, tasksTotal: 2, tasksCompleted: 2, percent: 50 }),
+        obj({ id: 'moving', priority: 2, tasksTotal: 4, tasksCompleted: 1, percent: 25, successCriteria: [crit('met')] }),
       ],
     });
-    expect(b.reassurance).toContain('1 other objective active, none stalled');
+    expect(b.standout?.objectiveId).toBe('flagged');
+    expect(b.reassurance).toContain('1 other objective advancing on evidence');
   });
 });

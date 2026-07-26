@@ -11,7 +11,7 @@ import {
 import { ConflictError, NotFoundError, ValidationError } from '@/lib/errors';
 import { METRIC_PATTERN, slugifyMetric } from '@/lib/slug';
 import { type DbTx } from '@/db/client';
-import { agents, departments, milestones, objectives, tasks, workItems } from '@/db/schema';
+import { agents, departments, milestones, objectives, profiles, tasks, workItems } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 
 /**
@@ -290,6 +290,12 @@ export interface ObjectiveDetail {
   /** Human Work Items attached to this objective — effort, shown alongside AI tasks. */
   workItems: { id: string; title: string; stage: string }[];
   progress: ObjectiveProgress;
+  /** Frozen closure record (completed/cancelled only). */
+  closedByName: string | null;
+  closedAt: Date | null;
+  closureReason: string | null;
+  /** Display names for criterion verifiers (verifiedBy id → name), for evidence provenance. */
+  verifierNames: Record<string, string>;
   createdAt: Date;
 }
 
@@ -308,6 +314,9 @@ export async function getObjective(
       successCriteria: objectives.successCriteria,
       sponsoringDepartmentId: objectives.sponsoringDepartmentId,
       accountableAgentId: objectives.accountableAgentId,
+      closedBy: objectives.closedBy,
+      closedAt: objectives.closedAt,
+      closureReason: objectives.closureReason,
       createdAt: objectives.createdAt,
       departmentName: departments.name,
       agentName: agents.name,
@@ -355,6 +364,16 @@ export async function getObjective(
     .where(and(eq(workItems.objectiveId, objectiveId), eq(workItems.projectId, ctx.projectId)))
     .orderBy(desc(workItems.createdAt));
 
+  // Resolve the people behind criterion evidence and the closure, for provenance wording.
+  const personIds = [
+    ...new Set(row.successCriteria.map((c) => c.verifiedBy).filter((x): x is string => !!x)),
+  ];
+  if (row.closedBy) personIds.push(row.closedBy);
+  const people = personIds.length
+    ? await tx.select({ id: profiles.id, name: profiles.displayName }).from(profiles).where(inArray(profiles.id, personIds))
+    : [];
+  const nameById = new Map(people.map((p) => [p.id, p.name]));
+
   const base = {
     tasksTotal: attachedTasks.length,
     tasksCompleted: attachedTasks.filter((t) => t.status === 'completed').length,
@@ -379,6 +398,10 @@ export async function getObjective(
     tasks: attachedTasks,
     workItems: attachedWorkItems,
     progress: { ...base, percent: computePercent(base) },
+    closedByName: row.closedBy ? (nameById.get(row.closedBy) ?? null) : null,
+    closedAt: row.closedAt,
+    closureReason: row.closureReason,
+    verifierNames: Object.fromEntries(nameById),
     createdAt: row.createdAt,
   };
 }
@@ -396,12 +419,22 @@ export async function setObjectiveStatus(
   ctx: TenantContext,
   objectiveId: string,
   next: ObjectiveStatus,
+  /** Required when cancelling — the strategic reason, kept as institutional memory. Optional
+   *  caveat on completion. */
+  reason?: string,
 ): Promise<void> {
   if (!OBJECTIVE_STATUSES.includes(next)) throw new ValidationError(['Invalid status.']);
   const detail = await getObjective(tx, ctx, objectiveId);
 
   if (!TRANSITIONS[detail.status].includes(next)) {
     throw new ConflictError(`An objective cannot go from ${detail.status} to ${next}.`);
+  }
+
+  const trimmedReason = reason?.trim() || null;
+  if (next === 'cancelled' && !trimmedReason) {
+    throw new ValidationError([
+      'A cancellation reason is required — why the objective is being abandoned is the institutional memory that makes it useful later.',
+    ]);
   }
 
   // Executive decision 2026-07-24: activation requires a measurable
@@ -426,16 +459,23 @@ export async function setObjectiveStatus(
     }
   }
 
+  const terminal = next === 'completed' || next === 'cancelled';
   await tx
     .update(objectives)
-    .set({ status: next, updatedAt: new Date() })
+    .set({
+      status: next,
+      updatedAt: new Date(),
+      ...(terminal
+        ? { closedBy: ctx.userId, closedAt: new Date(), closureReason: trimmedReason }
+        : {}),
+    })
     .where(and(eq(objectives.id, objectiveId), eq(objectives.projectId, ctx.projectId)));
 
   await writeAudit(tx, ctx, {
     action: `objective.${next === 'active' ? 'activated' : next}`,
     entityType: 'objective',
     entityId: objectiveId,
-    detail: { from: detail.status, to: next },
+    detail: { from: detail.status, to: next, reason: trimmedReason },
   });
 }
 

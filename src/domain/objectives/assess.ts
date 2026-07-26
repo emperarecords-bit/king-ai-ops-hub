@@ -2,19 +2,21 @@ import { type ObjectiveStatus, type SuccessCriterion } from '@/types/domain';
 import { type Reasoning } from '@/domain/dashboard/briefing';
 
 /**
- * The honest first-version objective assessment (HUB-PRODUCT.md → Objectives).
+ * The honest objective assessment (HUB-PRODUCT.md → Objectives) — the single source of truth
+ * for objective judgment across every surface (Dashboard, Objectives list, objective detail).
  *
- * A *semantic model*, not a scoring algorithm. It never produces a percentage: progress is
- * stated as criteria-and-evidence ("2 of 3 conditions met"), momentum is read only from outcome
- * evidence — never task volume — and activity is reported as *effort*, never silently promoted to
- * progress. Where evidence is missing it says so and what's missing. Risk is asserted only from a
- * real signal (none available yet, so v1 never claims "low risk"); confidence appears only when it
- * materially qualifies a claim. Pure and testable.
+ * A *semantic model*, not a scoring algorithm. Never a percentage: progress is criteria-and-
+ * evidence; momentum is read only from *outcome* evidence (never task volume) and separately from
+ * outcome progress — an objective can have real progress yet stale evidence, so momentum reads
+ * "unconfirmed"; activity is reported as effort; where evidence is missing it says what's missing.
+ * Risk is asserted only from a real signal (none available yet → never "low risk"); confidence
+ * appears only when it materially qualifies a claim. Pure and testable.
  */
 
 export type ObjectiveState =
   | 'draft'
   | 'advancing'
+  | 'progressed' // outcome progress exists, but evidence too stale to confirm current momentum
   | 'ready-to-close'
   | 'effort-only'
   | 'insufficient'
@@ -23,15 +25,10 @@ export type ObjectiveState =
 
 export interface Assessment {
   state: ObjectiveState;
-  /** The Hub's read — one bounded sentence, no forecast, no percentage. */
   headline: string;
-  /** Criteria-and-evidence, e.g. "2 of 3 conditions met · 1 waived". Never a percentage. */
   outcomeSummary: string;
-  /** Shown only when it materially qualifies the read (incomplete/mixed evidence). */
   confidence: string | null;
-  /** Human + AI work, reported together as effort. */
   work: string;
-  /** The five-dimension reasoning contract, behind "How I reached this". */
   reasoning: Reasoning | null;
 }
 
@@ -40,7 +37,16 @@ export interface AssessInput {
   criteria: SuccessCriterion[];
   taskTotal: number;
   workItemTotal: number;
+  /** For momentum freshness. Omit to skip staleness (treat any outcome evidence as current). */
+  now?: Date;
 }
+
+/**
+ * Placeholder momentum window. Per HUB-PRODUCT.md there is no universal age threshold — the real
+ * answer is the objective's own evidence cadence, which we don't model yet. Until then this is a
+ * conservative default and the language always speaks to the evidence *date*, not "N days".
+ */
+const MOMENTUM_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 
 function plural(n: number, s: string): string {
   return `${n} ${s}${n === 1 ? '' : 's'}`;
@@ -67,7 +73,7 @@ function reason(
   total: number,
   taskTotal: number,
   workItemTotal: number,
-  kind: 'advancing' | 'ready' | 'effort',
+  kind: 'advancing' | 'progressed' | 'ready' | 'effort',
 ): Reasoning {
   return {
     businessImpact:
@@ -75,21 +81,36 @@ function reason(
     evidence: `${summarize(met, waived, total)}. Work recorded: ${taskTotal} AI task(s), ${workItemTotal} Work Item(s).`,
     reasoning:
       kind === 'advancing'
-        ? 'At least one success condition has recorded evidence — that is outcome movement, not just completed activity.'
-        : kind === 'ready'
-          ? 'Every success condition is met or explicitly waived, so the completion gate is satisfied.'
-          : 'Completed work is evidence of effort; none of it is yet tied to a satisfied success condition.',
+        ? 'At least one success condition has recent recorded evidence — that is outcome movement, not just completed activity.'
+        : kind === 'progressed'
+          ? 'Success conditions are met, but the newest outcome evidence is old — enough to establish progress, not enough to judge current momentum.'
+          : kind === 'ready'
+            ? 'Every success condition is met or explicitly waived, so the completion gate is satisfied.'
+            : 'Completed work is evidence of effort; none of it is yet tied to a satisfied success condition.',
     confidence:
       kind === 'effort'
         ? 'Low — there is no outcome evidence to assess against.'
-        : 'Based only on recorded criterion evidence; progress is not inferred from task volume.',
+        : kind === 'progressed'
+          ? 'Confident on progress; current momentum is unconfirmed because the evidence is stale.'
+          : 'Based only on recorded criterion evidence; progress is not inferred from task volume.',
     whatWouldChange:
       'Marking a success condition met (with its evidence), or new outcome evidence arriving, would change this read.',
   };
 }
 
+/** Newest verifiedAt among met criteria, or null. */
+function latestMetEvidence(criteria: SuccessCriterion[]): string | null {
+  let latest: string | null = null;
+  for (const c of criteria) {
+    if (c.status === 'met' && c.verifiedAt && (latest === null || c.verifiedAt > latest)) {
+      latest = c.verifiedAt;
+    }
+  }
+  return latest;
+}
+
 export function assessObjective(input: AssessInput): Assessment {
-  const { status, criteria, taskTotal, workItemTotal } = input;
+  const { status, criteria, taskTotal, workItemTotal, now } = input;
   const met = criteria.filter((c) => c.status === 'met').length;
   const waived = criteria.filter((c) => c.status === 'waived').length;
   const total = criteria.length;
@@ -100,7 +121,10 @@ export function assessObjective(input: AssessInput): Assessment {
   if (status === 'draft') {
     return {
       state: 'draft',
-      headline: 'Not yet active — it needs at least one agreed success condition before it starts.',
+      headline:
+        total === 0
+          ? 'Draft — not yet active. It needs at least one agreed success condition before it starts.'
+          : 'Draft — not yet active. Success conditions are defined; activate it when the plan is ready.',
       outcomeSummary,
       confidence: null,
       work,
@@ -138,6 +162,18 @@ export function assessObjective(input: AssessInput): Assessment {
     };
   }
   if (met > 0) {
+    const latest = latestMetEvidence(criteria);
+    const stale = now != null && latest != null && now.getTime() - new Date(latest).getTime() > MOMENTUM_WINDOW_MS;
+    if (stale) {
+      return {
+        state: 'progressed',
+        headline: `${met} of ${plural(total, 'condition')} met, but the most recent outcome evidence is from ${latest!.slice(0, 10)} — not enough recent change to assess current momentum confidently.`,
+        outcomeSummary,
+        confidence: 'Confident on progress; current momentum is unconfirmed — the evidence is stale.',
+        work,
+        reasoning: reason(met, waived, total, taskTotal, workItemTotal, 'progressed'),
+      };
+    }
     return {
       state: 'advancing',
       headline: `Advancing on evidence — ${met} of ${plural(total, 'condition')} met.`,
@@ -166,4 +202,19 @@ export function assessObjective(input: AssessInput): Assessment {
     work,
     reasoning: null,
   };
+}
+
+/**
+ * Provenance wording for a criterion status. Human attestation is "Confirmed by …" — the person
+ * asserted it; the Hub does not claim to have independently verified it. Only a linked/usage/
+ * integration source earns "Verified from …". Freshness is the evidence date when known.
+ */
+export function describeEvidence(c: SuccessCriterion, verifierName?: string | null): string | null {
+  if (c.status === 'unmet') return null;
+  const on = c.verifiedAt ? ` on ${c.verifiedAt.slice(0, 10)}` : '';
+  const who = verifierName ? ` by ${verifierName}` : '';
+  if (c.status === 'waived') return `Waived${who}${on}`;
+  if (c.source === 'manual') return `Confirmed${who}${on}`; // human attestation, not independent verification
+  if (c.source === 'usage') return `Verified from usage data${on}`;
+  return `Verified from ${c.source.replace('integration:', '')}${on}`;
 }

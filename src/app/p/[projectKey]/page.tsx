@@ -50,6 +50,7 @@ export default async function DashboardPage({
     objectives,
     pendingApprovals: approvals.length,
     failed: failed.length,
+    now: new Date(),
   });
 
   const hour = new Date().getHours();
@@ -129,7 +130,7 @@ export default async function DashboardPage({
 
       {briefing.mood !== 'attention' ? (
         <div className="mb-6 grid gap-3 sm:grid-cols-3">
-          <Stat label="Objectives" value={`${briefing.advancing} active`} />
+          <Stat label="Objectives" value={`${briefing.advancing} advancing`} />
           <Stat label="Work" value={`${workItems.length} tracked`} />
           <Stat
             label="On your desk"

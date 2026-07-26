@@ -1,4 +1,5 @@
 import { type ObjectiveListRow } from '@/domain/objectives/objectives';
+import { assessObjective, type ObjectiveState } from '@/domain/objectives/assess';
 
 /**
  * The dashboard briefing — the chief of staff's read of the business, business-first.
@@ -48,26 +49,37 @@ export interface BriefingInput {
   pendingApprovals: number;
   /** Failed tasks needing a look. */
   failed: number;
+  /** For momentum freshness in the shared objective assessment. */
+  now?: Date;
 }
 
 /**
- * An active objective is "stalled" — the honest, non-crying-wolf version — when every task
- * under it is finished yet the objective isn't closed: work exists, all of it is done, and
- * nothing is moving it toward completion. Brand-new / task-less objectives are never flagged
- * (that was the old at-risk false alarm).
+ * Objective judgment comes from the SAME model as the Objectives area (assess.ts) — the operating
+ * partner cannot reach incompatible conclusions from the same evidence. The Dashboard shows a
+ * concise attention read; Objectives shows the full assessment; the underlying state is identical.
+ * The Dashboard flags an objective whose read is "effort-only" (busy but no outcome evidence) or
+ * "progressed" (real progress gone stale) — the kinds that hide behind a busy task list.
  */
-function isStalled(o: ObjectiveListRow): boolean {
-  const p = o.progress;
-  return o.status === 'active' && p.percent < 100 && p.tasksTotal > 0 && p.tasksCompleted === p.tasksTotal;
+function needsAttention(state: ObjectiveState): boolean {
+  return state === 'effort-only' || state === 'progressed';
 }
 
 export function buildBriefing(input: BriefingInput): Briefing {
-  const { business, objectives, pendingApprovals, failed } = input;
+  const { business, objectives, pendingApprovals, failed, now } = input;
   const active = objectives.filter((o) => o.status === 'active');
-  const stalled = active.filter(isStalled);
-  // listObjectives is ordered by priority asc, so the first stalled item is the top priority.
-  const top = stalled[0] ?? null;
-  const advancing = active.length - stalled.length;
+  const assessed = active.map((o) => ({
+    o,
+    a: assessObjective({
+      status: o.status,
+      criteria: o.successCriteria,
+      taskTotal: o.progress.tasksTotal,
+      workItemTotal: o.workItemTotal,
+      now,
+    }),
+  }));
+  // listObjectives is priority-ordered, so the first flagged objective is the top priority.
+  const top = assessed.find((x) => needsAttention(x.a.state)) ?? null;
+  const advancing = assessed.filter((x) => x.a.state === 'advancing' || x.a.state === 'ready-to-close').length;
 
   let mood: Mood;
   if (active.length === 0) mood = 'uncertain';
@@ -89,30 +101,16 @@ export function buildBriefing(input: BriefingInput): Briefing {
     verdict = `${business} is healthy — a few approvals are waiting on you.`;
   }
 
-  let standout: Standout | null = null;
-  if (top) {
-    const p = top.progress;
-    const dept = top.sponsoringDepartment;
-    standout = {
-      objectiveId: top.id,
-      title: top.title,
-      surface: `All ${p.tasksTotal} of its tasks are done, but it isn't closed — nothing is moving it forward now.`,
-      reasoning: {
-        businessImpact: dept
-          ? `Likely, not confirmed: this is ${dept}'s objective — while it sits unfinished, that outcome isn't being reached. I can see it's stalled; I can't measure the downstream effect directly.`
-          : `Likely, not confirmed: while this sits unfinished, the outcome it represents isn't being reached. I can see it's stalled; I can't measure the downstream effect directly.`,
-        evidence: `${p.tasksCompleted} of ${p.tasksTotal} tasks complete · objective at ${p.percent}% · no task currently in motion.`,
-        reasoning: `Of the active objectives, it's the one with finished work and no path to closing — the clearest place attention finishes an outcome.`,
-        confidence: `High that it's stalled; low on the size of its downstream impact.`,
-        whatWouldChange: `A new task that moves it, or closing the objective, drops it from here.`,
-      },
-    };
-  }
+  // The standout reuses the shared assessment verbatim — same read, concise depth.
+  const standout: Standout | null =
+    top && top.a.reasoning
+      ? { objectiveId: top.o.id, title: top.o.title, surface: top.a.headline, reasoning: top.a.reasoning }
+      : null;
 
-  let reassurance: string | null = null;
-  if (mood === 'attention' && advancing > 0) {
-    reassurance = `Everything else is healthy: ${advancing} other ${advancing === 1 ? 'objective' : 'objectives'} active, none stalled.`;
-  }
+  const reassurance =
+    mood === 'attention' && advancing > 0
+      ? `Everything else is healthy: ${advancing} other ${advancing === 1 ? 'objective' : 'objectives'} advancing on evidence.`
+      : null;
 
   return { business, mood, verdict, standout, advancing, reassurance };
 }

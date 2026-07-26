@@ -3,12 +3,11 @@ import { notFound } from 'next/navigation';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { getObjective } from '@/domain/objectives/objectives';
-import { assessObjective } from '@/domain/objectives/assess';
+import { assessObjective, describeEvidence } from '@/domain/objectives/assess';
 import { listAssignableEmployees } from '@/domain/agents/agents';
 import { listSchedules } from '@/domain/standing/standing';
 import { NotFoundError } from '@/lib/errors';
 import { formatMoney } from '@/lib/money';
-import { type SuccessCriterion } from '@/types/domain';
 import { Card, EmptyState, PageHeader, StatusBadge } from '@/components/ui';
 import {
   AddCriterionForm,
@@ -35,20 +34,6 @@ const CRITERION_STYLE: Record<string, string> = {
   met: 'border-[#3d6b58] bg-[#1f3a2a1a]',
   waived: 'border-[#6b5a3d] bg-[#3a32201a]',
 };
-
-/** Provenance + freshness for a met/waived criterion — the source of the outcome claim. */
-function evidenceSource(c: SuccessCriterion): string | null {
-  if (c.status === 'unmet') return null;
-  const src =
-    c.source === 'manual'
-      ? 'Human-confirmed'
-      : c.source === 'usage'
-        ? 'From usage data'
-        : `From ${c.source.replace('integration:', '')}`;
-  const when = c.verifiedAt ? c.verifiedAt.slice(0, 10) : null;
-  const verb = c.status === 'waived' ? 'Waived' : src;
-  return when ? `${verb} · ${when}` : verb;
-}
 
 export default async function ObjectiveDetailPage({
   params,
@@ -139,7 +124,7 @@ export default async function ObjectiveDetailPage({
         ) : (
           <ul className="space-y-2">
             {o.successCriteria.map((c, i) => {
-              const src = evidenceSource(c);
+              const src = describeEvidence(c, c.verifiedBy ? (o.verifierNames[c.verifiedBy] ?? null) : null);
               return (
                 <li
                   key={i}
@@ -193,10 +178,24 @@ export default async function ObjectiveDetailPage({
 
       {!open ? (
         <Card title="Closure record" className="mb-6">
-          <p className="text-sm">{assessment.headline}</p>
-          <p className="mt-1 text-xs text-[var(--muted)]">
-            Conditions at closure: {assessment.outcomeSummary}. The full record — who closed it, when,
-            and why — is preserved in the{' '}
+          <p className="text-sm">
+            {o.status === 'completed' ? 'Completed' : 'Cancelled'}
+            {o.closedByName ? ` by ${o.closedByName}` : ''}
+            {o.closedAt ? ` on ${o.closedAt.toISOString().slice(0, 10)}` : ''}.
+          </p>
+          <p className="mt-1 text-sm text-[var(--muted)]">Conditions at closure: {assessment.outcomeSummary}.</p>
+          {o.closureReason ? (
+            <p className="mt-2 text-sm">
+              <span className="text-[var(--muted)]">
+                {o.status === 'cancelled' ? 'Reason: ' : 'Caveat: '}
+              </span>
+              {o.closureReason}
+            </p>
+          ) : o.status === 'cancelled' ? (
+            <p className="mt-2 text-xs text-[var(--muted)]">No reason recorded (cancelled before reasons were required).</p>
+          ) : null}
+          <p className="mt-2 text-xs text-[var(--muted)]">
+            Full history is in the{' '}
             <Link href={`/p/${projectKey}/audit`} className="text-[var(--accent)]">
               audit log
             </Link>
