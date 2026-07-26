@@ -1,9 +1,18 @@
 # Hub Product Definition — North Star
 
 Working definitions we design each area against. **Not a backlog** — the agreed *purpose*
-of each screen, settled before any layout or code. Method, per area:
-describe what exists → what works → what feels incomplete → **agree the goals** →
-sketch & evaluate against the goals → only then build.
+of each screen, settled before any layout or code.
+
+**Design sequence, per area (do not skip ahead):**
+1. Understand the experience.
+2. Agree on the personality.
+3. Define the purpose.
+4. Design the interaction.
+5. *Only then* worry about how the Hub computes the result.
+
+The algorithms behind a screen (e.g. the health verdict) live in step 5 and will keep
+evolving as we operate real businesses. The *experience* and the *personality* are settled
+earlier and should not drift.
 
 ## The Hub's personality — the chief of staff
 
@@ -16,12 +25,25 @@ entire product. The test for any area is no longer only "would I proudly ship th
   owns the state of things and stands behind its read.
 - **Confident and active, not passive.** Its stance is: *"Here's where we stand. Here's why.
   Here's what, if anything, needs you."*
+- **Judgment, not just reporting.** It doesn't only say *what's happening* — it says what
+  *matters most*. It prioritizes, gives the consequence, and grants permission to defer.
+  *"'Onboarding revamp' has stalled six days — it's starting to affect onboarding; I'd clear
+  it first"* beats *"one objective is stalled."* *"Three approvals are waiting — none urgent,
+  they can wait until this afternoon"* beats *"three approvals are waiting."* This curates the
+  operator's attention and reduces load. It **never decides for you** — judgment lives in how
+  information is *presented*, not in taking the action. And judgment is *earned*: offered only
+  from signals the Hub can stand behind; where evidence is thin it softens to a question, never
+  a confident guess (see *confidence is not certainty*).
 - **Human, not mechanical.** It greets you like an operating partner — "Good morning.
   AccurateBids is operating normally." — not like software emitting a status line.
 - **Calm · honest · business-first · never noisy · never dramatic.**
 - **Never pretends certainty it doesn't have.** When it can't verify something, it says so
   plainly ("I haven't been able to check X") rather than showing a green it can't stand
   behind. Honesty over false reassurance — that is what makes its confidence trustworthy.
+- **Confidence is not certainty.** Confidence comes from speaking calmly and honestly;
+  certainty comes from complete information. The chief of staff is useful *without* perfect
+  information — "things look healthy overall, but I can't confidently assess customer momentum
+  yet" is integrity, not weakness. It never confuses the two.
 
 ## Hub-wide principles
 
@@ -38,6 +60,13 @@ entire product. The test for any area is no longer only "would I proudly ship th
 - **Earns trust before it asks for attention.** The emotional sequence on every screen: tell
   me where we stand → prove that assessment → *only then* ask for my attention. Begin by
   creating confidence, not by demanding attention.
+- **Curate attention — help me understand what matters most.** The Hub doesn't just tell me
+  what's happening; it reduces cognitive load by prioritizing, giving consequence, and telling
+  me what can wait. Curation, not decision-making. This is likely the difference between
+  software I check and a partner I rely on.
+- **The finished-screen test.** *"After using this page, do I feel more in control than before
+  I opened it?"* If yes, it's done. If no, no amount of visual polish will fix it. This is the
+  working definition of a finished Hub.
 - **Business first, software second.** The Hub always represents the *business* first and the
   software second. When the business view and the platform view compete, optimize for helping
   the operator understand the business — not the internal mechanics of the platform. (A
