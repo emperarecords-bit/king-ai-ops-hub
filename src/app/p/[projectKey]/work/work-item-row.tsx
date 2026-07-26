@@ -1,0 +1,105 @@
+'use client';
+
+import { useActionState } from 'react';
+import { updateWorkItemAction, type WorkItemState } from './actions';
+import { OwnerPicker, type OwnerOption } from '../owner-picker';
+
+const inputCls =
+  'w-full rounded border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-sm';
+const labelCls = 'block text-xs text-[var(--muted)] mb-1';
+
+export interface WorkItemView {
+  id: string;
+  title: string;
+  stage: string;
+  notes: string;
+  ownerAgentId: string | null;
+  ownerName: string | null;
+  objectiveTitle: string | null;
+}
+
+/**
+ * One work item: header line (title · stage · objective · owner) plus an
+ * "Edit" disclosure that reveals the in-place title/stage/notes form. Editable
+ * is the whole reason this object exists — unlike a write-once task.
+ */
+export function WorkItemRow({
+  projectKey,
+  item,
+  employees,
+  canEdit,
+}: {
+  projectKey: string;
+  item: WorkItemView;
+  employees: OwnerOption[];
+  canEdit: boolean;
+}) {
+  const [state, action, pending] = useActionState<WorkItemState, FormData>(updateWorkItemAction, {
+    error: null,
+  });
+
+  return (
+    <li className="border-b border-[var(--border)] py-3 last:border-0">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-medium">{item.title}</span>
+        <span className="rounded bg-[var(--surface-raised)] px-2 py-0.5 text-xs text-[var(--foreground)]">
+          {item.stage}
+        </span>
+        {item.objectiveTitle ? (
+          <span className="text-xs text-[var(--muted)]">· {item.objectiveTitle}</span>
+        ) : null}
+        <span className="ml-auto flex items-center gap-2 text-xs text-[var(--muted)]">
+          Owner:
+          {canEdit ? (
+            <OwnerPicker
+              projectKey={projectKey}
+              object="work_item"
+              objectId={item.id}
+              ownerAgentId={item.ownerAgentId}
+              employees={employees}
+              revalidate={`/p/${projectKey}/work`}
+            />
+          ) : (
+            <span>{item.ownerName ?? 'Unassigned'}</span>
+          )}
+        </span>
+      </div>
+
+      {item.notes ? (
+        <p className="mt-2 whitespace-pre-wrap text-sm text-[var(--muted)]">{item.notes}</p>
+      ) : null}
+
+      {canEdit ? (
+        <details className="mt-2">
+          <summary className="cursor-pointer text-xs text-[var(--muted)] hover:text-[var(--foreground)]">
+            Edit
+          </summary>
+          <form action={action} className="mt-3 space-y-3">
+            <input type="hidden" name="projectKey" value={projectKey} />
+            <input type="hidden" name="workItemId" value={item.id} />
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className={labelCls}>Title</label>
+                <input name="title" required maxLength={200} defaultValue={item.title} className={inputCls} />
+              </div>
+              <div>
+                <label className={labelCls}>Stage</label>
+                <input name="stage" maxLength={60} defaultValue={item.stage} className={inputCls} list="work-stages" />
+              </div>
+            </div>
+            <div>
+              <label className={labelCls}>Notes</label>
+              <textarea name="notes" rows={4} maxLength={8000} defaultValue={item.notes} className={inputCls} />
+            </div>
+            <div className="flex items-center gap-3">
+              <button type="submit" disabled={pending} className="rounded bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-[var(--accent-contrast,#111)] disabled:opacity-60">
+                {pending ? 'Saving…' : 'Save'}
+              </button>
+              {state.error ? <span className="text-sm text-[var(--danger)]">{state.error}</span> : null}
+            </div>
+          </form>
+        </details>
+      ) : null}
+    </li>
+  );
+}

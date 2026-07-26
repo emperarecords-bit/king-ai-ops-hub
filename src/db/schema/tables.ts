@@ -681,6 +681,47 @@ export const decisions = pgTable(
 );
 
 /**
+ * Work items (Org Slice 1 follow-up): a human-owned, editable tracking item.
+ * The counterpart to `tasks`, which are write-once AI *executions* — this
+ * represents human work (a conversation, a deal, a follow-up) that a person
+ * owns and advances through their own stages. Deliberately minimal: title,
+ * a free-text stage, editable notes, an optional employee owner, and an
+ * optional attachment to an objective (so pipelines group under a goal).
+ * No AI run, no cost, no automation — updated by hand as work progresses.
+ */
+export const workItems = pgTable(
+  'work_items',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    /** Free-text business stage (e.g. "Sourced", "Demo booked"). Not an enum —
+     * the vocabulary is the operator's, not the platform's. */
+    stage: text('stage').notNull().default('New'),
+    /** Editable free-form notes — the whole point vs. a write-once task. */
+    notes: text('notes').notNull().default(''),
+    /** Slice 1 ownership: the employee accountable for this work item. */
+    ownerAgentId: uuid('owner_agent_id').references(() => agents.id, { onDelete: 'set null' }),
+    /** Optional grouping under a goal (e.g. a pilot pipeline under an objective). */
+    objectiveId: uuid('objective_id').references(() => objectives.id, { onDelete: 'set null' }),
+    createdBy: uuid('created_by')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'restrict' }),
+    ...timestamps,
+  },
+  (t) => [
+    index('work_items_org_project_idx').on(t.orgId, t.projectId),
+    index('work_items_project_created_idx').on(t.projectId, t.createdAt),
+    index('work_items_objective_idx').on(t.objectiveId),
+  ],
+);
+
+/**
  * Durable run jobs (O-21). A job is a request to execute a task's run,
  * persisted so execution survives a browser close / terminal exit / process
  * restart. A worker claims a job atomically (FOR UPDATE SKIP LOCKED + a lease),

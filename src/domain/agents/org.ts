@@ -3,7 +3,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import { type AgentRole, type TenantContext } from '@/types/domain';
 import { AppError, NotFoundError, ValidationError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
-import { agents, decisions, departments, objectives, projects, tasks } from '@/db/schema';
+import { agents, decisions, departments, objectives, projects, tasks, workItems } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 
 /**
@@ -239,7 +239,7 @@ async function assertManagerInWorkspace(
 
 // --- Ownership: "who owns this?" across the core objects ---------------------
 
-export type OwnableObject = 'task' | 'decision' | 'objective' | 'project';
+export type OwnableObject = 'task' | 'decision' | 'objective' | 'project' | 'work_item';
 
 /** Assign (or clear, with null) the employee owner of a core object. Tenant-scoped
  *  on both the object and the owner. Descriptive — no routing follows. */
@@ -269,6 +269,9 @@ export async function setOwner(
   } else if (object === 'objective') {
     updated = await tx.update(objectives).set({ accountableAgentId: ownerAgentId, updatedAt: new Date() })
       .where(and(eq(objectives.id, objectId), eq(objectives.orgId, ctx.orgId), eq(objectives.projectId, ctx.projectId))).returning({ id: objectives.id });
+  } else if (object === 'work_item') {
+    updated = await tx.update(workItems).set({ ownerAgentId, updatedAt: new Date() })
+      .where(and(eq(workItems.id, objectId), eq(workItems.orgId, ctx.orgId), eq(workItems.projectId, ctx.projectId))).returning({ id: workItems.id });
   } else {
     updated = await tx.update(projects).set({ ownerAgentId, updatedAt: new Date() })
       .where(and(eq(projects.id, objectId), eq(projects.orgId, ctx.orgId), eq(projects.id, ctx.projectId))).returning({ id: projects.id });

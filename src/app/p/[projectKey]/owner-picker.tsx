@@ -22,7 +22,7 @@ export function OwnerPicker({
   revalidate,
 }: {
   projectKey: string;
-  object: 'task' | 'decision' | 'objective' | 'project';
+  object: 'task' | 'decision' | 'objective' | 'project' | 'work_item';
   objectId: string;
   ownerAgentId: string | null;
   employees: OwnerOption[];

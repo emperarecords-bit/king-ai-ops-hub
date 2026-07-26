@@ -14,7 +14,7 @@ export interface OwnerState {
 
 const schema = z.object({
   projectKey: z.string().min(1),
-  object: z.enum(['task', 'decision', 'objective', 'project']),
+  object: z.enum(['task', 'decision', 'objective', 'project', 'work_item']),
   objectId: z.string().uuid(),
   ownerAgentId: z
     .string()

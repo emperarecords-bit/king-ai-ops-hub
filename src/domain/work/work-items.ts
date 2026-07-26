@@ -1,0 +1,163 @@
+import { and, desc, eq } from 'drizzle-orm';
+import { z } from 'zod';
+import { type TenantContext } from '@/types/domain';
+import { ValidationError, NotFoundError } from '@/lib/errors';
+import { type DbTx } from '@/db/client';
+import { agents, objectives, workItems } from '@/db/schema';
+import { writeAudit } from '@/domain/audit/audit';
+
+/**
+ * Work items: human-owned, editable tracking items (Org Slice 1 follow-up).
+ * The counterpart to tasks (write-once AI executions) — this is human work a
+ * person owns and advances by hand through their own stages. No provider call,
+ * no cost, no automation. Ownership assignment lives in org.ts::setOwner
+ * (object 'work_item'); this module handles create / list / edit.
+ */
+
+export interface WorkItemRow {
+  id: string;
+  title: string;
+  stage: string;
+  notes: string;
+  ownerAgentId: string | null;
+  ownerName: string | null;
+  objectiveId: string | null;
+  objectiveTitle: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export async function listWorkItems(
+  tx: DbTx,
+  ctx: TenantContext,
+  objectiveId?: string,
+): Promise<WorkItemRow[]> {
+  const where = objectiveId
+    ? and(
+        eq(workItems.projectId, ctx.projectId),
+        eq(workItems.orgId, ctx.orgId),
+        eq(workItems.objectiveId, objectiveId),
+      )
+    : and(eq(workItems.projectId, ctx.projectId), eq(workItems.orgId, ctx.orgId));
+
+  const rows = await tx
+    .select({
+      id: workItems.id,
+      title: workItems.title,
+      stage: workItems.stage,
+      notes: workItems.notes,
+      ownerAgentId: workItems.ownerAgentId,
+      ownerName: agents.name,
+      objectiveId: workItems.objectiveId,
+      objectiveTitle: objectives.title,
+      createdAt: workItems.createdAt,
+      updatedAt: workItems.updatedAt,
+    })
+    .from(workItems)
+    .leftJoin(agents, eq(workItems.ownerAgentId, agents.id))
+    .leftJoin(objectives, eq(workItems.objectiveId, objectives.id))
+    .where(where)
+    .orderBy(desc(workItems.createdAt));
+  return rows;
+}
+
+export const createWorkItemSchema = z.object({
+  title: z.string().trim().min(1, 'Title is required').max(200),
+  stage: z.string().trim().max(60).default('New'),
+  notes: z.string().max(8_000).default(''),
+  objectiveId: z.string().uuid().nullable().default(null),
+});
+export type CreateWorkItemInput = z.input<typeof createWorkItemSchema>;
+
+export async function createWorkItem(
+  tx: DbTx,
+  ctx: TenantContext,
+  input: CreateWorkItemInput,
+): Promise<string> {
+  const parsed = createWorkItemSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message));
+  }
+
+  // A supplied objective must belong to this workspace (D-008 tenancy hygiene).
+  if (parsed.data.objectiveId) {
+    const obj = await tx
+      .select({ id: objectives.id })
+      .from(objectives)
+      .where(
+        and(
+          eq(objectives.id, parsed.data.objectiveId),
+          eq(objectives.projectId, ctx.projectId),
+          eq(objectives.orgId, ctx.orgId),
+        ),
+      )
+      .limit(1);
+    if (obj.length === 0) throw new ValidationError(['That objective is not in this workspace.']);
+  }
+
+  const inserted = await tx
+    .insert(workItems)
+    .values({
+      orgId: ctx.orgId,
+      projectId: ctx.projectId,
+      title: parsed.data.title,
+      stage: parsed.data.stage || 'New',
+      notes: parsed.data.notes,
+      objectiveId: parsed.data.objectiveId,
+      createdBy: ctx.userId,
+    })
+    .returning({ id: workItems.id });
+
+  const id = inserted[0]!.id;
+  await writeAudit(tx, ctx, {
+    action: 'work_item.created',
+    entityType: 'work_item',
+    entityId: id,
+    detail: { title: parsed.data.title, objectiveId: parsed.data.objectiveId },
+  });
+  return id;
+}
+
+export const updateWorkItemSchema = z.object({
+  title: z.string().trim().min(1, 'Title is required').max(200),
+  stage: z.string().trim().max(60),
+  notes: z.string().max(8_000),
+});
+export type UpdateWorkItemInput = z.infer<typeof updateWorkItemSchema>;
+
+export async function updateWorkItem(
+  tx: DbTx,
+  ctx: TenantContext,
+  workItemId: string,
+  input: UpdateWorkItemInput,
+): Promise<void> {
+  const parsed = updateWorkItemSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message));
+  }
+
+  const updated = await tx
+    .update(workItems)
+    .set({
+      title: parsed.data.title,
+      stage: parsed.data.stage || 'New',
+      notes: parsed.data.notes,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(workItems.id, workItemId),
+        eq(workItems.orgId, ctx.orgId),
+        eq(workItems.projectId, ctx.projectId),
+      ),
+    )
+    .returning({ id: workItems.id });
+  if (updated.length === 0) throw new NotFoundError('Work item');
+
+  await writeAudit(tx, ctx, {
+    action: 'work_item.updated',
+    entityType: 'work_item',
+    entityId: workItemId,
+    detail: { stage: parsed.data.stage },
+  });
+}
