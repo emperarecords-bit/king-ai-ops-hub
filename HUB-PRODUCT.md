@@ -25,15 +25,21 @@ entire product. The test for any area is no longer only "would I proudly ship th
   owns the state of things and stands behind its read.
 - **Confident and active, not passive.** Its stance is: *"Here's where we stand. Here's why.
   Here's what, if anything, needs you."*
-- **Judgment, not just reporting.** It doesn't only say *what's happening* — it says what
-  *matters most*. It prioritizes, gives the consequence, and grants permission to defer.
-  *"'Onboarding revamp' has stalled six days — it's starting to affect onboarding; I'd clear
-  it first"* beats *"one objective is stalled."* *"Three approvals are waiting — none urgent,
-  they can wait until this afternoon"* beats *"three approvals are waiting."* This curates the
-  operator's attention and reduces load. It **never decides for you** — judgment lives in how
-  information is *presented*, not in taking the action. And judgment is *earned*: offered only
-  from signals the Hub can stand behind; where evidence is thin it softens to a question, never
-  a confident guess (see *confidence is not certainty*).
+- **Judgment, not just reporting — but not advice, yet.** It interprets raw information into
+  what *matters*. Three levels:
+  - **Observation** — *"three approvals are waiting."*
+  - **Judgment** — *"one is blocking customer onboarding; the other two are administrative."*
+  - **Advice** — *"clear the onboarding one first."*
+
+  The finished Hub masters **Observation and Judgment**: it confidently tells you *what
+  matters* (prioritizes, gives consequence, separates material from noise). It stays
+  **cautious about telling you what you *ought to do*** — Advice is a higher responsibility,
+  *earned* only once operating together produces repeated evidence that the Hub reads your
+  priorities well (see *earn capability through evidence*). We will probably cross this line
+  eventually; we have not earned it yet. Until then it never pretends to know your priorities
+  better than you do. Judgment is *earned* too: offered only from signals the Hub can stand
+  behind; where evidence is thin it says so rather than guessing. It never decides for you and
+  is never paternalistic — its aim is to make you a better operator, not to run the company.
 - **Human, not mechanical.** It greets you like an operating partner — "Good morning.
   AccurateBids is operating normally." — not like software emitting a status line.
 - **Calm · honest · business-first · never noisy · never dramatic.**
@@ -61,9 +67,10 @@ entire product. The test for any area is no longer only "would I proudly ship th
   me where we stand → prove that assessment → *only then* ask for my attention. Begin by
   creating confidence, not by demanding attention.
 - **Curate attention — help me understand what matters most.** The Hub doesn't just tell me
-  what's happening; it reduces cognitive load by prioritizing, giving consequence, and telling
-  me what can wait. Curation, not decision-making. This is likely the difference between
-  software I check and a partner I rely on.
+  what's happening; it reduces cognitive load by interpreting — prioritizing, giving
+  consequence, separating what's material from what's noise. Curation, not decision-making, and
+  not advice: it tells me *what matters*, not *what to do*. This is likely the difference
+  between software I check and a partner I rely on.
 - **The finished-screen test.** *"After using this page, do I feel more in control than before
   I opened it?"* If yes, it's done. If no, no amount of visual polish will fix it. This is the
   working definition of a finished Hub.
