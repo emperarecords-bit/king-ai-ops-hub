@@ -1,0 +1,1 @@
+ALTER TABLE "runs" ADD COLUMN "retrieved_sources" jsonb;

@@ -3,8 +3,8 @@ import { createHash } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { extname, join, relative, sep } from 'node:path';
 import { and, desc, eq, sql } from 'drizzle-orm';
-import { type DocumentKind, type DocumentSource, type TenantContext } from '@/types/domain';
-import { AppError, TenantViolationError } from '@/lib/errors';
+import { type DocumentKind, type DocumentSource, type KnowledgeDisclosure, type TenantContext } from '@/types/domain';
+import { AppError, ConflictError, NotFoundError, TenantViolationError, ValidationError } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { type DbTx } from '@/db/client';
 import { documentChunks, documents, projects } from '@/db/schema';
@@ -292,6 +292,12 @@ export interface RetrievedChunk {
   chunkIndex: number;
   content: string;
   rank: number;
+  /** The EXACT version of the document this chunk came from — frozen into the run's source snapshot so
+   *  later extraction cites the evidence the run actually received, never whatever exists later. */
+  sha256: string;
+  /** The document's disclosure classification at retrieval — the sensitivity anchor derived Knowledge
+   *  inherits, captured at dispatch so a later reclassification can't rewrite what the run saw. */
+  disclosure: KnowledgeDisclosure;
   /** Indexed file modification time (O-17 freshness). Additive; no effect on ranking. */
   indexedAt: Date | null;
   /** Source adapter for provenance (O-23). Retrieval is identical regardless. */
@@ -423,6 +429,8 @@ export async function retrieveRelevant(
       relativePath: documents.relativePath,
       chunkIndex: documentChunks.chunkIndex,
       content: documentChunks.content,
+      sha256: documents.sha256,
+      disclosure: documents.disclosure,
       indexedAt: documents.indexedAt,
       source: documents.source,
       orgId: documentChunks.orgId,
@@ -464,6 +472,8 @@ export async function retrieveRelevant(
     chunkIndex: r.chunkIndex,
     content: r.content,
     rank: Number(r.rank),
+    sha256: r.sha256,
+    disclosure: r.disclosure,
     indexedAt: r.indexedAt,
     source: r.source,
   }));
@@ -534,6 +544,8 @@ export async function selectCoreReferences(
       relativePath: documents.relativePath,
       chunkIndex: documentChunks.chunkIndex,
       content: documentChunks.content,
+      sha256: documents.sha256,
+      disclosure: documents.disclosure,
       indexedAt: documents.indexedAt,
       source: documents.source,
       orgId: documentChunks.orgId,
@@ -567,6 +579,8 @@ export async function selectCoreReferences(
       chunkIndex: r.chunkIndex,
       content: r.content,
       rank: 0,
+      sha256: r.sha256,
+      disclosure: r.disclosure,
       indexedAt: r.indexedAt,
       source: r.source,
       coreType: coreTypeOf(r.relativePath),
@@ -588,6 +602,8 @@ export async function selectProductionStatus(
       relativePath: documents.relativePath,
       chunkIndex: documentChunks.chunkIndex,
       content: documentChunks.content,
+      sha256: documents.sha256,
+      disclosure: documents.disclosure,
       indexedAt: documents.indexedAt,
       source: documents.source,
       orgId: documentChunks.orgId,
@@ -616,9 +632,51 @@ export async function selectProductionStatus(
     chunkIndex: r.chunkIndex,
     content: r.content,
     rank: 0,
+    sha256: r.sha256,
+    disclosure: r.disclosure,
     indexedAt: r.indexedAt,
     source: r.source,
   };
+}
+
+/**
+ * RESTRICT a document — mark it (or keep it) `restricted`, the sensitivity anchor that Knowledge
+ * derived from it must inherit. Audited. This path can only tighten (or reaffirm) classification; it
+ * REFUSES to loosen restricted → workspace_internal, so a downgrade can never happen through an
+ * ordinary edit. Note: extraction inherits the classification frozen in the run's source SNAPSHOT, so
+ * a change here never rewrites the inherited disclosure of a proposal that already exists.
+ */
+export async function restrictDocument(tx: DbTx, ctx: TenantContext, documentId: string, reason?: string): Promise<void> {
+  const rows = await tx
+    .select({ id: documents.id, relativePath: documents.relativePath, disclosure: documents.disclosure })
+    .from(documents)
+    .where(and(eq(documents.id, documentId), eq(documents.projectId, ctx.projectId), eq(documents.orgId, ctx.orgId)))
+    .limit(1);
+  const doc = rows[0];
+  if (!doc) throw new NotFoundError('Document');
+  if (doc.disclosure === 'restricted') return; // already restricted — idempotent
+  await tx.update(documents).set({ disclosure: 'restricted', updatedAt: new Date() }).where(and(eq(documents.id, documentId), eq(documents.projectId, ctx.projectId), eq(documents.orgId, ctx.orgId)));
+  await writeAudit(tx, ctx, { action: 'document.restricted', entityType: 'document', entityId: documentId, detail: { relativePath: doc.relativePath, reason: reason?.trim() || null } });
+}
+
+/**
+ * DECLASSIFY a document — the explicit, authority-bearing action that loosens `restricted` →
+ * `workspace_internal`. Deliberately separate from any generic edit and REQUIRES a reason, so removing
+ * a sensitivity marker is always a deliberate, audited decision. Existing proposals keep the disclosure
+ * they inherited from the run snapshot; only future extractions see the looser classification.
+ */
+export async function declassifyDocument(tx: DbTx, ctx: TenantContext, documentId: string, reason: string): Promise<void> {
+  if (!reason || reason.trim().length === 0) throw new ValidationError(['Declassifying a document requires a reason — it removes a sensitivity marker.']);
+  const rows = await tx
+    .select({ id: documents.id, relativePath: documents.relativePath, disclosure: documents.disclosure })
+    .from(documents)
+    .where(and(eq(documents.id, documentId), eq(documents.projectId, ctx.projectId), eq(documents.orgId, ctx.orgId)))
+    .limit(1);
+  const doc = rows[0];
+  if (!doc) throw new NotFoundError('Document');
+  if (doc.disclosure === 'workspace_internal') throw new ConflictError('This document is not restricted.');
+  await tx.update(documents).set({ disclosure: 'workspace_internal', updatedAt: new Date() }).where(and(eq(documents.id, documentId), eq(documents.projectId, ctx.projectId), eq(documents.orgId, ctx.orgId)));
+  await writeAudit(tx, ctx, { action: 'document.declassified', entityType: 'document', entityId: documentId, detail: { relativePath: doc.relativePath, reason: reason.trim() } });
 }
 
 export interface DocumentListRow {

@@ -20,6 +20,7 @@ import {
   type Freshness,
   type ModelTier,
   type RetrievedDocRef,
+  type RunSourceSnapshot,
   type StepKind,
 } from '@/types/domain';
 import { findAgentForRole, type AgentRow } from '@/domain/agents/agents';
@@ -312,6 +313,23 @@ export async function startRun(
       source: r.source,
     }));
 
+    // IMMUTABLE source snapshot (source-integrity): the exact evidence supplied to THIS run — every
+    // citable document at the version, disclosure, and chunk text the model actually received. Later
+    // Knowledge extraction cites against this, never re-reading live documents. Covers everything the
+    // model could ground a claim on: retrieved chunks, core references, and the production-status doc.
+    const retrievedSources: RunSourceSnapshot[] = [
+      ...retrieved,
+      ...coreRefs,
+      ...(productionStatus ? [productionStatus] : []),
+    ].map((r) => ({
+      relativePath: r.relativePath,
+      sha256: r.sha256,
+      disclosure: r.disclosure,
+      chunkIndex: r.chunkIndex,
+      rank: r.rank,
+      excerpt: r.content,
+    }));
+
     // The manifest is the explainable record of the assembled package.
     const contextManifest: ContextManifestEntry[] = [
       ...(objective ? [{ source: 'objective' as const, label: objective.title }] : []),
@@ -358,6 +376,7 @@ export async function startRun(
         reviewerAgentId: reviewerRow?.id ?? null,
         retrievedDocuments: retrievedRefs.length > 0 ? retrievedRefs : null,
         contextManifest: contextManifest.length > 0 ? contextManifest : null,
+        retrievedSources: retrievedSources.length > 0 ? retrievedSources : null,
       })
       .returning({ id: runs.id });
     const runId = runInserted[0]!.id;

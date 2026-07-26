@@ -1642,9 +1642,54 @@ source ≠ a support judgment; AI confidence ≠ authority.
   idempotent · explicit-promotion-activates-not-verifies · no-declassification · rejection-preserved.
   RLS extended to `knowledge_proposals`. Full suite **494/494**.
 
-*Known v1 limitation surfaced for review: documents now carry a `disclosure` classification (default
-`workspace_internal`) as the sensitivity anchor, but nothing yet lets an operator SET it via the UI —
-the inheritance mechanism is real and tested; the authoring surface for document sensitivity is future.*
+### Ingestion increment 4b — source-integrity hardening (built 2026-07-26)
+
+Four corrections that make the citation trustworthy, not just present. The theme: a citation must name
+the evidence the ORIGINATING run received, and only claims that can be checked against it may be kept.
+
+- **Cite the run's evidence, not later document state.** The run now freezes an IMMUTABLE source
+  snapshot at dispatch — `runs.retrieved_sources` (migration 0034): per supplied document the exact
+  `sha256`, the disclosure classification in force, and the chunk `excerpt`, captured when context is
+  assembled (retrieval now carries `sha256`+`disclosure` through `RetrievedChunk`). Extraction cites
+  against THIS snapshot and never re-reads live documents; the cited version is the snapshot hash. A
+  document that changes after dispatch cannot alter what a proposal cites — it only makes that version
+  currently unavailable / a mismatch on resolution. *Principle: extracted Knowledge cites the evidence
+  supplied to the originating operation, not whatever source version exists later.*
+- **Validate locators/excerpts, drop invented precision.** A cited quote is persisted (as the source
+  `locator`) only when it verifiably appears in the snapshot excerpt (whitespace-insensitive). A
+  fabricated quote or an uncheckable page/section claim is dropped while the validated source
+  relationship is retained. *Principle: a valid source reference does not validate every detail the
+  model claims about that source.*
+- **Operational, audited document classification.** `restrictDocument` (audited; refuses to loosen — no
+  silent downgrade) and `declassifyDocument` (a distinct, reason-required, audited authority action)
+  make the sensitivity anchor controllable. Extraction inherits the classification from the run
+  SNAPSHOT, so a later reclassification never rewrites an existing proposal's inherited disclosure.
+  *Principle: sensitivity inheritance is trustworthy only when source classification is itself
+  controlled and auditable.* (The Documents authoring UI for this lands in the Documents review; the
+  domain action + historical snapshot exist now.)
+- **Explicit v1 source boundary.** Knowledge extraction v1 may cite ONLY document evidence supplied in
+  the run. Any ref not in the document snapshot — a fabricated path, an artifact id, the run's own
+  output — is rejected; the consolidated output is untrusted candidate-generation material, never
+  evidence. Artifact-as-evidence is a deliberate future source-resolver increment.
+- Reviewer support: `reviseKnowledgeProposalDraft` lets a pending proposal's claim be refined/narrowed
+  before promotion (splitting is reviewer-driven: revise one, reject-and-re-propose the rest); promotion
+  runs in one transaction, so configuration + activation cannot partially succeed.
+- Bounded language (corrected): the extractor is *instructed* to propose one closely-related claim group
+  per candidate, and the reviewer must split proposals whose claims need different trust assessments —
+  the cap + prompt encourage bounded claims but do not *prove* semantic separation. Duplicate/
+  contradiction handling stays conservative: exact-duplicate-of-active is suppressed deterministically;
+  near-duplicates and different-claims-on-the-same-subject surface as distinct proposals; nothing is
+  called a contradiction from title/subject similarity alone.
+- Locked by the expanded `knowledge-extraction.test.ts` (19): snapshot-version-not-live · fabricated/
+  artifact ref rejected · valid-quote-persisted vs fabricated-quote-dropped-source-kept · inherited
+  restricted · revise-before-promotion / conflict-after · classification audited · declassification
+  reason-required + authority-bearing · later-classification-change-doesn't-rewrite-proposal · plus the
+  original quarantine/promotion invariants. Full suite **499/499**.
+
+**Extraction & promotion CLOSED.** The ingestion path is defensible: propose-only, quarantined,
+source-integrity-checked against the immutable run snapshot, sensitivity-inherited, human-promoted by
+explicit decision, never self-verifying.
 
 *Remaining Knowledge increments (deferred, not built): (5) the operating-partner conversation — NEXT;
-(6) then the Knowledge Portfolio & Detail — page redesign last.*
+(6) then the Knowledge Portfolio & Detail — page redesign last. Documents review will add the
+classification authoring UI + broaden extraction evidence (artifacts) as its own increment.*

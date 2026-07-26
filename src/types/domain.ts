@@ -138,6 +138,23 @@ export interface RetrievedDocRef {
 }
 
 /**
+ * The IMMUTABLE evidence a run received at dispatch — captured when context is assembled, never re-read
+ * from live documents later. Knowledge extraction cites against THIS: the exact version (`sha256`) the
+ * originating operation saw, the disclosure classification in force then, and the exact chunk text
+ * (`excerpt`) so a quoted span can be verified. A document changing after dispatch cannot alter what a
+ * proposal cites; it only makes the cited version currently unavailable / a mismatch on resolution.
+ */
+export interface RunSourceSnapshot {
+  relativePath: string;
+  sha256: string;
+  disclosure: KnowledgeDisclosure;
+  chunkIndex: number;
+  rank: number;
+  /** The exact chunk text supplied to the run — the only thing a cited excerpt may be checked against. */
+  excerpt: string;
+}
+
+/**
  * Why a piece of context was included in a run's prompt (O-14). The panel
  * groups the assembled package by this so inclusion is explainable, and new
  * sources (project state, task history, approvals) slot in without touching

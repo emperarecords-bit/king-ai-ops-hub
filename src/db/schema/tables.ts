@@ -16,6 +16,7 @@ import {
   type ContextManifestEntry,
   type RetrievedDocRef,
   type ReviewDetail,
+  type RunSourceSnapshot,
   type SuccessCriterion,
 } from '@/types/domain';
 import {
@@ -1114,6 +1115,10 @@ export const runs = pgTable(
     retrievedDocuments: jsonb('retrieved_documents').$type<RetrievedDocRef[]>(),
     /** The full assembled context package, grouped by why each part was included (O-14). */
     contextManifest: jsonb('context_manifest').$type<ContextManifestEntry[]>(),
+    /** IMMUTABLE evidence snapshot at dispatch — per supplied document: exact version, disclosure, and
+     *  chunk excerpt. Knowledge extraction cites against this, never live documents, so a proposal
+     *  names the evidence the run actually received. */
+    retrievedSources: jsonb('retrieved_sources').$type<RunSourceSnapshot[]>(),
     /** Decision-candidate extraction outcome (O-20); makes extraction idempotent. */
     candidateExtractionStatus: extractionStatusEnum('candidate_extraction_status'),
     /** Knowledge-proposal extraction outcome; makes Knowledge extraction idempotent, independent of the
