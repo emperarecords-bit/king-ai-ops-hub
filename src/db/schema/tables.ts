@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
+  type AnyPgColumn,
   bigint,
   boolean,
   index,
@@ -119,6 +120,12 @@ export const projects = pgTable(
     /** Linked local Project Folder (D-020). Null until the owner links one. */
     documentFolderPath: text('document_folder_path'),
     archived: boolean('archived').notNull().default(false),
+    /** Slice 1: the employee responsible for this project ("who owns this?").
+     *  Human membership + roles stay in project_members; this is the employee
+     *  the org chart holds accountable. Nullable. */
+    ownerAgentId: uuid('owner_agent_id').references((): AnyPgColumn => agents.id, {
+      onDelete: 'set null',
+    }),
     ...timestamps,
   },
   (t) => [
@@ -190,8 +197,17 @@ export const agents = pgTable(
       .references(() => projects.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
     role: agentRoleEnum('role').notNull().default('primary'),
+    /** Business role/title (Slice 1): "CEO", "CMO", "Sales Manager". Free text —
+     *  the org chart is descriptive, not an enum, so businesses vary freely.
+     *  `role` above stays the TECHNICAL pipeline position (primary/reviewer). */
+    title: text('title'),
     /** D-015: every employee belongs to a department. Nullable until backfilled. */
     departmentId: uuid('department_id').references(() => departments.id, {
+      onDelete: 'set null',
+    }),
+    /** Slice 1 reporting line: this employee's manager. Self-referential, nullable
+     *  (the CEO reports to nobody). Descriptive only — no routing/delegation. */
+    reportsToId: uuid('reports_to_id').references((): AnyPgColumn => agents.id, {
       onDelete: 'set null',
     }),
     provider: providerIdEnum('provider').notNull(),
@@ -566,6 +582,8 @@ export const tasks = pgTable(
     /** Set when this task was created by standing work (Sprint 8). */
     scheduleId: uuid('schedule_id').references(() => taskSchedules.id, { onDelete: 'set null' }),
     status: taskStatusEnum('status').notNull().default('pending'),
+    /** Slice 1: the employee accountable for this task ("who owns this?"). */
+    ownerAgentId: uuid('owner_agent_id').references(() => agents.id, { onDelete: 'set null' }),
     createdBy: uuid('created_by')
       .notNull()
       .references(() => profiles.id, { onDelete: 'restrict' }),
@@ -651,6 +669,8 @@ export const decisions = pgTable(
     suggestionReason: text('suggestion_reason'),
     reviewedBy: uuid('reviewed_by').references(() => profiles.id, { onDelete: 'set null' }),
     reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+    /** Slice 1: the employee accountable for this decision ("who owns this?"). */
+    ownerAgentId: uuid('owner_agent_id').references(() => agents.id, { onDelete: 'set null' }),
     ...timestamps,
   },
   (t) => [
