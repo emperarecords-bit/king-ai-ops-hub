@@ -656,3 +656,20 @@ purpose · Autonomy & cost (when applicable).
 
 **Next:** semantics settled (no further philosophy cycle). The structured human condition is being
 added; then the execution portfolio and individual-work structures emerge from this language.
+
+**Execution build — increment 1 shipped (2026-07-26); increment 2 to do.** Built: the pure tested
+translator (`domain/execution/assess.ts`), the unified feed (`listExecution`), and the unified
+`/work` view — Requires-you lens (single canonical record), Active Execution by condition
+(Moving/Waiting/Planned/Unknown), Recent (Finished/Stopped); AI Tasks now listed; work type
+secondary; explicit Unknown. **Still to build (increment 2), all accepted, none blocking:**
+1. **Structured closure records for stopped work** — persist who/when/why when a Work Item becomes
+   Stopped, and an operator reason on AI cancellation (schema + capture UI). *Required build-test
+   "stopped work retains its closure reason" is NOT yet satisfied for work items/tasks.*
+2. **Schedule ⟂ instance** — represent ongoing automations (enabled/paused, next run, authority,
+   budget/spend, recent run health) distinct from the task instances they produce; never
+   double-counted. *(Schedules aren't shown in the view yet.)*
+3. **Shared detail frame** — a Work Item detail page with the 9-point shared frame; reframe the AI
+   task detail to match, then diverge into engine mechanics.
+4. **Cross-surface reuse** — Dashboard "Recent work" and the objective "Work contributing" should
+   read through the execution translator (required build-test #10), so the same work reads
+   identically everywhere.
