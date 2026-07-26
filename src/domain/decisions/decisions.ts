@@ -1,5 +1,6 @@
 import 'server-only';
 import { and, desc, eq, gt, inArray, isNull, ne, or } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import {
   DECISION_APPLICABILITY,
@@ -15,7 +16,12 @@ import {
 import { AppError, ConflictError, NotFoundError, TenantViolationError, ValidationError } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { type DbTx } from '@/db/client';
-import { decisions, tasks } from '@/db/schema';
+import { decisionInjections, decisions, objectives, tasks } from '@/db/schema';
+
+// Aliased scope targets, so the selector can read a decision's scope-task / scope-objective status
+// and drop guidance whose scope has closed (guidance does not outlive its scope).
+const scopeTask = alias(tasks, 'scope_task');
+const scopeObjective = alias(objectives, 'scope_objective');
 import { type ContextItemForPrompt } from '@/orchestration/prompts';
 import { writeAudit } from '@/domain/audit/audit';
 
@@ -45,15 +51,54 @@ function assertScoped(
   }
 }
 
+/**
+ * Validate + normalize a decision's scope target. Active guidance must name a CONCRETE target that
+ * belongs to this workspace: task scope → a real task, objective scope → a real objective, workspace
+ * scope → neither. A scope target is never inferred from category. Record-only decisions carry no
+ * active-guidance target (any suggested target is cleared here for the human path). Returns the
+ * normalized {scopeTaskId, scopeObjectiveId} to persist, or throws ValidationError.
+ */
+async function assertScopeTargets(
+  tx: DbTx,
+  ctx: TenantContext,
+  input: { applicability: DecisionApplicability; scope: DecisionScope; scopeTaskId: string | null; scopeObjectiveId: string | null },
+): Promise<{ scopeTaskId: string | null; scopeObjectiveId: string | null }> {
+  if (input.applicability !== 'guidance') return { scopeTaskId: null, scopeObjectiveId: null };
+
+  if (input.scope === 'task') {
+    if (!input.scopeTaskId) throw new ValidationError(['Task-scoped guidance must name the task it guides.']);
+    const rows = await tx
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(and(eq(tasks.id, input.scopeTaskId), eq(tasks.projectId, ctx.projectId), eq(tasks.orgId, ctx.orgId)))
+      .limit(1);
+    if (rows.length === 0) throw new ValidationError(['That task is not in this workspace.']);
+    return { scopeTaskId: input.scopeTaskId, scopeObjectiveId: null };
+  }
+  if (input.scope === 'objective') {
+    if (!input.scopeObjectiveId) throw new ValidationError(['Objective-scoped guidance must name the objective it guides.']);
+    const rows = await tx
+      .select({ id: objectives.id })
+      .from(objectives)
+      .where(and(eq(objectives.id, input.scopeObjectiveId), eq(objectives.projectId, ctx.projectId), eq(objectives.orgId, ctx.orgId)))
+      .limit(1);
+    if (rows.length === 0) throw new ValidationError(['That objective is not in this workspace.']);
+    return { scopeTaskId: null, scopeObjectiveId: input.scopeObjectiveId };
+  }
+  return { scopeTaskId: null, scopeObjectiveId: null }; // workspace scope
+}
+
 export const createDecisionSchema = z.object({
   title: z.string().trim().min(1, 'Title is required').max(200),
   summary: z.string().trim().min(1, 'Summary is required').max(2_000),
   rationale: z.string().trim().max(4_000).default(''),
   decisionType: z.enum(DECISION_TYPES).default('operational'),
-  // Record-only vs active guidance, and — for guidance — its scope + optional validity. Default
-  // narrow (task guidance): institutional memory defaults to the narrowest scope its evidence supports.
+  // Record-only vs active guidance, and — for guidance — its scope + concrete target + optional
+  // validity. Default narrow: institutional memory defaults to the narrowest scope its evidence
+  // supports. A guidance scope MUST name a concrete target (see assertScopeTargets).
   applicability: z.enum(DECISION_APPLICABILITY).default('guidance'),
-  scope: z.enum(DECISION_SCOPES).default('task'),
+  scope: z.enum(DECISION_SCOPES).default('workspace'),
+  scopeTaskId: z.string().uuid().nullable().default(null),
   scopeObjectiveId: z.string().uuid().nullable().default(null),
   effectiveUntil: z.coerce.date().nullable().default(null),
   originatingTaskId: z.string().uuid().nullable().default(null),
@@ -77,6 +122,8 @@ export async function createDecision(
   const parsed = createDecisionSchema.safeParse(input);
   if (!parsed.success) throw new ValidationError(parsed.error.issues.map((i) => i.message));
 
+  const targets = await assertScopeTargets(tx, ctx, parsed.data);
+
   const inserted = await tx
     .insert(decisions)
     .values({
@@ -88,7 +135,8 @@ export async function createDecision(
       decisionType: parsed.data.decisionType,
       applicability: parsed.data.applicability,
       scope: parsed.data.scope,
-      scopeObjectiveId: parsed.data.scope === 'objective' ? parsed.data.scopeObjectiveId : null,
+      scopeTaskId: targets.scopeTaskId,
+      scopeObjectiveId: targets.scopeObjectiveId,
       effectiveUntil: parsed.data.effectiveUntil,
       originatingTaskId: parsed.data.originatingTaskId,
       originatingRunId: parsed.data.originatingRunId,
@@ -133,14 +181,57 @@ async function loadDecision(tx: DbTx, ctx: TenantContext, id: string) {
  * prior decision, that prior is marked `superseded` and pointed at this one,
  * atomically. Only an admin may approve.
  */
-export async function acceptDecision(tx: DbTx, ctx: TenantContext, id: string): Promise<void> {
+export const promoteDecisionSchema = z.object({
+  applicability: z.enum(DECISION_APPLICABILITY),
+  scope: z.enum(DECISION_SCOPES).default('workspace'),
+  scopeTaskId: z.string().uuid().nullable().default(null),
+  scopeObjectiveId: z.string().uuid().nullable().default(null),
+  effectiveUntil: z.coerce.date().nullable().default(null),
+});
+export type PromoteDecisionInput = z.input<typeof promoteDecisionSchema>;
+
+/**
+ * Approve a proposed decision → `accepted`. Acceptance alone NEVER activates reusable guidance: a
+ * proposal keeps its filed applicability (AI candidates are record-only) unless the operator
+ * EXPLICITLY promotes it here by passing `promote`, which then requires a concrete scope. Only the
+ * operator may activate reuse; AI suggestion confidence carries no authority. If it was filed to
+ * supersede a prior decision, that prior is marked `superseded` atomically. Admin only.
+ */
+export async function acceptDecision(
+  tx: DbTx,
+  ctx: TenantContext,
+  id: string,
+  promote?: PromoteDecisionInput,
+): Promise<void> {
   if (ctx.projectRole !== 'admin') throw new AppError('forbidden', 'Only admins can approve decisions.');
   const d = await loadDecision(tx, ctx, id);
   if (d.status !== 'proposed') throw new ConflictError(`Only a proposed decision can be accepted (is ${d.status}).`);
 
+  let promotion: { applicability: DecisionApplicability; scope: DecisionScope; scopeTaskId: string | null; scopeObjectiveId: string | null; effectiveUntil: Date | null } | null = null;
+  if (promote) {
+    const parsed = promoteDecisionSchema.safeParse(promote);
+    if (!parsed.success) throw new ValidationError(parsed.error.issues.map((i) => i.message));
+    const targets = await assertScopeTargets(tx, ctx, parsed.data);
+    promotion = { applicability: parsed.data.applicability, scope: parsed.data.scope, ...targets, effectiveUntil: parsed.data.effectiveUntil };
+  }
+
   await tx
     .update(decisions)
-    .set({ status: 'accepted', reviewedBy: ctx.userId, reviewedAt: new Date(), updatedAt: new Date() })
+    .set({
+      status: 'accepted',
+      reviewedBy: ctx.userId,
+      reviewedAt: new Date(),
+      updatedAt: new Date(),
+      ...(promotion
+        ? {
+            applicability: promotion.applicability,
+            scope: promotion.scope,
+            scopeTaskId: promotion.scopeTaskId,
+            scopeObjectiveId: promotion.scopeObjectiveId,
+            effectiveUntil: promotion.effectiveUntil,
+          }
+        : {}),
+    })
     .where(eq(decisions.id, id));
 
   const supersedesRef = d.supportingRefs.find((r) => r.startsWith('supersedes:'));
@@ -192,15 +283,21 @@ export async function rejectDecision(tx: DbTx, ctx: TenantContext, id: string): 
  * with no replacement (distinct from supersession). A record may be permanent; operational authority
  * remains reviewable. Only an admin, only from `accepted`.
  */
-export async function retireDecision(tx: DbTx, ctx: TenantContext, id: string): Promise<void> {
+export async function retireDecision(tx: DbTx, ctx: TenantContext, id: string, reason?: string): Promise<void> {
   if (ctx.projectRole !== 'admin') throw new AppError('forbidden', 'Only admins can retire decisions.');
   const d = await loadDecision(tx, ctx, id);
   if (d.status !== 'accepted') throw new ConflictError(`Only an accepted decision can be retired (is ${d.status}).`);
+  // Retirement means "no longer ACTIVE GUIDANCE." A record-only decision was never active guidance,
+  // so retiring it is meaningless — it stays an accepted record.
+  if (d.applicability !== 'guidance') {
+    throw new ConflictError('Only active guidance can be retired; a record-only decision is already inactive.');
+  }
+  const r = (reason ?? '').trim() || null;
   await tx
     .update(decisions)
-    .set({ status: 'retired', reviewedBy: ctx.userId, reviewedAt: new Date(), updatedAt: new Date() })
+    .set({ status: 'retired', statusReason: r, reviewedBy: ctx.userId, reviewedAt: new Date(), updatedAt: new Date() })
     .where(eq(decisions.id, id));
-  await writeAudit(tx, ctx, { action: 'decision.retired', entityType: 'decision', entityId: id, detail: { title: d.title } });
+  await writeAudit(tx, ctx, { action: 'decision.retired', entityType: 'decision', entityId: id, detail: { title: d.title, reason: r } });
 }
 
 export interface DecisionRow {
@@ -212,9 +309,12 @@ export interface DecisionRow {
   status: DecisionStatus;
   applicability: DecisionApplicability;
   scope: DecisionScope;
+  scopeTaskId: string | null;
   scopeObjectiveId: string | null;
   effectiveUntil: Date | null;
+  statusReason: string | null;
   authorLabel: string;
+  suggestedByRunId: string | null;
   originatingTaskId: string | null;
   originatingTaskTitle: string | null;
   supersededBy: string | null;
@@ -233,9 +333,12 @@ export async function listDecisions(tx: DbTx, ctx: TenantContext): Promise<Decis
       status: decisions.status,
       applicability: decisions.applicability,
       scope: decisions.scope,
+      scopeTaskId: decisions.scopeTaskId,
       scopeObjectiveId: decisions.scopeObjectiveId,
       effectiveUntil: decisions.effectiveUntil,
+      statusReason: decisions.statusReason,
       authorLabel: decisions.authorLabel,
+      suggestedByRunId: decisions.suggestedByRunId,
       originatingTaskId: decisions.originatingTaskId,
       originatingTaskTitle: tasks.title,
       supersededBy: decisions.supersededBy,
@@ -365,6 +468,8 @@ export async function deferCandidate(tx: DbTx, ctx: TenantContext, id: string): 
 
 interface ScoredDecision extends DecisionRow {
   score: number;
+  /** Why this decision was eligible for the run: 'task' | 'objective' | 'reference'. */
+  reason: string;
   supersedes: { title: string }[];
 }
 
@@ -395,7 +500,10 @@ export async function selectRelevantDecisions(
       status: decisions.status,
       applicability: decisions.applicability,
       scope: decisions.scope,
+      scopeTaskId: decisions.scopeTaskId,
       scopeObjectiveId: decisions.scopeObjectiveId,
+      scopeTaskStatus: scopeTask.status,
+      scopeObjectiveStatus: scopeObjective.status,
       effectiveUntil: decisions.effectiveUntil,
       authorLabel: decisions.authorLabel,
       originatingTaskId: decisions.originatingTaskId,
@@ -405,6 +513,8 @@ export async function selectRelevantDecisions(
       projectId: decisions.projectId,
     })
     .from(decisions)
+    .leftJoin(scopeTask, eq(decisions.scopeTaskId, scopeTask.id))
+    .leftJoin(scopeObjective, eq(decisions.scopeObjectiveId, scopeObjective.id))
     .where(
       and(
         eq(decisions.projectId, ctx.projectId),
@@ -422,40 +532,61 @@ export async function selectRelevantDecisions(
 
   const objTasks = new Set(args.objectiveTaskIds);
   const nowMs = now.getTime();
+  const TERMINAL_TASK = new Set(['completed', 'cancelled']);
+  const CLOSED_OBJECTIVE = new Set(['completed', 'cancelled']);
 
-  // Two distinct stages. ELIGIBILITY: a decision may be considered ONLY when a structural
-  // relationship to this run establishes relevance, WITHIN THE DECISION'S SCOPE — scope is the
-  // ceiling on which relationships count, not an instruction to inject everywhere. Task-scoped:
-  // only its own task. Objective-scoped: its objective's work. Workspace-scoped: any relevant run.
-  // No relationship → omit it (silently applying unrelated guidance is worse than reduced recall).
+  // Two distinct stages. ELIGIBILITY: a decision may be considered ONLY within its SCOPE and while
+  // that scope is a live operating context — guidance does not outlive the task/objective that gave
+  // it meaning. Task-scoped: its concrete task, and only while non-terminal. Objective-scoped: its
+  // concrete objective, and only while open. Workspace-scoped: any run it is RELEVANT to (scope is a
+  // boundary, not inject-everywhere). No match → omit. `reason` records WHY (for the injection trail).
   // RANKING: recency only orders already-eligible decisions — it can never make one relevant.
   const eligible = rows
     .map((r) => {
-      const taskMatch = r.originatingTaskId === args.currentTaskId ? 1000 : 0;
-      const objMatch =
-        (r.scopeObjectiveId != null && r.scopeObjectiveId === args.currentObjectiveId) ||
-        (r.originatingTaskId != null && objTasks.has(r.originatingTaskId))
-          ? 100
-          : 0;
-      const docMatch = r.supportingRefs.some((ref) => args.docPaths.has(ref)) ? 10 : 0;
-
       let relationship = 0;
-      if (r.scope === 'task') relationship = taskMatch; // only its own task counts
-      else if (r.scope === 'objective') relationship = Math.max(taskMatch, objMatch);
-      else relationship = Math.max(taskMatch, objMatch, docMatch); // workspace: any relevance
-      return { r, relationship };
+      let reason = '';
+      if (r.scope === 'task') {
+        if (r.scopeTaskId === args.currentTaskId && !(r.scopeTaskStatus && TERMINAL_TASK.has(r.scopeTaskStatus))) {
+          relationship = 1000;
+          reason = 'task';
+        }
+      } else if (r.scope === 'objective') {
+        if (
+          r.scopeObjectiveId != null &&
+          r.scopeObjectiveId === args.currentObjectiveId &&
+          !(r.scopeObjectiveStatus && CLOSED_OBJECTIVE.has(r.scopeObjectiveStatus))
+        ) {
+          relationship = 100;
+          reason = 'objective';
+        }
+      } else {
+        // workspace: may guide anywhere it is relevant (by provenance task, sibling objective task, or doc)
+        if (r.originatingTaskId === args.currentTaskId) {
+          relationship = 1000;
+          reason = 'task';
+        } else if (r.originatingTaskId != null && objTasks.has(r.originatingTaskId)) {
+          relationship = 100;
+          reason = 'objective';
+        } else if (r.supportingRefs.some((ref) => args.docPaths.has(ref))) {
+          relationship = 10;
+          reason = 'reference';
+        }
+      }
+      return { r, relationship, reason };
     })
     .filter((s) => s.relationship > 0);
   if (eligible.length === 0) return [];
 
-  const scored = eligible.map(({ r, relationship }) => {
+  const scored = eligible.map(({ r, relationship, reason }) => {
     // Recency boost stays strictly below the smallest relationship tier, so it only breaks ties
     // among eligible decisions — never lifts an ineligible one into range.
     const ageDays = (nowMs - r.createdAt.getTime()) / 86_400_000;
-    return { r, score: relationship + Math.max(0, 5 - ageDays / 30) };
+    return { r, reason, score: relationship + Math.max(0, 5 - ageDays / 30) };
   });
   scored.sort((a, b) => b.score - a.score || b.r.createdAt.getTime() - a.r.createdAt.getTime());
-  const top = scored.slice(0, MAX_DECISIONS).map((s) => s.r);
+  const chosen = scored.slice(0, MAX_DECISIONS);
+  const reasonById = new Map(chosen.map((c) => [c.r.id, c.reason]));
+  const top = chosen.map((s) => s.r);
 
   // For each retained decision, find what it superseded (historical lineage) so
   // the prompt can acknowledge the old one without letting it outrank the new.
@@ -491,15 +622,19 @@ export async function selectRelevantDecisions(
     status: t.status,
     applicability: t.applicability,
     scope: t.scope,
+    scopeTaskId: t.scopeTaskId,
     scopeObjectiveId: t.scopeObjectiveId,
     effectiveUntil: t.effectiveUntil,
+    statusReason: null,
     authorLabel: t.authorLabel,
+    suggestedByRunId: null,
     originatingTaskId: t.originatingTaskId,
     originatingTaskTitle: null,
     supersededBy: null,
     ownerAgentId: null,
     createdAt: t.createdAt,
     score: 0,
+    reason: reasonById.get(t.id) ?? '',
     supersedes: supersededByNew.get(t.id) ?? [],
   }));
 }
@@ -507,6 +642,9 @@ export async function selectRelevantDecisions(
 export interface DecisionMemoryContext {
   contextItem: ContextItemForPrompt | null;
   manifest: ContextManifestEntry[];
+  /** The decisions actually included in this run's context, with why each was eligible — the honest
+   *  reverse trail records these as INJECTED (not "influenced"). */
+  injected: { decisionId: string; reason: string }[];
 }
 
 /** Assembles the Level-1 Decision memory block + manifest entries. */
@@ -521,7 +659,7 @@ export async function assembleDecisionMemory(
   },
 ): Promise<DecisionMemoryContext> {
   const chosen = await selectRelevantDecisions(tx, ctx, args);
-  if (chosen.length === 0) return { contextItem: null, manifest: [] };
+  if (chosen.length === 0) return { contextItem: null, manifest: [], injected: [] };
 
   const lines: string[] = [
     'DECISION MEMORY (accepted organizational decisions — structured memory, not documents or conversation):',
@@ -548,7 +686,86 @@ export async function assembleDecisionMemory(
       ` · ${d.createdAt.toISOString().slice(0, 10)}`,
   }));
 
-  return { contextItem: { title: 'Decision memory', content: lines.join('\n') }, manifest };
+  return {
+    contextItem: { title: 'Decision memory', content: lines.join('\n') },
+    manifest,
+    injected: chosen.map((d) => ({ decisionId: d.id, reason: d.reason })),
+  };
+}
+
+/**
+ * Record that these decisions were INJECTED into a run — the honest reverse trail. Called after the
+ * run row exists. Not "influence": it states only that the memory was supplied. No-op on empty.
+ */
+export async function logDecisionInjections(
+  tx: DbTx,
+  ctx: TenantContext,
+  args: { runId: string; taskId: string; injected: { decisionId: string; reason: string }[] },
+): Promise<void> {
+  if (args.injected.length === 0) return;
+  await tx.insert(decisionInjections).values(
+    args.injected.map((i) => ({
+      orgId: ctx.orgId,
+      projectId: ctx.projectId,
+      decisionId: i.decisionId,
+      runId: args.runId,
+      taskId: args.taskId,
+      reason: i.reason || 'unspecified',
+    })),
+  );
+}
+
+export interface InjectionRow {
+  runId: string | null;
+  taskId: string | null;
+  taskTitle: string | null;
+  reason: string;
+  injectedAt: Date;
+}
+
+/** The reverse trail for one decision: the runs it was injected into, newest first. */
+export async function listInjectionsForDecision(
+  tx: DbTx,
+  ctx: TenantContext,
+  decisionId: string,
+): Promise<InjectionRow[]> {
+  return tx
+    .select({
+      runId: decisionInjections.runId,
+      taskId: decisionInjections.taskId,
+      taskTitle: tasks.title,
+      reason: decisionInjections.reason,
+      injectedAt: decisionInjections.injectedAt,
+    })
+    .from(decisionInjections)
+    .leftJoin(tasks, eq(decisionInjections.taskId, tasks.id))
+    .where(
+      and(
+        eq(decisionInjections.decisionId, decisionId),
+        eq(decisionInjections.orgId, ctx.orgId),
+        eq(decisionInjections.projectId, ctx.projectId),
+      ),
+    )
+    .orderBy(desc(decisionInjections.injectedAt));
+}
+
+/**
+ * Surface *potential* overlaps among active guidance — bounded, never asserting incompatibility.
+ * v1 signal: two or more active-guidance decisions sharing the same concrete objective target (they
+ * govern the same initiative) with no supersession between them. Semantic conflict is future work;
+ * this only says "these may conflict — review," which is the honest claim the evidence supports.
+ */
+export function detectPotentialOverlaps(rows: DecisionRow[]): { objectiveId: string; decisions: DecisionRow[] }[] {
+  const active = rows.filter((d) => d.status === 'accepted' && d.applicability === 'guidance' && d.scope === 'objective' && d.scopeObjectiveId);
+  const byObjective = new Map<string, DecisionRow[]>();
+  for (const d of active) {
+    const arr = byObjective.get(d.scopeObjectiveId!) ?? [];
+    arr.push(d);
+    byObjective.set(d.scopeObjectiveId!, arr);
+  }
+  return [...byObjective.entries()]
+    .filter(([, ds]) => ds.length > 1)
+    .map(([objectiveId, decisions]) => ({ objectiveId, decisions }));
 }
 
 /** Tasks attached to an objective, for the objective-relationship rank. */

@@ -113,7 +113,7 @@ export default async function DecisionsPage({
                       <span>{ownerName(d.ownerAgentId) ?? 'Unassigned'}</span>
                     )}
                   </span>
-                  {isAdmin ? <RetireButton projectKey={projectKey} decisionId={d.id} /> : null}
+                  {isAdmin && d.applicability === 'guidance' ? <RetireButton projectKey={projectKey} decisionId={d.id} /> : null}
                 </div>
               </li>
             ))}

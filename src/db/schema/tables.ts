@@ -681,10 +681,14 @@ export const decisions = pgTable(
     // workspace) via defaults; new decisions default to the narrowest useful scope in the domain layer.
     applicability: decisionApplicabilityEnum('applicability').notNull().default('guidance'),
     scope: decisionScopeEnum('scope').notNull().default('workspace'),
-    /** For objective-scoped guidance: the objective whose work it may guide. */
+    /** For task-scoped guidance: the exact task whose work it may guide (concrete target, required). */
+    scopeTaskId: uuid('scope_task_id').references(() => tasks.id, { onDelete: 'set null' }),
+    /** For objective-scoped guidance: the objective whose work it may guide (concrete target, required). */
     scopeObjectiveId: uuid('scope_objective_id').references(() => objectives.id, { onDelete: 'set null' }),
-    /** Time-bounded validity: after this, the decision is historically valid but not active. */
+    /** Time-bounded validity: after this instant, the decision is historically valid but not active. */
     effectiveUntil: timestamp('effective_until', { withTimezone: true }),
+    /** Why an accepted decision was retired (who/when live in reviewedBy/reviewedAt). */
+    statusReason: text('status_reason'),
     supersededBy: uuid('superseded_by'),
     // AI-suggested candidates (O-20). Null suggested_by_run_id ⇒ human-filed;
     // set ⇒ a model suggestion from that run, awaiting human review.
@@ -701,6 +705,31 @@ export const decisions = pgTable(
     index('decisions_org_project_status_idx').on(t.orgId, t.projectId, t.status),
     index('decisions_originating_task_idx').on(t.originatingTaskId),
     index('decisions_superseded_by_idx').on(t.supersededBy),
+  ],
+);
+
+/**
+ * The honest reverse trail: one row each time a decision was actually INJECTED into a run's context
+ * (not merely eligible, and not proof it influenced the result). `reason` records why it was eligible
+ * (same task / objective / shared reference). Append-only in practice; read for "where was this
+ * memory applied?" on the decision detail.
+ */
+export const decisionInjections = pgTable(
+  'decision_injections',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    decisionId: uuid('decision_id').notNull().references(() => decisions.id, { onDelete: 'cascade' }),
+    runId: uuid('run_id').references(() => runs.id, { onDelete: 'set null' }),
+    taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'set null' }),
+    /** Why it was eligible for this run: 'task' | 'objective' | 'reference'. */
+    reason: text('reason').notNull(),
+    injectedAt: timestamp('injected_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('decision_injections_decision_idx').on(t.decisionId),
+    index('decision_injections_org_project_idx').on(t.orgId, t.projectId),
   ],
 );
 

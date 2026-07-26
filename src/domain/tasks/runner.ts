@@ -32,7 +32,7 @@ import {
 } from '@/domain/documents/documents';
 import { assembleProjectState } from '@/domain/state/project-state';
 import { assembleTaskGraph } from '@/domain/dependencies/graph-context';
-import { assembleDecisionMemory, objectiveTaskIds } from '@/domain/decisions/decisions';
+import { assembleDecisionMemory, logDecisionInjections, objectiveTaskIds } from '@/domain/decisions/decisions';
 import { extractCandidatesForRun, type ExtractFn } from '@/domain/decisions/extraction';
 import { compareFreshness, parseEffectiveDate } from '@/domain/context/freshness';
 
@@ -348,6 +348,9 @@ export async function startRun(
       })
       .returning({ id: runs.id });
     const runId = runInserted[0]!.id;
+
+    // The honest reverse trail: record which decisions were INJECTED into this run (not "influenced").
+    await logDecisionInjections(tx, ctx, { runId, taskId, injected: decisionMemory.injected });
 
     await tx
       .update(tasks)

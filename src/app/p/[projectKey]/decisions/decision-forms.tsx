@@ -46,8 +46,9 @@ export function CreateDecisionForm({
         </label>
         <label className="flex flex-col gap-1 text-xs text-[var(--muted)]">
           Scope (where it may guide)
-          <select name="scope" className={field + ' max-w-[11rem]'} aria-label="Scope" defaultValue="task">
-            <option value="task">This task only</option>
+          {/* Task scope needs a concrete task target, which this workspace-level page has no context
+              for — task-scoped guidance comes from AI candidates or a task page. Offer objective/workspace. */}
+          <select name="scope" className={field + ' max-w-[11rem]'} aria-label="Scope" defaultValue="workspace">
             <option value="objective">An objective</option>
             <option value="workspace">Whole workspace</option>
           </select>

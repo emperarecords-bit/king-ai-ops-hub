@@ -1141,9 +1141,35 @@ explicitly referenced · what conflicts.
 - The Decisions page now lets a human set mode/scope/objective/validity and retire an accepted decision,
   and shows each accepted decision's *guides-{scope}* / *record-only* / *until/expired* read.
 
-*Next increment: the Decisions **Portfolio** (what currently guides · awaiting review · approaching
-expiry · potential conflicts · historical · injection status) and **Decision Detail** (conclusion ·
-rationale/evidence · proposal/acceptance provenance · record-vs-guidance · scope · effective period ·
-supersession/retirement · potential conflicts · eligibility/injection history · the exact form supplied
-to future runs). The reverse influence trail (from a decision, where it was injected) and conflict
-surfacing build here.*
+### Three model-level fixes before the structures (built 2026-07-26)
+
+1. **AI may recommend reuse; only the operator activates it.** AI candidates are now filed
+   **record-only** (with a *suggested* task target preserved), so a plain Accept can never turn a
+   suggestion into active guidance. Promotion is an explicit `acceptDecision(…, {applicability,
+   scope, target})` that **requires a concrete scope**. Suggestion confidence carries no authority.
+   Locked by tests (plain-accept stays record-only & uninjected · promote-to-guidance needs a target).
+2. **Scope must name a concrete target.** New `scopeTaskId` (+ existing `scopeObjectiveId`);
+   `assertScopeTargets` enforces: task→a real task, objective→a real objective, workspace→neither,
+   and targets must belong to the workspace; a target is never inferred from category. The
+   workspace-level Decisions form no longer offers "this task" (no task context there). Malformed
+   combinations are rejected (tested).
+3. **Guidance follows the lifecycle of its scope.** The selector drops task-scoped guidance once its
+   task is terminal (completed/cancelled) and objective-scoped guidance once its objective closes —
+   without deleting or rejecting the record (it stays an accepted, now-inactive memory). Enforced via
+   scope-target status joins; locked by tests (completed/cancelled task · closed objective).
+
+Plus: **Retire** applies only to active guidance (a record-only decision is already inactive —
+rejected), records a reason (who/when via reviewedBy/At), and is offered in the UI only for guidance.
+**`effectiveUntil`** is a stored timestamp; the selector uses one comparison (`> now`); a past instant
+is historical, not active.
+
+**Honest reverse trail:** a new `decision_injections` table logs each time a decision was *injected*
+into a run (with why: task/objective/reference) — recorded in the runner once the run row exists.
+`listInjectionsForDecision` reads it. This is **injection, never "influence."** `detectPotentialOverlaps`
+surfaces *possible* conflicts (2+ active guidance on the same objective) as "may conflict — review,"
+never asserting incompatibility. All verified: full suite **401/401**.
+
+*Next increment: the Decisions **Portfolio** (Awaiting review · Active guidance · Record only · Needs
+review lens · Historical) and **Decision Detail** (the 8-section institutional-memory conversation,
+including the eligibility/injection trail and the exact memory text supplied to runs), rendering the
+model above. Do not present Defer until it has real semantics.*

@@ -83,22 +83,15 @@ describe.skipIf(!available)('decision extraction orchestration', () => {
     expect(cands).toHaveLength(1);
     expect(cands[0]!.suggestedByRunId).toBe(runId);
 
-    // Not in Decision Memory yet (proposed, not accepted) — even for its own originating task.
+    // AI candidates are filed RECORD-ONLY. Not in memory as a proposal, and — crucially — a plain
+    // accept does not activate guidance either: only the operator may activate reuse.
     const own = { currentTaskId: taskId, currentObjectiveId: null, objectiveTaskIds: [] as string[], docPaths: new Set<string>() };
     let mem = await withTenant(ctx, (tx) => assembleDecisionMemory(tx, ctx, own));
     expect(mem.contextItem?.content ?? '').not.toContain('runtime locked at 22:00');
 
-    // Accept → now it IS in Decision Memory for a run related to it (its originating task).
-    await withTenant(ctx, (tx) => acceptDecision(tx, ctx, cands[0]!.id));
+    await withTenant(ctx, (tx) => acceptDecision(tx, ctx, cands[0]!.id)); // plain accept — record-only
     mem = await withTenant(ctx, (tx) => assembleDecisionMemory(tx, ctx, own));
-    expect(mem.contextItem?.content).toContain('runtime locked at 22:00');
-
-    // But it must NOT leak into an unrelated run — acceptance is not workspace-wide eligibility.
-    const other = await completedRun('later run', 'unrelated');
-    const otherMem = await withTenant(ctx, (tx) =>
-      assembleDecisionMemory(tx, ctx, { currentTaskId: other.taskId, currentObjectiveId: null, objectiveTaskIds: [], docPaths: new Set() }),
-    );
-    expect(otherMem.contextItem?.content ?? '').not.toContain('runtime locked at 22:00');
+    expect(mem.contextItem?.content ?? '').not.toContain('runtime locked at 22:00');
   });
 
   it('idempotency — a second extraction on the same run adds nothing', async () => {

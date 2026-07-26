@@ -5,7 +5,7 @@ import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
-import { memberships, organizations, profiles, projectMembers, projects, tasks } from '@/db/schema';
+import { memberships, objectives, organizations, profiles, projectMembers, projects, tasks } from '@/db/schema';
 import {
   acceptDecision,
   assembleDecisionMemory,
@@ -14,6 +14,7 @@ import {
   objectiveTaskIds,
   retireDecision,
 } from '@/domain/decisions/decisions';
+import { type TaskStatus } from '@/types/domain';
 
 /**
  * Decision Memory (O-19) acceptance scenarios + supersession + isolation.
@@ -44,12 +45,20 @@ async function makeWorkspace(): Promise<TenantContext> {
   return { userId, orgId, projectId: p[0]!.id, orgRole: 'owner', projectRole: 'admin' };
 }
 
-async function mkTask(ctx: TenantContext, title: string): Promise<string> {
+async function mkTask(ctx: TenantContext, title: string, status: TaskStatus = 'completed'): Promise<string> {
   const t = await getSetupDb()
     .insert(tasks)
-    .values({ orgId, projectId: ctx.projectId, title, input: 'x', providerSelection: 'openai', status: 'completed', createdBy: userId })
+    .values({ orgId, projectId: ctx.projectId, title, input: 'x', providerSelection: 'openai', status, createdBy: userId })
     .returning({ id: tasks.id });
   return t[0]!.id;
+}
+
+async function mkObjective(ctx: TenantContext, title: string, status: 'draft' | 'active' | 'completed' | 'cancelled' = 'active'): Promise<string> {
+  const o = await getSetupDb()
+    .insert(objectives)
+    .values({ orgId, projectId: ctx.projectId, title, status, createdBy: userId })
+    .returning({ id: objectives.id });
+  return o[0]!.id;
 }
 
 const noArgs = (taskId: string) => ({ currentTaskId: taskId, currentObjectiveId: null, objectiveTaskIds: [], docPaths: new Set<string>() });
@@ -212,47 +221,105 @@ describe.skipIf(!available)('decision memory', () => {
     expect(content).toContain('active');
   });
 
-  it('scope — a task-scoped decision does not leak to a sibling task via the shared objective', async () => {
-    const owningTask = await mkTask(ctxA, 'scope owner');
-    const siblingTask = await mkTask(ctxA, 'scope sibling');
+  it('scope — a concrete target is required; malformed scope combinations are rejected', async () => {
+    // Task scope without a task id, objective scope without an objective id → rejected.
+    await expect(
+      withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'Owner', { title: 'x', summary: 's', scope: 'task', applicability: 'guidance' })),
+    ).rejects.toThrow(/must name the task/i);
+    await expect(
+      withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'Owner', { title: 'x', summary: 's', scope: 'objective', applicability: 'guidance' })),
+    ).rejects.toThrow(/must name the objective/i);
+    // A scope target from another workspace is rejected.
+    const foreignTask = await mkTask(ctxB, 'B task', 'running');
+    await expect(
+      withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'Owner', { title: 'x', summary: 's', scope: 'task', scopeTaskId: foreignTask })),
+    ).rejects.toThrow(/not in this workspace/i);
+  });
+
+  it('scope — task guidance reaches its own live task, not a sibling', async () => {
+    const owningTask = await mkTask(ctxA, 'scope owner', 'running');
+    const siblingTask = await mkTask(ctxA, 'scope sibling', 'running');
     const d = await withTenant(ctxA, (tx) =>
-      createDecision(tx, ctxA, 'Owner', { title: 'Task-only convention', summary: 's', scope: 'task', originatingTaskId: owningTask }),
+      createDecision(tx, ctxA, 'Owner', { title: 'Task-only convention', summary: 's', scope: 'task', scopeTaskId: owningTask }),
     );
     await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, d));
-    // The sibling shares the objective's task set, but the decision is TASK-scoped → not eligible.
-    const mem = await withTenant(ctxA, (tx) =>
-      assembleDecisionMemory(tx, ctxA, { currentTaskId: siblingTask, currentObjectiveId: null, objectiveTaskIds: [owningTask], docPaths: new Set() }),
-    );
-    expect(mem.contextItem?.content ?? '').not.toContain('Task-only convention');
-    // Its own task still sees it.
+    const sibling = await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(siblingTask)));
+    expect(sibling.contextItem?.content ?? '').not.toContain('Task-only convention');
     const own = await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(owningTask)));
     expect(own.contextItem?.content ?? '').toContain('Task-only convention');
   });
 
-  it('scope — objective guidance reaches sibling tasks in the same objective', async () => {
-    const owningTask = await mkTask(ctxA, 'obj owner');
-    const siblingTask = await mkTask(ctxA, 'obj sibling');
-    const d = await withTenant(ctxA, (tx) =>
-      createDecision(tx, ctxA, 'Owner', { title: 'Objective-wide convention', summary: 's', scope: 'objective', originatingTaskId: owningTask }),
-    );
-    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, d));
-    const mem = await withTenant(ctxA, (tx) =>
-      assembleDecisionMemory(tx, ctxA, { currentTaskId: siblingTask, currentObjectiveId: null, objectiveTaskIds: [owningTask], docPaths: new Set() }),
-    );
-    expect(mem.contextItem?.content ?? '').toContain('Objective-wide convention');
+  it('lifecycle — task guidance is not injected once its task is completed or cancelled', async () => {
+    const doneTask = await mkTask(ctxA, 'completed scope task', 'completed');
+    const cancelledTask = await mkTask(ctxA, 'cancelled scope task', 'cancelled');
+    const dDone = await withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'Owner', { title: 'For a completed task', summary: 's', scope: 'task', scopeTaskId: doneTask }));
+    const dCancelled = await withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'Owner', { title: 'For a cancelled task', summary: 's', scope: 'task', scopeTaskId: cancelledTask }));
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, dDone));
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, dCancelled));
+    const m1 = await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(doneTask)));
+    const m2 = await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(cancelledTask)));
+    expect(m1.contextItem?.content ?? '').not.toContain('For a completed task');
+    expect(m2.contextItem?.content ?? '').not.toContain('For a cancelled task');
+    // The records are preserved, not deleted or rejected.
+    const all = await withTenant(ctxA, (tx) => listDecisions(tx, ctxA));
+    expect(all.find((x) => x.id === dDone)!.status).toBe('accepted');
   });
 
-  it('retirement — an accepted decision can be retired without a replacement and stops guiding', async () => {
-    const t = await mkTask(ctxA, 'retire task');
+  it('lifecycle — objective guidance reaches siblings while open, and stops when the objective closes', async () => {
+    const openObj = await mkObjective(ctxA, 'Open objective', 'active');
+    const runTask = await mkTask(ctxA, 'obj run', 'running');
     const d = await withTenant(ctxA, (tx) =>
-      createDecision(tx, ctxA, 'Owner', { title: 'Retire me', summary: 's', originatingTaskId: t }),
+      createDecision(tx, ctxA, 'Owner', { title: 'Objective-wide convention', summary: 's', scope: 'objective', scopeObjectiveId: openObj }),
     );
     await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, d));
-    await withTenant(ctxA, (tx) => retireDecision(tx, ctxA, d));
+    const args = { currentTaskId: runTask, currentObjectiveId: openObj, objectiveTaskIds: [], docPaths: new Set<string>() };
+    expect((await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, args))).contextItem?.content ?? '').toContain('Objective-wide convention');
+    // Close the objective → the guidance stops being injected, but the record survives.
+    await getSetupDb().update(objectives).set({ status: 'completed' }).where(eq(objectives.id, openObj));
+    expect((await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, args))).contextItem?.content ?? '').not.toContain('Objective-wide convention');
+    expect((await withTenant(ctxA, (tx) => listDecisions(tx, ctxA))).find((x) => x.id === d)!.status).toBe('accepted');
+  });
+
+  it('retirement — active guidance can be retired without a replacement; record-only cannot', async () => {
+    const t = await mkTask(ctxA, 'retire task', 'running');
+    const d = await withTenant(ctxA, (tx) =>
+      createDecision(tx, ctxA, 'Owner', { title: 'Retire me', summary: 's', scope: 'task', scopeTaskId: t }),
+    );
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, d));
+    await withTenant(ctxA, (tx) => retireDecision(tx, ctxA, d, 'no longer applies'));
     const all = await withTenant(ctxA, (tx) => listDecisions(tx, ctxA));
     expect(all.find((x) => x.id === d)!.status).toBe('retired');
-    const mem = await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(t)));
-    expect(mem.contextItem?.content ?? '').not.toContain('Retire me');
+    expect(all.find((x) => x.id === d)!.statusReason).toBe('no longer applies');
+    expect((await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(t)))).contextItem?.content ?? '').not.toContain('Retire me');
+    // A record-only decision was never active guidance → retiring it is rejected.
+    const rec = await withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'Owner', { title: 'Record', summary: 's', applicability: 'record' }));
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, rec));
+    await expect(withTenant(ctxA, (tx) => retireDecision(tx, ctxA, rec))).rejects.toThrow(/record-only/i);
+  });
+
+  it('AI activation — acceptance alone cannot turn a record-only proposal into active guidance', async () => {
+    const t = await mkTask(ctxA, 'promo task', 'running');
+    // A record-only proposal (as AI candidates are filed).
+    const p1 = await withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'AI suggestion', { title: 'Proposed conclusion', summary: 's', applicability: 'record', scope: 'task', scopeTaskId: t }));
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, p1)); // plain accept — no promotion
+    const after = (await withTenant(ctxA, (tx) => listDecisions(tx, ctxA))).find((x) => x.id === p1)!;
+    expect(after.applicability).toBe('record'); // stayed record-only
+    expect((await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(t)))).contextItem?.content ?? '').not.toContain('Proposed conclusion');
+  });
+
+  it('AI activation — promoting to guidance requires an explicit scope target', async () => {
+    const t = await mkTask(ctxA, 'promo task 2', 'running');
+    const p = await withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'AI suggestion', { title: 'Promote me', summary: 's', applicability: 'record', scope: 'task', scopeTaskId: t }));
+    // Promoting to task guidance without naming the task is rejected.
+    await expect(
+      withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, p, { applicability: 'guidance', scope: 'task' })),
+    ).rejects.toThrow(/must name the task/i);
+    // Explicit promotion to task guidance with the concrete target activates it (traceable change).
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, p, { applicability: 'guidance', scope: 'task', scopeTaskId: t }));
+    const after = (await withTenant(ctxA, (tx) => listDecisions(tx, ctxA))).find((x) => x.id === p)!;
+    expect(after.applicability).toBe('guidance');
+    expect(after.scope).toBe('task');
+    expect((await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(t)))).contextItem?.content ?? '').toContain('Promote me');
   });
 
   it('objectiveTaskIds is tenant-scoped and returns attached task ids', async () => {

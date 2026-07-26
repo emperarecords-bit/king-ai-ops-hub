@@ -278,10 +278,12 @@ export async function extractCandidatesForRun(
         summary: c.summary,
         rationale: c.rationale,
         decisionType: c.decisionType,
-        // An AI suggestion must NOT default to workspace-wide guidance. It is proposed as
-        // task-scoped guidance; the reviewer widens the scope only deliberately.
-        applicability: 'guidance',
+        // An AI suggestion must NOT silently become reusable guidance. It is proposed as RECORD-ONLY;
+        // only the operator may activate reuse, choosing scope explicitly at acceptance. The task is
+        // stored as a *suggested* scope target for that promotion, but does not make it guidance.
+        applicability: 'record',
         scope: 'task',
+        scopeTaskId: run.taskId,
         supportingRefs: refs,
         originatingTaskId: run.taskId,
         originatingRunId: runId,
