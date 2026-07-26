@@ -1237,3 +1237,89 @@ injection vs influence · active guidance vs historically-valid record. Deferred
 never presented as if they exist): eligible-but-not-injected history (needs an evaluation event
 persisted at assembly time), evidence-backed semantic conflict assessment, and Defer with real
 semantics.
+
+---
+
+## Knowledge — the workspace evidence & context system
+
+Knowledge preserves facts, claims, learned context, and reusable reference material with enough
+provenance that the Hub can decide what a record says, where it came from, how it was established,
+whether it remains current, where it applies, how confidently it may be used, whether another record
+disputes it, and whether it may be disclosed in the current work.
+
+- **Documents** preserve source material · **Artifacts** preserve outputs of execution · **Knowledge**
+  preserves claims and context derived from identifiable sources · **Decisions** preserve conclusions
+  intended to guide future work. **Knowledge supports judgment; it does not grant authority.**
+
+**Primary question:** *What does this workspace believe to be true, what supports that belief, and when
+is it appropriate to rely on it?* ("What does the workspace know?" is fine product language, but the
+internal contract is more precise — Knowledge holds observed facts, human assertions, extractions,
+summaries, interpretations, inferences, and reference material, which do NOT carry equal weight.)
+
+The central failure the review named: **active Knowledge was treated as universally applicable,
+currently true, and equally trustworthy — three different claims, none established by activation.**
+
+### Immediate integrity fix — relevance gates injection (built 2026-07-26)
+
+`loadApprovedContext` injected every active item into every run as "charter." That is corrected on the
+**run path**: the runner now uses `selectRelevantKnowledge`, two-stage like Decision Memory —
+**eligibility** (an active item is considered only when it shares subject vocabulary with the run's
+query = task input + objective; workspace membership alone is never enough), then **ranking**
+(shared-term strength, then recency — recency ranks, never creates relevance). No relationship →
+omitted (`domain/knowledge/relevance.ts`, `MIN_SHARED_TERMS`). Bounded to 12. Only active items are
+eligible, so a superseded/archived version can never be supplied.
+> Principle: Approval permits Knowledge to be used; relevance determines whether it belongs in this run.
+
+**Application records** (`knowledge_injections`): each time a knowledge item VERSION is injected, one
+immutable row records item+version · run · task · why eligible · the **exact rendered text supplied** ·
+timestamp — idempotent per (run, item), so a retry can't inflate history and a later revision can't
+rewrite what a past run received. `logKnowledgeInjections` / `listInjectionsForKnowledge`. This is
+**injection, not influence** (eligible → injected → referenced → influenced stay distinct).
+> Principle: Application history preserves what the AI actually received, not what the record looks like today.
+
+### Durable principles (recorded; enforcement partly future)
+
+- Approval permits Knowledge to be used; relevance determines whether it belongs in this run. *(built)*
+- Activation is permission to consider a record, not proof that every claim in it is true.
+- A provenance label is useful only when it leads back to inspectable support.
+- A claim may remain historically correct while becoming unsafe to use as current context.
+- Scope defines where Knowledge may apply; relevance determines whether it applies now.
+- Knowledge may describe a directive; only an authoritative decision can establish it as guidance.
+- Conflicting evidence must remain visible until authority or stronger evidence resolves it.
+- AI may propose what the workspace could remember; it may not declare its own output trusted Knowledge.
+- Relevant Knowledge is supplied only when its disclosure is permitted.
+
+### Responsibilities (north-star for the coming build)
+
+1. Preserve claims and context without rewriting history *(the versioning lifecycle already does this)*.
+2. Retain inspectable provenance. 3. Distinguish epistemic basis (observed / asserted / extracted /
+summarized / inferred / derived). 4. **Separate activation from verification** (record status vs
+verification state vs claim-level confidence — no single confidence for a multi-claim free-text item).
+5. Represent freshness and validity (as-of / last-verified / optional review-or-expiry / freshness
+assessment / staleness reason; no universal staleness window). 6. Bound applicability through scope
+(workspace/objective/task/entity) AND relevance. 7. Preserve disputes, supersession, correction
+(superseded / archived / stale / disputed as distinct). 8. Control sensitive disclosure — the future
+retrieval gate asks **(a) is it relevant? (b) is this run authorized to receive it?** 9. Record where
+Knowledge was supplied *(built: application records)*. 10. Support Decisions without behaving as
+authority itself.
+
+### What is genuinely strong (preserve)
+
+The versioned record lifecycle: drafts quarantined · only-active injects · revision creates a new
+version (never rewrites) · explicit supersession · activating a replacement archives its predecessor
+atomically · every transition audited · tenancy reasserted on the high-risk read.
+
+### Boundaries
+
+Knowledge (facts/evidence/context) · Decisions (conclusions/guidance) · Documents (files) · Artifacts
+(execution outputs) · Audit (history). The `kind` set (`policy`/`standard`/`decision`) leans
+prescriptive; **a subject category must not create authority** — Knowledge is presented as evidence,
+never as instructions that override Decision Memory. (Prompt reframing + the trustworthiness schema are
+the next step.)
+
+*Next steps (deferred, not built, never presented as if they exist): the minimum provenance /
+epistemic-basis / verification / freshness / scope / sensitivity model; presenting Knowledge as
+evidence-not-directive in the prompt; an AI extraction/promotion path (propose-only, source-identified,
+human-activated, never self-trusted); conflict/dispute surfacing; then the operating-partner
+conversation across the representative states, and only then the Knowledge page redesign. Do not
+redesign the page yet.*

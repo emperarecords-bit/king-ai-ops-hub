@@ -23,7 +23,7 @@ import {
   type StepKind,
 } from '@/types/domain';
 import { findAgentForRole, type AgentRow } from '@/domain/agents/agents';
-import { loadApprovedContext } from '@/domain/projects/context';
+import { selectRelevantKnowledge, logKnowledgeInjections } from '@/domain/knowledge/knowledge';
 import { loadObjectiveForRun } from '@/domain/objectives/objectives';
 import {
   retrieveRelevant,
@@ -158,11 +158,14 @@ export async function startRun(
       }
     }
 
-    // Isolation invariant I1: ONLY this project's approved context.
-    const knowledge = await loadApprovedContext(tx, ctx);
     // Owner intent that frames the work (closes O-9); tenant-scoped, null when
     // the task serves no live objective.
     const objective = await loadObjectiveForRun(tx, ctx, task.objectiveId);
+    // Isolation invariant I1: ONLY this project's ACTIVE knowledge — and now RELEVANCE-GATED, not
+    // wholesale charter. Approval permits a record to be used; relevance (shared subject with the
+    // task + objective) decides whether it belongs in THIS run. Unrelated active knowledge is omitted.
+    const knowledgeQuery = [task.input, objective?.title, objective?.description].filter(Boolean).join(' ');
+    const knowledge = await selectRelevantKnowledge(tx, ctx, { queryText: knowledgeQuery });
     // Balanced context package (O-14, CONTEXT-PACKAGE.md). Retrieval is
     // unchanged (D-020); we ADD a small quota of foundational references and a
     // production-status doc that relevance alone would crowd out, dedup them
@@ -246,7 +249,8 @@ export async function startRun(
           ]
         : []),
       ...knowledge.map((k) => ({
-        ...k,
+        title: k.title,
+        content: k.body,
         authority: AUTHORITY.WORKSPACE_CONTROL,
         kind: 'Approved workspace control',
       })),
@@ -349,8 +353,10 @@ export async function startRun(
       .returning({ id: runs.id });
     const runId = runInserted[0]!.id;
 
-    // The honest reverse trail: record which decisions were INJECTED into this run (not "influenced").
+    // The honest reverse trail: record which decisions and knowledge were INJECTED into this run
+    // (supplied, not "influenced").
     await logDecisionInjections(tx, ctx, { runId, taskId, injected: decisionMemory.injected });
+    await logKnowledgeInjections(tx, ctx, { runId, taskId, injected: knowledge });
 
     await tx
       .update(tasks)

@@ -6,13 +6,16 @@ import { type TenantContext } from '@/types/domain';
 import { ConflictError } from '@/lib/errors';
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
-import { memberships, organizations, profiles, projectMembers, projects } from '@/db/schema';
+import { agents, memberships, organizations, profiles, projectMembers, projects, runs, tasks } from '@/db/schema';
 import {
   activateKnowledge,
   archiveKnowledge,
   createKnowledge,
+  listInjectionsForKnowledge,
   listKnowledge,
+  logKnowledgeInjections,
   reviseKnowledge,
+  selectRelevantKnowledge,
 } from '@/domain/knowledge/knowledge';
 import { loadApprovedContext } from '@/domain/projects/context';
 
@@ -152,5 +155,54 @@ describe.skipIf(!available)('company knowledge K1', () => {
     await expect(
       withTenant(ctx, (tx) => activateKnowledge(tx, ctx, active.id)),
     ).rejects.toThrow(ConflictError);
+  });
+});
+
+describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesale)', () => {
+  it('an unrelated active item is NOT injected; membership + recency do not create relevance', async () => {
+    const shipping = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Shipping carrier accounts', body: 'Freight carrier logistics warehouse pallet dispatch codes.', kind: 'fact', activate: true }));
+    // A recent, active, workspace item — but no shared subject with a database query → omitted.
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'migrate the postgres database schema and indexes' }));
+    expect(picked.find((k) => k.id === shipping)).toBeUndefined();
+  });
+
+  it('a relevant active item IS injected, with a recorded eligibility reason', async () => {
+    await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Database migration policy', body: 'Postgres schema migrations run through drizzle with a backup first.', kind: 'standard', activate: true }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'migrate the postgres database schema safely' }));
+    const hit = picked.find((k) => k.title === 'Database migration policy')!;
+    expect(hit).toBeDefined();
+    expect(hit.reason).toBe('subject');
+  });
+
+  it('drafts, archived, and superseded versions are never selected; one version at most', async () => {
+    const id = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Refund window rule', body: 'Refund window billing invoice payment terms are thirty days.', kind: 'policy', activate: true }));
+    await withTenant(ctx, (tx) => reviseKnowledge(tx, ctx, id, { body: 'Refund window billing invoice payment terms are now sixty days.', activate: true }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'refund window billing invoice payment terms' }));
+    const matches = picked.filter((k) => k.title === 'Refund window rule');
+    expect(matches).toHaveLength(1); // v1 archived, only v2 active
+    expect(matches[0]!.body).toMatch(/sixty days/);
+    // A draft is not selected.
+    await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Refund draft', body: 'Refund window billing invoice payment draft only.', kind: 'policy', activate: false }));
+    const picked2 = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'refund window billing invoice payment terms' }));
+    expect(picked2.find((k) => k.title === 'Refund draft')).toBeUndefined();
+  });
+
+  it('application records are idempotent and preserve the exact supplied text after a later revision', async () => {
+    const id = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Vendor onboarding steps', body: 'Vendor onboarding contract signature compliance checklist steps.', kind: 'playbook', activate: true }));
+    // A run to attach the application record to.
+    const a = await getSetupDb().insert(agents).values({ orgId, projectId: ctx.projectId, name: `A-${randomUUID().slice(0, 6)}`, role: 'primary', provider: 'openai', model: 'gpt-5.4-mini', systemPrompt: 'x' }).returning({ id: agents.id });
+    const t = await getSetupDb().insert(tasks).values({ orgId, projectId: ctx.projectId, title: 'Vendor task', input: 'x', providerSelection: 'openai', status: 'completed', createdBy: userId }).returning({ id: tasks.id });
+    const r = await getSetupDb().insert(runs).values({ orgId, projectId: ctx.projectId, taskId: t[0]!.id, status: 'completed', primaryAgentId: a[0]!.id }).returning({ id: runs.id });
+    const selected = [{ id, version: 1, title: 'Vendor onboarding steps', body: 'original', reason: 'subject', memoryText: 'EXACT vendor text v1' }];
+    await withTenant(ctx, (tx) => logKnowledgeInjections(tx, ctx, { runId: r[0]!.id, taskId: t[0]!.id, injected: selected }));
+    await withTenant(ctx, (tx) => logKnowledgeInjections(tx, ctx, { runId: r[0]!.id, taskId: t[0]!.id, injected: [{ ...selected[0]!, memoryText: 'DIFFERENT (ignored)' }] }));
+    let trail = await withTenant(ctx, (tx) => listInjectionsForKnowledge(tx, ctx, id));
+    expect(trail).toHaveLength(1); // idempotent per (run, item)
+    expect(trail[0]!.memoryText).toBe('EXACT vendor text v1');
+    // Revise the item; the historical snapshot is unchanged.
+    await withTenant(ctx, (tx) => reviseKnowledge(tx, ctx, id, { body: 'Rewritten entirely.', activate: true }));
+    trail = await withTenant(ctx, (tx) => listInjectionsForKnowledge(tx, ctx, id));
+    expect(trail[0]!.memoryText).toBe('EXACT vendor text v1');
+    expect(trail[0]!.version).toBe(1);
   });
 });

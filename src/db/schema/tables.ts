@@ -297,6 +297,36 @@ export const knowledgeItems = pgTable(
 );
 
 /**
+ * The honest reverse trail for Knowledge: one row each time a knowledge item VERSION was injected
+ * into a run (not merely eligible, and not proof it influenced the result). Stores the exact rendered
+ * text supplied — an immutable snapshot, so a later revision can't rewrite what a past run received.
+ * `reason` records why it was eligible. Idempotent per (run, knowledge_item).
+ */
+export const knowledgeInjections = pgTable(
+  'knowledge_injections',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    knowledgeItemId: uuid('knowledge_item_id').notNull().references(() => knowledgeItems.id, { onDelete: 'cascade' }),
+    /** The exact version supplied, so the trail is pinned to what the run actually received. */
+    version: integer('version').notNull(),
+    runId: uuid('run_id').references(() => runs.id, { onDelete: 'set null' }),
+    taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'set null' }),
+    /** Why it was eligible: 'subject' | 'objective' | 'task' | 'reference'. */
+    reason: text('reason').notNull(),
+    /** Immutable snapshot of the exact rendered text supplied to the AI. */
+    memoryText: text('memory_text'),
+    injectedAt: timestamp('injected_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('knowledge_injections_item_idx').on(t.knowledgeItemId),
+    index('knowledge_injections_org_project_idx').on(t.orgId, t.projectId),
+    uniqueIndex('knowledge_injections_run_item_uq').on(t.runId, t.knowledgeItemId),
+  ],
+);
+
+/**
  * Project Folder documents (D-020). One row per indexed file. We store the
  * extracted TEXT and a content hash, never the binary — refresh re-reads from
  * the source folder, so no file content lands in a blob store, and an

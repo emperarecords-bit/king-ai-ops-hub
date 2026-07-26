@@ -9,8 +9,9 @@ import {
 } from '@/types/domain';
 import { ConflictError, NotFoundError, ValidationError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
-import { knowledgeItems } from '@/db/schema';
+import { knowledgeInjections, knowledgeItems, tasks } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
+import { knowledgeRelevance, significantTerms } from '@/domain/knowledge/relevance';
 
 /**
  * Company Knowledge lifecycle (K1 — KNOWLEDGE-DESIGN.md). The rules this
@@ -183,6 +184,116 @@ export async function archiveKnowledge(
     entityId: itemId,
     detail: { title: item.title, version: item.version },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Relevance-gated retrieval + application records (evidence, not wholesale charter)
+// ---------------------------------------------------------------------------
+
+const MAX_KNOWLEDGE = 12;
+
+export interface SelectedKnowledge {
+  id: string;
+  version: number;
+  title: string;
+  body: string;
+  /** Why it was eligible for this run: 'subject' (shared vocabulary) today. */
+  reason: string;
+  /** The exact text supplied to the AI — snapshotted into the application record. */
+  memoryText: string;
+}
+
+/**
+ * Two-stage selection replacing wholesale injection. ELIGIBILITY: an active item may be considered
+ * only when it has a defensible relationship to the run — today, shared subject vocabulary with the
+ * run's query (workspace membership alone is never enough). RANKING: shared-term strength, then
+ * recency (recency ranks, never creates relevance). No relationship → omitted. Bounded to
+ * MAX_KNOWLEDGE. Only ACTIVE items are eligible; a superseded predecessor is archived, so two
+ * versions of one item can never both be supplied.
+ */
+export async function selectRelevantKnowledge(
+  tx: DbTx,
+  ctx: TenantContext,
+  args: { queryText: string },
+): Promise<SelectedKnowledge[]> {
+  const rows = await tx
+    .select({ id: knowledgeItems.id, title: knowledgeItems.title, body: knowledgeItems.body, version: knowledgeItems.version, createdAt: knowledgeItems.createdAt })
+    .from(knowledgeItems)
+    .where(and(eq(knowledgeItems.projectId, ctx.projectId), eq(knowledgeItems.orgId, ctx.orgId), eq(knowledgeItems.scope, 'project'), eq(knowledgeItems.status, 'active')));
+  if (rows.length === 0) return [];
+
+  const queryTerms = significantTerms(args.queryText);
+  const now = Date.now();
+  const scored = rows
+    .map((r) => ({ r, rel: knowledgeRelevance(`${r.title} ${r.body}`, queryTerms) }))
+    .filter((s) => s.rel.eligible)
+    .map((s) => {
+      const ageDays = (now - s.r.createdAt.getTime()) / 86_400_000;
+      // Recency stays a small tiebreak below relationship strength — it never lifts an irrelevant item.
+      return { r: s.r, score: s.rel.score + Math.max(0, 1 - ageDays / 90) };
+    });
+  scored.sort((a, b) => b.score - a.score || b.r.createdAt.getTime() - a.r.createdAt.getTime());
+
+  return scored.slice(0, MAX_KNOWLEDGE).map(({ r }) => ({
+    id: r.id,
+    version: r.version,
+    title: r.title,
+    body: r.body,
+    reason: 'subject',
+    memoryText: `${r.title}\n${r.body}`,
+  }));
+}
+
+/** Record that these knowledge items were INJECTED into a run — idempotent, immutable text snapshot. */
+export async function logKnowledgeInjections(
+  tx: DbTx,
+  ctx: TenantContext,
+  args: { runId: string; taskId: string; injected: SelectedKnowledge[] },
+): Promise<void> {
+  if (args.injected.length === 0) return;
+  await tx
+    .insert(knowledgeInjections)
+    .values(
+      args.injected.map((k) => ({
+        orgId: ctx.orgId,
+        projectId: ctx.projectId,
+        knowledgeItemId: k.id,
+        version: k.version,
+        runId: args.runId,
+        taskId: args.taskId,
+        reason: k.reason,
+        memoryText: k.memoryText,
+      })),
+    )
+    .onConflictDoNothing({ target: [knowledgeInjections.runId, knowledgeInjections.knowledgeItemId] });
+}
+
+export interface KnowledgeInjectionRow {
+  runId: string | null;
+  taskId: string | null;
+  taskTitle: string | null;
+  version: number;
+  reason: string;
+  memoryText: string | null;
+  injectedAt: Date;
+}
+
+/** The reverse trail for one knowledge item: the runs it was supplied to, newest first. */
+export async function listInjectionsForKnowledge(tx: DbTx, ctx: TenantContext, itemId: string): Promise<KnowledgeInjectionRow[]> {
+  return tx
+    .select({
+      runId: knowledgeInjections.runId,
+      taskId: knowledgeInjections.taskId,
+      taskTitle: tasks.title,
+      version: knowledgeInjections.version,
+      reason: knowledgeInjections.reason,
+      memoryText: knowledgeInjections.memoryText,
+      injectedAt: knowledgeInjections.injectedAt,
+    })
+    .from(knowledgeInjections)
+    .leftJoin(tasks, eq(knowledgeInjections.taskId, tasks.id))
+    .where(and(eq(knowledgeInjections.knowledgeItemId, itemId), eq(knowledgeInjections.orgId, ctx.orgId), eq(knowledgeInjections.projectId, ctx.projectId)))
+    .orderBy(desc(knowledgeInjections.injectedAt));
 }
 
 export const reviseKnowledgeSchema = z.object({
