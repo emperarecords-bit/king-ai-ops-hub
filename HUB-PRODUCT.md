@@ -5,6 +5,24 @@ of each screen, settled before any layout or code. Method, per area:
 describe what exists → what works → what feels incomplete → **agree the goals** →
 sketch & evaluate against the goals → only then build.
 
+## The Hub's personality — the chief of staff
+
+The Hub speaks as **one character across every screen**: a competent, accountable chief of
+staff who has been running the business while you were away. This is the through-line for the
+entire product. The test for any area is no longer only "would I proudly ship this?" but also
+**"does this sound like the same chief of staff?"**
+
+- **Accountable, not reporting.** It has been *minding the business*, not just tallying it. It
+  owns the state of things and stands behind its read.
+- **Confident and active, not passive.** Its stance is: *"Here's where we stand. Here's why.
+  Here's what, if anything, needs you."*
+- **Human, not mechanical.** It greets you like an operating partner — "Good morning.
+  AccurateBids is operating normally." — not like software emitting a status line.
+- **Calm · honest · business-first · never noisy · never dramatic.**
+- **Never pretends certainty it doesn't have.** When it can't verify something, it says so
+  plainly ("I haven't been able to check X") rather than showing a green it can't stand
+  behind. Honesty over false reassurance — that is what makes its confidence trustworthy.
+
 ## Hub-wide principles
 
 - **Every screen answers one primary question.** Anything on the screen should help answer
@@ -17,11 +35,20 @@ sketch & evaluate against the goals → only then build.
   charts.
 - **Signals must be trustworthy.** An alert always means something real; a quiet/green state
   means things are genuinely fine. No crying wolf.
+- **Earns trust before it asks for attention.** The emotional sequence on every screen: tell
+  me where we stand → prove that assessment → *only then* ask for my attention. Begin by
+  creating confidence, not by demanding attention.
 - **Business first, software second.** The Hub always represents the *business* first and the
   software second. When the business view and the platform view compete, optimize for helping
   the operator understand the business — not the internal mechanics of the platform. (A
   business can be healthy though an AI task failed; every AI task can succeed while the
   business drifts. Health is a business judgment, not a platform status.)
+- **Information reveals itself in layers.** A glance conveys the state; a second glance
+  explains why; detail is a deliberate drill-down. A screen *invites* you down to the pages
+  beneath it — it never competes with them or duplicates them.
+- **Design the experience, not the interface.** Decide what the operator should *feel* and
+  understand first; the layout follows from that. Screens hold a conversation with the
+  operator — they don't just display data.
 
 ## Dashboard  — *agreed 2026-07-26*
 
@@ -39,6 +66,27 @@ orientation, not the purpose.
 **Reward-opening test:** in ~30 seconds I know — which business I'm in, whether it's
 healthy, what changed that matters, and whether I need to do anything before my day. If the
 answer is "nothing," it feels reassuring, not empty.
+
+**The morning conversation (experience definition).** The Dashboard is the chief of staff
+greeting you at the start of the day. The 30-second arc, which obeys *earn-trust-before-
+attention*:
+- **0–3s — where we stand.** A human greeting + a one-sentence verdict of the business's
+  health. *"Good morning. AccurateBids is operating normally."* or *"Good morning. AccurateBids
+  is healthy overall, but two things need your attention."* Identity + confidence, before any
+  detail.
+- **3–10s — why.** The proof behind the verdict, business-first: objectives advancing, work
+  moving, nothing stalled.
+- **10–20s — what needs you (or that nothing does).** Attention items with their *why* and a
+  way in; when nothing needs you, it *affirms* that ("You're clear") — reassurance is content,
+  not empty space.
+- **20–30s — what changed since you last looked.** A short re-entry digest (orientation, not
+  analytics).
+- **Fades:** run counts, "working now," roster, cost detail, history — software talks second.
+
+Answers to the five experience questions: **first thing seen** = business name + one-line
+verdict · **reassures** = a green verdict backed by real business movement · **concerns** =
+only genuine problems, business-first, each with its why · **invites action** = each item is a
+doorway into the page that handles it · **fades** = the machinery.
 
 **Design intents:**
 - Whole business represented: human Work Items *and* AI Tasks, not only AI activity.
