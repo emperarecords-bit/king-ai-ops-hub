@@ -453,6 +453,52 @@ export const knowledgeDisclosureGrants = pgTable(
 );
 
 /**
+ * AI-proposed Knowledge — the quarantine record for the extraction/promotion path. The AI may only
+ * PROPOSE: extraction creates a DRAFT knowledge_item (conservative ACTUAL values) plus one of these
+ * rows holding the AI's SUGGESTED values and the extraction provenance. Suggested values live here,
+ * physically separate from the operator's actual choices on the item — a promotion cannot silently
+ * inherit them. `reviewStatus` is the proposal's own lifecycle (pending → promoted | rejected),
+ * distinct from the item's draft/active lifecycle. A rejected proposal is preserved, never deleted.
+ */
+export const knowledgeProposals = pgTable(
+  'knowledge_proposals',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    /** The quarantined draft this proposal produced. */
+    knowledgeItemId: uuid('knowledge_item_id').notNull().references(() => knowledgeItems.id, { onDelete: 'cascade' }),
+    /** Extraction provenance: the run whose output was mined, the durable extraction operation, model. */
+    suggestedByRunId: uuid('suggested_by_run_id').references(() => runs.id, { onDelete: 'set null' }),
+    extractionOperationId: uuid('extraction_operation_id').references(() => aiOperations.id, { onDelete: 'set null' }),
+    provider: text('provider'),
+    model: text('model'),
+    promptVersion: text('prompt_version').notNull(),
+    /** The AI's own confidence + one-line reason — evidence for the reviewer, NEVER authority. */
+    confidence: text('confidence').notNull().default('low'),
+    reason: text('reason'),
+    /** SUGGESTED values (the AI's proposal) — separate from the item's actual columns. */
+    suggestedScopeKind: knowledgeScopeKindEnum('suggested_scope_kind').notNull().default('workspace'),
+    suggestedScopeTaskId: uuid('suggested_scope_task_id').references(() => tasks.id, { onDelete: 'set null' }),
+    suggestedScopeObjectiveId: uuid('suggested_scope_objective_id').references(() => objectives.id, { onDelete: 'set null' }),
+    suggestedDisclosure: knowledgeDisclosureEnum('suggested_disclosure').notNull().default('workspace_internal'),
+    suggestedAsOf: timestamp('suggested_as_of', { withTimezone: true }),
+    suggestedReviewAfter: timestamp('suggested_review_after', { withTimezone: true }),
+    suggestedExpiresAt: timestamp('suggested_expires_at', { withTimezone: true }),
+    /** Proposal lifecycle, distinct from the item's: pending | promoted | rejected. */
+    reviewStatus: text('review_status').notNull().default('pending'),
+    reviewedBy: uuid('reviewed_by').references(() => profiles.id, { onDelete: 'set null' }),
+    reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+    rejectionReason: text('rejection_reason'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('knowledge_proposals_item_idx').on(t.knowledgeItemId),
+    index('knowledge_proposals_review_idx').on(t.projectId, t.reviewStatus),
+  ],
+);
+
+/**
  * A durable record of an AI operation that is NOT a task run (e.g. objective suggestion), so that
  * every AI use of Knowledge belongs to an inspectable operation rather than an ephemeral correlation
  * value. Recorded before provider dispatch; its status advances to completed/failed. An
@@ -520,6 +566,10 @@ export const documents = pgTable(
     kind: documentKindEnum('kind').notNull(),
     sha256: text('sha256').notNull(),
     sizeBytes: integer('size_bytes').notNull(),
+    /** Disclosure classification of the source itself. Knowledge DERIVED from this document may be no
+     *  less restrictive than this (sensitivity is inherited, never laundered). Defaults to
+     *  workspace_internal; an operator marks a document `restricted` to quarantine what it produces. */
+    disclosure: knowledgeDisclosureEnum('disclosure').notNull().default('workspace_internal'),
     /** Chunk count at last successful index; 0 for an empty or failed file. */
     chunkCount: integer('chunk_count').notNull().default(0),
     status: documentStatusEnum('status').notNull().default('active'),
@@ -1066,6 +1116,9 @@ export const runs = pgTable(
     contextManifest: jsonb('context_manifest').$type<ContextManifestEntry[]>(),
     /** Decision-candidate extraction outcome (O-20); makes extraction idempotent. */
     candidateExtractionStatus: extractionStatusEnum('candidate_extraction_status'),
+    /** Knowledge-proposal extraction outcome; makes Knowledge extraction idempotent, independent of the
+     *  decision extractor — one may succeed while the other is empty/failed. */
+    knowledgeExtractionStatus: extractionStatusEnum('knowledge_extraction_status'),
     errorMessage: text('error_message'),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp('finished_at', { withTimezone: true }),

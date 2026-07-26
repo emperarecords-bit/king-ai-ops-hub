@@ -232,6 +232,13 @@
       "when": 1785105853434,
       "tag": "0032_gigantic_smiling_tiger",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1785107026575,
+      "tag": "0033_motionless_madame_masque",
+      "breakpoints": true
     }
   ]
 }

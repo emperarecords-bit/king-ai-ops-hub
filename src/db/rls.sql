@@ -95,7 +95,7 @@ grant select, insert, update on
   agents, departments, project_context_items, integration_secrets,
   tasks, runs, run_steps, artifacts, approvals,
   objectives, milestones, knowledge_items, task_schedules,
-  documents, document_chunks, task_dependencies, decisions, decision_injections, knowledge_injections, knowledge_sources, knowledge_verification_events, knowledge_disclosure_grants, ai_operations, run_jobs, document_jobs,
+  documents, document_chunks, task_dependencies, decisions, decision_injections, knowledge_injections, knowledge_sources, knowledge_verification_events, knowledge_disclosure_grants, knowledge_proposals, ai_operations, run_jobs, document_jobs,
   work_items,
   usage_events, spend_limits, rate_limit_buckets, profiles
 to app_server;
@@ -513,7 +513,7 @@ begin
     'tasks', 'runs', 'run_steps', 'messages',
     'artifacts', 'approvals', 'usage_events', 'spend_limits',
     'objectives', 'milestones', 'knowledge_items', 'task_schedules',
-    'documents', 'document_chunks', 'task_dependencies', 'decisions', 'decision_injections', 'knowledge_injections', 'knowledge_sources', 'knowledge_verification_events', 'knowledge_disclosure_grants', 'ai_operations', 'run_jobs',
+    'documents', 'document_chunks', 'task_dependencies', 'decisions', 'decision_injections', 'knowledge_injections', 'knowledge_sources', 'knowledge_verification_events', 'knowledge_disclosure_grants', 'knowledge_proposals', 'ai_operations', 'run_jobs',
     'document_jobs', 'work_items'
   ]
   loop

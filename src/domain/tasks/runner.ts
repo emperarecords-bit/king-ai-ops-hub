@@ -34,6 +34,7 @@ import { assembleProjectState } from '@/domain/state/project-state';
 import { assembleTaskGraph } from '@/domain/dependencies/graph-context';
 import { assembleDecisionMemory, logDecisionInjections, objectiveTaskIds } from '@/domain/decisions/decisions';
 import { extractCandidatesForRun, type ExtractFn } from '@/domain/decisions/extraction';
+import { extractKnowledgeForRun } from '@/domain/knowledge/extraction';
 import { compareFreshness, parseEffectiveDate } from '@/domain/context/freshness';
 
 /** Reduces full Freshness to the compact shape persisted in the manifest. */
@@ -631,6 +632,9 @@ export async function startRun(
           return resp.text;
         };
         await extractCandidatesForRun(tx, ctx, outcome.runId, extract);
+        // Knowledge extraction is INDEPENDENT of decision extraction — its own guard, its own operation,
+        // and equally fail-safe. Proposals land quarantined; nothing is trusted or used without a human.
+        await extractKnowledgeForRun(tx, ctx, outcome.runId, extract, { provider: primaryRow.provider, model: primaryRow.model });
       });
     } catch (err) {
       log.warn('candidate extraction transaction failed (task unaffected)', {

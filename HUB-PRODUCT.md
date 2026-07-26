@@ -1595,6 +1595,56 @@ the derived intended use → 6. eligible records ranked → 7. qualified evidenc
 dispatch representation + trust decision recorded (immutable). *This closes provenance + disclosure for
 the Knowledge review; the wider Knowledge trust model is NOT yet finished — the ingestion side is next.*
 
-*Remaining Knowledge increments (deferred, not built): (4) the AI extraction/promotion path
-(propose-only, source-identified, human-activated) — NEXT; (5) the operating-partner conversation; (6)
-then the Knowledge Portfolio & Detail — page redesign last.*
+### Ingestion increment 4 — AI extraction & human promotion (built 2026-07-26)
+
+The ingestion side of the trust model: how untrusted AI output *enters* the evidence system. Primary
+question — *what claim is the AI proposing the workspace remember, what exact evidence supports it, and
+what human judgment is required before it may be trusted or used?* Mirrors the Decision-extraction
+integrity pattern (`decisions/extraction.ts`).
+
+Boundary: **source material → AI-proposed claim → quarantined draft → human review → optional
+activation → separate verification.** Extraction ≠ activation; activation ≠ verification; attaching a
+source ≠ a support judgment; AI confidence ≠ authority.
+
+- **Extraction proposes only, and is fail-safe.** `extractKnowledgeForRun` (module
+  `knowledge/extraction.ts`) runs after a completed run — independent of decision extraction, its own
+  `runs.knowledge_extraction_status` guard, its own durable `ai_operation` — mines the consolidated
+  output through a fixed schema (`MAX_KNOWLEDGE_CANDIDATES = 3`), and any error is recorded + swallowed
+  so the run is never affected.
+- **Quarantine, hardcoded.** Each proposal inserts a `draft` / `unverified` / injection-ineligible
+  `knowledge_item` (`source = promoted_context`), scoped to the NARROWEST actual (the originating task),
+  with disclosure = the inherited (most-restrictive) classification. The AI can neither self-activate
+  (`status` hardcoded) nor self-verify (`verification` hardcoded), nor record a support judgment.
+- **Source integrity — exact version or nothing.** Every cited ref must resolve to a document in the
+  run's context manifest; a fabricated/absent path invalidates the whole candidate, and a source-less
+  candidate is rejected (schema `min(1)`). Each citation is bound to the document's EXACT `sha256` at
+  extraction time, so it names the version the extractor saw — never "latest". *Principle: a citation
+  is provenance only when it identifies the exact evidence used.*
+- **Sensitivity is inherited, never laundered.** Documents gained a `disclosure` classification
+  (migration 0033); a proposal's suggested disclosure is the most-restrictive over its cited sources —
+  any restricted source ⇒ restricted proposal (draft actual disclosure already restricted). Promotion
+  may tighten disclosure but **never loosen it below the inherited** (no v1 declassification authority).
+  *Principle: derived Knowledge cannot launder the sensitivity of its sources.*
+- **Suggested ≠ actual.** A companion `knowledge_proposals` row holds the AI's SUGGESTED values (scope,
+  disclosure, temporal, confidence, reason) + extraction provenance (run, operation, provider/model,
+  prompt version), physically separate from the item's actual columns.
+- **Explicit structured promotion** (operator's choice): `promoteKnowledgeProposal` requires an explicit
+  scope + temporal validity + disclosure + lifecycle decision — no one-click Accept that silently
+  activates, verifies, broadens, or declassifies. A promoted proposal stays `unverified` until a
+  separate support judgment (the existing Part-A path). `rejectKnowledgeProposal` preserves the proposal
+  (archived draft + recorded reason), never deletes; re-reviewing a decided proposal conflicts.
+- Granularity: materially-independent claims are separate candidates (prompt + per-candidate handling);
+  an exact duplicate of an ACTIVE record is suppressed; near-duplicates/contradictions are left as
+  distinct proposals to surface for review (never auto-merged).
+- Locked by `knowledge-extraction.test.ts` (14): quarantined-draft · exact-version-frozen · fabricated
+  ref rejected · no-source rejected · inherited-restricted · confidence-not-authority · suggested-vs-
+  actual-scope · independent-claims-split · duplicate-suppressed · failure-doesn't-affect-run ·
+  idempotent · explicit-promotion-activates-not-verifies · no-declassification · rejection-preserved.
+  RLS extended to `knowledge_proposals`. Full suite **494/494**.
+
+*Known v1 limitation surfaced for review: documents now carry a `disclosure` classification (default
+`workspace_internal`) as the sensitivity anchor, but nothing yet lets an operator SET it via the UI —
+the inheritance mechanism is real and tested; the authoring surface for document sensitivity is future.*
+
+*Remaining Knowledge increments (deferred, not built): (5) the operating-partner conversation — NEXT;
+(6) then the Knowledge Portfolio & Detail — page redesign last.*
