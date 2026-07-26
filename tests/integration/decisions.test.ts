@@ -11,6 +11,7 @@ import {
   assembleDecisionMemory,
   createDecision,
   detectSharedApplicability,
+  getDecisionDetail,
   getDecisionLifecycle,
   listDecisions,
   listInjectionsForDecision,
@@ -428,6 +429,38 @@ describe.skipIf(!available)('decision memory', () => {
     const forObj = overlaps.find((o) => o.objectiveId === obj)!;
     // Two harmonious decisions share applicability — reported as an overlap, never as a conflict.
     expect(forObj.decisions.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('cross-surface — Detail assessment agrees with the selector (active is injected; closed is not)', async () => {
+    // Active guidance: Detail says active AND the selector injects it.
+    const liveTask = await mkTask(ctxA, 'xsurface live', 'running');
+    const dLive = await withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'Owner', { title: 'Cross active', summary: 's', scope: 'task', scopeTaskId: liveTask }));
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, dLive));
+    const detailLive = await withTenant(ctxA, (tx) => getDecisionDetail(tx, ctxA, dLive));
+    expect(detailLive.assessment.isActiveGuidance).toBe(true);
+    expect((await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(liveTask)))).contextItem?.content ?? '').toContain('Cross active');
+
+    // Scope-closed guidance: Detail says inactive AND the selector does NOT inject it.
+    const doneTask = await mkTask(ctxA, 'xsurface done', 'completed');
+    const dClosed = await withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'Owner', { title: 'Cross closed', summary: 's', scope: 'task', scopeTaskId: doneTask }));
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, dClosed));
+    const detailClosed = await withTenant(ctxA, (tx) => getDecisionDetail(tx, ctxA, dClosed));
+    expect(detailClosed.assessment.isActiveGuidance).toBe(false);
+    expect(detailClosed.assessment.inactiveReason).toBe('task_closed');
+    expect((await withTenant(ctxA, (tx) => assembleDecisionMemory(tx, ctxA, noArgs(doneTask)))).contextItem?.content ?? '').not.toContain('Cross closed');
+  });
+
+  it('Detail shows lifecycle authority only from recorded events', async () => {
+    const t = await mkTask(ctxA, 'detail prov', 'running');
+    const id = await withTenant(ctxA, (tx) => createDecision(tx, ctxA, 'Owner', { title: 'Detail provenance', summary: 's', scope: 'task', scopeTaskId: t }));
+    // Before acceptance: no accepted event → Detail must not claim an acceptor.
+    const before = await withTenant(ctxA, (tx) => getDecisionDetail(tx, ctxA, id));
+    expect(before.lifecycle.find((e) => e.action === 'decision.accepted')).toBeUndefined();
+    await withTenant(ctxA, (tx) => acceptDecision(tx, ctxA, id));
+    const after = await withTenant(ctxA, (tx) => getDecisionDetail(tx, ctxA, id));
+    const acc = after.lifecycle.find((e) => e.action === 'decision.accepted')!;
+    expect(acc.actorName).toBe('Owner');
+    expect(acc.at).toBeInstanceOf(Date);
   });
 
   it('objectiveTaskIds is tenant-scoped and returns attached task ids', async () => {

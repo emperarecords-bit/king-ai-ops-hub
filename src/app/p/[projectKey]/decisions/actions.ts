@@ -80,6 +80,8 @@ export async function createDecisionAction(
   return { error: null };
 }
 
+const VERBS = ['accept_record', 'accept_guidance', 'reject', 'retire'] as const;
+
 export async function decideDecisionAction(
   _prev: DecisionState,
   formData: FormData,
@@ -87,23 +89,46 @@ export async function decideDecisionAction(
   const projectKey = String(formData.get('projectKey') ?? '');
   const id = String(formData.get('decisionId') ?? '');
   const verb = String(formData.get('verb') ?? '');
-  if (!idSchema.safeParse(id).success || (verb !== 'accept' && verb !== 'reject' && verb !== 'retire')) {
+  const reason = String(formData.get('reason') ?? '').trim() || undefined;
+  if (!idSchema.safeParse(id).success || !VERBS.includes(verb as (typeof VERBS)[number])) {
     return { error: 'Invalid request.' };
   }
+
+  // Accept-as-guidance carries the operator's explicit scope choice (a traceable activation).
+  const promo = z
+    .object({
+      scope: z.enum(DECISION_SCOPES).default('workspace'),
+      scopeTaskId: z.string().uuid().nullable().optional().default(null),
+      scopeObjectiveId: z.string().uuid().nullable().optional().default(null),
+      effectiveUntil: z.coerce.date().nullable().optional().default(null),
+    })
+    .parse({
+      scope: formData.get('scope') ?? 'workspace',
+      scopeTaskId: emptyToNull(formData.get('scopeTaskId')),
+      scopeObjectiveId: emptyToNull(formData.get('scopeObjectiveId')),
+      effectiveUntil: emptyToNull(formData.get('effectiveUntil')),
+    });
+
   try {
     const ctx = await requireTenant(projectKey);
-    await withTenant(ctx, (tx) =>
-      verb === 'accept'
-        ? acceptDecision(tx, ctx, id)
-        : verb === 'retire'
-          ? retireDecision(tx, ctx, id)
-          : rejectDecision(tx, ctx, id),
-    );
+    await withTenant(ctx, (tx) => {
+      switch (verb) {
+        case 'accept_record':
+          return acceptDecision(tx, ctx, id, { applicability: 'record', scope: 'workspace' });
+        case 'accept_guidance':
+          return acceptDecision(tx, ctx, id, { applicability: 'guidance', ...promo });
+        case 'retire':
+          return retireDecision(tx, ctx, id, reason);
+        default:
+          return rejectDecision(tx, ctx, id, reason);
+      }
+    });
   } catch (err) {
     if (!(err instanceof AppError)) log.error('decideDecision failed', { err });
     return { error: toPublicMessage(err) };
   }
   revalidatePath(`/p/${projectKey}/decisions`);
+  revalidatePath(`/p/${projectKey}/decisions/${id}`);
   return { error: null };
 }
 

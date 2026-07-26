@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, desc, eq, gt, inArray, isNull, ne, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import {
@@ -16,7 +16,8 @@ import {
 import { AppError, ConflictError, NotFoundError, TenantViolationError, ValidationError } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { type DbTx } from '@/db/client';
-import { auditLogs, decisionInjections, decisions, objectives, profiles, tasks } from '@/db/schema';
+import { agents, auditLogs, decisionInjections, decisions, objectives, profiles, tasks } from '@/db/schema';
+import { assessDecision, type DecisionAssessment } from '@/domain/decisions/assess';
 
 // Aliased scope targets, so the selector can read a decision's scope-task / scope-objective status
 // and drop guidance whose scope has closed (guidance does not outlive its scope).
@@ -339,6 +340,9 @@ export interface DecisionRow {
   scope: DecisionScope;
   scopeTaskId: string | null;
   scopeObjectiveId: string | null;
+  /** Status of the scope target, for the shared assessor (guidance follows its scope's lifecycle). */
+  scopeTaskStatus: string | null;
+  scopeObjectiveStatus: string | null;
   effectiveUntil: Date | null;
   statusReason: string | null;
   authorLabel: string;
@@ -368,6 +372,8 @@ export async function listDecisions(tx: DbTx, ctx: TenantContext): Promise<Decis
       scope: decisions.scope,
       scopeTaskId: decisions.scopeTaskId,
       scopeObjectiveId: decisions.scopeObjectiveId,
+      scopeTaskStatus: scopeTask.status,
+      scopeObjectiveStatus: scopeObjective.status,
       effectiveUntil: decisions.effectiveUntil,
       statusReason: decisions.statusReason,
       authorLabel: decisions.authorLabel,
@@ -386,10 +392,127 @@ export async function listDecisions(tx: DbTx, ctx: TenantContext): Promise<Decis
     })
     .from(decisions)
     .leftJoin(tasks, eq(decisions.originatingTaskId, tasks.id))
+    .leftJoin(scopeTask, eq(decisions.scopeTaskId, scopeTask.id))
+    .leftJoin(scopeObjective, eq(decisions.scopeObjectiveId, scopeObjective.id))
     .where(and(eq(decisions.projectId, ctx.projectId), eq(decisions.orgId, ctx.orgId)))
     .orderBy(desc(decisions.createdAt));
   assertScoped(rows, ctx, 'listDecisions');
   return rows.map(({ orgId: _o, projectId: _p, ...r }) => r);
+}
+
+const supersededByDecision = alias(decisions, 'superseded_by_decision');
+
+export interface DecisionDetail extends DecisionRow {
+  supportingRefs: string[];
+  scopeTaskTitle: string | null;
+  scopeObjectiveTitle: string | null;
+  ownerName: string | null;
+  supersededByTitle: string | null;
+  supersedesId: string | null;
+  supersedesTitle: string | null;
+  assessment: DecisionAssessment;
+  lifecycle: DecisionLifecycleEvent[];
+  applications: InjectionRow[];
+  /** Other active guidance sharing this decision's objective — observed overlap, NOT a conflict. */
+  sharesApplicabilityWith: { id: string; title: string }[];
+}
+
+/** The full institutional-memory record for the Decision Detail — persisted facts + shared assessment. */
+export async function getDecisionDetail(tx: DbTx, ctx: TenantContext, id: string): Promise<DecisionDetail> {
+  const rows = await tx
+    .select({
+      id: decisions.id,
+      title: decisions.title,
+      summary: decisions.summary,
+      rationale: decisions.rationale,
+      decisionType: decisions.decisionType,
+      status: decisions.status,
+      applicability: decisions.applicability,
+      scope: decisions.scope,
+      scopeTaskId: decisions.scopeTaskId,
+      scopeObjectiveId: decisions.scopeObjectiveId,
+      scopeTaskStatus: scopeTask.status,
+      scopeObjectiveStatus: scopeObjective.status,
+      scopeTaskTitle: scopeTask.title,
+      scopeObjectiveTitle: scopeObjective.title,
+      effectiveUntil: decisions.effectiveUntil,
+      statusReason: decisions.statusReason,
+      authorLabel: decisions.authorLabel,
+      suggestedByRunId: decisions.suggestedByRunId,
+      suggestedApplicability: decisions.suggestedApplicability,
+      suggestedScope: decisions.suggestedScope,
+      suggestionConfidence: decisions.suggestionConfidence,
+      suggestionReason: decisions.suggestionReason,
+      supportingRefs: decisions.supportingRefs,
+      originatingTaskId: decisions.originatingTaskId,
+      originatingTaskTitle: tasks.title,
+      supersededBy: decisions.supersededBy,
+      supersededByTitle: supersededByDecision.title,
+      ownerAgentId: decisions.ownerAgentId,
+      ownerName: agents.name,
+      createdAt: decisions.createdAt,
+      orgId: decisions.orgId,
+      projectId: decisions.projectId,
+    })
+    .from(decisions)
+    .leftJoin(tasks, eq(decisions.originatingTaskId, tasks.id))
+    .leftJoin(scopeTask, eq(decisions.scopeTaskId, scopeTask.id))
+    .leftJoin(scopeObjective, eq(decisions.scopeObjectiveId, scopeObjective.id))
+    .leftJoin(supersededByDecision, eq(decisions.supersededBy, supersededByDecision.id))
+    .leftJoin(agents, eq(decisions.ownerAgentId, agents.id))
+    .where(and(eq(decisions.id, id), eq(decisions.projectId, ctx.projectId), eq(decisions.orgId, ctx.orgId)))
+    .limit(1);
+  assertScoped(rows, ctx, 'getDecisionDetail');
+  const row = rows[0];
+  if (!row) throw new NotFoundError('Decision');
+  const { orgId: _o, projectId: _p, ...r } = row;
+
+  const assessment = assessDecision({
+    status: r.status,
+    applicability: r.applicability,
+    scope: r.scope,
+    scopeTaskId: r.scopeTaskId,
+    scopeObjectiveId: r.scopeObjectiveId,
+    scopeTaskStatus: r.scopeTaskStatus,
+    scopeObjectiveStatus: r.scopeObjectiveStatus,
+    effectiveUntil: r.effectiveUntil,
+    now: new Date(),
+  });
+
+  const [lifecycle, applications] = await Promise.all([
+    getDecisionLifecycle(tx, ctx, id),
+    listInjectionsForDecision(tx, ctx, id),
+  ]);
+
+  // What this decision superseded (from its supporting refs), for lineage.
+  const supersedesId = r.supportingRefs.find((x: string) => x.startsWith('supersedes:'))?.slice('supersedes:'.length) ?? null;
+  let supersedesTitle: string | null = null;
+  if (supersedesId) {
+    const s = await tx.select({ title: decisions.title }).from(decisions).where(and(eq(decisions.id, supersedesId), eq(decisions.orgId, ctx.orgId), eq(decisions.projectId, ctx.projectId))).limit(1);
+    supersedesTitle = s[0]?.title ?? null;
+  }
+
+  // Observed overlap: other active guidance on the same objective (never labeled conflict).
+  let sharesApplicabilityWith: { id: string; title: string }[] = [];
+  if (r.scope === 'objective' && r.scopeObjectiveId && assessment.isActiveGuidance) {
+    const siblings = await tx
+      .select({ id: decisions.id, title: decisions.title })
+      .from(decisions)
+      .where(
+        and(
+          eq(decisions.orgId, ctx.orgId),
+          eq(decisions.projectId, ctx.projectId),
+          eq(decisions.status, 'accepted'),
+          eq(decisions.applicability, 'guidance'),
+          eq(decisions.scope, 'objective'),
+          eq(decisions.scopeObjectiveId, r.scopeObjectiveId),
+          ne(decisions.id, id),
+        ),
+      );
+    sharesApplicabilityWith = siblings;
+  }
+
+  return { ...r, supersedesId, supersedesTitle, assessment, lifecycle, applications, sharesApplicabilityWith };
 }
 
 export interface CandidateRow {
@@ -557,10 +680,7 @@ export async function selectRelevantDecisions(
         eq(decisions.projectId, ctx.projectId),
         eq(decisions.orgId, ctx.orgId),
         eq(decisions.status, 'accepted'),
-        // Only ACTIVE GUIDANCE is ever injected: record-only conclusions are never applied, and a
-        // time-bounded decision past its validity is historical, not active.
         eq(decisions.applicability, 'guidance'),
-        or(isNull(decisions.effectiveUntil), gt(decisions.effectiveUntil, now)),
       ),
     )
     .orderBy(desc(decisions.createdAt));
@@ -569,30 +689,37 @@ export async function selectRelevantDecisions(
 
   const objTasks = new Set(args.objectiveTaskIds);
   const nowMs = now.getTime();
-  const TERMINAL_TASK = new Set(['completed', 'cancelled']);
-  const CLOSED_OBJECTIVE = new Set(['completed', 'cancelled']);
 
-  // Two distinct stages. ELIGIBILITY: a decision may be considered ONLY within its SCOPE and while
-  // that scope is a live operating context — guidance does not outlive the task/objective that gave
-  // it meaning. Task-scoped: its concrete task, and only while non-terminal. Objective-scoped: its
-  // concrete objective, and only while open. Workspace-scoped: any run it is RELEVANT to (scope is a
-  // boundary, not inject-everywhere). No match → omit. `reason` records WHY (for the injection trail).
+  // Two distinct stages. ELIGIBILITY: first the SHARED assessment decides whether the decision is
+  // active guidance at all (expiry, scope-target lifecycle, invalid scope) — the same fact the
+  // Portfolio and Detail use, so nothing can be active on one surface and inactive on another. Then
+  // run-specific RELEVANCE within its scope: task→its task, objective→its objective, workspace→any
+  // relevant run (scope is a boundary, not inject-everywhere). `reason` records WHY, for the trail.
   // RANKING: recency only orders already-eligible decisions — it can never make one relevant.
   const eligible = rows
     .map((r) => {
+      const active = assessDecision({
+        status: r.status,
+        applicability: r.applicability,
+        scope: r.scope,
+        scopeTaskId: r.scopeTaskId,
+        scopeObjectiveId: r.scopeObjectiveId,
+        scopeTaskStatus: r.scopeTaskStatus,
+        scopeObjectiveStatus: r.scopeObjectiveStatus,
+        effectiveUntil: r.effectiveUntil,
+        now,
+      }).isActiveGuidance;
       let relationship = 0;
       let reason = '';
-      if (r.scope === 'task') {
-        if (r.scopeTaskId === args.currentTaskId && !(r.scopeTaskStatus && TERMINAL_TASK.has(r.scopeTaskStatus))) {
+      if (!active) {
+        // not active guidance → never eligible, regardless of relationship
+      } else if (r.scope === 'task') {
+        if (r.scopeTaskId === args.currentTaskId) {
           relationship = 1000;
           reason = 'task';
         }
       } else if (r.scope === 'objective') {
-        if (
-          r.scopeObjectiveId != null &&
-          r.scopeObjectiveId === args.currentObjectiveId &&
-          !(r.scopeObjectiveStatus && CLOSED_OBJECTIVE.has(r.scopeObjectiveStatus))
-        ) {
+        if (r.scopeObjectiveId != null && r.scopeObjectiveId === args.currentObjectiveId) {
           relationship = 100;
           reason = 'objective';
         }
@@ -661,6 +788,8 @@ export async function selectRelevantDecisions(
     scope: t.scope,
     scopeTaskId: t.scopeTaskId,
     scopeObjectiveId: t.scopeObjectiveId,
+    scopeTaskStatus: t.scopeTaskStatus,
+    scopeObjectiveStatus: t.scopeObjectiveStatus,
     effectiveUntil: t.effectiveUntil,
     statusReason: null,
     authorLabel: t.authorLabel,
@@ -770,6 +899,16 @@ export interface InjectionRow {
   reason: string;
   memoryText: string | null;
   injectedAt: Date;
+}
+
+/** How many recorded Decision Memory applications each decision has — "supplied to N runs." */
+export async function injectionCounts(tx: DbTx, ctx: TenantContext): Promise<Map<string, number>> {
+  const rows = await tx
+    .select({ decisionId: decisionInjections.decisionId, count: sql<number>`count(*)::int` })
+    .from(decisionInjections)
+    .where(and(eq(decisionInjections.orgId, ctx.orgId), eq(decisionInjections.projectId, ctx.projectId)))
+    .groupBy(decisionInjections.decisionId);
+  return new Map(rows.map((r) => [r.decisionId, r.count]));
 }
 
 /** The reverse trail for one decision: the runs it was injected into, newest first. */

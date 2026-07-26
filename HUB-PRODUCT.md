@@ -1194,10 +1194,33 @@ never asserting incompatibility. All verified: full suite **401/401**.
 
 All verified: full suite **406/406**.
 
-*Next increment: the Decisions **Portfolio** (Awaiting review · Active guidance · Record only · Needs
-review lens · Historical) and **Decision Detail** (the institutional-memory conversation: conclusion ·
-rationale · evidence/refs · proposal provenance · acceptance & authority · record-vs-guidance · scope
-& target · effective period + active-state reason · supersession/retirement/rejection history ·
-eligibility/injection trail · exact historical memory supplied · bounded overlap · valid actions),
-rendering the model above. Portfolio/Detail rely only on persisted facts and clearly-labeled
-assessments. Do not present Defer until it has real semantics.*
+### Portfolio & Detail structures (built 2026-07-26)
+
+- **One shared assessment** (`domain/decisions/assess.ts` → `assessDecision`): the single pure source
+  of record-status · memory-role · guidance-state · inactive-reason · active-guidance · historical ·
+  valid-actions. The **selector, Portfolio, and Detail all consume it** — a decision can't be active
+  in one surface and inactive in another. The selector calls `assessDecision().isActiveGuidance` as
+  its base gate, then adds run-relevance. Locked by `decision-assess.test.ts` (7 states) +
+  `decisions.test.ts` cross-surface (Detail-active ⇒ injected; Detail-closed ⇒ not injected).
+- **Portfolio** (`decisions/page.tsx`): Awaiting review (with AI suggestion clearly labeled as a
+  suggestion, and Accept-as-record / Accept-as-guidance-with-scope / Refuse-with-rationale) · Active
+  guidance (scope + target · effective period · "supplied to N runs") · Record only (legitimate
+  memory, not second-class) · **Needs review** as a *lens* (invalid scope · approaching expiry ·
+  multiple guidance on one objective) whose items keep their canonical home and are shown as concise
+  references, never duplicate cards — and **"never injected" is NOT a concern** · Historical (distinct
+  reasons: retired/superseded/rejected/expired/task-closed/objective-closed).
+- **Decision Detail** (`decisions/[decisionId]/page.tsx`, via `getDecisionDetail`): conclusion ·
+  rationale · evidence/refs · proposal provenance · **acceptance/refusal/retirement authority read
+  from `audit_logs`, shown only when the event exists** ("no recorded acceptance event" otherwise,
+  never the author-as-acceptor) · memory role · scope + concrete target · effective period +
+  active-state reason · lifecycle history + supersession lineage · **Decision Memory applications**
+  (labeled as injections, not "eligibility"; each shows the run, why it qualified, and the **exact
+  immutable `memoryText`** supplied) · shared applicability (observed overlap, explicitly *not* a
+  conflict) · valid actions. Scope-broadening is not an ordinary edit — accepted guidance is retired
+  or superseded; broader guidance is a new, traceable decision (stated in the Actions section).
+- Verified: `tsc` clean · build clean · full suite **416/416** (no exclusions).
+
+*Decisions is functionally complete for the core institutional-memory model. Deferred (recorded, not
+built): eligible-but-not-injected history (needs an evaluation event persisted at assembly time),
+evidence-backed semantic conflict assessment, and Defer with real semantics. Present none of these as
+if they exist.*
