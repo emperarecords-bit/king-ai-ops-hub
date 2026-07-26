@@ -453,6 +453,14 @@ respects attention.
 emerge from it (layered as above). Still no cards, bars, filters, or percentages until the
 structure follows the conversation.
 
+*Objectives accepted & closed 2026-07-26.* **Future integrity boundary (do not build now):** the
+closure record is currently frozen by terminal immutability (criteria/state can't be edited after
+close). **If** success conditions, evidence links, or external evidence ever become mutable after
+closure, the closure record must retain a *versioned snapshot* of what the Hub relied on at
+closure — criterion wording, criterion state, evidence references/immutable ids, provenance, the
+assessment produced, and any caveat. Not an acceptance blocker; a boundary to honor when
+post-closure data can change.
+
 **Mobile — scoped follow-up (desktop-first today).** When the persistent rail can't stay visible,
 the mental model *and* the current-location signal must survive. Do **not** collapse into an
 unstructured hamburger — that preserves access while destroying the table-of-contents function.
