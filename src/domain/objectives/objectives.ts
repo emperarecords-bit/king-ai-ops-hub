@@ -11,7 +11,7 @@ import {
 import { ConflictError, NotFoundError, ValidationError } from '@/lib/errors';
 import { METRIC_PATTERN, slugifyMetric } from '@/lib/slug';
 import { type DbTx } from '@/db/client';
-import { agents, departments, milestones, objectives, tasks } from '@/db/schema';
+import { agents, departments, milestones, objectives, tasks, workItems } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 
 /**
@@ -125,6 +125,10 @@ export interface ObjectiveListRow {
   sponsoringDepartment: string | null;
   accountableEmployee: string | null;
   progress: ObjectiveProgress;
+  /** The success contract — for criteria-and-evidence assessment (assess.ts). */
+  successCriteria: SuccessCriterion[];
+  /** Human Work Items attached to this objective (effort, not progress). */
+  workItemTotal: number;
   createdAt: Date;
 }
 
@@ -175,8 +179,15 @@ export async function listObjectives(tx: DbTx, ctx: TenantContext): Promise<Obje
     .where(and(eq(milestones.projectId, ctx.projectId), inArray(milestones.objectiveId, ids)))
     .groupBy(milestones.objectiveId);
 
+  const workItemCounts = await tx
+    .select({ objectiveId: workItems.objectiveId, total: sql<string>`count(*)` })
+    .from(workItems)
+    .where(and(eq(workItems.projectId, ctx.projectId), inArray(workItems.objectiveId, ids)))
+    .groupBy(workItems.objectiveId);
+
   const taskMap = new Map(taskCounts.map((t) => [t.objectiveId, t]));
   const milestoneMap = new Map(milestoneCounts.map((m) => [m.objectiveId, m]));
+  const workItemMap = new Map(workItemCounts.map((w) => [w.objectiveId, w]));
 
   return rows.map((r) => {
     const t = taskMap.get(r.id);
@@ -198,6 +209,8 @@ export async function listObjectives(tx: DbTx, ctx: TenantContext): Promise<Obje
       sponsoringDepartment: r.departmentName,
       accountableEmployee: r.agentName,
       progress: { ...base, percent: computePercent(base) },
+      successCriteria: criteria,
+      workItemTotal: Number(workItemMap.get(r.id)?.total ?? 0),
       createdAt: r.createdAt,
     };
   });
@@ -274,6 +287,8 @@ export interface ObjectiveDetail {
   accountableEmployee: string | null;
   milestones: MilestoneRow[];
   tasks: ObjectiveTaskRow[];
+  /** Human Work Items attached to this objective — effort, shown alongside AI tasks. */
+  workItems: { id: string; title: string; stage: string }[];
   progress: ObjectiveProgress;
   createdAt: Date;
 }
@@ -334,6 +349,12 @@ export async function getObjective(
     .where(and(eq(tasks.objectiveId, objectiveId), eq(tasks.projectId, ctx.projectId)))
     .orderBy(desc(tasks.createdAt));
 
+  const attachedWorkItems = await tx
+    .select({ id: workItems.id, title: workItems.title, stage: workItems.stage })
+    .from(workItems)
+    .where(and(eq(workItems.objectiveId, objectiveId), eq(workItems.projectId, ctx.projectId)))
+    .orderBy(desc(workItems.createdAt));
+
   const base = {
     tasksTotal: attachedTasks.length,
     tasksCompleted: attachedTasks.filter((t) => t.status === 'completed').length,
@@ -356,6 +377,7 @@ export async function getObjective(
     accountableEmployee: row.agentName,
     milestones: ms,
     tasks: attachedTasks,
+    workItems: attachedWorkItems,
     progress: { ...base, percent: computePercent(base) },
     createdAt: row.createdAt,
   };

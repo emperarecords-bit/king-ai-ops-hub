@@ -11,6 +11,8 @@ function obj(over: Partial<ObjectiveListRow> & { tasksTotal: number; tasksComple
     priority: rest.priority ?? 1,
     sponsoringDepartment: rest.sponsoringDepartment ?? null,
     accountableEmployee: rest.accountableEmployee ?? null,
+    successCriteria: rest.successCriteria ?? [],
+    workItemTotal: rest.workItemTotal ?? 0,
     createdAt: rest.createdAt ?? new Date('2026-07-01'),
     progress: {
       tasksTotal,
