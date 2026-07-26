@@ -89,7 +89,7 @@ export async function suggestSuccessCriteria(
   const operationId = randomUUID();
   const { agent, knowledge } = await withTenant(ctx, async (tx) => {
     await assertWithinBudget(tx, ctx.projectId);
-    const selected = await selectRelevantKnowledge(tx, ctx, { queryText: `${title} ${input.description}` });
+    const selected = await selectRelevantKnowledge(tx, ctx, { queryText: `${title} ${input.description}`, intendedUse: 'objective_planning' });
     await logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: operationId, injected: selected });
     return {
       agent: await findAgentForRole(tx, ctx, 'primary', 'openai'),

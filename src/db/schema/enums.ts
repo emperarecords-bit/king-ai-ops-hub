@@ -18,10 +18,14 @@ import {
   DOCUMENT_SOURCES,
   DOCUMENT_JOB_STATUSES,
   FLAGSHIP_CATEGORIES,
+  KNOWLEDGE_DISCLOSURES,
+  KNOWLEDGE_EPISTEMIC_BASES,
   KNOWLEDGE_KINDS,
+  KNOWLEDGE_SCOPE_KINDS,
   KNOWLEDGE_SCOPES,
   KNOWLEDGE_SOURCES,
   KNOWLEDGE_STATUSES,
+  KNOWLEDGE_VERIFICATIONS,
   MESSAGE_ROLES,
   MILESTONE_STATUSES,
   MODEL_TIERS,
@@ -66,6 +70,10 @@ export const knowledgeScopeEnum = pgEnum('knowledge_scope', KNOWLEDGE_SCOPES);
 export const knowledgeKindEnum = pgEnum('knowledge_kind', KNOWLEDGE_KINDS);
 export const knowledgeStatusEnum = pgEnum('knowledge_status', KNOWLEDGE_STATUSES);
 export const knowledgeSourceEnum = pgEnum('knowledge_source', KNOWLEDGE_SOURCES);
+export const knowledgeEpistemicBasisEnum = pgEnum('knowledge_epistemic_basis', KNOWLEDGE_EPISTEMIC_BASES);
+export const knowledgeVerificationEnum = pgEnum('knowledge_verification', KNOWLEDGE_VERIFICATIONS);
+export const knowledgeScopeKindEnum = pgEnum('knowledge_scope_kind', KNOWLEDGE_SCOPE_KINDS);
+export const knowledgeDisclosureEnum = pgEnum('knowledge_disclosure', KNOWLEDGE_DISCLOSURES);
 export const cadenceEnum = pgEnum('cadence', CADENCES);
 export const documentKindEnum = pgEnum('document_kind', DOCUMENT_KINDS);
 export const documentStatusEnum = pgEnum('document_status', DOCUMENT_STATUSES);

@@ -16,6 +16,7 @@ import {
   logKnowledgeApplications,
   reviseKnowledge,
   selectRelevantKnowledge,
+  setKnowledgeVerification,
 } from '@/domain/knowledge/knowledge';
 import { listAllActiveKnowledgeForAdministration } from '@/domain/knowledge/admin';
 
@@ -206,6 +207,59 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
     trail = await withTenant(ctx, (tx) => listInjectionsForKnowledge(tx, ctx, id));
     expect(trail[0]!.memoryText).toBe('EXACT vendor text v1');
     expect(trail[0]!.version).toBe(1);
+  });
+
+  it('active manual knowledge stays unverified — selection qualifies it, and it never claims verification', async () => {
+    await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Kubernetes cluster autoscaler', body: 'Kubernetes cluster autoscaler nodepool provisioning tuning parameters.', kind: 'fact', activate: true }));
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'tune the kubernetes cluster autoscaler nodepool provisioning' }));
+    const hit = picked.find((k) => k.title === 'Kubernetes cluster autoscaler')!;
+    expect(hit).toBeDefined();
+    // Supplied text carries the trust qualification: human-asserted + unverified (activation is not verification).
+    expect(hit.memoryText).toMatch(/human_asserted/);
+    expect(hit.memoryText).toMatch(/unverified/);
+  });
+
+  it('expired knowledge is withheld from current-fact use; restricted knowledge is withheld without a grant', async () => {
+    await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Datacenter lease terms', body: 'Datacenter lease colocation rack power cooling contract.', kind: 'fact', activate: true, expiresAt: new Date('2020-01-01') }));
+    await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Encryption key rotation secret', body: 'Encryption key rotation secret vault credentials rotation cadence.', kind: 'fact', activate: true, disclosure: 'restricted' }));
+    const q = 'datacenter lease colocation rack power cooling and encryption key rotation secret vault credentials cadence';
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: q }));
+    expect(picked.find((k) => k.title === 'Datacenter lease terms')).toBeUndefined(); // expired
+    const restricted = picked.find((k) => k.title === 'Encryption key rotation secret');
+    expect(restricted).toBeUndefined(); // restricted, no grant → not supplied at all (no sensitive text)
+  });
+
+  it('knowledge scope requires a concrete same-workspace target', async () => {
+    await expect(
+      withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'x', body: 'y', scopeKind: 'task' })),
+    ).rejects.toThrow(/must name the task/i);
+    // A foreign task target is rejected.
+    const foreignTask = await getSetupDb().insert(tasks).values({ orgId, projectId: ctx.projectId, title: 'ok', input: 'x', providerSelection: 'openai', status: 'running', createdBy: userId }).returning({ id: tasks.id });
+    // (same-workspace task succeeds)
+    await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Scoped ok', body: 'Scoped clickstream analytics funnel.', scopeKind: 'task', scopeTaskId: foreignTask[0]!.id, activate: true }));
+  });
+
+  it('closed-scope knowledge does not leak into unrelated current work', async () => {
+    const doneTask = await getSetupDb().insert(tasks).values({ orgId, projectId: ctx.projectId, title: 'closed', input: 'x', providerSelection: 'openai', status: 'completed', createdBy: userId }).returning({ id: tasks.id });
+    await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Widget serial format', body: 'Widget serial format numbering scheme barcode.', kind: 'fact', scopeKind: 'task', scopeTaskId: doneTask[0]!.id, activate: true }));
+    // An unrelated run — task-scoped to a completed task, so never supplied here.
+    const picked = await withTenant(ctx, (tx) =>
+      selectRelevantKnowledge(tx, ctx, { queryText: 'widget serial format numbering barcode', currentTaskId: null, currentObjectiveId: null }),
+    );
+    expect(picked.find((k) => k.title === 'Widget serial format')).toBeUndefined();
+  });
+
+  it('a disputed record is withheld from a task run but the same record is not gated by kind', async () => {
+    const id = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Quarterly discount rate', body: 'Quarterly discount rate margin promotion percentage.', kind: 'policy', activate: true }));
+    await withTenant(ctx, (tx) => setKnowledgeVerification(tx, ctx, id, 'disputed'));
+    // Task run = current operational fact → disputed is withheld (not settled context for execution).
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'quarterly discount rate margin promotion percentage', intendedUse: 'current_operational_fact' }));
+    expect(picked.find((k) => k.title === 'Quarterly discount rate')).toBeUndefined();
+    // Its `policy` kind played no role — a reference-use consumer receives it, qualified as disputed.
+    const ref = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'quarterly discount rate margin promotion percentage', intendedUse: 'reference' }));
+    const hit = ref.find((k) => k.title === 'Quarterly discount rate');
+    expect(hit).toBeDefined();
+    expect(hit!.memoryText).toMatch(/disputed/);
   });
 
   it('objective suggestion (a non-run consumer) leaves the same application record, idempotent per operation', async () => {

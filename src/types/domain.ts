@@ -304,6 +304,22 @@ export type KnowledgeStatus = (typeof KNOWLEDGE_STATUSES)[number];
 export const KNOWLEDGE_SOURCES = ['manual', 'promoted_artifact', 'promoted_context'] as const;
 export type KnowledgeSource = (typeof KNOWLEDGE_SOURCES)[number];
 
+// How the record was FORMED (not whether it is true). Never derived from `kind`.
+export const KNOWLEDGE_EPISTEMIC_BASES = ['observed', 'human_asserted', 'extracted', 'summarized', 'inferred'] as const;
+export type KnowledgeEpistemicBasis = (typeof KNOWLEDGE_EPISTEMIC_BASES)[number];
+
+// What review has occurred — separate from activation. Activation never creates verification.
+export const KNOWLEDGE_VERIFICATIONS = ['unverified', 'human_confirmed', 'source_supported', 'system_verified', 'disputed'] as const;
+export type KnowledgeVerification = (typeof KNOWLEDGE_VERIFICATIONS)[number];
+
+// Applicability boundary (distinct from the legacy org/project/department/employee KNOWLEDGE_SCOPES).
+export const KNOWLEDGE_SCOPE_KINDS = ['task', 'objective', 'workspace'] as const;
+export type KnowledgeScopeKind = (typeof KNOWLEDGE_SCOPE_KINDS)[number];
+
+// Enforceable disclosure classification. `restricted` is denied by default (grants are future).
+export const KNOWLEDGE_DISCLOSURES = ['workspace_internal', 'restricted'] as const;
+export type KnowledgeDisclosure = (typeof KNOWLEDGE_DISCLOSURES)[number];
+
 /** Objectives (OBJECTIVES.md, D-010). Dark schema in Sprint 3; UI in Sprint 4. */
 export const OBJECTIVE_STATUSES = ['draft', 'active', 'completed', 'cancelled'] as const;
 export type ObjectiveStatus = (typeof OBJECTIVE_STATUSES)[number];

@@ -183,6 +183,13 @@
       "when": 1785097173643,
       "tag": "0025_deep_switch",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1785098065198,
+      "tag": "0026_chemical_meteorite",
+      "breakpoints": true
     }
   ]
 }

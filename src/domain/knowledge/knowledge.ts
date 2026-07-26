@@ -1,7 +1,11 @@
 import { and, asc, desc, eq } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import {
+  KNOWLEDGE_DISCLOSURES,
+  KNOWLEDGE_EPISTEMIC_BASES,
   KNOWLEDGE_KINDS,
+  KNOWLEDGE_SCOPE_KINDS,
   type KnowledgeKind,
   type KnowledgeSource,
   type KnowledgeStatus,
@@ -9,9 +13,13 @@ import {
 } from '@/types/domain';
 import { ConflictError, NotFoundError, ValidationError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
-import { knowledgeInjections, knowledgeItems, tasks } from '@/db/schema';
+import { knowledgeInjections, knowledgeItems, objectives, tasks } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 import { knowledgeRelevance, significantTerms } from '@/domain/knowledge/relevance';
+import { assessKnowledge, qualificationLabel, type KnowledgeUseIntent } from '@/domain/knowledge/assess';
+
+const scopeTask = alias(tasks, 'k_scope_task');
+const scopeObjective = alias(objectives, 'k_scope_objective');
 
 /**
  * Company Knowledge lifecycle (K1 — KNOWLEDGE-DESIGN.md). The rules this
@@ -32,9 +40,41 @@ export const createKnowledgeSchema = z.object({
   title: z.string().trim().min(1, 'Title is required').max(200),
   body: z.string().trim().min(1, 'Body is required').max(20_000),
   kind: z.enum(KNOWLEDGE_KINDS).default('fact'),
-  /** Human authors may activate immediately — the author IS the approver. */
+  // Trust facts. Epistemic basis defaults to human_asserted (a person wrote it). Verification is
+  // ALWAYS 'unverified' at creation — activation is not verification. Scope defaults narrowest-safe
+  // to workspace (task/objective require a concrete target). Disclosure defaults workspace_internal.
+  epistemicBasis: z.enum(KNOWLEDGE_EPISTEMIC_BASES).default('human_asserted'),
+  scopeKind: z.enum(KNOWLEDGE_SCOPE_KINDS).default('workspace'),
+  scopeTaskId: z.string().uuid().nullable().default(null),
+  scopeObjectiveId: z.string().uuid().nullable().default(null),
+  disclosure: z.enum(KNOWLEDGE_DISCLOSURES).default('workspace_internal'),
+  asOf: z.coerce.date().nullable().default(null),
+  reviewAfter: z.coerce.date().nullable().default(null),
+  expiresAt: z.coerce.date().nullable().default(null),
+  /** Human authors may activate immediately — the author IS the approver (still NOT verification). */
   activate: z.boolean().default(false),
 });
+
+/** Validate a knowledge scope target belongs to this workspace; workspace scope carries no target. */
+async function assertKnowledgeScope(
+  tx: DbTx,
+  ctx: TenantContext,
+  input: { scopeKind: 'task' | 'objective' | 'workspace'; scopeTaskId: string | null; scopeObjectiveId: string | null },
+): Promise<{ scopeTaskId: string | null; scopeObjectiveId: string | null }> {
+  if (input.scopeKind === 'task') {
+    if (!input.scopeTaskId) throw new ValidationError(['Task-scoped knowledge must name the task it concerns.']);
+    const rows = await tx.select({ id: tasks.id }).from(tasks).where(and(eq(tasks.id, input.scopeTaskId), eq(tasks.projectId, ctx.projectId), eq(tasks.orgId, ctx.orgId))).limit(1);
+    if (rows.length === 0) throw new ValidationError(['That task is not in this workspace.']);
+    return { scopeTaskId: input.scopeTaskId, scopeObjectiveId: null };
+  }
+  if (input.scopeKind === 'objective') {
+    if (!input.scopeObjectiveId) throw new ValidationError(['Objective-scoped knowledge must name the objective it concerns.']);
+    const rows = await tx.select({ id: objectives.id }).from(objectives).where(and(eq(objectives.id, input.scopeObjectiveId), eq(objectives.projectId, ctx.projectId), eq(objectives.orgId, ctx.orgId))).limit(1);
+    if (rows.length === 0) throw new ValidationError(['That objective is not in this workspace.']);
+    return { scopeTaskId: null, scopeObjectiveId: input.scopeObjectiveId };
+  }
+  return { scopeTaskId: null, scopeObjectiveId: null };
+}
 
 export interface KnowledgeRow {
   id: string;
@@ -102,6 +142,7 @@ export async function createKnowledge(
   const parsed = createKnowledgeSchema.safeParse(input);
   if (!parsed.success) throw new ValidationError(parsed.error.issues.map((i) => i.message));
 
+  const targets = await assertKnowledgeScope(tx, ctx, parsed.data);
   const now = new Date();
   const inserted = await tx
     .insert(knowledgeItems)
@@ -114,6 +155,17 @@ export async function createKnowledge(
       body: parsed.data.body,
       status: parsed.data.activate ? 'active' : 'draft',
       source: 'manual',
+      // Epistemic basis is set at creation; verification is ALWAYS unverified here (activation ≠
+      // verification). Scope/disclosure/temporal facts carry through.
+      epistemicBasis: parsed.data.epistemicBasis,
+      verification: 'unverified',
+      scopeKind: parsed.data.scopeKind,
+      scopeTaskId: targets.scopeTaskId,
+      scopeObjectiveId: targets.scopeObjectiveId,
+      disclosure: parsed.data.disclosure,
+      asOf: parsed.data.asOf,
+      reviewAfter: parsed.data.reviewAfter,
+      expiresAt: parsed.data.expiresAt,
       createdBy: ctx.userId,
       approvedBy: parsed.data.activate ? ctx.userId : null,
       approvedAt: parsed.data.activate ? now : null,
@@ -161,6 +213,35 @@ export async function activateKnowledge(
     entityType: 'knowledge_item',
     entityId: itemId,
     detail: { title: item.title, version: item.version, superseded: item.supersedes },
+  });
+}
+
+/**
+ * Set a record's VERIFICATION state — an explicit, audited review separate from activation. Records
+ * who/when for a positive verification; marking `disputed` flags competing evidence. Never implied by
+ * activation. (A record-wide numeric confidence is intentionally NOT modeled — one body may hold many
+ * claims with different support.)
+ */
+export async function setKnowledgeVerification(
+  tx: DbTx,
+  ctx: TenantContext,
+  itemId: string,
+  verification: 'unverified' | 'human_confirmed' | 'source_supported' | 'system_verified' | 'disputed',
+): Promise<void> {
+  const item = await getItem(tx, ctx, itemId);
+  const verifiedAt =
+    verification === 'human_confirmed' || verification === 'source_supported' || verification === 'system_verified'
+      ? new Date()
+      : null;
+  await tx
+    .update(knowledgeItems)
+    .set({ verification, verifiedAt, updatedAt: new Date() })
+    .where(and(eq(knowledgeItems.id, itemId), scopeWhere(ctx)));
+  await writeAudit(tx, ctx, {
+    action: 'knowledge.verification_set',
+    entityType: 'knowledge_item',
+    entityId: itemId,
+    detail: { title: item.title, verification },
   });
 }
 
@@ -214,35 +295,97 @@ export interface SelectedKnowledge {
 export async function selectRelevantKnowledge(
   tx: DbTx,
   ctx: TenantContext,
-  args: { queryText: string },
+  args: {
+    queryText: string;
+    currentTaskId?: string | null;
+    currentObjectiveId?: string | null;
+    /** How the consumer intends to use the records (default: current operational fact). */
+    intendedUse?: KnowledgeUseIntent;
+  },
 ): Promise<SelectedKnowledge[]> {
   const rows = await tx
-    .select({ id: knowledgeItems.id, title: knowledgeItems.title, body: knowledgeItems.body, version: knowledgeItems.version, createdAt: knowledgeItems.createdAt })
+    .select({
+      id: knowledgeItems.id,
+      title: knowledgeItems.title,
+      body: knowledgeItems.body,
+      version: knowledgeItems.version,
+      createdAt: knowledgeItems.createdAt,
+      status: knowledgeItems.status,
+      epistemicBasis: knowledgeItems.epistemicBasis,
+      verification: knowledgeItems.verification,
+      asOf: knowledgeItems.asOf,
+      verifiedAt: knowledgeItems.verifiedAt,
+      reviewAfter: knowledgeItems.reviewAfter,
+      expiresAt: knowledgeItems.expiresAt,
+      scopeKind: knowledgeItems.scopeKind,
+      scopeTaskId: knowledgeItems.scopeTaskId,
+      scopeObjectiveId: knowledgeItems.scopeObjectiveId,
+      scopeTaskStatus: scopeTask.status,
+      scopeObjectiveStatus: scopeObjective.status,
+      disclosure: knowledgeItems.disclosure,
+    })
     .from(knowledgeItems)
+    .leftJoin(scopeTask, eq(knowledgeItems.scopeTaskId, scopeTask.id))
+    .leftJoin(scopeObjective, eq(knowledgeItems.scopeObjectiveId, scopeObjective.id))
     .where(and(eq(knowledgeItems.projectId, ctx.projectId), eq(knowledgeItems.orgId, ctx.orgId), eq(knowledgeItems.scope, 'project'), eq(knowledgeItems.status, 'active')));
   if (rows.length === 0) return [];
 
+  const now = new Date();
+  const nowMs = now.getTime();
+  const intendedUse: KnowledgeUseIntent = args.intendedUse ?? 'current_operational_fact';
   const queryTerms = significantTerms(args.queryText);
-  const now = Date.now();
-  const scored = rows
-    .map((r) => ({ r, rel: knowledgeRelevance(`${r.title} ${r.body}`, queryTerms) }))
-    .filter((s) => s.rel.eligible)
-    .map((s) => {
-      const ageDays = (now - s.r.createdAt.getTime()) / 86_400_000;
-      // Recency stays a small tiebreak below relationship strength — it never lifts an irrelevant item.
-      return { r: s.r, rel: s.rel, score: s.rel.score + Math.max(0, 1 - ageDays / 90) };
-    });
-  scored.sort((a, b) => b.score - a.score || b.r.createdAt.getTime() - a.r.createdAt.getTime());
 
-  return scored.slice(0, MAX_KNOWLEDGE).map(({ r, rel }) => ({
+  const scored: { r: (typeof rows)[number]; reason: string; qualification: string; score: number }[] = [];
+  for (const r of rows) {
+    // Order: lifecycle → version(active) → disclosure → scope validity → freshness/verification.
+    // v1 disclosure: `restricted` has no grant path yet, so it is not permitted for any consumer.
+    const a = assessKnowledge({
+      status: r.status,
+      epistemicBasis: r.epistemicBasis,
+      verification: r.verification,
+      asOf: r.asOf,
+      verifiedAt: r.verifiedAt,
+      reviewAfter: r.reviewAfter,
+      expiresAt: r.expiresAt,
+      scopeKind: r.scopeKind,
+      scopeTaskId: r.scopeTaskId,
+      scopeObjectiveId: r.scopeObjectiveId,
+      scopeTaskStatus: r.scopeTaskStatus,
+      scopeObjectiveStatus: r.scopeObjectiveStatus,
+      disclosure: r.disclosure,
+      disclosurePermitted: r.disclosure !== 'restricted',
+      intendedUse,
+      now,
+    });
+    if (a.useState === 'withheld') continue; // failed a hard gate before relevance — no scoring, no text
+
+    // Scope RELEVANCE: a record failing scope is not rescued by lexical overlap.
+    let relScore = 0;
+    let reason = '';
+    if (r.scopeKind === 'task') {
+      if (r.scopeTaskId && r.scopeTaskId === args.currentTaskId) { relScore = 1000; reason = 'task'; }
+    } else if (r.scopeKind === 'objective') {
+      if (r.scopeObjectiveId && r.scopeObjectiveId === args.currentObjectiveId) { relScore = 100; reason = 'objective'; }
+    } else {
+      const rel = knowledgeRelevance(`${r.title} ${r.body}`, queryTerms);
+      if (rel.eligible) { relScore = rel.score; reason = `subject: ${rel.sharedTerms.join(', ')}`; }
+    }
+    if (relScore === 0) continue;
+
+    const ageDays = (nowMs - r.createdAt.getTime()) / 86_400_000;
+    const qualification = a.useState === 'usable_with_qualification' ? qualificationLabel(a) : '';
+    scored.push({ r, reason, qualification, score: relScore + Math.max(0, 1 - ageDays / 90) });
+  }
+  scored.sort((x, y) => y.score - x.score || y.r.createdAt.getTime() - x.r.createdAt.getTime());
+
+  return scored.slice(0, MAX_KNOWLEDGE).map(({ r, reason, qualification }) => ({
     id: r.id,
     version: r.version,
     title: r.title,
     body: r.body,
-    // Provisional relevance by shared terminology — the matched terms are preserved so the trail
-    // shows WHY it was eligible (not a claim of structural applicability).
-    reason: `subject: ${rel.sharedTerms.join(', ')}`,
-    memoryText: `${r.title}\n${r.body}`,
+    reason,
+    // Qualified rendering: a qualified record carries its bracket label so the model uses it responsibly.
+    memoryText: qualification ? `${qualification}\n${r.title}\n${r.body}` : `${r.title}\n${r.body}`,
   }));
 }
 

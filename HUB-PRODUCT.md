@@ -1354,9 +1354,39 @@ the next step.)
   path can only reach it by a conspicuous, deliberate import. Safe selection (`selectRelevantKnowledge`)
   is the obvious public API; the repository guard test remains as a secondary defense.
 
-*Next steps (deferred, not built, never presented as if they exist): the minimum provenance /
-epistemic-basis / verification / freshness / scope / sensitivity model; presenting Knowledge as
-evidence-not-directive in the prompt; an AI extraction/promotion path (propose-only, source-identified,
-human-activated, never self-trusted); conflict/dispute surfacing; then the operating-partner
-conversation across the representative states, and only then the Knowledge page redesign. Do not
-redesign the page yet.*
+### Trustworthiness model — increment 1: the shared assessment + selection order (built 2026-07-26)
+
+One shared **`assessKnowledge`** (`domain/knowledge/assess.ts`) is the single source of a record's
+trust: lifecycle · epistemic basis · verification · freshness · scope validity · disclosure decision ·
+**use-state** (usable / usable-with-qualification / withheld) · reasons · prompt qualifications. The
+selector consumes it; rendering and the future Portfolio/Detail will too — a record can't be usable in
+selection, stale in rendering, and trusted in inspection at once.
+
+- **Persisted trust facts** on `knowledge_items`: `epistemicBasis` (observed/human_asserted/extracted/
+  summarized/inferred — how it was *formed*, never derived from `kind`); `verification`
+  (unverified/human_confirmed/source_supported/system_verified/disputed — **separate from activation**;
+  `setKnowledgeVerification` is the explicit audited event; creation is always `unverified`); temporal
+  `asOf`/`verifiedAt`/`reviewAfter`/`expiresAt` → derived freshness (current/review-due/stale/
+  historical/unknown) by one deterministic rule, never from `updatedAt`; `scopeKind` (task/objective/
+  workspace) + concrete target (validated same-workspace); `disclosure` (workspace_internal/restricted,
+  **restricted denied by default** — grants are future).
+- **Selection order enforced** (`selectRelevantKnowledge`): lifecycle → active version → **disclosure**
+  → **scope validity** → **relevance** (scope-target match, or lexical for workspace scope — a record
+  failing scope is not rescued by lexical overlap) → **freshness/verification** (use-intent aware) →
+  rank → render with qualifications → log. Withheld items never enter scoring and contribute **no text**
+  to the prompt. **Use-intent aware:** a task run (`current_operational_fact`) withholds expired,
+  scope-closed, and disputed records; a `reference`/`historical_analysis` consumer may receive the same
+  record *qualified*. Supplied records carry a `[basis · verification · freshness · scope]` label.
+- Locked by `knowledge-assess.test.ts` (state matrix) + `knowledge.test.ts` (unverified-after-activation,
+  expired withheld, restricted withheld with no sensitive text supplied, scope requires a concrete
+  same-workspace target, closed-scope doesn't leak, disputed withheld for current / qualified for
+  reference, `kind` plays no role). Full suite **443/443**.
+
+*Remaining trustworthiness increments (deferred, not built, never presented as if they exist):
+(2) inspectable provenance — a `knowledge_sources` relationship (type/id/label/version-hash/date/
+transformation/excerpt), "source_supported" only when a source resolves, broken-source = provenance
+defect; (3) disclosure GRANTS (provider/agent/consumer/purpose/period/actor) so restricted can be
+supplied with a matching grant; (4) a durable objective-suggestion operation record (stable id,
+recorded before dispatch, inspectable) so its application trail points to a real operation; (5) the AI
+extraction/promotion path (propose-only, source-identified, human-activated); (6) qualified-rendering
+polish + Portfolio/Detail; then the operating-partner conversation, and only then the page redesign.*

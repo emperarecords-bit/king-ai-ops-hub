@@ -165,7 +165,12 @@ export async function startRun(
     // wholesale charter. Approval permits a record to be used; relevance (shared subject with the
     // task + objective) decides whether it belongs in THIS run. Unrelated active knowledge is omitted.
     const knowledgeQuery = [task.input, objective?.title, objective?.description].filter(Boolean).join(' ');
-    const knowledge = await selectRelevantKnowledge(tx, ctx, { queryText: knowledgeQuery });
+    const knowledge = await selectRelevantKnowledge(tx, ctx, {
+      queryText: knowledgeQuery,
+      currentTaskId: taskId,
+      currentObjectiveId: task.objectiveId,
+      intendedUse: 'current_operational_fact',
+    });
     // Balanced context package (O-14, CONTEXT-PACKAGE.md). Retrieval is
     // unchanged (D-020); we ADD a small quota of foundational references and a
     // production-status doc that relevance alone would crowd out, dedup them

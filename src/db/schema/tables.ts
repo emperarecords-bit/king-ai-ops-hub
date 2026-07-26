@@ -38,9 +38,13 @@ import {
   contextItemStatusEnum,
   flagshipCategoryEnum,
   knowledgeKindEnum,
+  knowledgeDisclosureEnum,
+  knowledgeEpistemicBasisEnum,
   knowledgeScopeEnum,
+  knowledgeScopeKindEnum,
   knowledgeSourceEnum,
   knowledgeStatusEnum,
+  knowledgeVerificationEnum,
   messageRoleEnum,
   milestoneStatusEnum,
   modelTierEnum,
@@ -282,6 +286,21 @@ export const knowledgeItems = pgTable(
     status: knowledgeStatusEnum('status').notNull().default('draft'),
     source: knowledgeSourceEnum('source').notNull().default('manual'),
     sourceRef: uuid('source_ref'),
+    // Trustworthiness model. Epistemic basis = how it was FORMED (default: a human wrote it).
+    epistemicBasis: knowledgeEpistemicBasisEnum('epistemic_basis').notNull().default('human_asserted'),
+    // Verification = what review occurred, SEPARATE from activation (default: none).
+    verification: knowledgeVerificationEnum('verification').notNull().default('unverified'),
+    /** When the content was considered current; when it was last verified; when to review; when it expires. */
+    asOf: timestamp('as_of', { withTimezone: true }),
+    verifiedAt: timestamp('verified_at', { withTimezone: true }),
+    reviewAfter: timestamp('review_after', { withTimezone: true }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    // Applicability boundary + concrete target (workspace scope needs no target).
+    scopeKind: knowledgeScopeKindEnum('scope_kind').notNull().default('workspace'),
+    scopeTaskId: uuid('scope_task_id').references(() => tasks.id, { onDelete: 'set null' }),
+    scopeObjectiveId: uuid('scope_objective_id').references(() => objectives.id, { onDelete: 'set null' }),
+    // Enforceable disclosure classification. `restricted` is withheld by default (grants are future).
+    disclosure: knowledgeDisclosureEnum('disclosure').notNull().default('workspace_internal'),
     createdBy: uuid('created_by')
       .notNull()
       .references(() => profiles.id, { onDelete: 'restrict' }),
