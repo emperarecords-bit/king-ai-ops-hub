@@ -685,3 +685,36 @@ secondary; explicit Unknown. **Still to build (increment 2), all accepted, none 
   for schedules until a terminal transition distinct from pause exists.
 - **Control-location usability follow-up:** valid schedule actions should eventually live on the
   canonical Ongoing-Automations record, not require knowing the control sits under an objective.
+
+**Execution 2c — shared work detail frame (built 2026-07-26).**
+
+The detail view answers ten questions as *one coherent operational read*, not ten permanent
+fields. That read is the shared `WorkFrame` (`work-frame.tsx`), rendered identically atop both the
+Work Item and the AI Task detail pages, then the engine-specific mechanics diverge below it:
+1. *What is this* — kind (Work Item / AI Task) + title. 2. *Its purpose* — the objective it serves,
+or "operational — not tied to an objective." 3. *Its condition* — the assessed condition label
+(shared vocabulary, human- and AI-compatible). 4. *Whether you're needed* — intervention: silent
+for none, "watch" muted, "needs you: <action>" only when required. 5. *Why* — the native reason,
+in the model's own terms. 6. *Who's accountable* — the owner, or "unowned." 7. *Who performs it* —
+named only when a distinct performer is recorded; a human item shows "a separate performer is not
+recorded" (it never invents a performer from an owner). 8. *How the Hub knows* — the source
+(system-observed / human-reported / unknown), kept distinct. 9. *Valid + permitted actions* — the
+live edit/finish/stop controls for an active Work Item; nothing actionable once terminal. 10. *What
+changed* — the recent line. Per-claim confidence rides on the assessment, not a global badge.
+
+- **Work Item detail is canonical** (`work/[workItemId]/page.tsx`): editable and coordination-
+  oriented while active (reuses `WorkItemRow` — condition/owner/notes edit + finish/stop); a frozen,
+  read-only **closure record** once terminal (who/when/why, then a pointer to the audit log). No live
+  editing surfaces on a closed item — the freeze is enforced in `updateWorkItem`, and the page
+  simply stops rendering the edit affordance.
+- **AI Task detail reframed, not reduced** (`tasks/[taskId]/page.tsx`): the same `WorkFrame` read
+  now leads; every existing mechanic (run, cancel-with-reason, output, provenance) stays intact
+  below it. A cancelled task still shows its operator reason.
+- **Provenance stays honest:** human-reported vs system-observed is carried through as the frame's
+  `source`; a finished/stopped item is described as closed work, never as objective progress.
+- **Links:** work-item titles across Execution (Requires-you, Active, Recent) and the row itself now
+  route to the canonical detail page; the old in-page `#exec-<id>` anchor is retired as a nav target.
+- Acceptance covered by `execution-assess` unit tests (condition/intervention/source/confidence
+  translation, Unknown-stays-Unknown, unowned≠performer) plus new `work-items` integration cases
+  (getWorkItem carries owner-not-performer, keeps null condition Unknown, exposes the frozen closure
+  record with a resolved closer name).

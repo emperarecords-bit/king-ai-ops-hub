@@ -10,6 +10,8 @@ import { NotFoundError } from '@/lib/errors';
 import { Card, ModelText, PageHeader, ProviderBadge, StatusBadge } from '@/components/ui';
 import { OwnerPicker } from '../../owner-picker';
 import { Breadcrumb } from '../../breadcrumb';
+import { WorkFrame } from '../../work-frame';
+import { assessTask } from '@/domain/execution/assess';
 import { CancelTaskButton, RunButton } from './run-button';
 import { AddDependencyForm, RemoveDependencyButton } from './dependency-forms';
 import { CandidateReview } from './candidate-review';
@@ -119,6 +121,15 @@ export default async function TaskDetailPage({
           <span>{ownerName ?? 'Unassigned'}</span>
         )}
       </div>
+
+      <WorkFrame
+        kind="ai_task"
+        purpose={null}
+        assessment={assessTask({ status: task.status, ownerAgentId: task.ownerAgentId })}
+        accountable={ownerName ?? null}
+        performer="the assigned agent"
+        recent={null}
+      />
 
       {task.status === 'cancelled' && task.cancelReason ? (
         <p className="mb-6 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--muted)]">

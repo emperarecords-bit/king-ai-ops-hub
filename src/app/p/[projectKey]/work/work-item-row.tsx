@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useActionState } from 'react';
 import { finishWorkItemAction, stopWorkItemAction, updateWorkItemAction, type WorkItemState } from './actions';
 import { OwnerPicker, type OwnerOption } from '../owner-picker';
@@ -55,7 +56,9 @@ export function WorkItemRow({
   return (
     <li className="border-b border-[var(--border)] py-3 last:border-0">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-sm font-medium">{item.title}</span>
+        <Link href={`/p/${projectKey}/work/${item.id}`} className="text-sm font-medium hover:text-[var(--accent)]">
+          {item.title}
+        </Link>
         <span className="rounded bg-[var(--surface-raised)] px-2 py-0.5 text-xs text-[var(--foreground)]">
           {item.condition ? CONDITION_LABEL[item.condition] : 'Unknown'}
         </span>

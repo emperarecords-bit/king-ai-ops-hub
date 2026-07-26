@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { type TenantContext, type WorkItemCondition, WORK_ITEM_CONDITIONS } from '@/types/domain';
 import { ConflictError, ValidationError, NotFoundError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
-import { agents, objectives, workItems } from '@/db/schema';
+import { agents, objectives, profiles, workItems } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 
 /**
@@ -28,6 +28,58 @@ export interface WorkItemRow {
   objectiveTitle: string | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface WorkItemDetail {
+  id: string;
+  title: string;
+  condition: WorkItemCondition | null;
+  waitingOn: string | null;
+  stage: string;
+  notes: string;
+  ownerAgentId: string | null;
+  ownerName: string | null;
+  objectiveId: string | null;
+  objectiveTitle: string | null;
+  closureReason: string | null;
+  closedByName: string | null;
+  closedAt: Date | null;
+  updatedAt: Date;
+  createdAt: Date;
+}
+
+export async function getWorkItem(
+  tx: DbTx,
+  ctx: TenantContext,
+  workItemId: string,
+): Promise<WorkItemDetail> {
+  const rows = await tx
+    .select({
+      id: workItems.id,
+      title: workItems.title,
+      condition: workItems.condition,
+      waitingOn: workItems.waitingOn,
+      stage: workItems.stage,
+      notes: workItems.notes,
+      ownerAgentId: workItems.ownerAgentId,
+      ownerName: agents.name,
+      objectiveId: workItems.objectiveId,
+      objectiveTitle: objectives.title,
+      closureReason: workItems.closureReason,
+      closedByName: profiles.displayName,
+      closedAt: workItems.closedAt,
+      updatedAt: workItems.updatedAt,
+      createdAt: workItems.createdAt,
+    })
+    .from(workItems)
+    .leftJoin(agents, eq(workItems.ownerAgentId, agents.id))
+    .leftJoin(objectives, eq(workItems.objectiveId, objectives.id))
+    .leftJoin(profiles, eq(workItems.closedBy, profiles.id))
+    .where(and(eq(workItems.id, workItemId), eq(workItems.orgId, ctx.orgId), eq(workItems.projectId, ctx.projectId)))
+    .limit(1);
+  const row = rows[0];
+  if (!row) throw new NotFoundError('Work item');
+  return row;
 }
 
 export async function listWorkItems(

@@ -114,9 +114,9 @@ export default async function ExecutionPage({
                         {r.title}
                       </Link>
                     ) : (
-                      <a href={`#exec-${r.id}`} className="text-[var(--foreground)] hover:text-[var(--accent)]">
+                      <Link href={`/p/${projectKey}/work/${r.id}`} className="text-[var(--foreground)] hover:text-[var(--accent)]">
                         {r.title}
-                      </a>
+                      </Link>
                     )}
                     <span className="text-xs text-[var(--muted)]">· {CONDITION_LABEL[a.condition]}</span>
                     <span className="text-xs text-[var(--accent)]">· {a.requiredAction}</span>
@@ -209,7 +209,9 @@ export default async function ExecutionPage({
                           {r.title}
                         </Link>
                       ) : (
-                        <span className="text-[var(--foreground)]">{r.title}</span>
+                        <Link href={`/p/${projectKey}/work/${r.id}`} className="text-[var(--foreground)] hover:text-[var(--accent)]">
+                          {r.title}
+                        </Link>
                       )}
                       <span className="text-xs text-[var(--muted)]">· {CONDITION_LABEL[a.condition]}</span>
                       <span className="ml-auto text-xs text-[var(--muted)]">{r.ownerName ?? ''}</span>

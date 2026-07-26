@@ -6,7 +6,7 @@ import { type TenantContext } from '@/types/domain';
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { agents, memberships, objectives, organizations, profiles, projectMembers, projects, tasks, workItems } from '@/db/schema';
-import { createWorkItem, finishWorkItem, listWorkItems, stopWorkItem, updateWorkItem } from '@/domain/work/work-items';
+import { createWorkItem, finishWorkItem, getWorkItem, listWorkItems, stopWorkItem, updateWorkItem } from '@/domain/work/work-items';
 import { cancelTask } from '@/domain/tasks/tasks';
 import { setOwner } from '@/domain/agents/org';
 
@@ -128,6 +128,36 @@ describe.skipIf(!available)('work items — create, list, edit, own', () => {
     const row = await getSetupDb().select({ s: tasks.status, r: tasks.cancelReason }).from(tasks).where(eq(tasks.id, t[0]!.id));
     expect(row[0]!.s).toBe('cancelled');
     expect(row[0]!.r).toBe('no longer needed');
+  });
+
+  // 2c shared-detail: the canonical detail read (getWorkItem) is what the detail page assesses.
+  it('getWorkItem carries only an owner — never a separate performer — for human work', async () => {
+    const id = await withTenant(ctxA, (tx) => createWorkItem(tx, ctxA, { title: 'Owned detail', objectiveId: objId }));
+    await withTenant(ctxA, (tx) => setOwner(tx, ctxA, 'work_item', id, empId));
+    const w = await withTenant(ctxA, (tx) => getWorkItem(tx, ctxA, id));
+    expect(w.ownerName).toBe('Rep');
+    expect(w.objectiveTitle).toBe('Pipeline');
+    // There is no performer field distinct from the owner: a human item can never claim a
+    // performer the model doesn't know. The detail page passes performer={null} on this basis.
+    expect('performer' in w).toBe(false);
+  });
+
+  it('getWorkItem keeps an unestablished condition Unknown (null), not a defaulted value', async () => {
+    const id = await withTenant(ctxA, (tx) => createWorkItem(tx, ctxA, { title: 'No condition set' }));
+    // Legacy/unestablished items carry a null condition until an operator sets one.
+    await getSetupDb().update(workItems).set({ condition: null }).where(eq(workItems.id, id));
+    const w = await withTenant(ctxA, (tx) => getWorkItem(tx, ctxA, id));
+    expect(w.condition).toBeNull();
+  });
+
+  it('getWorkItem exposes the frozen closure record for a terminal item', async () => {
+    const id = await withTenant(ctxA, (tx) => createWorkItem(tx, ctxA, { title: 'Closes with a record' }));
+    await withTenant(ctxA, (tx) => stopWorkItem(tx, ctxA, id, 'client went dark'));
+    const w = await withTenant(ctxA, (tx) => getWorkItem(tx, ctxA, id));
+    expect(w.condition).toBe('stopped');
+    expect(w.closureReason).toBe('client went dark');
+    expect(w.closedByName).toBe('Owner'); // resolved from the profile, not a raw id
+    expect(w.closedAt).toBeInstanceOf(Date);
   });
 
   it('filters by objective and isolates across workspaces', async () => {
