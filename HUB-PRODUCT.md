@@ -1772,10 +1772,49 @@ disclosure / `describeKnowledgeForConversation`.
   injects Available/Qualified relevant records and never a Needs-Review one, matching the Portfolio.
   Full suite **522/522**, build clean.
 
-**Knowledge area — the trust model is now end to end**: create/propose → relevance-gated selection →
-evidence-not-directive rendering → shared assessment → durable/idempotent ops → live-resolved provenance
-→ enforceable disclosure (execution identity + derived purpose) → AI extraction/promotion with source
-integrity → the operating-partner conversation → Portfolio & Detail, all reading one assessment.
+**Knowledge trust ARCHITECTURE is implemented end to end** (not yet the complete product — see closure):
+create/propose → relevance-gated selection → evidence-not-directive rendering → shared assessment →
+durable/idempotent ops → live-resolved provenance → enforceable disclosure (execution identity + derived
+purpose) → AI extraction/promotion with source integrity → the operating-partner conversation →
+Portfolio & Detail, all reading one assessment.
+
+### Surface increment 6b — Portfolio/Detail closure corrections (built 2026-07-26)
+
+- **Needs-Review is a lens, not a selection gate.** The selector never depended on the Portfolio (it
+  only reads `assessKnowledge`); the earlier *test/report* framed the invariant wrongly. Corrected: the
+  ASSESSMENT governs selection — withheld → not selected, qualified → selectable-with-qualification,
+  Needs-Review membership alone neither permits nor prohibits. Proven by tests where a review-due record
+  is in the lens AND selected, a disputed record is withheld by its assessment, and a restricted record
+  the Portfolio shows as Needs-Review IS selected for an agent that holds a live grant. *Principle:
+  surfaces share judgment; operational systems do not depend on presentation categories.*
+- **Viewer access is resolved from the authenticated request, filtered at retrieval.** The aggregator
+  derives `operatorAccess` from the viewer's role (`viewerMaySeeRestricted`: project admin / org
+  owner-admin; deny-by-default); a non-privileged viewer's descriptor is built REDACTED (claim null,
+  sources empty) — sensitive fields absent from the loader result, not hidden by the component. The
+  Detail route branches on visibility before running the sensitive queries; direct navigation to a
+  restricted URL yields only the bounded notice. Loader-boundary tests prove an admin sees content, a
+  member never receives the title/body/source in the returned object, and the Portfolio doesn't leak
+  restricted titles. *Principle: restricted data is filtered at retrieval, not merely hidden by the
+  rendered component.*
+- **Detail shows the frozen dispatch snapshot vs current.** `listInjectionsForKnowledge` now returns the
+  immutable `trustSnapshot`; the Detail's application history shows dispatch-time provenance alongside
+  current, and the exact rendered text — never reconstructing the past from today's record. A test
+  proves a source breaking after dispatch leaves the frozen snapshot `inspectable_support` while current
+  resolution reads `broken`.
+- **Core review actions wired.** Server actions + client forms for the review queue: AI proposals →
+  promote (explicit scope/temporal/disclosure/lifecycle; suggested values shown as placeholders only),
+  revise, split, reject-with-rationale, and record-source-support-judgment; active records → confirm /
+  mark-disputed (reason required) and new-version / archive. The forms preserve every distinction
+  (promotion ≠ verification, activation ≠ verification, attaching a source ≠ support, split children stay
+  drafts, rejection preserves the record). Document classification is linked to Documents; disclosure
+  grants to Governance — a restricted record is never a dead end. Full suite **527/527**, build clean.
+
+*Knowledge closure conditions: (1) Needs-Review not a selector gate ✓, (2) selection independent of
+Portfolio grouping ✓, (3) authenticated viewer access enforced at the data boundary ✓, (4) core review
+controls wired ✓, (5) seeded authenticated visual acceptance — OUTSTANDING (needs a logged-in staging
+walkthrough), (6) suite + build clean ✓. Knowledge is NOT closed until (5) is done. Remaining deferred
+follow-ons: split/support-judgment richer pickers, disclosure-grant UI (Governance), document
+classification UI + artifact-as-evidence (Documents).*
 
 *Deferred follow-ons (explicitly not built): the newer action controls' UI (promote/split/support-
 judgment/restrict/declassify/grant-revoke forms); Decision↔Knowledge link semantics; the Documents

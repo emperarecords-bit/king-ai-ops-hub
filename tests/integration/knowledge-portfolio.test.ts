@@ -15,6 +15,7 @@ import {
   selectRelevantKnowledge,
   setKnowledgeVerification,
 } from '@/domain/knowledge/knowledge';
+import { createDisclosureGrant } from '@/domain/knowledge/disclosure';
 import { buildKnowledgePortfolio, buildKnowledgeReference, type KnowledgePortfolioGroup } from '@/domain/knowledge/portfolio';
 
 /**
@@ -118,26 +119,85 @@ describe.skipIf(!available)('knowledge portfolio grouping + cross-surface integr
     }
   });
 
-  it('the selector injects Available/Qualified relevant records and never a Needs-Review one, matching the Portfolio', async () => {
-    // A clearly-available relevant record and a disputed (needs-review) one sharing query vocabulary.
-    await getSetupDb().insert(documents).values({ orgId, projectId: ctx.projectId, relativePath: 'pf/omega.md', kind: 'markdown', sha256: 'OMEGA_V1', sizeBytes: 10, disclosure: 'workspace_internal' });
-    const good = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Omega throughput policy', body: 'Omega throughput burst policy limit configuration.', kind: 'fact', epistemicBasis: 'extracted', expiresAt: future() }));
-    const gsrc = await withTenant(ctx, (tx) => attachKnowledgeSource(tx, ctx, good, { sourceType: 'document', sourceRef: 'pf/omega.md', sourceLabel: 'Omega.md', sourceVersionHash: 'OMEGA_V1', transformation: 'extracted' }));
-    await withTenant(ctx, (tx) => recordSupportJudgment(tx, ctx, good, { reliedOnSourceIds: [gsrc] }));
-    await withTenant(ctx, (tx) => activateKnowledge(tx, ctx, good));
-    const bad = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Omega throughput disputed', body: 'Omega throughput burst policy limit configuration.', kind: 'fact', activate: true }));
-    await withTenant(ctx, (tx) => setKnowledgeVerification(tx, ctx, bad, 'disputed', 'conflicting limits'));
+  it('selection is governed by the ASSESSMENT, not by Needs-Review membership', async () => {
+    // A record with a NON-BLOCKING concern (review-due) — flagged in the lens, yet its assessment
+    // permits qualified use, so it IS selected.
+    const reviewDue = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Sigma cadence policy', body: 'Sigma cadence policy interval configuration threshold.', kind: 'fact', reviewAfter: past(), expiresAt: future(), activate: true }));
+    // A record with a BLOCKING defect (disputed) — withheld by the assessment itself.
+    const disputed = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Sigma cadence disputed', body: 'Sigma cadence policy interval configuration threshold.', kind: 'fact', activate: true }));
+    await withTenant(ctx, (tx) => setKnowledgeVerification(tx, ctx, disputed, 'disputed', 'two records disagree'));
 
-    const query = 'omega throughput burst policy limit configuration';
+    const query = 'sigma cadence policy interval configuration threshold';
     const injected = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: query, consumerType: 'task_run', consumerAgentIds: [agentId] }));
     const injectedIds = injected.map((k) => k.id);
     const pf = await withTenant(ctx, (tx) => buildKnowledgePortfolio(tx, ctx));
 
-    // The good record: injected by the selector AND in Available in the Portfolio.
-    expect(injectedIds).toContain(good);
-    expect(groupFor(pf, good)).toBe('available');
-    // The disputed record: NOT injected AND in Needs-Review — no contradiction across surfaces.
-    expect(injectedIds).not.toContain(bad);
-    expect(groupFor(pf, bad)).toBe('needs_review');
+    // Review-due: in the Needs-Review lens AND selected — lens membership did not prohibit it.
+    expect(pf.needsReviewLens.map((r) => r.id)).toContain(reviewDue);
+    expect(injectedIds).toContain(reviewDue);
+    // Disputed: withheld — because the assessment withholds a disputed claim for current use, NOT
+    // because it appears in the lens.
+    expect(injectedIds).not.toContain(disputed);
+    const disputedAssessed = await withTenant(ctx, (tx) => buildKnowledgeReference(tx, ctx, disputed));
+    expect(disputedAssessed!.descriptor.currentUseVerdict.state).toBe('withheld');
+  });
+
+  it('a restricted record validly granted to the operation IS selected, though the Portfolio groups it Needs-Review', async () => {
+    // The Portfolio has no consuming agent → this restricted record is Needs-Review (no disclosure path).
+    const restricted = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Tau restricted directive', body: 'Tau restricted directive privileged handling procedure.', kind: 'fact', disclosure: 'restricted', activate: true }));
+    const pf = await withTenant(ctx, (tx) => buildKnowledgePortfolio(tx, ctx));
+    expect(groupFor(pf, restricted)).toBe('needs_review');
+
+    // But a run whose consuming agent holds a live grant for this purpose receives it — selection is
+    // driven by the assessment + grant, never by the Portfolio's page-oriented grouping.
+    await withTenant(ctx, (tx) => createDisclosureGrant(tx, ctx, { knowledgeItemId: restricted, agentId, purpose: 'current_operational_fact', expiresAt: future() }));
+    const injected = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'tau restricted directive privileged handling procedure', consumerType: 'task_run', consumerAgentIds: [agentId] }));
+    expect(injected.map((k) => k.id)).toContain(restricted);
+  });
+});
+
+describe.skipIf(!available)('viewer access is resolved from the authenticated request (filtered at retrieval)', () => {
+  let memberCtx: TenantContext;
+  let restrictedId = '';
+
+  beforeAll(async () => {
+    if (!available) return;
+    // A non-privileged member of the SAME project.
+    const memberId = randomUUID();
+    await getSetupDb().insert(profiles).values({ id: memberId, email: `pf-mbr-${randomUUID().slice(0, 8)}@test.local`, displayName: 'PF Member' });
+    await getSetupDb().insert(memberships).values({ orgId, userId: memberId, role: 'member' });
+    await getSetupDb().insert(projectMembers).values({ orgId, projectId: ctx.projectId, userId: memberId, role: 'member' });
+    memberCtx = { userId: memberId, orgId, projectId: ctx.projectId, orgRole: 'member', projectRole: 'member' };
+    // A restricted record with a sensitive title + body, authored by the admin.
+    restrictedId = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Phi secret codename', body: 'Phi confidential acquisition target valuation.', kind: 'fact', disclosure: 'restricted', activate: true }));
+  });
+
+  it('an authorized (admin) viewer receives the restricted record content', async () => {
+    const ref = await withTenant(ctx, (tx) => buildKnowledgeReference(tx, ctx, restrictedId));
+    expect(ref!.descriptor.visibility.operator).toBe('full');
+    expect(ref!.descriptor.claim?.title).toBe('Phi secret codename');
+  });
+
+  it('an UNAUTHORIZED (member) viewer never receives restricted content or source metadata in the loader result', async () => {
+    const ref = await withTenant(memberCtx, (tx) => buildKnowledgeReference(tx, memberCtx, restrictedId));
+    expect(ref).not.toBeNull();
+    expect(ref!.descriptor.visibility.operator).toBe('withholding_only');
+    expect(ref!.descriptor.claim).toBeNull();
+    // The redaction is at retrieval: the sensitive fields are absent from the returned object.
+    const serialized = JSON.stringify(ref);
+    expect(serialized).not.toContain('Phi secret codename');
+    expect(serialized).not.toContain('confidential acquisition');
+  });
+
+  it('the Portfolio does not leak restricted titles to an unauthorized viewer', async () => {
+    const pf = await withTenant(memberCtx, (tx) => buildKnowledgePortfolio(tx, memberCtx));
+    const serialized = JSON.stringify(pf);
+    expect(serialized).not.toContain('Phi secret codename');
+    expect(serialized).not.toContain('confidential acquisition');
+    // The record still appears (as a bounded, redacted reference) so the operator knows it exists.
+    const allRefs = Object.values(pf.groups).flat();
+    const redacted = allRefs.find((r) => r.id === restrictedId);
+    expect(redacted).toBeDefined();
+    expect(redacted!.descriptor.claim).toBeNull();
   });
 });

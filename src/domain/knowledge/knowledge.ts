@@ -814,6 +814,8 @@ export interface KnowledgeInjectionRow {
   version: number;
   reason: string;
   memoryText: string | null;
+  /** The immutable trust snapshot recorded AT DISPATCH — never recomputed from today's record. */
+  trustSnapshot: KnowledgeTrustSnapshot | null;
   injectedAt: Date;
 }
 
@@ -844,9 +846,11 @@ export async function listConsumerKnowledgeApplications(
   return rows.map((r) => ({ memoryText: r.memoryText, trustSnapshot: (r.trustSnapshot as KnowledgeTrustSnapshot | null) ?? null }));
 }
 
-/** The reverse trail for one knowledge item: the AI operations it was supplied to, newest first. */
+/** The reverse trail for one knowledge item: the AI operations it was supplied to, newest first. Each
+ *  row carries the FROZEN trust snapshot recorded at dispatch — the Detail shows dispatch-time truth
+ *  alongside current truth, never reconstructing the past from today's record. */
 export async function listInjectionsForKnowledge(tx: DbTx, ctx: TenantContext, itemId: string): Promise<KnowledgeInjectionRow[]> {
-  return tx
+  const rows = await tx
     .select({
       consumerType: knowledgeInjections.consumerType,
       consumerId: knowledgeInjections.consumerId,
@@ -856,12 +860,14 @@ export async function listInjectionsForKnowledge(tx: DbTx, ctx: TenantContext, i
       version: knowledgeInjections.version,
       reason: knowledgeInjections.reason,
       memoryText: knowledgeInjections.memoryText,
+      trustSnapshot: knowledgeInjections.trustSnapshot,
       injectedAt: knowledgeInjections.injectedAt,
     })
     .from(knowledgeInjections)
     .leftJoin(tasks, eq(knowledgeInjections.taskId, tasks.id))
     .where(and(eq(knowledgeInjections.knowledgeItemId, itemId), eq(knowledgeInjections.orgId, ctx.orgId), eq(knowledgeInjections.projectId, ctx.projectId)))
     .orderBy(desc(knowledgeInjections.injectedAt));
+  return rows.map((r) => ({ ...r, trustSnapshot: (r.trustSnapshot as KnowledgeTrustSnapshot | null) ?? null }));
 }
 
 export const reviseKnowledgeSchema = z.object({

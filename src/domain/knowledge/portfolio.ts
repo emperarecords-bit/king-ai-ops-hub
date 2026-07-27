@@ -46,11 +46,22 @@ const scopeTask = alias(tasks, 'pf_scope_task');
 const scopeObjective = alias(objectives, 'pf_scope_objective');
 
 /** Portfolio disclosure view: an operator surface has no consuming AI agent, so `restricted` has no
- *  disclosure path here (it surfaces as a Needs-Review concern) — but the operator may still inspect it. */
+ *  AI disclosure path here (it surfaces as a Needs-Review concern). Whether the human VIEWER may inspect
+ *  its content is a separate decision — see `viewerMaySeeRestricted`. */
 function portfolioDisclosure(disclosure: string): { permitted: boolean; reason: string | null } {
   return disclosure === 'restricted'
     ? { permitted: false, reason: 'restricted — requires a disclosure grant for a consuming agent; not disclosable in this view' }
     : { permitted: true, reason: null };
+}
+
+/**
+ * Whether the authenticated VIEWER may inspect restricted Knowledge content. Derived from their
+ * workspace role (deny-by-default): only a project admin or an org owner/admin. A member/viewer receives
+ * the redacted, bounded descriptor for a restricted record. This runs on the loader's authenticated
+ * `ctx`, so access is resolved from the request — never caller-supplied or hardcoded.
+ */
+export function viewerMaySeeRestricted(ctx: TenantContext): boolean {
+  return ctx.projectRole === 'admin' || ctx.orgRole === 'owner' || ctx.orgRole === 'admin';
 }
 
 async function assembleReference(
@@ -98,7 +109,7 @@ async function assembleReference(
     provenance,
     verificationEventCount: verificationEvents.length,
     disclosureDecision: portfolioDisclosure(row.disclosure),
-    operatorAccess: true, // the operator Portfolio; restricted content is inspectable, but flagged
+    operatorAccess: viewerMaySeeRestricted(ctx), // resolved from the authenticated viewer's role
     applicationCount: applications.length,
     supersededBy: successorOf.has(row.id) ? { version: row.version + 1 } : null,
     proposal: row.proposalReviewStatus === 'pending' ? { reviewStatus: 'pending', confidence: row.proposalConfidence ?? 'low' } : null,

@@ -8,6 +8,7 @@ import { withTenant } from '@/db/tenant';
 import { documents, memberships, organizations, profiles, projectMembers, projects } from '@/db/schema';
 import {
   activateKnowledge,
+  assessKnowledgeProvenance,
   attachKnowledgeSource,
   createKnowledge,
   listConsumerKnowledgeApplications,
@@ -181,5 +182,23 @@ describe.skipIf(!available)('provenance in live selection + application trust sn
     const row = trail.find((t) => t.consumerId === op)!;
     expect(row.version).toBe(1);
     expect(row.memoryText).toContain('source-supported');
+  });
+
+  it('the application trail preserves BOTH the frozen dispatch snapshot and the current state after a break', async () => {
+    const { id } = await makeSupported({ title: 'Iris rate', body: 'Iris rate for burst billing.', docPath: 'canon/iris.md', hash: 'IRIS_V1', label: 'Iris.md' });
+    const picked = await withTenant(ctx, (tx) => selectRelevantKnowledge(tx, ctx, { queryText: 'iris rate burst billing', consumerType: 'task_run' }));
+    const op = randomUUID();
+    await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'objective_suggestion', consumerId: op, injected: picked.filter((k) => k.id === id) }));
+
+    // The cited source becomes unavailable AFTER dispatch.
+    await getSetupDb().update(documents).set({ sha256: 'IRIS_V2' }).where(eq(documents.relativePath, 'canon/iris.md'));
+
+    // The frozen trail (what the Detail shows for the application) keeps dispatch-time truth...
+    const trail = await withTenant(ctx, (tx) => listInjectionsForKnowledge(tx, ctx, id));
+    const row = trail.find((t) => t.consumerId === op)!;
+    expect(row.trustSnapshot!.provenanceState).toBe('inspectable_support'); // was inspectable when supplied
+    // ...while the CURRENT resolution reflects the break — two distinct, both-true facts.
+    const current = await withTenant(ctx, (tx) => assessKnowledgeProvenance(tx, ctx, id, 1));
+    expect(current.state).toBe('broken');
   });
 });
