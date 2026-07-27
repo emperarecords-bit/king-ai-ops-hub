@@ -1833,14 +1833,26 @@ softened ("no review date recorded"); the workspace-internal default and the zer
 no longer chipped. Locked by portfolio tests (restricted-with-grant configured; specific historical
 reasons). Full suite **532/532**. *Portfolio re-pass + full Detail visual pass still required.*
 
-*Knowledge closure conditions: (1) Needs-Review not a selector gate ✓, (2) selection independent of
-Portfolio grouping ✓, (3) authenticated viewer access enforced at the data boundary ✓ — the non-admin
-boundary is now exercised by automated route-loader tests with the non-admin identity (not inferred from
-the admin view), (4) core review controls wired ✓, (5) seeded authenticated VISUAL acceptance — still
-OUTSTANDING (operator's eyeball on the 15-state matrix; data seeded on staging as tag ab20), (6) suite +
-build clean ✓. Knowledge is NOT closed until (5) passes and any surfaced defects are fixed. Deferred
-follow-ons: split/support-judgment richer pickers, disclosure-grant UI (Governance), document
-classification UI + artifact-as-evidence (Documents).*
+### ★ KNOWLEDGE CLOSED (2026-07-27)
+
+All six closure conditions met: (1) Needs-Review is a lens, not a selector gate ✓; (2) selection
+independent of Portfolio grouping ✓; (3) authenticated viewer access enforced at the data boundary,
+exercised by automated route-loader tests with a real non-admin identity ✓; (4) core review controls
+wired (promote/split/revise/reject/support-judgment; confirm/dispute; activate/archive) ✓; (5) seeded
+authenticated VISUAL acceptance — Portfolio + all four representative Detail pages passed on staging
+(operator verdict "Clean"; the Detail pages were also driven and read back through the logged-in
+session) ✓; (6) full suite **536/536** + build clean ✓. During the visual pass one real defect was
+caught and fixed (a blunt archive left AI proposals in Awaiting because `groupOf` checked pending
+before archived — archived is now authoritative, and the archive script rejects pending proposals).
+The 15-state `[demo]` matrix (tag ab20) was archived after acceptance. Knowledge visual-corrections copy
+tweaks (universal-consultation, honest activation, concise lens, supplemental vs relied wording,
+institutional grant state, awaiting≠historical, specific historical reasons, softened qualification,
+no zero-application boilerplate) all confirmed live.
+
+**The Knowledge trust ARCHITECTURE and its operator surfaces are complete end to end.** Deferred
+follow-ons (not blockers, tracked for their own areas): richer split/support-judgment pickers;
+disclosure-grant management UI (Governance); document classification authoring UI + artifact-as-evidence
+(Documents); explicit Decision↔Knowledge link semantics.
 
 *Deferred follow-ons (explicitly not built): the newer action controls' UI (promote/split/support-
 judgment/restrict/declassify/grant-revoke forms); Decision↔Knowledge link semantics; the Documents
