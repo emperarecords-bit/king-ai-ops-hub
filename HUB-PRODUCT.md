@@ -1690,6 +1690,42 @@ the evidence the ORIGINATING run received, and only claims that can be checked a
 source-integrity-checked against the immutable run snapshot, sensitivity-inherited, human-promoted by
 explicit decision, never self-verifying.
 
-*Remaining Knowledge increments (deferred, not built): (5) the operating-partner conversation — NEXT;
-(6) then the Knowledge Portfolio & Detail — page redesign last. Documents review will add the
-classification authoring UI + broaden extraction evidence (artifacts) as its own increment.*
+Extraction closure also added **proposal splitting** (`splitKnowledgeProposal`): a bundled proposal
+becomes 2+ independently-reviewable drafts, each carrying the same extraction provenance and a chosen
+subset of the original's sources at their exact versions; inherited disclosure is preserved and never
+weakened; the original is retired `split` (archived, unpromotable) so only the children can be promoted;
+nothing is activated or verified. *Principle: a record may be no broader than the trust assessment that
+honestly applies to all its claims — and when it is, split before relying on it.*
+
+### Conversation increment 5 — the operating-partner conversation (built 2026-07-26)
+
+The *voice* of the trust model — it adds no trust logic; it translates the already-computed assessments
+into accurate, proportionate language. Two layers (`knowledge/conversation.ts`), both PURE:
+
+- **Layer 1 — `describeKnowledgeForConversation`** composes item + `assessKnowledge` + `assessKnowledge​Provenance`
+  + verification count + disclosure decision + relevance + application count (+ optional superseded /
+  proposal / asOf) into a structured descriptor. It makes ALL eleven reasoning answers available;
+  invents no confidence, re-resolves nothing, and derives the conversational **category from the FULL
+  assessment** — a gate (disclosure / dispute / stale / draft) wins over epistemic basis, so an
+  "observed" record can still be withheld. `currentUseVerdict` mirrors the shared assessment;
+  `historicalUseVerdict` is derived from *why* current use was refused (a structural gate denies every
+  use; a current-fact-only concern is fine, qualified, for history).
+- **Layer 2 — renderers by audience + depth.** `renderOperatorSummary` (routine: claim + key
+  qualification + date, not an 11-field dump), `renderOperatorEvidence` (deep, with per-source
+  resolution — progressive disclosure), `renderHistoricalAudit` (speaks the past for superseded/
+  historical records), and `renderAiQualification` — the ONLY AI-facing text, which returns **null**
+  for a denied or withheld record *before reading any content*, so denied content is absent, never
+  redacted-after.
+
+Honesty guarantees enforced and tested: eleven answers are available, not mandatory (depth scales with
+consequence); AI consumers receive nothing about a denied restricted record (not even its existence),
+while an authorized operator may receive a bounded withholding reason; application language is
+**"supplied"**, never "used"/"influenced"; **no Decision relationship is inferred** — the descriptor
+states "No authoritative Decision relationship is recorded" until an explicit link exists (that link is
+future work, not built inside the adapter); a long free-text body is flagged `possibly_multiple` rather
+than given one misleading verdict; source-supported verification and current inspectability are reported
+separately. Locked by `tests/unit/knowledge-conversation.test.ts` (14). Full suite **514/514**.
+
+*The Knowledge Portfolio & Detail pages (deferred, last) will render from this same descriptor object —
+no second interpretation of trust. Decision↔Knowledge link semantics and the Documents classification
+authoring UI (+ artifact evidence) are separate future increments, explicitly NOT built here.*
