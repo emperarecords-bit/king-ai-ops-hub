@@ -5,7 +5,7 @@ import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
-import { agents, documents, memberships, organizations, profiles, projectMembers, projects, tasks } from '@/db/schema';
+import { agents, documents, knowledgeItems as knowledgeItemsTbl, knowledgeProposals, memberships, organizations, profiles, projectMembers, projects, tasks } from '@/db/schema';
 import {
   activateKnowledge,
   archiveKnowledge,
@@ -150,6 +150,17 @@ describe.skipIf(!available)('knowledge portfolio grouping + cross-surface integr
     const pf = await withTenant(ctx, (tx) => buildKnowledgePortfolio(tx, ctx));
     expect(groupFor(pf, id)).toBe('awaiting_review'); // closed origin does not make it historical
     expect(pf.groups.awaiting_review.find((x) => x.id === id)!.originatingTaskClosed).toBe(true);
+  });
+
+  it('an archived record is Historical even if a stale proposal row still reads pending', async () => {
+    // Directly construct the inconsistent state a blunt archive could create: item archived, but a
+    // proposal row still 'pending'. Archived must be authoritative → Historical, not Awaiting.
+    const id = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Rho orphan proposal', body: 'x', kind: 'fact', activate: false }));
+    await getSetupDb().insert(knowledgeProposals).values({ orgId, projectId: ctx.projectId, knowledgeItemId: id, promptVersion: 'test', reviewStatus: 'pending' });
+    await getSetupDb().update(knowledgeItemsTbl).set({ status: 'archived' }).where(eq(knowledgeItemsTbl.id, id));
+    const pf = await withTenant(ctx, (tx) => buildKnowledgePortfolio(tx, ctx));
+    expect(groupFor(pf, id)).toBe('historical'); // archived is authoritative over a stale pending proposal
+    expect(pf.groups.awaiting_review.map((r) => r.id)).not.toContain(id);
   });
 
   it('Detail verdict never contradicts the Portfolio group', async () => {

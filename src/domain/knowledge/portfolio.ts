@@ -179,8 +179,11 @@ function historicalReasonOf(row: PortfolioRow, d: KnowledgeConversationDescripto
 }
 
 function groupOf(row: PortfolioRow, d: KnowledgeConversationDescriptor): KnowledgePortfolioGroup {
-  if (row.status === 'draft' || row.proposalReviewStatus === 'pending') return 'awaiting_review';
+  // Archived is terminal and authoritative — an archived record is Historical even if a stale proposal
+  // row still reads "pending" (a proposal is normally rejected/split, which archives it, so this only
+  // guards against inconsistent lifecycle states).
   if (row.status === 'archived') return 'historical';
+  if (row.status === 'draft' || row.proposalReviewStatus === 'pending') return 'awaiting_review';
   // Active: freshness that removes it from current use reads as historical; otherwise usability decides.
   if (d.freshness.state === 'stale' || d.freshness.state === 'historical') return 'historical';
   if (d.currentUseVerdict.state === 'usable') return 'available';
