@@ -246,6 +246,13 @@
       "when": 1785108230889,
       "tag": "0034_mute_stick",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1785139558816,
+      "tag": "0035_marvelous_nighthawk",
+      "breakpoints": true
     }
   ]
 }

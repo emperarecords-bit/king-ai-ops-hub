@@ -127,6 +127,26 @@ export type DocumentStatus = (typeof DOCUMENT_STATUSES)[number];
 export const DOCUMENT_JOB_STATUSES = ['queued', 'running', 'done', 'failed'] as const;
 export type DocumentJobStatus = (typeof DOCUMENT_JOB_STATUSES)[number];
 
+/**
+ * A Document VERSION's index outcome. A version is created `pending`, becomes `indexed` on success or
+ * `failed` on a parse/index error. Only an `indexed` version may become a logical Document's current
+ * version; a `failed` version is retained (with its bytes + error) but never current.
+ */
+export const DOCUMENT_INDEX_STATUSES = ['pending', 'indexed', 'failed'] as const;
+export type DocumentIndexStatus = (typeof DOCUMENT_INDEX_STATUSES)[number];
+
+/**
+ * How faithfully a Document Version's content is retained — the Hub must distinguish EXACT evidence,
+ * RECONSTRUCTED evidence, and UNAVAILABLE evidence, and never let a caller infer this from whether an
+ * object key happens to be null.
+ *  - byte_exact: raw source bytes retained + hash-verified; exact download permitted (when authorized).
+ *  - reconstructed_text: only indexed chunks retained (legacy local); text inspectable WITH a visible
+ *    qualification; no exact-file download.
+ *  - unavailable: neither raw bytes nor sufficient reconstructed content is retained; identity preserved.
+ */
+export const CONTENT_FIDELITIES = ['byte_exact', 'reconstructed_text', 'unavailable'] as const;
+export type ContentFidelity = (typeof CONTENT_FIDELITIES)[number];
+
 /** Provenance: which document chunks fed a given run (transparency, D-020). */
 export interface RetrievedDocRef {
   relativePath: string;
@@ -152,6 +172,9 @@ export interface RunSourceSnapshot {
   rank: number;
   /** The exact chunk text supplied to the run — the only thing a cited excerpt may be checked against. */
   excerpt: string;
+  /** The immutable Document Version this evidence came from. Optional so historical snapshots without it
+   *  still parse; the durable, referentially-safe pointer lives in `run_document_versions`. */
+  documentVersionId?: string;
 }
 
 /**

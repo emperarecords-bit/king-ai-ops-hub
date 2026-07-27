@@ -5,7 +5,9 @@ import {
   APPROVAL_STATUSES,
   ARTIFACT_KINDS,
   CADENCES,
+  CONTENT_FIDELITIES,
   CONTEXT_ITEM_STATUSES,
+  DOCUMENT_INDEX_STATUSES,
   DECISION_APPLICABILITY,
   DECISION_CONFIDENCE,
   DECISION_SCOPES,
@@ -79,6 +81,8 @@ export const documentKindEnum = pgEnum('document_kind', DOCUMENT_KINDS);
 export const documentStatusEnum = pgEnum('document_status', DOCUMENT_STATUSES);
 export const documentSourceEnum = pgEnum('document_source', DOCUMENT_SOURCES);
 export const documentJobStatusEnum = pgEnum('document_job_status', DOCUMENT_JOB_STATUSES);
+export const documentIndexStatusEnum = pgEnum('document_index_status', DOCUMENT_INDEX_STATUSES);
+export const contentFidelityEnum = pgEnum('content_fidelity', CONTENT_FIDELITIES);
 export const dependencyKindEnum = pgEnum('dependency_kind', DEPENDENCY_KINDS);
 export const decisionStatusEnum = pgEnum('decision_status', DECISION_STATUSES);
 export const decisionTypeEnum = pgEnum('decision_type', DECISION_TYPES);

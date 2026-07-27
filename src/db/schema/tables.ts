@@ -36,6 +36,8 @@ import {
   documentStatusEnum,
   documentSourceEnum,
   documentJobStatusEnum,
+  documentIndexStatusEnum,
+  contentFidelityEnum,
   contextItemStatusEnum,
   flagshipCategoryEnum,
   knowledgeKindEnum,
@@ -379,6 +381,11 @@ export const knowledgeSources = pgTable(
     sourceLabel: text('source_label').notNull(),
     /** Exact cited version — a document's sha256; null for immutable artifacts. */
     sourceVersionHash: text('source_version_hash'),
+    /** Durable pointer to the immutable Document Version cited (document sources). Null for artifacts,
+     *  and for a legacy citation whose exact version was overwritten before versioning existed — such a
+     *  citation keeps its path+hash and resolves "exact version unavailable", never bound to another
+     *  version merely because the path matches. */
+    documentVersionId: uuid('document_version_id').references(() => documentVersions.id, { onDelete: 'set null' }),
     sourceDate: timestamp('source_date', { withTimezone: true }),
     transformation: text('transformation').notNull(), // quoted | extracted | summarized | inferred
     locator: text('locator'),
@@ -589,6 +596,13 @@ export const documents = pgTable(
     sourceModifiedAt: timestamp('source_modified_at', { withTimezone: true }),
     /** When the current version's bytes were ingested into object storage. */
     ingestedAt: timestamp('ingested_at', { withTimezone: true }),
+    // ---- Immutable version model (Documents increment 1, additive) ----------
+    /** Pointer to the current SUCCESSFULLY-INDEXED version used for normal retrieval. Never repointed to
+     *  a pending/failed version. Not a hard FK (documents↔document_versions form a cycle); integrity is
+     *  enforced in the domain + checked on backfill. */
+    currentVersionId: uuid('current_version_id'),
+    /** Last time ingestion observed this source (same-content refresh + disappearance behavior). */
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }),
     ...timestamps,
   },
   (t) => [
@@ -598,6 +612,76 @@ export const documents = pgTable(
     // migration as partial unique indexes; see rls.sql / 0013.)
     index('documents_org_project_status_idx').on(t.orgId, t.projectId, t.status),
     index('documents_source_idx').on(t.projectId, t.source, t.sourceId),
+    index('documents_current_version_idx').on(t.currentVersionId),
+  ],
+);
+
+/**
+ * A DOCUMENT VERSION — one immutable content state of a logical Document. "A Document identifies the
+ * source; a Document Version identifies the evidence." Content and hash never change once inserted.
+ * Raw bytes for every NEW version are retained under a content-addressed object key; legacy local
+ * versions carry `contentFidelity='reconstructed_text'` (chunks only, no original bytes). A `failed`
+ * version is retained (with bytes + error) but never becomes a Document's current version. Uniqueness
+ * on (documentId, sha256) enforces same-content idempotency within one logical source.
+ */
+export const documentVersions = pgTable(
+  'document_versions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    documentId: uuid('document_id').notNull().references(() => documents.id, { onDelete: 'cascade' }),
+    sha256: text('sha256').notNull(),
+    sizeBytes: integer('size_bytes').notNull(),
+    mimeType: text('mime_type'),
+    /** Immutable content-addressed object key (projects/{p}/documents/{d}/versions/{sha256}); null only
+     *  for a legacy local version whose original bytes were never retained (reconstructed_text). */
+    objectKey: text('object_key'),
+    contentFidelity: contentFidelityEnum('content_fidelity').notNull().default('unavailable'),
+    /** The source's own revision id, when the adapter supplies one. */
+    sourceRevisionId: text('source_revision_id'),
+    sourceModifiedAt: timestamp('source_modified_at', { withTimezone: true }),
+    ingestedAt: timestamp('ingested_at', { withTimezone: true }),
+    indexedAt: timestamp('indexed_at', { withTimezone: true }),
+    indexStatus: documentIndexStatusEnum('index_status').notNull().default('pending'),
+    errorMessage: text('error_message'),
+    /** Classification recorded AT INGEST — a historical fact, never rewritten by a later reclassification. */
+    disclosureSnapshot: knowledgeDisclosureEnum('disclosure_snapshot').notNull().default('workspace_internal'),
+    parserVersion: text('parser_version'),
+    /** The ingestion operation that created this version (audit/provenance). */
+    ingestionOperationId: uuid('ingestion_operation_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('document_versions_document_idx').on(t.documentId),
+    uniqueIndex('document_versions_document_sha_uq').on(t.documentId, t.sha256),
+  ],
+);
+
+/**
+ * Normalized run→version references — the referentially-safe complement to the immutable JSON
+ * `runs.retrieved_sources` snapshot. "Historical prompt snapshots preserve representation; normalized
+ * references preserve integrity." Used for reverse trails, retention/purge checks, and usage queries.
+ */
+export const runDocumentVersions = pgTable(
+  'run_document_versions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    runId: uuid('run_id').notNull().references(() => runs.id, { onDelete: 'cascade' }),
+    documentVersionId: uuid('document_version_id').notNull().references(() => documentVersions.id, { onDelete: 'restrict' }),
+    /** Retrieval unit within the version (nullable when whole-doc). -1 sentinel avoids NULL in the uq. */
+    chunkIndex: integer('chunk_index').notNull().default(-1),
+    retrievalReason: text('retrieval_reason'),
+    rank: integer('rank'),
+    disclosureSnapshot: knowledgeDisclosureEnum('disclosure_snapshot').notNull().default('workspace_internal'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('run_document_versions_run_idx').on(t.runId),
+    index('run_document_versions_version_idx').on(t.documentVersionId),
+    uniqueIndex('run_document_versions_uq').on(t.runId, t.documentVersionId, t.chunkIndex),
   ],
 );
 
@@ -656,14 +740,23 @@ export const documentChunks = pgTable(
     documentId: uuid('document_id')
       .notNull()
       .references(() => documents.id, { onDelete: 'cascade' }),
+    /** The immutable version these chunks belong to. Nullable during backfill; every new chunk is
+     *  version-scoped. Reindexing a new version creates NEW chunks — a version's chunks are never
+     *  edited or replaced once it is active or referenced. */
+    documentVersionId: uuid('document_version_id').references(() => documentVersions.id, { onDelete: 'cascade' }),
     /** 0-based position within the document, for stable ordering + display. */
     chunkIndex: integer('chunk_index').notNull(),
     content: text('content').notNull(),
+    /** Where in the source this chunk is (section/offset), when derivable — a checkable locator. */
+    locator: text('locator'),
+    parserVersion: text('parser_version'),
+    contentHash: text('content_hash'),
     ...timestamps,
   },
   (t) => [
     index('document_chunks_org_project_idx').on(t.orgId, t.projectId),
     index('document_chunks_document_idx').on(t.documentId),
+    index('document_chunks_version_idx').on(t.documentVersionId),
   ],
 );
 

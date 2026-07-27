@@ -1858,3 +1858,46 @@ disclosure-grant management UI (Governance); document classification authoring U
 judgment/restrict/declassify/grant-revoke forms); Decision↔Knowledge link semantics; the Documents
 classification authoring UI + artifact-as-evidence. Interactive staging visual acceptance of the two
 pages remains to be walked through with an authenticated session.*
+
+---
+
+## AREA: Documents (source-material system) — IN PROGRESS
+
+Primary question: *what source material does this workspace possess, which exact version was used, and
+can the Hub inspect and disclose it safely?* Documents preserves evidence; it does not judge truth.
+Accepted sub-area sequence: (1) immutable version model → (2) version chunks + current retrieval →
+(3) run/Knowledge relationships on version ids → (4) retention/purge safeguards → (5) classification
+controls → (6) Detail + reverse trail → (7) viewer access → (8) retrieval/locator/dedup/deletion
+hygiene → (9) visual acceptance. Building the version model FIRST; no Documents interface yet.
+
+### Sub-area 1 — immutable versions, STAGE A: additive schema + migration (built 2026-07-27)
+
+The provenance-critical restructure is delivered in verified stages. **Stage A** is purely additive
+(migration 0035) — nullable columns + empty new tables, no behavior change, safe to run while current
+ingestion/retrieval keep working:
+- `documents` becomes the LOGICAL source (+ `current_version_id` — a successfully-indexed version only,
+  no hard FK to avoid the documents↔versions cycle; + `last_seen_at`). Old content columns retained
+  during the transition, dropped only in a later migration after dual-read verification.
+- **`document_versions`** (immutable): sha256, size, mime, `object_key` (content-addressed), 
+  `content_fidelity` (`byte_exact` | `reconstructed_text` | `unavailable`), source revision/modified,
+  ingested/indexed timestamps, `index_status` (`pending`|`indexed`|`failed`), error, `disclosure_snapshot`
+  (classification at ingest, never rewritten), parser version, ingestion-operation id. Unique
+  `(document_id, sha256)` = same-content idempotency. A failed version is retained but never current.
+- **`document_chunks`** gains `document_version_id` (+ locator, parser version, content hash) — chunks
+  belong to a version; a new version makes new chunks, never replacing an old version's.
+- **`run_document_versions`** (normalized run→version references) — the referentially-safe complement to
+  the immutable JSON `runs.retrieved_sources`; `onDelete: restrict` from the version so a referenced
+  version can't be purged. Unique `(run_id, document_version_id, chunk_index)`.
+- **`knowledge_sources`** gains `document_version_id` (durable pointer; null = artifact or a legacy
+  overwritten citation that resolves "version unavailable", never rebound by path).
+- `RunSourceSnapshot` gains optional `documentVersionId`. RLS extended to both new tables.
+Applied locally, build clean, full suite **536/536** (no behavior change yet). *Principle: a Document
+identifies the source; a Document Version identifies the evidence.*
+
+*Stages remaining in sub-area 1: B — object-store content-addressing + ingestion state transitions
+(same/changed/failed/disappeared) writing versions+bytes+chunks; C — current-vs-historical retrieval
+switch + backfill script (with cloud object hash-verification; legacy local → reconstructed_text;
+overwritten citations → version-unavailable) + evidence version-pointers + resolveKnowledgeSource by
+version; D — purge safeguards + viewer access at retrieval + the 35-test set. Then report the full
+increment-1 completion (schema, migration counts, fidelity breakdown, transitions, retrieval, references,
+access, results, legacy limitations).*
