@@ -9,8 +9,8 @@ import { type TenantContext } from '@/types/domain';
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { documentChunks, documents, memberships, organizations, profiles, projectMembers, projects } from '@/db/schema';
-import { retrieveRelevant } from '@/domain/documents/documents';
-import { archiveDocument, retryDocument, uploadDocument } from '@/domain/documents/cloud';
+import { archiveDocument, retrieveRelevant } from '@/domain/documents/documents';
+import { retryDocument, uploadDocument } from '@/domain/documents/cloud';
 import { claimNextDocumentJob, reconcileStaleDocumentJobs, runClaimedDocumentJob } from '@/domain/documents/document-jobs';
 import { LocalObjectStore } from '@/domain/documents/local-object-store';
 

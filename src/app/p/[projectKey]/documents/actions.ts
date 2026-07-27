@@ -5,9 +5,14 @@ import { AppError, toPublicMessage } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
-import { linkFolder, refreshIndex, type IndexSummary } from '@/domain/documents/documents';
 import {
   archiveDocument,
+  linkFolder,
+  refreshIndex,
+  restoreDocument,
+  type IndexSummary,
+} from '@/domain/documents/documents';
+import {
   replaceDocument,
   retryDocument,
   uploadDocument,
@@ -157,6 +162,28 @@ export async function archiveDocumentAction(_prev: DocumentsState, formData: For
   return adminDocMutation(formData, 'archive', (ctx, documentId) =>
     withTenant(ctx, (tx) => archiveDocument(tx, ctx, documentId)),
   );
+}
+
+/** Explicit restore of an archived document (admin, adapter-neutral). Cloud sources restore immediately;
+ *  a local source whose path is unreachable from the server records the intent and completes on the next
+ *  refresh from a capable host. */
+export async function restoreDocumentAction(_prev: DocumentsState, formData: FormData): Promise<DocumentsState> {
+  const projectKey = String(formData.get('projectKey') ?? '');
+  const documentId = String(formData.get('documentId') ?? '');
+  try {
+    const ctx = await requireTenant(projectKey);
+    if (ctx.projectRole !== 'admin') return { error: 'Only admins can restore documents.', message: null };
+    const store = await getObjectStore();
+    const outcome = await withTenant(ctx, (tx) => restoreDocument(tx, ctx, store, documentId));
+    revalidatePath(`/p/${projectKey}/documents`);
+    if (outcome.restored) {
+      return { error: null, message: outcome.versionReused ? 'Restored (source unchanged).' : 'Restored (new version ingested).' };
+    }
+    return { error: null, message: 'Restore requested — refresh the linked folder from a host that can reach its path to complete it.' };
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('restoreDocument failed', { err });
+    return { error: toPublicMessage(err), message: null };
+  }
 }
 
 export async function replaceDocumentAction(_prev: DocumentsState, formData: FormData): Promise<DocumentsState> {

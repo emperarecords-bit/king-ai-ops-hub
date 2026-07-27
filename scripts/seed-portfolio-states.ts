@@ -113,6 +113,19 @@ async function main() {
   }
   await byteExact(`${PREFIX}no-reference-normal.md`, '# Normal\n\nordinary unreferenced source');
 
+  // Recently-changed CONTROL PAIR (Blocker 2). `recently-changed` is created through a GENUINE ingestion
+  // (ingestDocumentVersion records source_change_at = now) → it is the only expected "recently changed"
+  // besides `multiple-versions` (whose V2 was also genuinely ingested). `old-unchanged` is a backfilled
+  // byte_exact source (source_change_at = null) — an infrastructure-migrated version is NOT a source change,
+  // so it must NOT appear in Recently Changed. This is why the lens shows a small, meaningful count rather
+  // than the whole migrated inventory.
+  {
+    const docId = await insDoc(`${PREFIX}recently-changed.md`, { source: 'cloud_upload', status: 'active' });
+    const body = '# Recently changed\n\ngenuine source ingestion — changed recently';
+    await tx((t) => ingestDocumentVersion(t as never, ctx, store, { documentId: docId, bytes: Buffer.from(body, 'utf8'), text: body, mimeType: 'text/markdown', disclosure: 'workspace_internal', chunk: chunkText }));
+  }
+  await byteExact(`${PREFIX}old-unchanged.md`, '# Old unchanged\n\nbackfilled (migration) source — not a recent source change');
+
   // Pure in-progress / failed / unsupported states LAST — no backfill runs after these, so a project-wide
   // backfill (which corrects active/indexing → source_unavailable) never mutates them.
   await insDoc(`${PREFIX}processing-upload.md`, { status: 'uploaded' });

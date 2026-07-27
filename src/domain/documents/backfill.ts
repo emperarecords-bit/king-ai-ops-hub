@@ -328,6 +328,15 @@ async function backfillOneDocument(
   opts: { operationId: string; stageBDeployedAt?: Date | null },
   report: ProjectBackfillReport,
 ): Promise<void> {
+  // A pending upload (uploaded/queued) has no settled indexed evidence to version yet — the worker is
+  // about to (re)index it. Backfill must NOT manufacture an `unavailable` version for it: that would brand
+  // a still-processing upload as evidence whose content has been *determined* unavailable (a false trust
+  // fact). Leave pending uploads untouched; the normal ingestion path creates their first version.
+  if (doc.status === 'uploaded' || doc.status === 'queued') {
+    report.notes.push(`skipped pending upload ${doc.relativePath} (status=${doc.status}) — no settled evidence to version`);
+    return;
+  }
+
   const versions: VersionRow[] = await tx
     .select({
       id: documentVersions.id,

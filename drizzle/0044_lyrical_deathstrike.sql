@@ -1,0 +1,1 @@
+ALTER TABLE "documents" ADD COLUMN "archived_intent_at" timestamp with time zone;

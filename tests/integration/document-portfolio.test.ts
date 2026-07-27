@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { and, eq, sql } from 'drizzle-orm';
@@ -8,12 +8,12 @@ import { fixtureKey } from '@tests/support/fixture-key';
 import { type KnowledgeDisclosure, type TenantContext } from '@/types/domain';
 import { type DbTx, getSetupDb } from '@/db/client';
 import { agents, documentChunks, documentVersions, documents, knowledgeItems, knowledgeSources, memberships, organizations, profiles, projectMembers, projects, runDocumentVersions, runs, tasks } from '@/db/schema';
-import { chunkText } from '@/domain/documents/documents';
+import { archiveDocument, chunkText, linkFolder, refreshIndex, restoreDocument, retrieveRelevant } from '@/domain/documents/documents';
 import { backfillProject } from '@/domain/documents/backfill';
 import { ingestDocumentVersion } from '@/domain/documents/versions';
 import { LocalObjectStore } from '@/domain/documents/local-object-store';
 import { tenantObjectKey } from '@/domain/documents/object-store';
-import { assessDocument, loadDocumentPortfolio } from '@/domain/documents/portfolio';
+import { type DocumentAssessmentInput, assessDocument, latestSourceChangeAt, loadDocumentPortfolio } from '@/domain/documents/portfolio';
 
 process.env.DATABASE_URL = process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL ?? 'postgresql://king:king@localhost:5433/king_ai_hub';
 let available = false;
@@ -251,7 +251,7 @@ describe.skipIf(!available)('Documents Portfolio — assessment, grouping, lense
 
   it('22. assessDocument (pure) does not read the database — retrieval never depends on Portfolio groups', () => {
     const rec = assessDocument(
-      { id: 'x', relativePath: 'p.md', source: 'cloud_upload', status: 'active', disclosure: 'workspace_internal', currentVersionId: 'v1', indexedAt: null, currentVersion: { id: 'v1', contentFidelity: 'byte_exact', indexStatus: 'indexed', indexDegraded: false }, latestVersion: { id: 'v1', contentFidelity: 'byte_exact', indexStatus: 'indexed', createdAt: NOW }, versionCount: 1, knowledgeRefCount: 0, aiOperationCount: 0, lastChangeAt: NOW, viewerIsAdmin: true },
+      { id: 'x', relativePath: 'p.md', source: 'cloud_upload', status: 'active', disclosure: 'workspace_internal', currentVersionId: 'v1', indexedAt: null, currentVersion: { id: 'v1', contentFidelity: 'byte_exact', indexStatus: 'indexed', indexDegraded: false }, latestVersion: { id: 'v1', contentFidelity: 'byte_exact', indexStatus: 'indexed', createdAt: NOW }, versionCount: 1, knowledgeRefCount: 0, aiOperationCount: 0, lastSourceChangeAt: NOW, viewerIsAdmin: true },
       NOW,
     );
     expect(rec.group).toBe('available');
@@ -300,5 +300,221 @@ describe.skipIf(!available)('Documents Portfolio — assessment, grouping, lense
     const withEight = await count();
     // Single-workspace fixed query set (member, docs, versions, knowledge, runs) — independent of N.
     expect(withEight).toBeLessThanOrEqual(6);
+  });
+});
+
+// ---- Review corrections: Blocker 1 (processing fidelity), Blocker 2 (recently changed), Blocker 3 (archive/restore) ----
+
+const baseInput = (over: Partial<DocumentAssessmentInput>): DocumentAssessmentInput => ({
+  id: 'x', relativePath: 'p.md', source: 'cloud_upload', status: 'active', disclosure: 'workspace_internal',
+  currentVersionId: null, indexedAt: null, currentVersion: null, latestVersion: null,
+  versionCount: 0, knowledgeRefCount: 0, aiOperationCount: 0, lastSourceChangeAt: null, viewerIsAdmin: true, ...over,
+});
+
+async function versionsOf(docId: string) {
+  return db().select({ id: documentVersions.id, contentFidelity: documentVersions.contentFidelity, sourceChangeAt: documentVersions.sourceChangeAt }).from(documentVersions).where(eq(documentVersions.documentId, docId));
+}
+
+describe.skipIf(!available)('Documents Portfolio — Blocker 1: Processing cards never show false unavailable fidelity', () => {
+  it('B1.1 backfill does not manufacture an unavailable version for a pending upload (uploaded/queued)', async () => {
+    const ctx = await makeWorkspace();
+    await bareDoc(ctx, 'up.md', 'uploaded');
+    await bareDoc(ctx, 'qu.md', 'queued');
+    await runBackfill(ctx);
+    const up = (await db().select({ id: documents.id }).from(documents).where(and(eq(documents.projectId, ctx.projectId), eq(documents.relativePath, 'up.md'))))[0]!;
+    const qu = (await db().select({ id: documents.id }).from(documents).where(and(eq(documents.projectId, ctx.projectId), eq(documents.relativePath, 'qu.md'))))[0]!;
+    expect(await versionsOf(up.id)).toHaveLength(0);
+    expect(await versionsOf(qu.id)).toHaveLength(0);
+  });
+
+  it('B1.2 a Processing card with no version shows NO fidelity (not "unavailable")', async () => {
+    const rec = assessDocument(baseInput({ status: 'uploaded' }), NOW);
+    expect(rec.group).toBe('processing');
+    expect(rec.fidelity).toBeNull();
+    expect(rec.fidelityLabel).toBeNull();
+  });
+
+  it('B1.3 unavailable fidelity is shown ONLY when a real unavailable version exists', async () => {
+    // A processing doc that genuinely has an unavailable version row may reflect it (the rule permits it);
+    // the defect was fabricating it for a pending upload with no such version (covered by B1.1/B1.2).
+    const withReal = assessDocument(baseInput({ status: 'source_unavailable', latestVersion: { id: 'v', contentFidelity: 'unavailable', indexStatus: 'failed', createdAt: NOW } }), NOW);
+    expect(withReal.fidelityLabel).toBe('Source content unavailable');
+    const ctx = await makeWorkspace();
+    await bareDoc(ctx, 'proc.md', 'uploaded');
+    await runBackfill(ctx);
+    const view = await load(ctx);
+    const proc = view.groups.processing.find((r) => r.relativePath === 'proc.md')!;
+    expect(proc.fidelityLabel).toBeNull();
+  });
+});
+
+describe.skipIf(!available)('Documents Portfolio — Blocker 2: Recently Changed reflects source change, not migration', () => {
+  it('B2.0 latestSourceChangeAt ignores backfilled (null) versions and takes the max genuine change', () => {
+    const old = new Date('2026-07-01T00:00:00Z');
+    const recent = new Date('2026-07-26T00:00:00Z');
+    expect(latestSourceChangeAt([])).toBeNull();
+    expect(latestSourceChangeAt([{ sourceChangeAt: null }, { sourceChangeAt: null }])).toBeNull();
+    expect(latestSourceChangeAt([{ sourceChangeAt: old }, { sourceChangeAt: null }, { sourceChangeAt: recent }])).toEqual(recent);
+  });
+
+  it('B2.1 a backfilled version is NOT recently changed even though the migration ran just now', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'migrated.md', 'body'); // created via backfill (source_change_at null)
+    expect((await versionsOf(docId)).every((v) => v.sourceChangeAt === null)).toBe(true);
+    const view = await load(ctx);
+    const rec = view.groups.available.find((r) => r.relativePath === 'migrated.md')!;
+    expect(rec.lenses).not.toContain('recently_changed');
+  });
+
+  it('B2.2 a genuine ingestion with a new source hash IS recently changed', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'live.md', 'first body');
+    await newVersion(ctx, docId, 'second, changed body'); // genuine ingest → source_change_at = now
+    const view = await load(ctx, new Date());
+    const rec = view.groups.available.find((r) => r.relativePath === 'live.md')!;
+    expect(rec.lenses).toContain('recently_changed');
+  });
+
+  it('B2.3 re-observing the SAME hash creates no new version and no new change', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'same.md', 'stable body');
+    await newVersion(ctx, docId, 'genuine v'); // one genuine version
+    const before = await versionsOf(docId);
+    await newVersion(ctx, docId, 'genuine v'); // identical bytes → reused, not a new version
+    const after = await versionsOf(docId);
+    expect(after.length).toEqual(before.length);
+  });
+
+  it('B2.4 a source-modified timestamp can establish a recent source change', () => {
+    const recent = new Date(NOW.getTime() - 2 * 24 * 60 * 60 * 1000);
+    const rec = assessDocument(baseInput({ status: 'active', currentVersionId: 'v1', currentVersion: { id: 'v1', contentFidelity: 'byte_exact', indexStatus: 'indexed', indexDegraded: false }, latestVersion: { id: 'v1', contentFidelity: 'byte_exact', indexStatus: 'indexed', createdAt: NOW }, versionCount: 1, lastSourceChangeAt: recent }), NOW);
+    expect(rec.lenses).toContain('recently_changed');
+  });
+
+  it('B2.5 a migration-created version with an OLD source-modified date is not recent', () => {
+    // Even if the migrated source itself was last modified long ago, a backfilled version contributes no
+    // source-change time (null) — infrastructure migration is never a source change.
+    expect(latestSourceChangeAt([{ sourceChangeAt: null }])).toBeNull();
+    const rec = assessDocument(baseInput({ status: 'active', currentVersionId: 'v1', currentVersion: { id: 'v1', contentFidelity: 'byte_exact', indexStatus: 'indexed', indexDegraded: false }, versionCount: 1, lastSourceChangeAt: null }), NOW);
+    expect(rec.lenses).not.toContain('recently_changed');
+  });
+
+  it('B2.6 the Recently Changed lens count remains audience-filtered', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'secret-live.md', 'body', 'restricted');
+    await newVersion(ctx, docId, 'genuinely changed restricted body'); // recently changed AND restricted
+    const member = await addMember(ctx, 'member');
+    const asMember = await load(member, new Date());
+    expect(asMember.lensCounts.recently_changed).toBe(0); // restricted row dropped before counting
+    const asAdmin = await load(ctx, new Date());
+    expect(asAdmin.lensCounts.recently_changed).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe.skipIf(!available)('Documents Portfolio — Blocker 3: adapter-neutral archive & explicit restore', () => {
+  const tx = <T,>(fn: (t: DbTx) => Promise<T>) => db().transaction((t) => fn(t as unknown as DbTx));
+
+  it('B3.1 an active LOCAL document can be intentionally archived', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await reconDoc(ctx, 'loc.md', ['local body']);
+    await tx((t) => archiveDocument(t, ctx, docId));
+    const doc = (await db().select({ status: documents.status }).from(documents).where(eq(documents.id, docId)))[0]!;
+    expect(doc.status).toBe('archived');
+    const view = await load(ctx);
+    expect(view.groups.historical.some((r) => r.relativePath === 'loc.md')).toBe(true);
+  });
+
+  it('B3.2 archiving preserves every retained version and relationship', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await reconDoc(ctx, 'keep.md', ['evidence chunk']);
+    await bindKnowledge(ctx, 'keep.md', versionId);
+    await supplyToRun(ctx, versionId, [0]);
+    await tx((t) => archiveDocument(t, ctx, docId));
+    expect((await versionsOf(docId)).length).toBeGreaterThanOrEqual(1);
+    const versionChunks = await db().select({ id: documentChunks.id }).from(documentChunks).where(eq(documentChunks.documentVersionId, versionId));
+    expect(versionChunks.length).toBeGreaterThanOrEqual(1);
+    const krefs = await db().select({ id: knowledgeSources.id }).from(knowledgeSources).where(eq(knowledgeSources.documentVersionId, versionId));
+    expect(krefs.length).toBe(1);
+    const rrefs = await db().select({ id: runDocumentVersions.id }).from(runDocumentVersions).where(eq(runDocumentVersions.documentVersionId, versionId));
+    expect(rrefs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('B3.3 an archived local document leaves current retrieval', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await reconDoc(ctx, 'findme.md', ['unicorn zebra content']);
+    const before = await tx((t) => retrieveRelevant(t, ctx, 'unicorn zebra', 5));
+    expect(before.some((r) => r.relativePath === 'findme.md')).toBe(true);
+    await tx((t) => archiveDocument(t, ctx, docId));
+    const after = await tx((t) => retrieveRelevant(t, ctx, 'unicorn zebra', 5));
+    expect(after.some((r) => r.relativePath === 'findme.md')).toBe(false);
+  });
+
+  it('B3.4 a folder refresh does NOT silently restore an intentionally-archived document', async () => {
+    const ctx = await makeWorkspace();
+    const dir = await mkdtemp(join(tmpdir(), 'pf-folder-'));
+    await writeFile(join(dir, 'note.md'), '# Note\n\nfolder body', 'utf8');
+    await tx((t) => linkFolder(t, ctx, dir));
+    await tx((t) => refreshIndex(t, ctx));
+    const doc0 = (await db().select({ id: documents.id, status: documents.status }).from(documents).where(and(eq(documents.projectId, ctx.projectId), eq(documents.relativePath, 'note.md'))))[0]!;
+    await tx((t) => archiveDocument(t, ctx, doc0.id));
+    await tx((t) => refreshIndex(t, ctx)); // file still present
+    const after = (await db().select({ status: documents.status }).from(documents).where(eq(documents.id, doc0.id)))[0]!;
+    expect(after.status).toBe('archived'); // NOT silently reactivated
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('B3.5/B3.6 explicit restore returns the doc to active and ingests a NEW version when bytes changed', async () => {
+    const ctx = await makeWorkspace();
+    const dir = await mkdtemp(join(tmpdir(), 'pf-folder-'));
+    await writeFile(join(dir, 'r.md'), '# R\n\noriginal body', 'utf8');
+    await tx((t) => linkFolder(t, ctx, dir));
+    await tx((t) => refreshIndex(t, ctx));
+    const doc = (await db().select({ id: documents.id }).from(documents).where(and(eq(documents.projectId, ctx.projectId), eq(documents.relativePath, 'r.md'))))[0]!;
+    const beforeCount = (await versionsOf(doc.id)).length;
+    await tx((t) => archiveDocument(t, ctx, doc.id));
+    await writeFile(join(dir, 'r.md'), '# R\n\nCHANGED body', 'utf8'); // source changed while archived
+    const outcome = await tx((t) => restoreDocument(t, ctx, store, doc.id));
+    expect(outcome.restored).toBe(true);
+    expect(outcome.versionReused).toBe(false); // changed bytes → new version
+    const status = (await db().select({ status: documents.status }).from(documents).where(eq(documents.id, doc.id)))[0]!;
+    expect(status.status).toBe('active');
+    expect((await versionsOf(doc.id)).length).toBe(beforeCount + 1);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('B3.7 restoration with UNCHANGED bytes reuses the existing version', async () => {
+    const ctx = await makeWorkspace();
+    const dir = await mkdtemp(join(tmpdir(), 'pf-folder-'));
+    await writeFile(join(dir, 'u.md'), '# U\n\nstable body', 'utf8');
+    await tx((t) => linkFolder(t, ctx, dir));
+    await tx((t) => refreshIndex(t, ctx));
+    const doc = (await db().select({ id: documents.id }).from(documents).where(and(eq(documents.projectId, ctx.projectId), eq(documents.relativePath, 'u.md'))))[0]!;
+    const beforeCount = (await versionsOf(doc.id)).length;
+    await tx((t) => archiveDocument(t, ctx, doc.id));
+    const outcome = await tx((t) => restoreDocument(t, ctx, store, doc.id)); // same bytes on disk
+    expect(outcome.restored).toBe(true);
+    expect(outcome.versionReused).toBe(true);
+    expect((await versionsOf(doc.id)).length).toBe(beforeCount); // no new version
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('B3.8 invalid archive and restore actions are rejected server-side', async () => {
+    const ctx = await makeWorkspace();
+    // Archive a nonexistent id → NotFound (indistinguishable from another workspace's id).
+    await expect(tx((t) => archiveDocument(t, ctx, randomUUID()))).rejects.toThrow();
+    // Restore a non-archived (active) document → validation error.
+    const { docId } = await byteExactDoc(ctx, 'active.md', 'body');
+    await expect(tx((t) => restoreDocument(t, ctx, store, docId))).rejects.toThrow();
+  });
+
+  it('B3.9 restore of an archived CLOUD document completes immediately from retained bytes', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'cloudy.md', 'cloud body');
+    await tx((t) => archiveDocument(t, ctx, docId));
+    const outcome = await tx((t) => restoreDocument(t, ctx, store, docId));
+    expect(outcome.restored).toBe(true);
+    expect(outcome.pending).toBe(false);
+    const status = (await db().select({ status: documents.status }).from(documents).where(eq(documents.id, docId)))[0]!;
+    expect(status.status).toBe('active');
   });
 });

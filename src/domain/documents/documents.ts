@@ -9,7 +9,7 @@ import { log } from '@/lib/log';
 import { type DbTx } from '@/db/client';
 import { documentChunks, documents, projects } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
-import { getObjectStore } from './object-store';
+import { type ObjectStore, ObjectNotFoundError, getObjectStore, keyBelongsToTenant } from './object-store';
 import { ingestDocumentVersion } from './versions';
 
 /** MIME for the text kinds supported in slice 1 (used when retaining raw version bytes). */
@@ -147,6 +147,8 @@ export async function refreshIndex(tx: DbTx, ctx: TenantContext): Promise<IndexS
       sha256: documents.sha256,
       status: documents.status,
       disclosure: documents.disclosure,
+      archivedIntentAt: documents.archivedIntentAt,
+      restoreRequestedAt: documents.restoreRequestedAt,
     })
     .from(documents)
     .where(and(eq(documents.projectId, ctx.projectId), eq(documents.orgId, ctx.orgId)));
@@ -194,6 +196,14 @@ export async function refreshIndex(tx: DbTx, ctx: TenantContext): Promise<IndexS
       const raw = await readFile(full, 'utf8');
       const sha = createHash('sha256').update(raw).digest('hex');
       const prior = byPath.get(rel);
+      // No silent restore: an INTENTIONALLY-archived Document (operator action) whose source file still
+      // exists is NOT reactivated by a normal refresh unless it carries an explicit restore intent. An
+      // implicit disappearance-archive (archivedIntentAt null) reappearing IS reconnected below, preserving
+      // the existing vanish→reappear behavior — the source coming back was never an intentional archive.
+      if (prior && prior.status === 'archived' && prior.archivedIntentAt && !prior.restoreRequestedAt) {
+        summary.skippedUnchanged += 1; // already in `seen`, so the archival loop leaves it archived
+        continue;
+      }
       if (prior && prior.sha256 === sha && prior.status === 'active') {
         summary.skippedUnchanged += 1;
         continue;
@@ -290,6 +300,9 @@ async function upsertDocument(
         status: 'active',
         errorMessage: null,
         indexedAt: new Date(),
+        // Reactivating clears any archive intent + restore intent a prior archive/restore recorded.
+        archivedIntentAt: null,
+        restoreRequestedAt: null,
         updatedAt: new Date(),
       })
       .where(eq(documents.id, d.priorId));
@@ -713,6 +726,149 @@ export async function declassifyDocument(tx: DbTx, ctx: TenantContext, documentI
   if (doc.disclosure === 'workspace_internal') throw new ConflictError('This document is not restricted.');
   await tx.update(documents).set({ disclosure: 'workspace_internal', updatedAt: new Date() }).where(and(eq(documents.id, documentId), eq(documents.projectId, ctx.projectId), eq(documents.orgId, ctx.orgId)));
   await writeAudit(tx, ctx, { action: 'document.declassified', entityType: 'document', entityId: documentId, detail: { relativePath: doc.relativePath, reason: reason.trim() } });
+}
+
+// ---- Adapter-neutral lifecycle: archive & explicit restore --------------------------------------
+//
+// Archive and restore are LOGICAL Document lifecycle actions. Source adapters determine ingestion; they
+// do not redefine lifecycle — so both operate identically whether a source arrived by cloud upload or by
+// folder sync. Neither ever deletes evidence: archive stops current retrieval but preserves the row, every
+// retained version + its immutable chunks, the stored source object(s), and all Knowledge/run
+// relationships. A normal folder refresh never silently reactivates an archived Document (see
+// `refreshIndex`); restoration is always an explicit operator action.
+
+interface LifecycleDocRow {
+  id: string;
+  source: DocumentSource;
+  status: string;
+  relativePath: string;
+  objectKey: string | null;
+  mimeType: string | null;
+  disclosure: KnowledgeDisclosure;
+}
+
+async function loadLifecycleDoc(tx: DbTx, ctx: TenantContext, documentId: string): Promise<LifecycleDocRow> {
+  const row = (
+    await tx
+      .select({ id: documents.id, source: documents.source, status: documents.status, relativePath: documents.relativePath, objectKey: documents.objectKey, mimeType: documents.mimeType, disclosure: documents.disclosure })
+      .from(documents)
+      .where(and(eq(documents.id, documentId), eq(documents.projectId, ctx.projectId), eq(documents.orgId, ctx.orgId)))
+      .limit(1)
+  )[0];
+  // Throw NotFound (not "forbidden") so another workspace's id is indistinguishable from a nonexistent one.
+  if (!row) throw new NotFoundError('Document');
+  return row;
+}
+
+/**
+ * ARCHIVE a Document (adapter-neutral, admin). Marks it archived and removes it from CURRENT retrieval by
+ * dropping only the legacy retrievable (null-version) chunks — every immutable version, its version-scoped
+ * chunks, the source object(s), and all Knowledge/run relationships are preserved. Clears any prior
+ * restore intent. Idempotent: archiving an already-archived Document is a no-op. Audited.
+ */
+export async function archiveDocument(tx: DbTx, ctx: TenantContext, documentId: string): Promise<void> {
+  const doc = await loadLifecycleDoc(tx, ctx, documentId);
+  if (doc.status === 'archived') return; // already archived — idempotent, no evidence touched
+  await tx.delete(documentChunks).where(and(eq(documentChunks.documentId, documentId), isNull(documentChunks.documentVersionId)));
+  await tx
+    .update(documents)
+    // Mark this an INTENTIONAL archive so a later folder refresh never silently reactivates it (distinct
+    // from the implicit disappearance-archive refresh performs when a source file vanishes).
+    .set({ status: 'archived', chunkCount: 0, archivedIntentAt: new Date(), restoreRequestedAt: null, updatedAt: new Date() })
+    .where(and(eq(documents.id, documentId), eq(documents.projectId, ctx.projectId), eq(documents.orgId, ctx.orgId)));
+  await writeAudit(tx, ctx, { action: 'document.archived', entityType: 'document', entityId: documentId, detail: { source: doc.source, relativePath: doc.relativePath } });
+}
+
+export interface RestoreOutcome {
+  /** True when the source was re-observed and the Document is active again. */
+  restored: boolean;
+  /** True when restoration could not complete now (source unreachable from this host); the intent is
+   *  recorded and the next refresh from a capable host completes it. Applies to local sources only. */
+  pending: boolean;
+  /** Whether re-observation reused the identical existing version (unchanged bytes) vs created a new one. */
+  versionReused?: boolean;
+}
+
+/** Read the current bytes of a local-folder source from a linked folder reachable on THIS host. */
+async function readLocalSource(tx: DbTx, ctx: TenantContext, relativePath: string): Promise<Buffer | null> {
+  const folder = await getFolderPath(tx, ctx);
+  if (!folder) return null;
+  try {
+    const s = await stat(folder);
+    if (!s.isDirectory()) return null;
+    return await readFile(join(folder, relativePath.split('/').join(sep)));
+  } catch {
+    return null; // path unreachable from this host (e.g. cloud app cannot see a local disk)
+  }
+}
+
+/**
+ * RESTORE an intentionally-archived Document (adapter-neutral, admin) — the EXPLICIT operator action that
+ * returns it to active. It re-observes the current source and ingests a new immutable version if the bytes
+ * changed, or reuses the identical existing version if unchanged; either way it rebuilds the legacy
+ * retrievable chunk set and marks the Document active. A cloud source (its bytes retained in object
+ * storage) completes immediately. A local source completes when its path is reachable from this host;
+ * otherwise the restore intent is recorded and the next folder refresh from a capable host completes it —
+ * never a silent reactivation. Rejects (validation) if the Document is not archived. Audited.
+ */
+export async function restoreDocument(
+  tx: DbTx,
+  ctx: TenantContext,
+  store: ObjectStore,
+  documentId: string,
+  opts?: { bytes?: Buffer },
+): Promise<RestoreOutcome> {
+  const doc = await loadLifecycleDoc(tx, ctx, documentId);
+  if (doc.status !== 'archived') throw new ValidationError(['Only an archived document can be restored.']);
+
+  // Resolve the current source bytes: caller-supplied, else the retained cloud object, else the local file.
+  let bytes: Buffer | null = opts?.bytes ?? null;
+  if (!bytes) {
+    if (doc.source === 'cloud_upload') {
+      if (doc.objectKey && keyBelongsToTenant(doc.objectKey, ctx)) {
+        try {
+          bytes = await store.get(doc.objectKey);
+        } catch (err) {
+          if (!(err instanceof ObjectNotFoundError)) throw err;
+          bytes = null; // object gone — cannot restore evidence that no longer exists
+        }
+      }
+    } else {
+      bytes = await readLocalSource(tx, ctx, doc.relativePath);
+    }
+  }
+
+  if (!bytes) {
+    // Source not reachable from this host. Record the explicit intent so the next refresh from a capable
+    // host completes the restore; never fabricate an active state without re-observed evidence.
+    await tx
+      .update(documents)
+      .set({ restoreRequestedAt: new Date(), updatedAt: new Date() })
+      .where(and(eq(documents.id, documentId), eq(documents.projectId, ctx.projectId), eq(documents.orgId, ctx.orgId)));
+    await writeAudit(tx, ctx, { action: 'document.restore_requested', entityType: 'document', entityId: documentId, detail: { source: doc.source, relativePath: doc.relativePath } });
+    return { restored: false, pending: true };
+  }
+
+  const text = bytes.toString('utf8');
+  const mimeType = doc.mimeType ?? 'text/plain';
+  // Ingest the observed state as an immutable version: same content reuses the version, changed content
+  // creates a new one. Sets the current pointer on success.
+  const ingest = await ingestDocumentVersion(tx, ctx, store, { documentId, bytes, text, mimeType, disclosure: doc.disclosure, chunk: chunkText });
+
+  // Rebuild the legacy retrievable (null-version) chunk set so current retrieval sees the source again.
+  const chunks = chunkText(text);
+  await tx.delete(documentChunks).where(and(eq(documentChunks.documentId, documentId), isNull(documentChunks.documentVersionId)));
+  if (chunks.length > 0) {
+    await tx.insert(documentChunks).values(
+      chunks.map((content, i) => ({ orgId: ctx.orgId, projectId: ctx.projectId, documentId, chunkIndex: i, content })),
+    );
+  }
+  await tx
+    .update(documents)
+    .set({ status: 'active', chunkCount: chunks.length, errorMessage: null, indexedAt: new Date(), archivedIntentAt: null, restoreRequestedAt: null, updatedAt: new Date() })
+    .where(and(eq(documents.id, documentId), eq(documents.projectId, ctx.projectId), eq(documents.orgId, ctx.orgId)));
+  await writeAudit(tx, ctx, { action: 'document.restored', entityType: 'document', entityId: documentId, detail: { source: doc.source, relativePath: doc.relativePath, versionReused: ingest.reused } });
+  return { restored: true, pending: false, versionReused: ingest.reused };
 }
 
 export interface DocumentListRow {

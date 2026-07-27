@@ -264,24 +264,8 @@ export async function retryDocument(tx: DbTx, ctx: TenantContext, documentId: st
   });
 }
 
-/** Archive a document: stop retrieval (drop chunks), keep the row + object +
- *  provenance. Never a silent hard-delete. */
-export async function archiveDocument(tx: DbTx, ctx: TenantContext, documentId: string): Promise<void> {
-  await requireOwnedCloudDoc(tx, ctx, documentId);
-  // Drop only the legacy retrievable (null-version) chunks; immutable version chunks are preserved so a
-  // Knowledge citation / run that relied on a specific version keeps its evidence after archival.
-  await tx.delete(documentChunks).where(and(eq(documentChunks.documentId, documentId), isNull(documentChunks.documentVersionId)));
-  await tx
-    .update(documents)
-    .set({ status: 'archived', chunkCount: 0, updatedAt: new Date() })
-    .where(eq(documents.id, documentId));
-  await writeAudit(tx, ctx, {
-    action: 'document.archived',
-    entityType: 'document',
-    entityId: documentId,
-    detail: {},
-  });
-}
+// Archive is now an adapter-neutral lifecycle action — see `archiveDocument` / `restoreDocument` in
+// documents.ts. A source's arrival channel (cloud vs local) does not redefine its lifecycle.
 
 interface OwnedCloudDoc {
   id: string;

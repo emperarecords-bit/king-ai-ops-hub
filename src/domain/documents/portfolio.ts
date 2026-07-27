@@ -69,7 +69,12 @@ export type PortfolioLens = 'needs_attention' | 'restricted' | 'referenced_by_kn
 export interface DocumentActionAvailability {
   retry: boolean;
   replace: boolean;
+  /** Archive is a LOGICAL lifecycle action, available for either adapter (cloud or local) — a source's
+   *  arrival channel does not redefine its lifecycle. */
   archive: boolean;
+  /** Restore an intentionally-archived Document, also adapter-neutral (cloud completes immediately; local
+   *  completes on the next refresh from a host that can reach the path). */
+  restore: boolean;
 }
 
 export interface PortfolioRecord {
@@ -111,12 +116,30 @@ export interface DocumentAssessmentInput {
   versionCount: number;
   knowledgeRefCount: number;
   aiOperationCount: number;
-  /** The most recent version's createdAt or the source's modified time — for the "recently changed" lens. */
-  lastChangeAt: Date | null;
+  /** The most recent TRUSTWORTHY source-change time (see `latestSourceChangeAt`) — for the "recently
+   *  changed" lens. Null when no genuine source change is known (e.g. only backfilled versions exist);
+   *  infrastructure migration never makes a Document look recently changed. */
+  lastSourceChangeAt: Date | null;
   viewerIsAdmin: boolean;
 }
 
 const RECENTLY_CHANGED_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * The most recent time this Document's SOURCE MATERIAL genuinely changed, or null if unknown. A version
+ * contributes a change time ONLY when it was created by a real ingestion observation — its `sourceChangeAt`
+ * is set (preferring the source's own modified time, else the observation time). A version created by
+ * infrastructure backfill / migration has `sourceChangeAt = null` and never counts: creating a retained
+ * version row is not a business-source change. Re-observing the same content creates no new version, so it
+ * advances nothing. Pure and deterministic — the sole input to the "recently changed" lens.
+ */
+export function latestSourceChangeAt(versions: ReadonlyArray<{ sourceChangeAt: Date | null }>): Date | null {
+  let latest: Date | null = null;
+  for (const v of versions) {
+    if (v.sourceChangeAt && (!latest || v.sourceChangeAt > latest)) latest = v.sourceChangeAt;
+  }
+  return latest;
+}
 
 /**
  * Pure Document assessment. Derives the canonical group, a specific lifecycle reason, fidelity,
@@ -180,16 +203,19 @@ export function assessDocument(d: DocumentAssessmentInput, now: Date): Portfolio
   if (d.knowledgeRefCount > 0) lenses.push('referenced_by_knowledge');
   if (d.aiOperationCount > 0) lenses.push('supplied_to_ai');
   if (d.versionCount > 1) lenses.push('multiple_versions');
-  if (d.lastChangeAt && now.getTime() - d.lastChangeAt.getTime() <= RECENTLY_CHANGED_MS) lenses.push('recently_changed');
+  if (d.lastSourceChangeAt && now.getTime() - d.lastSourceChangeAt.getTime() <= RECENTLY_CHANGED_MS) lenses.push('recently_changed');
   if (currentValid && d.currentVersion!.indexDegraded) lenses.push('integrity_concern');
 
-  // Archive/replace/retry are cloud-only operator capabilities (the domain archive/replace/retry require a
-  // cloud source); a linked-folder Document's lifecycle is driven by refresh, not per-row actions.
+  // Retry/replace are cloud-specific ingestion capabilities (re-enqueue a cloud job / upload a new cloud
+  // file); a local source re-ingests through folder refresh, not per-row buttons. Archive and restore are
+  // LOGICAL lifecycle actions and are adapter-neutral — the source adapter determines ingestion, not
+  // lifecycle. The server re-checks authorization + lifecycle on every action; these flags only gate the UI.
   const isCloud = d.source === 'cloud_upload';
   const actions: DocumentActionAvailability = {
     retry: isCloud && (d.status === 'failed' || d.status === 'source_unavailable'),
     replace: isCloud && d.viewerIsAdmin,
-    archive: isCloud && d.viewerIsAdmin && d.status !== 'archived',
+    archive: d.viewerIsAdmin && d.status !== 'archived',
+    restore: d.viewerIsAdmin && d.status === 'archived',
   };
 
   return {
@@ -248,7 +274,7 @@ export async function loadDocumentPortfolio(tx: DbTx, ctx: TenantContext, now: D
   }
 
   const docs = await tx
-    .select({ id: documents.id, relativePath: documents.relativePath, source: documents.source, status: documents.status, disclosure: documents.disclosure, currentVersionId: documents.currentVersionId, indexedAt: documents.indexedAt, sourceModifiedAt: documents.sourceModifiedAt })
+    .select({ id: documents.id, relativePath: documents.relativePath, source: documents.source, status: documents.status, disclosure: documents.disclosure, currentVersionId: documents.currentVersionId, indexedAt: documents.indexedAt })
     .from(documents)
     .where(and(eq(documents.orgId, ctx.orgId), eq(documents.projectId, ctx.projectId)));
 
@@ -262,7 +288,7 @@ export async function loadDocumentPortfolio(tx: DbTx, ctx: TenantContext, now: D
 
   // Bulk-load all versions for the visible Documents.
   const versions = await tx
-    .select({ id: documentVersions.id, documentId: documentVersions.documentId, contentFidelity: documentVersions.contentFidelity, indexStatus: documentVersions.indexStatus, indexDegraded: documentVersions.indexDegraded, createdAt: documentVersions.createdAt })
+    .select({ id: documentVersions.id, documentId: documentVersions.documentId, contentFidelity: documentVersions.contentFidelity, indexStatus: documentVersions.indexStatus, indexDegraded: documentVersions.indexDegraded, createdAt: documentVersions.createdAt, sourceChangeAt: documentVersions.sourceChangeAt })
     .from(documentVersions)
     .where(and(eq(documentVersions.orgId, ctx.orgId), eq(documentVersions.projectId, ctx.projectId)));
   const versionsByDoc = new Map<string, typeof versions>();
@@ -320,7 +346,7 @@ export async function loadDocumentPortfolio(tx: DbTx, ctx: TenantContext, now: D
         versionCount: vs.length,
         knowledgeRefCount: knowledgeCountByDoc.get(d.id) ?? 0,
         aiOperationCount: runsByDoc.get(d.id)?.size ?? 0,
-        lastChangeAt: latestVersion?.createdAt ?? d.sourceModifiedAt ?? d.indexedAt ?? null,
+        lastSourceChangeAt: latestSourceChangeAt(vs),
         viewerIsAdmin,
       },
       now,

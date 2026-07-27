@@ -302,6 +302,20 @@
       "when": 1785160235623,
       "tag": "0042_faithful_rumiko_fujikawa",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1785165527171,
+      "tag": "0043_parallel_karen_page",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1785166211314,
+      "tag": "0044_lyrical_deathstrike",
+      "breakpoints": true
     }
   ]
 }

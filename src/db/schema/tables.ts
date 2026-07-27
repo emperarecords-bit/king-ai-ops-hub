@@ -644,6 +644,16 @@ export const documents = pgTable(
     currentVersionId: uuid('current_version_id'),
     /** Last time ingestion observed this source (same-content refresh + disappearance behavior). */
     lastSeenAt: timestamp('last_seen_at', { withTimezone: true }),
+    /** Set when a Document was archived by an EXPLICIT operator action (adapter-neutral archive) — as
+     *  opposed to the implicit disappearance-archive a folder refresh performs when a source file vanishes.
+     *  A normal refresh reactivates a reappeared disappearance-archived source, but NEVER silently restores
+     *  one an operator intentionally archived (this flag set); restoring that requires the explicit action. */
+    archivedIntentAt: timestamp('archived_intent_at', { withTimezone: true }),
+    /** Set when an operator explicitly asks to restore an intentionally-archived Document. A normal folder
+     *  refresh never reactivates an archived Document on its own; it only completes the restore of one that
+     *  carries this intent (then clears it). Null for a Document that was never archived or whose restore
+     *  has completed. Adapter-neutral: cloud restore completes immediately and never persists this. */
+    restoreRequestedAt: timestamp('restore_requested_at', { withTimezone: true }),
     ...timestamps,
   },
   (t) => [
@@ -682,6 +692,12 @@ export const documentVersions = pgTable(
     /** The source's own revision id, when the adapter supplies one. */
     sourceRevisionId: text('source_revision_id'),
     sourceModifiedAt: timestamp('source_modified_at', { withTimezone: true }),
+    /** The trustworthy time the SOURCE MATERIAL genuinely changed — set only when this version was created
+     *  by a real ingestion observation (a new/changed source hash), preferring the source's own modified
+     *  time and falling back to the observation time. NULL for a version created by infrastructure backfill
+     *  / migration: creating a retained version row is not a business-source change, so a migration must
+     *  never make a Document look recently changed. The "recently changed" lens reads only this column. */
+    sourceChangeAt: timestamp('source_change_at', { withTimezone: true }),
     ingestedAt: timestamp('ingested_at', { withTimezone: true }),
     indexedAt: timestamp('indexed_at', { withTimezone: true }),
     indexStatus: documentIndexStatusEnum('index_status').notNull().default('pending'),

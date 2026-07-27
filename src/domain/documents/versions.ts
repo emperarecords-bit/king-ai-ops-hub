@@ -122,6 +122,10 @@ export async function ingestDocumentVersion(tx: DbTx, ctx: TenantContext, store:
       disclosureSnapshot: input.disclosure,
       sourceRevisionId: input.sourceRevisionId ?? null,
       sourceModifiedAt: input.sourceModifiedAt ?? null,
+      // A genuine ingestion is a real source change (new/changed hash observed). Record WHEN the source
+      // changed, preferring its own modified time; the "recently changed" lens reads only this. Backfill,
+      // by contrast, leaves this null — a migration is not a business-source change.
+      sourceChangeAt: input.sourceModifiedAt ?? new Date(),
       ingestedAt: new Date(),
       indexStatus: 'pending',
       parserVersion: PARSER_VERSION,

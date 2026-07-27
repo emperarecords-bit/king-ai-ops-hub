@@ -6,6 +6,7 @@ import {
   linkFolderAction,
   refreshIndexAction,
   replaceDocumentAction,
+  restoreDocumentAction,
   retryDocumentAction,
   uploadDocumentsAction,
   type DocumentsState,
@@ -108,7 +109,9 @@ export function UploadForm({ projectKey }: { projectKey: string }) {
 }
 
 /** Per-document quick actions, driven by the shared Document assessment (which computed lifecycle
- *  validity). The server actions re-check authorization + lifecycle — these buttons never bypass gating. */
+ *  validity). Archive and restore are adapter-neutral (cloud or local); retry and replace are cloud-only
+ *  ingestion capabilities. The server actions re-check authorization + lifecycle — these buttons never
+ *  bypass gating. */
 export function DocumentRowActions({
   projectKey,
   documentId,
@@ -118,32 +121,43 @@ export function DocumentRowActions({
   projectKey: string;
   documentId: string;
   source: string;
-  actions: { retry: boolean; replace: boolean; archive: boolean };
+  actions: { retry: boolean; replace: boolean; archive: boolean; restore: boolean };
 }) {
   const [retryState, retry, retrying] = useActionState(retryDocumentAction, initial);
   const [archiveState, archive, archiving] = useActionState(archiveDocumentAction, initial);
   const [replaceState, replace, replacing] = useActionState(replaceDocumentAction, initial);
+  const [restoreState, restore, restoring] = useActionState(restoreDocumentAction, initial);
   const isCloud = source === 'cloud_upload';
-  const canRetry = actions.retry;
-  const canArchive = actions.archive;
+  const anyAction = actions.retry || actions.replace || actions.archive || actions.restore;
 
-  if (!isCloud) return <span className="text-xs text-[var(--muted)]">local folder</span>;
+  const hidden = (
+    <>
+      <input type="hidden" name="projectKey" value={projectKey} />
+      <input type="hidden" name="documentId" value={documentId} />
+    </>
+  );
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {canRetry ? (
+      {actions.retry ? (
         <form action={retry}>
-          <input type="hidden" name="projectKey" value={projectKey} />
-          <input type="hidden" name="documentId" value={documentId} />
+          {hidden}
           <button type="submit" disabled={retrying} className={smallBtn}>
             {retrying ? 'Retrying…' : 'Retry'}
           </button>
         </form>
       ) : null}
-      {canArchive ? (
+      {actions.restore ? (
+        <form action={restore}>
+          {hidden}
+          <button type="submit" disabled={restoring} className={smallBtn}>
+            {restoring ? 'Restoring…' : 'Restore'}
+          </button>
+        </form>
+      ) : null}
+      {actions.archive ? (
         <form action={archive}>
-          <input type="hidden" name="projectKey" value={projectKey} />
-          <input type="hidden" name="documentId" value={documentId} />
+          {hidden}
           <button type="submit" disabled={archiving} className={smallBtn}>
             {archiving ? 'Archiving…' : 'Archive'}
           </button>
@@ -151,8 +165,7 @@ export function DocumentRowActions({
       ) : null}
       {actions.replace ? (
         <form action={replace} className="flex items-center gap-1">
-          <input type="hidden" name="projectKey" value={projectKey} />
-          <input type="hidden" name="documentId" value={documentId} />
+          {hidden}
           <input
             name="file"
             type="file"
@@ -164,10 +177,15 @@ export function DocumentRowActions({
           </button>
         </form>
       ) : null}
-      {[retryState, archiveState, replaceState].map((s, i) =>
+      {!anyAction ? <span className="text-xs text-[var(--muted)]">{isCloud ? '—' : 'local folder'}</span> : null}
+      {[retryState, restoreState, archiveState, replaceState].map((s, i) =>
         s.error ? (
           <span key={i} role="alert" className="text-xs text-[var(--danger)]">
             {s.error}
+          </span>
+        ) : s.message ? (
+          <span key={i} className="text-xs text-[var(--success)]">
+            {s.message}
           </span>
         ) : null,
       )}
