@@ -1726,6 +1726,24 @@ future work, not built inside the adapter); a long free-text body is flagged `po
 than given one misleading verdict; source-supported verification and current inspectability are reported
 separately. Locked by `tests/unit/knowledge-conversation.test.ts` (14). Full suite **514/514**.
 
-*The Knowledge Portfolio & Detail pages (deferred, last) will render from this same descriptor object —
-no second interpretation of trust. Decision↔Knowledge link semantics and the Documents classification
-authoring UI (+ artifact evidence) are separate future increments, explicitly NOT built here.*
+**Conversation-build corrections (built 2026-07-26):**
+- **Historical use is its OWN assessment, not inferred.** The descriptor now takes `currentAssessment`
+  AND `historicalAssessment` (each `assessKnowledge` run with its own intended use + its own consumer
+  disclosure decision); `historicalUseVerdict` = the historical assessment's verdict, never a mapping of
+  current-refusal reasons. A draft stays withheld in both modes; restricted-without-a-historical-grant
+  stays withheld; stale is withheld-current yet qualified-historical — each because its own assessment
+  says so. *Principle: alternative use is established by a separate trust assessment, not inferred from
+  why another use was denied.*
+- **Audience visibility precedes rendering.** `describeKnowledgeForConversation` takes `operatorAccess`;
+  for a restricted record the viewer may not inspect, it returns a REDACTED descriptor directly (claim
+  null, sources empty, only a bounded withholding reason) — the sensitive fields are absent, not stripped
+  by a downstream renderer. `visibility.operator` ∈ full / metadata_only / withholding_only / none; the
+  renderers refuse to reveal content the visibility state forbids. *Principle: audience-specific
+  rendering begins with audience-specific data visibility.*
+- Locked by 5 more unit tests (draft-withheld-both · restricted-withheld-both · verdicts-match-their-own
+  assessment · authorized-operator-inspects · unauthorized-operator-gets-reason-only-content-absent).
+  Full suite **519/519**. **Operating-partner conversation CLOSED.**
+
+*The Knowledge Portfolio & Detail pages (NEXT) render from this same descriptor object — no second
+interpretation of trust. Decision↔Knowledge link semantics and the Documents classification authoring
+UI (+ artifact evidence) are separate future increments, explicitly NOT built here.*

@@ -46,8 +46,12 @@ export interface ConversationSourceEvidence {
   relied: boolean;
 }
 
+export type OperatorVisibility = 'full' | 'metadata_only' | 'withholding_only' | 'none';
+
 export interface KnowledgeConversationDescriptor {
-  claim: { title: string; body: string };
+  /** Null when the viewer may not see the record's content (e.g. a restricted record + unauthorized
+   *  operator). The sensitive fields are ABSENT here, not stripped by a downstream renderer. */
+  claim: { title: string; body: string } | null;
   /** 'single' when the caller guarantees one bounded claim; 'possibly_multiple' otherwise (heuristic —
    *  a conversational verdict must NOT imply uniform trust across claims the model has not separated). */
   claimGranularity: 'single' | 'possibly_multiple';
@@ -67,7 +71,7 @@ export interface KnowledgeConversationDescriptor {
   limitations: string[];
   /** Deep evidence — surfaced by the operator evidence renderer, not routine conversation. */
   availableEvidence: { sources: ConversationSourceEvidence[]; supportJudgmentId: string | null };
-  visibility: { operator: 'full' | 'existence_only'; aiConsumer: 'permitted' | 'denied' };
+  visibility: { operator: OperatorVisibility; aiConsumer: 'permitted' | 'denied' };
 }
 
 export interface KnowledgeConversationInput {
@@ -80,12 +84,19 @@ export interface KnowledgeConversationInput {
     disclosure: KnowledgeDisclosure;
     status: KnowledgeStatus;
   };
-  /** The shared assessment computed for a CURRENT-operational-fact intended use (the strict baseline). */
-  assessment: KnowledgeAssessment;
+  /** The shared assessment run for a CURRENT-operational-fact use — the strict baseline verdict. */
+  currentAssessment: KnowledgeAssessment;
+  /** The shared assessment run INDEPENDENTLY for a historical/audit use (its own disclosure decision for
+   *  the historical consumer). Alternative use is established by its own assessment, never inferred from
+   *  why current use was refused. */
+  historicalAssessment: KnowledgeAssessment;
   provenance: KnowledgeProvenanceAssessment;
   verificationEventCount: number;
   /** The disclosure decision for the CONSUMER this description is for (permitted + why, if withheld). */
   disclosureDecision: { permitted: boolean; reason: string | null };
+  /** Whether the human VIEWER may inspect a restricted record's content. False → a restricted record's
+   *  content and source metadata are ABSENT from the descriptor (only a bounded withholding reason). */
+  operatorAccess?: boolean;
   relevanceReason?: string | null;
   applicationCount: number;
   /** Present when this version was corrected by a later version (superseded). */
@@ -113,9 +124,6 @@ const FRESHNESS_PHRASE: Record<FreshnessState, string> = {
   unknown: 'continuing validity has not been established',
 };
 
-// Withhold reasons that are STRUCTURAL (deny for any use) vs current-fact-ONLY (fine for history).
-const STRUCTURAL_WITHHOLD = new Set(['draft', 'archived', 'restricted_without_grant', 'invalid_scope']);
-
 /** ~4kB of prose is unlikely to be one honestly-uniform claim; flag it so a verdict isn't over-applied. */
 const MULTI_CLAIM_LENGTH = 1_500;
 
@@ -127,7 +135,7 @@ function deriveCategory(i: KnowledgeConversationInput, freshness: FreshnessState
   if (freshness === 'stale' || freshness === 'historical') return 'stale_historical';
   if (freshness === 'review_due') return 'review_due';
   if (i.supersededBy) return 'superseded_correction';
-  if (i.assessment.useState === 'withheld') return 'withheld_other';
+  if (i.currentAssessment.useState === 'withheld') return 'withheld_other';
   if (i.item.verification === 'source_supported') return 'source_supported';
   if (i.item.epistemicBasis === 'summarized') return 'document_summary';
   if (i.item.epistemicBasis === 'inferred') return 'inference';
@@ -158,18 +166,41 @@ function provenancePhrase(p: KnowledgeProvenanceAssessment): string {
  * Layer 1 — the pure conversational descriptor. Composes existing assessments; adds no trust logic.
  */
 export function describeKnowledgeForConversation(i: KnowledgeConversationInput): KnowledgeConversationDescriptor {
-  const freshness = i.assessment.freshness;
+  const freshness = i.currentAssessment.freshness;
   const asOf = i.asOf ? i.asOf.toISOString().slice(0, 10) : null;
   const category = deriveCategory(i, freshness);
+  const aiConsumer = !i.disclosureDecision.permitted && i.item.disclosure === 'restricted' ? 'denied' : 'permitted';
 
-  // Historical-use verdict is derived from WHY current use was refused — a structural gate denies every
-  // use; a current-fact-only concern (stale / scope-closed / disputed / broken provenance) is fine,
-  // qualified, for historical analysis.
-  const currentState = i.assessment.useState;
-  let historicalState: UseState;
-  if (currentState !== 'withheld') historicalState = currentState;
-  else if (i.assessment.reasons.some((r) => STRUCTURAL_WITHHOLD.has(r))) historicalState = 'withheld';
-  else historicalState = 'usable_with_qualification';
+  // AUDIENCE-SPECIFIC DATA VISIBILITY comes FIRST. If the human viewer may not inspect a restricted
+  // record, its content and source metadata are ABSENT from the descriptor — only a bounded withholding
+  // reason survives. We construct the redacted descriptor directly, never a full one that a renderer
+  // must later strip.
+  const operatorAccess = i.operatorAccess ?? true;
+  if (i.item.disclosure === 'restricted' && !operatorAccess) {
+    return {
+      claim: null,
+      claimGranularity: 'single',
+      category: 'restricted_withheld',
+      formation: { epistemicBasis: i.item.epistemicBasis, phrase: '' },
+      verification: { state: i.item.verification, events: 0, phrase: '' },
+      provenance: { state: 'no_source', reliedInspectable: false, phrase: '' },
+      freshness: { state: 'unknown', asOf: null, phrase: '' },
+      scope: { kind: i.item.scopeKind, valid: i.currentAssessment.scopeValid, phrase: '' },
+      relevance: { reason: null },
+      disclosure: { permitted: false, reason: i.disclosureDecision.reason },
+      currentUseVerdict: { state: 'withheld', phrase: 'withheld from this viewer' },
+      historicalUseVerdict: { state: 'withheld', phrase: 'withheld from this viewer' },
+      applications: { count: 0, phrase: '' },
+      decisionRelationship: { recorded: false, phrase: 'No authoritative Decision relationship is recorded.' },
+      limitations: [],
+      availableEvidence: { sources: [], supportJudgmentId: null },
+      visibility: { operator: 'withholding_only', aiConsumer: 'denied' },
+    };
+  }
+
+  // Historical use is its OWN assessment — never inferred from why current use was refused.
+  const currentState = i.currentAssessment.useState;
+  const historicalState: UseState = i.historicalAssessment.useState;
 
   const freshnessPhrase = asOf && freshness === 'unknown' ? `observed as of ${asOf}; continuing validity has not been established` : asOf ? `${FRESHNESS_PHRASE[freshness]} · as of ${asOf}` : FRESHNESS_PHRASE[freshness];
 
@@ -203,7 +234,7 @@ export function describeKnowledgeForConversation(i: KnowledgeConversationInput):
     freshness: { state: freshness, asOf, phrase: freshnessPhrase },
     scope: {
       kind: i.item.scopeKind,
-      valid: i.assessment.scopeValid,
+      valid: i.currentAssessment.scopeValid,
       phrase: i.item.scopeKind === 'workspace' ? 'applies workspace-wide' : `applies to a specific ${i.item.scopeKind}`,
     },
     relevance: { reason: i.relevanceReason ?? null },
@@ -219,7 +250,12 @@ export function describeKnowledgeForConversation(i: KnowledgeConversationInput):
     },
     historicalUseVerdict: {
       state: historicalState,
-      phrase: historicalState === 'withheld' ? 'not available even for historical analysis' : 'available for historical analysis, with its qualification',
+      phrase:
+        historicalState === 'withheld'
+          ? 'not available even for historical analysis'
+          : historicalState === 'usable'
+            ? 'available for historical analysis'
+            : 'available for historical analysis, with its qualification',
     },
     // FACTUAL application language — the trail proves the record was SUPPLIED, not that it was used,
     // referenced, or that it changed any result.
@@ -233,10 +269,7 @@ export function describeKnowledgeForConversation(i: KnowledgeConversationInput):
       sources: i.provenance.resolutions.map((r) => ({ label: r.label, versionHash: null, outcome: r.outcome, relied: r.relied })),
       supportJudgmentId: i.provenance.supportJudgmentId,
     },
-    visibility: {
-      operator: 'full',
-      aiConsumer: !i.disclosureDecision.permitted && i.item.disclosure === 'restricted' ? 'denied' : 'permitted',
-    },
+    visibility: { operator: 'full', aiConsumer },
   };
 }
 
@@ -244,8 +277,14 @@ export function describeKnowledgeForConversation(i: KnowledgeConversationInput):
 // Layer 2 — audience-specific renderers (depth scales with consequence/question)
 // ---------------------------------------------------------------------------
 
+/** A record the viewer may only be told was withheld — never its content. */
+function withholdingLine(d: KnowledgeConversationDescriptor): string {
+  return `Withheld — ${d.disclosure.reason ?? 'not permitted for this viewer'}`;
+}
+
 /** Routine operator answer: the claim, its key qualification, its effective date. Not an 11-field dump. */
 export function renderOperatorSummary(d: KnowledgeConversationDescriptor): string {
+  if (d.visibility.operator !== 'full' || d.claim === null) return withholdingLine(d);
   const parts = [d.claim.title.trim()];
   if (d.currentUseVerdict.state !== 'usable') parts.push(`(${d.currentUseVerdict.phrase})`);
   if (d.freshness.asOf) parts.push(`as of ${d.freshness.asOf}`);
@@ -255,6 +294,7 @@ export function renderOperatorSummary(d: KnowledgeConversationDescriptor): strin
 
 /** Detailed operator evidence view: the full reasoning + deep provenance (progressive disclosure). */
 export function renderOperatorEvidence(d: KnowledgeConversationDescriptor): string {
+  if (d.visibility.operator !== 'full' || d.claim === null) return withholdingLine(d);
   const lines = [
     `Claim: ${d.claim.title}`,
     `Formation: ${d.formation.phrase}.`,
@@ -281,7 +321,7 @@ export function renderOperatorEvidence(d: KnowledgeConversationDescriptor): stri
  * live path the selector already excludes denied records, so this is defence in depth.
  */
 export function renderAiQualification(d: KnowledgeConversationDescriptor): string | null {
-  if (d.visibility.aiConsumer === 'denied') return null;
+  if (d.visibility.aiConsumer === 'denied' || d.claim === null) return null;
   if (d.currentUseVerdict.state === 'withheld') return null; // not supplied for use
   const quals: string[] = [d.formation.phrase, d.verification.phrase, d.freshness.phrase];
   if (d.provenance.state !== 'inspectable_support' && d.provenance.state !== 'no_source') quals.push(d.provenance.phrase);
@@ -294,6 +334,7 @@ export function renderAiQualification(d: KnowledgeConversationDescriptor): strin
  * pretending it is current. Distinct from operational mode, which speaks only the current version.
  */
 export function renderHistoricalAudit(d: KnowledgeConversationDescriptor): string {
+  if (d.visibility.operator !== 'full' || d.claim === null) return withholdingLine(d);
   const lines = [`Historical record: ${d.claim.title}`, `Formation: ${d.formation.phrase}.`, `Freshness: ${d.freshness.phrase}.`];
   if (d.category === 'superseded_correction') lines.push('This version was corrected by a later version.');
   lines.push(`Historical use: ${d.historicalUseVerdict.phrase}.`, `Applications: ${d.applications.phrase}.`);
