@@ -34,8 +34,9 @@ export default async function ProjectLayout({
   const base = `/p/${projectKey}`;
 
   return (
-    <div className="flex min-h-screen">
-      <aside className="w-56 shrink-0 border-r border-[var(--border)] bg-[var(--surface)] p-3">
+    // Stack on mobile (no fixed sidebar squeezing content → no horizontal overflow); side rail on md+.
+    <div className="flex min-h-screen flex-col md:flex-row">
+      <aside className="w-full shrink-0 border-b border-[var(--border)] bg-[var(--surface)] p-3 md:w-56 md:border-b-0 md:border-r">
         <div className="mb-3 flex items-center gap-2 px-2 py-1">
           <span className="truncate text-sm font-semibold text-[var(--foreground)]" title={name}>
             {name}
@@ -47,11 +48,21 @@ export default async function ProjectLayout({
             switch
           </Link>
         </div>
-        <WorkspaceNav base={base} />
+        {/* Mobile: a collapsed menu so the workspace nav never pushes content down or sideways. */}
+        <details className="md:hidden">
+          <summary className="cursor-pointer px-2 py-1 text-sm text-[var(--muted)]">Menu</summary>
+          <div className="mt-2">
+            <WorkspaceNav base={base} />
+          </div>
+        </details>
+        {/* Desktop: the always-visible side rail. */}
+        <div className="hidden md:block">
+          <WorkspaceNav base={base} />
+        </div>
       </aside>
 
       <main className="min-w-0 flex-1">
-        <div className="mx-auto max-w-5xl p-6">{children}</div>
+        <div className="mx-auto max-w-5xl p-4 md:p-6">{children}</div>
       </main>
     </div>
   );
