@@ -5,7 +5,7 @@ import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
-import { agents, documents, memberships, organizations, profiles, projectMembers, projects } from '@/db/schema';
+import { agents, documents, memberships, organizations, profiles, projectMembers, projects, tasks } from '@/db/schema';
 import {
   activateKnowledge,
   archiveKnowledge,
@@ -124,6 +124,32 @@ describe.skipIf(!available)('knowledge portfolio grouping + cross-surface integr
     const historical = pf.groups.historical;
     expect(historical.find((x) => x.id === staleId)?.historicalReason).toBe('Expired for current use');
     expect(historical.find((x) => x.id === v1)?.historicalReason).toBe('Superseded by a newer version');
+  });
+
+  it('broken SUPPLEMENTAL provenance stays Available (relied-upon intact) and carries only a partial concern', async () => {
+    await getSetupDb().insert(documents).values({ orgId, projectId: ctx.projectId, relativePath: 'pf/psi-relied.md', kind: 'markdown', sha256: 'PR_V1', sizeBytes: 10, disclosure: 'workspace_internal' });
+    await getSetupDb().insert(documents).values({ orgId, projectId: ctx.projectId, relativePath: 'pf/psi-supp.md', kind: 'markdown', sha256: 'PS_V1', sizeBytes: 10, disclosure: 'workspace_internal' });
+    const id = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Psi summarized figure', body: 'Psi figure.', kind: 'fact', epistemicBasis: 'summarized', expiresAt: future() }));
+    const relied = await withTenant(ctx, (tx) => attachKnowledgeSource(tx, ctx, id, { sourceType: 'document', sourceRef: 'pf/psi-relied.md', sourceLabel: 'Relied.md', sourceVersionHash: 'PR_V1', transformation: 'summarized' }));
+    await withTenant(ctx, (tx) => attachKnowledgeSource(tx, ctx, id, { sourceType: 'document', sourceRef: 'pf/psi-supp.md', sourceLabel: 'Supp.md', sourceVersionHash: 'PS_V1', transformation: 'summarized' }));
+    await withTenant(ctx, (tx) => recordSupportJudgment(tx, ctx, id, { reliedOnSourceIds: [relied] }));
+    await withTenant(ctx, (tx) => activateKnowledge(tx, ctx, id));
+    await getSetupDb().update(documents).set({ sha256: 'PS_V2' }).where(eq(documents.relativePath, 'pf/psi-supp.md')); // break supplemental only
+
+    const pf = await withTenant(ctx, (tx) => buildKnowledgePortfolio(tx, ctx));
+    expect(groupFor(pf, id)).toBe('available'); // relied-upon intact → still usable now
+    const ref = pf.groups.available.find((x) => x.id === id)!;
+    expect(ref.concerns).toContain('supplemental_partial');
+    expect(ref.concerns).not.toContain('relied_source_unavailable');
+    expect(pf.needsReviewLens.map((x) => x.id)).toContain(id); // surfaced in the lens, still Available
+  });
+
+  it('a draft scoped to a CLOSED task stays Awaiting review (not Historical) and flags the closed origin', async () => {
+    const closed = await getSetupDb().insert(tasks).values({ orgId, projectId: ctx.projectId, title: 'PF closed task', input: 'x', providerSelection: 'openai', status: 'completed', createdBy: userId }).returning({ id: tasks.id });
+    const id = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Omega draft on closed task', body: 'Draft awaiting review.', kind: 'fact', scopeKind: 'task', scopeTaskId: closed[0]!.id, activate: false }));
+    const pf = await withTenant(ctx, (tx) => buildKnowledgePortfolio(tx, ctx));
+    expect(groupFor(pf, id)).toBe('awaiting_review'); // closed origin does not make it historical
+    expect(pf.groups.awaiting_review.find((x) => x.id === id)!.originatingTaskClosed).toBe(true);
   });
 
   it('Detail verdict never contradicts the Portfolio group', async () => {

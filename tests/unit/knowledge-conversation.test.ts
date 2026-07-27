@@ -191,6 +191,13 @@ describe('knowledge conversation descriptor', () => {
     expect(renderAiQualification(d)).toBeNull(); // never enters a prompt
   });
 
+  it('authored context with no validity window reads as "no review date recorded", not a failed verification', () => {
+    const d = describeKnowledgeForConversation(input({ item: { title: 'Mission', body: 'Our mission.', epistemicBasis: 'human_asserted', verification: 'unverified', scopeKind: 'workspace', disclosure: 'workspace_internal', status: 'active' } }));
+    expect(d.freshness.state).toBe('unknown');
+    expect(d.freshness.phrase).toBe('no review date recorded');
+    expect(d.freshness.phrase).not.toMatch(/continuing validity/);
+  });
+
   it('a human assertion is not dressed as verified or source-backed', () => {
     const d = describeKnowledgeForConversation(input({ item: { title: 'Contractors prefer monthly', body: 'x', epistemicBasis: 'human_asserted', verification: 'unverified', scopeKind: 'workspace', disclosure: 'workspace_internal', status: 'active' } }));
     expect(d.category).toBe('human_assertion');
