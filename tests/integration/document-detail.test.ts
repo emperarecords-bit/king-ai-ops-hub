@@ -7,9 +7,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
 import { type KnowledgeDisclosure, type TenantContext } from '@/types/domain';
 import { type DbTx, getSetupDb } from '@/db/client';
-import { agents, documentChunks, documentVersions, documents, knowledgeItems, knowledgeSources, knowledgeVerificationEvents, memberships, organizations, profiles, projectMembers, projects, runDocumentVersions, runs, tasks } from '@/db/schema';
+import { agents, documentChunks, documentVersionTombstones, documentVersions, documents, knowledgeItems, knowledgeSources, knowledgeVerificationEvents, memberships, organizations, profiles, projectMembers, projects, runDocumentVersions, runSteps, runs, tasks } from '@/db/schema';
 import { chunkText, declassifyDocument, restrictDocument } from '@/domain/documents/documents';
 import { backfillProject } from '@/domain/documents/backfill';
+import { markIndexDegraded } from '@/domain/documents/integrity';
 import { ingestDocumentVersion } from '@/domain/documents/versions';
 import { LocalObjectStore } from '@/domain/documents/local-object-store';
 import { tenantObjectKey } from '@/domain/documents/object-store';
@@ -75,12 +76,28 @@ async function bindKnowledge(ctx: TenantContext, versionId: string, title: strin
 async function recordRelied(ctx: TenantContext, itemId: string, sourceIds: string[]) {
   await db().insert(knowledgeVerificationEvents).values({ orgId: ctx.orgId, projectId: ctx.projectId, knowledgeItemId: itemId, knowledgeVersion: 1, judgment: 'source_supported', verifier: ctx.userId, reliedOnSourceIds: sourceIds, resolutionSnapshot: {} });
 }
-async function supplyToRun(ctx: TenantContext, versionId: string, chunkIndexes: number[]) {
-  const a = await db().insert(agents).values({ orgId: ctx.orgId, projectId: ctx.projectId, name: 'a', role: 'primary', provider: 'openai', model: 'gpt-x', systemPrompt: 'x' }).returning({ id: agents.id });
+async function supplyToRun(
+  ctx: TenantContext,
+  versionId: string,
+  chunkIndexes: number[],
+  exec: { status?: 'completed' | 'failed'; provider?: 'openai' | 'anthropic' | null; model?: string | null; reviewer?: { provider: 'openai' | 'anthropic'; model: string } } = {},
+) {
+  const a = await db().insert(agents).values({ orgId: ctx.orgId, projectId: ctx.projectId, name: 'a', role: 'primary', provider: 'openai', model: 'agent-current-model', systemPrompt: 'x' }).returning({ id: agents.id });
   const t = await db().insert(tasks).values({ orgId: ctx.orgId, projectId: ctx.projectId, title: 't', input: 'x', providerSelection: 'openai', status: 'completed', createdBy: ctx.userId }).returning({ id: tasks.id });
-  const r = await db().insert(runs).values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId: t[0]!.id, status: 'completed', primaryAgentId: a[0]!.id }).returning({ id: runs.id });
+  const r = await db().insert(runs).values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId: t[0]!.id, status: exec.status ?? 'completed', primaryAgentId: a[0]!.id }).returning({ id: runs.id });
+  // The IMMUTABLE dispatch record: the primary execution step froze the provider/model actually used.
+  if (exec.provider !== null) {
+    await db().insert(runSteps).values({ orgId: ctx.orgId, projectId: ctx.projectId, runId: r[0]!.id, stepNumber: 1, kind: 'primary', agentId: a[0]!.id, provider: exec.provider ?? 'openai', model: exec.model ?? 'gpt-dispatch', succeeded: exec.status !== 'failed' });
+  }
+  if (exec.reviewer) {
+    await db().insert(runSteps).values({ orgId: ctx.orgId, projectId: ctx.projectId, runId: r[0]!.id, stepNumber: 2, kind: 'review', agentId: a[0]!.id, provider: exec.reviewer.provider, model: exec.reviewer.model, succeeded: true });
+  }
   for (const ci of chunkIndexes) await db().insert(runDocumentVersions).values({ orgId: ctx.orgId, projectId: ctx.projectId, runId: r[0]!.id, documentVersionId: versionId, chunkIndex: ci, disclosureSnapshot: 'workspace_internal' });
-  return r[0]!.id;
+  return { runId: r[0]!.id, agentId: a[0]!.id };
+}
+async function auditDoc(ctx: TenantContext, documentId: string, action: string, detail: Record<string, unknown> = {}) {
+  const { writeAudit } = await import('@/domain/audit/audit');
+  await db().transaction((t) => writeAudit(t as unknown as DbTx, ctx, { action, entityType: 'document', entityId: documentId, detail }));
 }
 function asDetail(v: unknown): DocumentDetail {
   expect((v as { found: boolean }).found).toBe(true);
@@ -209,8 +226,9 @@ describe.skipIf(!available)('Documents Detail — shared audience-safe loader (P
     await recordRelied(ctx, relied.itemId, [relied.sourceId]); // only one is recorded as relied-upon
     const d = asDetail(await detail(ctx, docId));
     expect(d.knowledge).toHaveLength(2); // exactly the two explicit bindings, nothing implied
-    expect(d.knowledge.find((k) => k.knowledgeSourceId === relied.sourceId)!.reliedUpon).toBe(true);
-    expect(d.knowledge.find((k) => k.knowledgeSourceId === supp.sourceId)!.reliedUpon).toBe(false);
+    expect(d.knowledge.find((k) => k.knowledgeSourceId === relied.sourceId)!.relationshipState).toBe('relied_upon');
+    // The other is NOT supplemental just because it is absent from the judgment — its support is unjudged.
+    expect(d.knowledge.find((k) => k.knowledgeSourceId === supp.sourceId)!.relationshipState).toBe('attached_not_judged');
     expect(d.knowledge.every((k) => k.documentVersionId === versionId)).toBe(true);
   });
 
@@ -254,7 +272,9 @@ describe.skipIf(!available)('Documents Detail — shared audience-safe loader (P
       });
       return selects;
     };
-    expect(await count()).toBeLessThanOrEqual(14);
+    // A fixed query set (access, doc, versions, tombstones, knowledge×3, runs×3, history×2) — bounded and
+    // independent of how many versions / knowledge / run relationships exist.
+    expect(await count()).toBeLessThanOrEqual(16);
   });
 
   it('32. a serialized unauthorized result contains no restricted identity or metadata', async () => {
@@ -266,5 +286,206 @@ describe.skipIf(!available)('Documents Detail — shared audience-safe loader (P
     expect(serialized).not.toContain('topsecret-projectname');
     expect(serialized).not.toContain('confidential');
     expect(serialized).not.toContain(docId);
+  });
+});
+
+describe.skipIf(!available)('Documents Detail — Blocker 1: Knowledge relationship states never infer supplemental', () => {
+  it('B1.3/B1.4 an attached source with no support judgment is attached_not_judged, never supplemental', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await byteExactDoc(ctx, 'unjudged.md', 'body');
+    await bindKnowledge(ctx, versionId, 'Unjudged item'); // attached, never judged
+    const d = asDetail(await detail(ctx, docId));
+    expect(d.knowledge).toHaveLength(1);
+    expect(d.knowledge[0]!.relationshipState).toBe('attached_not_judged');
+    // No source is ever labeled supplemental without an explicit supplemental fact (schema records none).
+    expect(d.knowledge.every((k) => k.relationshipState !== 'supplemental')).toBe(true);
+  });
+
+  it('B1.5 a later support judgment does not rewrite the historical state of an earlier judgment', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await byteExactDoc(ctx, 'rejudged.md', 'body');
+    const a = await bindKnowledge(ctx, versionId, 'A item');
+    const b = await bindKnowledge(ctx, versionId, 'B item');
+    await recordRelied(ctx, a.itemId, [a.sourceId]); // earlier judgment relied on A
+    await recordRelied(ctx, b.itemId, [b.sourceId]); // a later, separate judgment relied on B
+    // The earlier verification event's recorded relied set is unchanged (append-only history).
+    const events = await db().select({ relied: knowledgeVerificationEvents.reliedOnSourceIds }).from(knowledgeVerificationEvents).where(eq(knowledgeVerificationEvents.knowledgeItemId, a.itemId));
+    expect(events[0]!.relied).toEqual([a.sourceId]);
+    const d = asDetail(await detail(ctx, docId));
+    expect(d.knowledge.find((k) => k.knowledgeSourceId === a.sourceId)!.relationshipState).toBe('relied_upon');
+    expect(d.knowledge.find((k) => k.knowledgeSourceId === b.sourceId)!.relationshipState).toBe('relied_upon');
+  });
+});
+
+describe.skipIf(!available)('Documents Detail — Blocker 2: historical provider/model from immutable dispatch facts', () => {
+  it('B2.1/B2.2 a run shows its recorded dispatch provider/model, not the agent current config', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await byteExactDoc(ctx, 'dispatch.md', 'body');
+    const { agentId } = await supplyToRun(ctx, versionId, [0], { provider: 'anthropic', model: 'claude-dispatch' });
+    // The agent is later reconfigured — historical Detail must not follow it.
+    await db().update(agents).set({ provider: 'openai', model: 'agent-changed-model' }).where(eq(agents.id, agentId));
+    const op = asDetail(await detail(ctx, docId)).aiOperations[0]!;
+    expect(op.provider).toBe('anthropic');
+    expect(op.model).toBe('claude-dispatch');
+    expect(op.model).not.toBe('agent-changed-model');
+  });
+
+  it('B2.3 a run with no recorded primary step reports provider/model as null (Not recorded)', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await byteExactDoc(ctx, 'norec.md', 'body');
+    await supplyToRun(ctx, versionId, [0], { provider: null }); // no primary step recorded
+    const op = asDetail(await detail(ctx, docId)).aiOperations[0]!;
+    expect(op.provider).toBeNull();
+    expect(op.model).toBeNull();
+  });
+
+  it('B2.4 the reviewer step is not collapsed into the primary dispatch identity', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await byteExactDoc(ctx, 'reviewer.md', 'body');
+    await supplyToRun(ctx, versionId, [0], { provider: 'openai', model: 'primary-model', reviewer: { provider: 'anthropic', model: 'reviewer-model' } });
+    const op = asDetail(await detail(ctx, docId)).aiOperations[0]!;
+    expect(op.provider).toBe('openai');
+    expect(op.model).toBe('primary-model'); // never the reviewer's
+  });
+
+  it('B2.5 a failed run preserves its attempted dispatch provider/model', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await byteExactDoc(ctx, 'failed.md', 'body');
+    await supplyToRun(ctx, versionId, [0], { status: 'failed', provider: 'anthropic', model: 'attempted-model' });
+    const op = asDetail(await detail(ctx, docId)).aiOperations[0]!;
+    expect(op.runStatus).toBe('failed');
+    expect(op.provider).toBe('anthropic');
+    expect(op.model).toBe('attempted-model');
+  });
+});
+
+describe.skipIf(!available)('Documents Detail — Blocker 3: exact selected-version resolution in the shared loader', () => {
+  it('B3.1 no selection defaults to the current version', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'sel-default.md', 'v1');
+    const v2 = await newVersion(ctx, docId, 'v2');
+    const d = asDetail(await detail(ctx, docId));
+    expect(d.selected.versionId).toBe(v2);
+    expect(d.selected.isCurrent).toBe(true);
+    expect(d.selected.resolution).toBe('selected');
+  });
+
+  it('B3.2 an older selected version stays distinct from current', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId: v1 } = await byteExactDoc(ctx, 'sel-old.md', 'v1');
+    const v2 = await newVersion(ctx, docId, 'v2');
+    const d = asDetail(await db().transaction((t) => loadDocumentDetail(t as unknown as DbTx, ctx, docId, v1)));
+    expect(d.selected.versionId).toBe(v1);
+    expect(d.selected.isCurrent).toBe(false);
+    expect(d.current.versionId).toBe(v2); // current is never substituted by the selection
+  });
+
+  it('B3.3 a missing historical version does not fall back to current', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'sel-missing.md', 'v1');
+    const d = asDetail(await db().transaction((t) => loadDocumentDetail(t as unknown as DbTx, ctx, docId, randomUUID())));
+    expect(d.selected.resolution).toBe('missing');
+    expect(d.selected.versionId).toBeNull(); // NOT the current version
+  });
+
+  it('B3.4 a version belonging to another Document is rejected', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'sel-a.md', 'a');
+    const other = await byteExactDoc(ctx, 'sel-b.md', 'b');
+    const d = asDetail(await db().transaction((t) => loadDocumentDetail(t as unknown as DbTx, ctx, docId, other.versionId)));
+    expect(d.selected.resolution).toBe('missing');
+    expect(d.selected.versionId).toBeNull();
+  });
+
+  it('B3.5 a cross-workspace version is rejected without metadata leakage', async () => {
+    const ctxA = await makeWorkspace();
+    const ctxB = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctxA, 'sel-mine.md', 'mine');
+    const foreign = await byteExactDoc(ctxB, 'sel-foreign.md', 'foreign');
+    const d = asDetail(await db().transaction((t) => loadDocumentDetail(t as unknown as DbTx, ctxA, docId, foreign.versionId)));
+    expect(d.selected.resolution).toBe('missing');
+    expect(JSON.stringify(d.selected)).not.toContain('sel-foreign');
+  });
+
+  it('B3.6 an unavailable selected version stays selected but exposes no preview capability', async () => {
+    const ctx = await makeWorkspace();
+    // A source-disconnected local doc gets an unavailable version via backfill; it becomes current-less.
+    await db().insert(documents).values({ orgId: ctx.orgId, projectId: ctx.projectId, source: 'local_folder', sourceId: 'gone.md', relativePath: 'gone.md', kind: 'markdown', sha256: shaOf('gone'), sizeBytes: 1, status: 'active' });
+    await runBackfill(ctx);
+    const doc = (await db().select({ id: documents.id }).from(documents).where(and(eq(documents.projectId, ctx.projectId), eq(documents.relativePath, 'gone.md'))))[0]!;
+    const unav = (await db().select({ id: documentVersions.id }).from(documentVersions).where(and(eq(documentVersions.documentId, doc.id), eq(documentVersions.contentFidelity, 'unavailable'))))[0]!;
+    const d = asDetail(await db().transaction((t) => loadDocumentDetail(t as unknown as DbTx, ctx, doc.id, unav.id)));
+    expect(d.selected.resolution).toBe('selected');
+    expect(d.selected.version!.inspect.preview).toBe(false);
+    expect(d.selected.version!.inspect.reason).toBe('unavailable');
+  });
+
+  it('B3.7 present policy governs inspection of an older selected version', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId: v1 } = await byteExactDoc(ctx, 'sel-policy.md', 'v1');
+    await newVersion(ctx, docId, 'v2');
+    const member = await addMember(ctx, 'member');
+    await db().transaction((t) => restrictDocument(t as unknown as DbTx, ctx, docId)); // present policy: restricted
+    const res = await db().transaction((t) => loadDocumentDetail(t as unknown as DbTx, member, docId, v1));
+    expect(res.found).toBe(false); // current policy gates the whole Detail, old-version selection included
+  });
+});
+
+describe.skipIf(!available)('Documents Detail — Blocker 4: lifecycle history covers Document- and version-scoped events', () => {
+  it('B4.1 Document-level archive and restore events appear', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'lh-archive.md', 'body');
+    await auditDoc(ctx, docId, 'document.archived');
+    await auditDoc(ctx, docId, 'document.restored');
+    const kinds = asDetail(await detail(ctx, docId)).history.map((h) => h.kind);
+    expect(kinds).toContain('archived');
+    expect(kinds).toContain('restored');
+  });
+
+  it('B4.2 version-scoped integrity (index-degraded) events appear', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await byteExactDoc(ctx, 'lh-degraded.md', 'body');
+    await db().transaction((t) => markIndexDegraded(t as unknown as DbTx, ctx, versionId, 'rebuild could not be proven'));
+    const d = asDetail(await detail(ctx, docId));
+    const ev = d.history.find((h) => h.kind === 'index_degraded');
+    expect(ev).toBeTruthy();
+    expect(ev!.documentVersionId).toBe(versionId); // attributed to the exact version
+  });
+
+  it('B4.3 a restricted-inspection event appears only after actual release', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'lh-inspect.md', 'body', 'restricted');
+    expect(asDetail(await detail(ctx, docId)).history.some((h) => h.kind === 'restricted_inspected')).toBe(false);
+    await auditDoc(ctx, docId, 'document.restricted_inspected', { accessType: 'download' });
+    expect(asDetail(await detail(ctx, docId)).history.some((h) => h.kind === 'restricted_inspected')).toBe(true);
+  });
+
+  it('B4.5/B4.7 a purge tombstone appears once — the redundant purge audit is deduplicated', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await byteExactDoc(ctx, 'lh-purge.md', 'body');
+    const when = new Date();
+    await db().insert(documentVersionTombstones).values({ orgId: ctx.orgId, projectId: ctx.projectId, versionId, documentId: docId, sha256: shaOf('x'), contentFidelity: 'byte_exact', status: 'completed', reason: 'test', purgedBy: ctx.userId, purgedAt: when });
+    await auditDoc(ctx, docId, 'document.version_purged', { versionId }); // the redundant audit for the same op
+    const purges = asDetail(await detail(ctx, docId)).history.filter((h) => h.kind === 'purged');
+    expect(purges).toHaveLength(1); // one durable operation → one visible event
+    expect(purges[0]!.documentVersionId).toBe(versionId);
+  });
+
+  it('B4.6 lifecycle events are deterministically ordered (newest first)', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'lh-order.md', 'body');
+    await auditDoc(ctx, docId, 'document.restricted');
+    await auditDoc(ctx, docId, 'document.declassified');
+    const hist = asDetail(await detail(ctx, docId)).history;
+    for (let i = 1; i < hist.length; i += 1) expect(hist[i - 1]!.at.getTime()).toBeGreaterThanOrEqual(hist[i]!.at.getTime());
+  });
+
+  it('B4.8 an unauthorized Detail result contains no lifecycle events or counts', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'lh-denied.md', 'body', 'restricted');
+    const member = await addMember(ctx, 'member');
+    const res = await detail(member, docId);
+    expect(res.found).toBe(false);
+    expect(JSON.stringify(res)).not.toContain('"history"');
   });
 });

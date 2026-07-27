@@ -2,13 +2,14 @@ import 'server-only';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { type ContentFidelity, type KnowledgeDisclosure, type TenantContext } from '@/types/domain';
 import { type DbTx } from '@/db/client';
-import { agents, auditLogs, documentVersionTombstones, documentVersions, documents, knowledgeItems, knowledgeSources, knowledgeVerificationEvents, runDocumentVersions, runs } from '@/db/schema';
+import { auditLogs, documentVersionTombstones, documentVersions, documents, knowledgeItems, knowledgeSources, knowledgeVerificationEvents, runDocumentVersions, runSteps, runs } from '@/db/schema';
 import {
   type CanonicalGroup,
   type DocumentActionAvailability,
   FIDELITY_LABEL,
   assessDocument,
 } from './portfolio';
+import { resolveExactVersion } from './historical';
 import {
   type ClassificationAcrossTime,
   assessDocumentViewerAccess,
@@ -88,6 +89,17 @@ export interface DetailVersion {
   integrity: { degraded: boolean; byteExactMissingObject: boolean };
 }
 
+/**
+ * The judged relationship of a Knowledge citation to its source — attachment NEVER establishes support.
+ *  - `relied_upon`: this exact source relationship is explicitly recorded in a support judgment's
+ *    `reliedOnSourceIds`.
+ *  - `supplemental`: an established structured fact explicitly marks it supplemental to a judgment. (No such
+ *    fact exists in the schema yet, so this is never assigned today — reserved, never inferred.)
+ *  - `attached_not_judged`: the citation exists but no support judgment establishes it either way. This is
+ *    NOT supplemental — its support has simply not been judged.
+ */
+export type KnowledgeRelationshipState = 'relied_upon' | 'supplemental' | 'attached_not_judged';
+
 export interface DetailKnowledgeRef {
   knowledgeSourceId: string;
   knowledgeItemId: string;
@@ -95,9 +107,8 @@ export interface DetailKnowledgeRef {
   knowledgeVersion: number;
   /** The transformation role recorded on the citation: quoted | extracted | summarized | inferred. */
   role: string;
-  /** Recorded as relied-upon in a support judgment for this item (else supplemental — attachment alone
-   *  never establishes support). */
-  reliedUpon: boolean;
+  /** Judged support relationship — never inferred from absence in `reliedOnSourceIds`. */
+  relationshipState: KnowledgeRelationshipState;
   /** The exact immutable version the citation is bound to (null: cited version predates versioning). */
   documentVersionId: string | null;
   versionHash: string | null;
@@ -120,18 +131,44 @@ export interface DetailRunRef {
   runStatus: string;
   /** When the run was dispatched. */
   dispatchAt: Date | null;
-  /** Provider/model of the primary agent (member-visible provenance). Null when not recorded. */
+  /** IMMUTABLE dispatch-time provider/model — read from the run's recorded PRIMARY execution step, never
+   *  the worker agent's current configuration (which may have changed since). Null → "Not recorded"; never
+   *  substitute a current value. The reviewer step's identity is not collapsed into this. */
   provider: string | null;
   model: string | null;
   /** The exact version(s) of THIS Document supplied to the run (evidence remains even if the run failed). */
   suppliedVersions: DetailRunVersionSupply[];
 }
 
-export interface DetailHistoryEntry {
+/** Exact resolution outcome of a caller-selected historical version — never substitutes the current one. */
+export type SelectedResolution = 'selected' | 'missing' | 'version_mismatch' | 'unsupported' | 'none';
+
+export interface SelectedVersion {
+  /** The resolved selected version id, or null when nothing usable was selected/resolved. */
+  versionId: string | null;
+  isCurrent: boolean;
+  resolution: SelectedResolution;
+  /** The selected version's facts (from the Document's own history), or null when unresolved/foreign. */
+  version: DetailVersion | null;
+}
+
+export type LifecycleEventKind =
+  | 'uploaded' | 'indexed' | 'index_failed' | 'retry'
+  | 'restricted' | 'declassified' | 'disclosure_revoked'
+  | 'archived' | 'restored' | 'restore_requested'
+  | 'restricted_inspected' | 'index_degraded' | 'chunks_restored' | 'run_reference_restored'
+  | 'purged' | 'other';
+
+/** One normalized lifecycle event over the logical source AND its retained versions. Sensitive source
+ *  content is never included; technical facts stay behind progressive disclosure. */
+export interface DetailLifecycleEvent {
+  kind: LifecycleEventKind;
   action: string;
   at: Date;
   actorId: string | null;
-  /** Technical detail behind progressive disclosure. */
+  /** The version this event concerns, when applicable. */
+  documentVersionId: string | null;
+  /** Bounded, content-free technical detail (revealed progressively). */
   detail: unknown;
 }
 
@@ -171,13 +208,16 @@ export interface DocumentDetail {
   classification: ClassificationAcrossTime;
   // 3. Version history
   versions: DetailVersion[];
+  /** The exact version being inspected (defaults to current; a historical selection resolves exactly and
+   *  never substitutes current). */
+  selected: SelectedVersion;
   // 6. Knowledge relationships (explicit, version-bound)
   knowledge: DetailKnowledgeRef[];
   // 7. AI operation relationships (deduplicated by run; "supplied")
   aiOperations: DetailRunRef[];
   aiOperationCount: number;
-  // 9. Audit & lifecycle history
-  history: DetailHistoryEntry[];
+  // 9. Audit & lifecycle history (Document- AND version-scoped, normalized + deduplicated)
+  history: DetailLifecycleEvent[];
   /** Attention reasons (shared assessment). */
   attention: { code: string; label: string }[];
   /** Safe lifecycle actions (shared assessment): retry/replace/archive/restore. Privileged Detail actions
@@ -210,7 +250,7 @@ function inspectCapability(
  * shared assessment for lifecycle/actions and the classification-across-time helper. Evidence RELEASE is not
  * performed here — `inspect` capability flags say only what MAY be inspected; the gated route releases it.
  */
-export async function loadDocumentDetail(tx: DbTx, ctx: TenantContext, documentId: string): Promise<DocumentDetailView> {
+export async function loadDocumentDetail(tx: DbTx, ctx: TenantContext, documentId: string, selectedVersionId?: string): Promise<DocumentDetailView> {
   // Access is decided by the shared authorization surface (membership + current logical disclosure). A
   // non-member or an ordinary member facing a restricted source gets a bounded denial that never reveals
   // whether the source exists.
@@ -338,13 +378,17 @@ export async function loadDocumentDetail(tx: DbTx, ctx: TenantContext, documentI
     const hashByVersion = new Map(versionRows.map((v) => [v.id, v.sha256] as const));
     const inspectableByVersion = new Map(versions.map((v) => [v.id, v.inspect.canInspect] as const));
     for (const k of ks) {
+      // Attachment never establishes support: a citation is `relied_upon` only where a support judgment
+      // explicitly named it, and `attached_not_judged` otherwise — NOT supplemental. `supplemental` is
+      // reserved for an explicit structured fact the schema does not yet record, so it is never inferred.
+      const relationshipState: KnowledgeRelationshipState = reliedSourceIds.has(k.id) ? 'relied_upon' : 'attached_not_judged';
       knowledge.push({
         knowledgeSourceId: k.id,
         knowledgeItemId: k.knowledgeItemId,
         knowledgeItemTitle: titleById.get(k.knowledgeItemId) ?? '(unknown)',
         knowledgeVersion: k.knowledgeVersion,
         role: k.transformation,
-        reliedUpon: reliedSourceIds.has(k.id),
+        relationshipState,
         documentVersionId: k.documentVersionId,
         versionHash: k.documentVersionId ? hashByVersion.get(k.documentVersionId) ?? null : null,
         currentlyInspectable: k.documentVersionId ? inspectableByVersion.get(k.documentVersionId) ?? false : false,
@@ -378,20 +422,31 @@ export async function loadDocumentDetail(tx: DbTx, ctx: TenantContext, documentI
     const runIds = [...byRun.keys()];
     if (runIds.length > 0) {
       const runRows = await tx
-        .select({ id: runs.id, status: runs.status, startedAt: runs.startedAt, primaryAgentId: runs.primaryAgentId, provider: agents.provider, model: agents.model })
+        .select({ id: runs.id, status: runs.status, startedAt: runs.startedAt })
         .from(runs)
-        .leftJoin(agents, eq(runs.primaryAgentId, agents.id))
         .where(and(eq(runs.orgId, ctx.orgId), eq(runs.projectId, ctx.projectId), inArray(runs.id, runIds)));
       const runMeta = new Map(runRows.map((r) => [r.id, r] as const));
+      // IMMUTABLE dispatch identity: the PRIMARY execution step's recorded provider/model — never the
+      // agent's current configuration, and never the reviewer step. Absent → left null ("Not recorded").
+      const primaryStepRows = await tx
+        .select({ runId: runSteps.runId, stepNumber: runSteps.stepNumber, provider: runSteps.provider, model: runSteps.model })
+        .from(runSteps)
+        .where(and(eq(runSteps.orgId, ctx.orgId), eq(runSteps.projectId, ctx.projectId), inArray(runSteps.runId, runIds), eq(runSteps.kind, 'primary')))
+        .orderBy(runSteps.stepNumber);
+      const execByRun = new Map<string, { provider: string | null; model: string | null }>();
+      for (const s of primaryStepRows) {
+        if (!execByRun.has(s.runId)) execByRun.set(s.runId, { provider: s.provider ?? null, model: s.model ?? null });
+      }
       const hashByVersion = new Map(versionRows.map((v) => [v.id, v.sha256] as const));
       for (const [runId, perVersion] of byRun) {
         const meta = runMeta.get(runId);
+        const exec = execByRun.get(runId);
         aiOperations.push({
           runId,
           runStatus: meta?.status ?? 'unknown',
           dispatchAt: meta?.startedAt ?? null,
-          provider: meta?.provider ?? null,
-          model: meta?.model ?? null,
+          provider: exec?.provider ?? null,
+          model: exec?.model ?? null,
           suppliedVersions: [...perVersion.entries()].map(([vid, e]) => ({
             documentVersionId: vid,
             versionHash: hashByVersion.get(vid) ?? null,
@@ -404,14 +459,31 @@ export async function loadDocumentDetail(tx: DbTx, ctx: TenantContext, documentI
     }
   }
 
-  // ---- Audit & lifecycle history -----------------------------------------------------------------
-  const historyRows = await tx
-    .select({ action: auditLogs.action, at: auditLogs.createdAt, actorId: auditLogs.actorId, detail: auditLogs.detail })
-    .from(auditLogs)
-    .where(and(eq(auditLogs.orgId, ctx.orgId), eq(auditLogs.projectId, ctx.projectId), eq(auditLogs.entityType, 'document'), eq(auditLogs.entityId, documentId)))
-    .orderBy(desc(auditLogs.createdAt))
-    .limit(200);
-  const history: DetailHistoryEntry[] = historyRows.map((h) => ({ action: h.action, at: h.at, actorId: h.actorId, detail: h.detail }));
+  // ---- Audit & lifecycle history (Document- AND version-scoped, normalized + deduplicated) --------
+  const history = await loadLifecycleHistory(tx, ctx, documentId, versionIds, tombstoneVersionIds);
+
+  // ---- Selected version (default current; a historical selection resolves EXACTLY, never substitutes) --
+  const versionById = new Map(versions.map((v) => [v.id, v] as const));
+  let selected: SelectedVersion;
+  if (!selectedVersionId) {
+    // No selection defaults to the current version when one exists.
+    const cur = currentValid ? versionById.get(currentVersion!.id) ?? null : null;
+    selected = { versionId: cur?.id ?? null, isCurrent: !!cur, resolution: cur ? 'selected' : 'none', version: cur };
+  } else {
+    const r = await resolveExactVersion(tx, ctx, { kind: 'versionId', versionId: selectedVersionId });
+    if (r.state === 'found' && r.version && r.version.documentId === documentId) {
+      // Belongs to THIS Document + workspace: select it exactly. Current viewer authorization already
+      // governs the whole Detail; an unavailable-fidelity selection stays selected but exposes no preview.
+      const v = versionById.get(r.version.id) ?? null;
+      selected = { versionId: r.version.id, isCurrent: r.version.id === doc.currentVersionId, resolution: 'selected', version: v };
+    } else if (r.state === 'found') {
+      // A version that exists but belongs to ANOTHER Document is rejected exactly like an unknown one —
+      // no metadata, and never a fall-back to current. (Cross-workspace ids resolve to `missing` above.)
+      selected = { versionId: null, isCurrent: false, resolution: 'missing', version: null };
+    } else {
+      selected = { versionId: null, isCurrent: false, resolution: r.state as Exclude<typeof r.state, 'found'>, version: null };
+    }
+  }
 
   // ---- Shared assessment (lifecycle/state/attention/actions) -------------------------------------
   const knowledgeRefCount = knowledge.length;
@@ -471,6 +543,7 @@ export async function loadDocumentDetail(tx: DbTx, ctx: TenantContext, documentI
       versionDisclosureSnapshot: currentVersion?.disclosureSnapshot ?? doc.disclosure,
     }),
     versions,
+    selected,
     knowledge,
     aiOperations,
     aiOperationCount: aiOperations.length,
@@ -478,4 +551,95 @@ export async function loadDocumentDetail(tx: DbTx, ctx: TenantContext, documentI
     attention: record.attention,
     actions: record.actions,
   };
+}
+
+/** Map an audit action to a normalized lifecycle-event kind. */
+function eventKindOf(action: string): LifecycleEventKind {
+  switch (action) {
+    case 'document.uploaded': return 'uploaded';
+    case 'document.indexed': return 'indexed';
+    case 'document.retry': return 'retry';
+    case 'document.restricted': return 'restricted';
+    case 'document.declassified': return 'declassified';
+    case 'document.disclosure_revoked': return 'disclosure_revoked';
+    case 'document.archived': return 'archived';
+    case 'document.restored': return 'restored';
+    case 'document.restore_requested': return 'restore_requested';
+    case 'document.restricted_inspected': return 'restricted_inspected';
+    case 'document.version_index_degraded': return 'index_degraded';
+    case 'document.version_chunks_restored': return 'chunks_restored';
+    case 'document.run_reference_restored': return 'run_reference_restored';
+    case 'document.version_purged': return 'purged';
+    default: return 'other';
+  }
+}
+
+/**
+ * One bounded aggregator for the lifecycle of the LOGICAL source AND its retained versions. It gathers:
+ *   - Document-scoped audit events (entity = this document): upload/index/retry, restrict/declassify,
+ *     archive/restore, restricted-content release, chunk-restore, etc.
+ *   - Version-scoped audit events (entity = a version of this document): e.g. index-degraded integrity
+ *     repairs.
+ *   - Purge tombstones (the authoritative purge record) — surfaced directly, and the redundant
+ *     `document.version_purged` audit row for the same version is dropped so one durable operation is one
+ *     visible event.
+ * Normalizes into a shared event model, deduplicates by durable operation, and orders deterministically.
+ * Content is never included; technical facts stay in `detail` for progressive disclosure.
+ */
+async function loadLifecycleHistory(
+  tx: DbTx,
+  ctx: TenantContext,
+  documentId: string,
+  versionIds: string[],
+  tombstonedVersionIds: Set<string>,
+): Promise<DetailLifecycleEvent[]> {
+  const events: DetailLifecycleEvent[] = [];
+
+  const docRows = await tx
+    .select({ action: auditLogs.action, at: auditLogs.createdAt, actorId: auditLogs.actorId, detail: auditLogs.detail })
+    .from(auditLogs)
+    .where(and(eq(auditLogs.orgId, ctx.orgId), eq(auditLogs.projectId, ctx.projectId), eq(auditLogs.entityType, 'document'), eq(auditLogs.entityId, documentId)))
+    .orderBy(desc(auditLogs.createdAt))
+    .limit(300);
+  for (const r of docRows) {
+    // The tombstone (below) is the authoritative purge event — drop the redundant audit row for it.
+    if (r.action === 'document.version_purged') continue;
+    const detail = (r.detail ?? {}) as Record<string, unknown>;
+    const vId = typeof detail.versionId === 'string' ? detail.versionId : null;
+    events.push({ kind: eventKindOf(r.action), action: r.action, at: r.at, actorId: r.actorId, documentVersionId: vId, detail: r.detail });
+  }
+
+  if (versionIds.length > 0) {
+    const verRows = await tx
+      .select({ action: auditLogs.action, at: auditLogs.createdAt, actorId: auditLogs.actorId, detail: auditLogs.detail, entityId: auditLogs.entityId })
+      .from(auditLogs)
+      .where(and(eq(auditLogs.orgId, ctx.orgId), eq(auditLogs.projectId, ctx.projectId), eq(auditLogs.entityType, 'document_version'), inArray(auditLogs.entityId, versionIds)))
+      .orderBy(desc(auditLogs.createdAt))
+      .limit(300);
+    for (const r of verRows) {
+      events.push({ kind: eventKindOf(r.action), action: r.action, at: r.at, actorId: r.actorId, documentVersionId: r.entityId, detail: r.detail });
+    }
+  }
+
+  if (tombstonedVersionIds.size > 0) {
+    const tombs = await tx
+      .select({ versionId: documentVersionTombstones.versionId, at: documentVersionTombstones.purgedAt, actorId: documentVersionTombstones.purgedBy, status: documentVersionTombstones.status, reason: documentVersionTombstones.reason })
+      .from(documentVersionTombstones)
+      .where(and(eq(documentVersionTombstones.orgId, ctx.orgId), eq(documentVersionTombstones.projectId, ctx.projectId), inArray(documentVersionTombstones.versionId, [...tombstonedVersionIds])));
+    for (const t of tombs) {
+      events.push({ kind: 'purged', action: 'document.version_purged', at: t.at, actorId: t.actorId, documentVersionId: t.versionId, detail: { status: t.status, reason: t.reason } });
+    }
+  }
+
+  // Deduplicate by durable operation (same kind + version + timestamp) and order deterministically
+  // (newest first, then a stable key) so the same operation never shows twice.
+  const seen = new Set<string>();
+  const deduped = events.filter((e) => {
+    const key = `${e.kind}:${e.documentVersionId ?? ''}:${e.at.getTime()}:${e.action}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  deduped.sort((a, b) => b.at.getTime() - a.at.getTime() || a.kind.localeCompare(b.kind) || (a.documentVersionId ?? '').localeCompare(b.documentVersionId ?? ''));
+  return deduped;
 }
