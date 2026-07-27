@@ -2004,3 +2004,41 @@ tsc + build clean, full suite **593/593** (+8 review tests: active-requires-curr
 from retrieval, unavailable preserves identity/no-preview, reconnection creates byte_exact + restores
 active, reconnection preserves the unavailable row, fidelity counts = real rows, no-version vs no-current
 counted separately, reverse-trail dedup).
+
+### Sub-area 1 — immutable versions, STAGE C2: versioned retrieval + shadow + controlled switch (built 2026-07-27)
+
+**Stage C2** builds a separate current-version retrieval path, validates it against legacy in shadow, and
+puts the authoritative choice behind a per-workspace flag — no UI, no purge, no legacy deletion.
+- **Pre-C2 DB guard (migration 0037).** A second partial unique index on `(document_id, sha256) WHERE
+  content_fidelity = 'unavailable'` — so a concurrent/defective writer cannot create duplicate unavailable
+  placeholders. Net invariant: ≤1 unavailable placeholder + ≤1 retained version per (doc, hash), coexisting.
+- **Versioned retrieval (`retrieval-versioned.ts`).** Version-aware equivalents of every document read:
+  start from active docs, join ONLY through `documents.current_version_id`, require the current version
+  `indexed`, read ONLY that version's chunks, re-assert org/workspace + indexed on every row, and return
+  the `documentVersionId`, version hash, fidelity, index status, chunk content-hash and locator.
+  Structurally excludes pending/failed/unavailable versions and archived/source-unavailable docs. *Principle:
+  every retrieved Document excerpt belongs to an explicitly identified immutable version* — never inferred
+  from the hash after selection. **Deterministic tie-break** (stable identity + chunk index) added to BOTH
+  paths (item 3), so tied scores never truncate a different top-N.
+- **Shadow comparison (`shadow.ts`).** Runs both paths independently, normalizes into a shared, text-free
+  comparison contract (ids + hashes + scores + disclosure only — a report is never a disclosure channel),
+  and classifies every difference: exact_match / expected_exclusion / legacy_defect_corrected /
+  versioned_defect / unresolved. Read-only: writes no evidence, mutates nothing. The switch is clear only
+  at 0 versioned_defect + 0 unresolved; source-unavailable docs are enumerated as named exclusions.
+- **Retrieval-mode flag (`retrieval-mode.ts`, `projects.retrieval_mode`, enum migration 0038).** Server-
+  authoritative per-workspace mode `legacy | shadow | versioned`, never client-supplied. `assembleDocument
+  Sources` dispatches the runner's relevant→core→production assembly on the authoritative path; shadow mode
+  compares non-authoritatively with bounded instrumentation (a shadow error never breaks the legacy request
+  and writes nothing).
+- **Post-switch evidence (`writeRunVersionEvidence`).** Under versioned mode the run's `RunSourceSnapshot`
+  carries `documentVersionId`, and normalized `run_document_versions` (version-level `-1` + chunk-level) are
+  written in the SAME transaction that creates the run, BEFORE dispatch — a successful run can never end
+  with a prompt excerpt but no durable version relationship. Idempotent; reverse trails dedup to one run.
+  (`run_document_versions.rank` widened to `real` for the ts_rank score — migration 0039.)
+- **Rollback.** The flag returns a workspace to legacy; legacy chunks/columns/objects stay intact; a mode
+  switch never rewrites historical run snapshots; versioned runs keep their version ids after rollback.
+- **Scripts.** `npm run shadow:retrieval` (per-workspace corpus: one query per retrievable doc + generics,
+  reports classification + expected exclusions) and `npm run set:retrieval-mode` (audited per-workspace
+  rollout).
+tsc + build clean, full suite **615/615** (+22 C2 tests covering all 32 required cases). Retrieval default
+stays `legacy`. No columns dropped, no legacy objects deleted, no purge.

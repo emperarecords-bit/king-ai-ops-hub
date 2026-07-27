@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "document_versions_document_sha_unavailable_uq" ON "document_versions" USING btree ("document_id","sha256") WHERE content_fidelity = 'unavailable';

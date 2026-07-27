@@ -26,11 +26,8 @@ import {
 import { findAgentForRole, type AgentRow } from '@/domain/agents/agents';
 import { selectRelevantKnowledge, logKnowledgeApplications } from '@/domain/knowledge/knowledge';
 import { loadObjectiveForRun } from '@/domain/objectives/objectives';
-import {
-  retrieveRelevant,
-  selectCoreReferences,
-  selectProductionStatus,
-} from '@/domain/documents/documents';
+import { assembleDocumentSources } from '@/domain/documents/retrieval-mode';
+import { writeRunVersionEvidence } from '@/domain/documents/references';
 import { assembleProjectState } from '@/domain/state/project-state';
 import { assembleTaskGraph } from '@/domain/dependencies/graph-context';
 import { assembleDecisionMemory, logDecisionInjections, objectiveTaskIds } from '@/domain/decisions/decisions';
@@ -181,11 +178,13 @@ export async function startRun(
     // production-status doc that relevance alone would crowd out, dedup them
     // against what retrieval already surfaced, and record WHY each part was
     // included. Every read below is tenant-scoped by the same I1 guard.
-    const retrieved = await retrieveRelevant(tx, ctx, task.input, 5);
-    const seen = new Set(retrieved.map((r) => r.relativePath));
-    const coreRefs = await selectCoreReferences(tx, ctx, seen, 2);
-    coreRefs.forEach((c) => seen.add(c.relativePath));
-    const productionStatus = await selectProductionStatus(tx, ctx, seen);
+    // Retrieval runs under the workspace's server-authoritative mode (Stage C2): legacy or shadow →
+    // legacy is authoritative (shadow also compares the versioned path, non-authoritatively); versioned →
+    // the current-version path is authoritative and the run writes version-bound evidence below.
+    const docSources = await assembleDocumentSources(tx, ctx, task.input, 5);
+    const retrieved = docSources.retrieved;
+    const coreRefs = docSources.coreRefs;
+    const productionStatus = docSources.productionStatus;
 
     // Project State (O-15): operational Hub records for this workspace,
     // preferring the attached objective. The current task is excluded from its
@@ -317,17 +316,16 @@ export async function startRun(
     // citable document at the version, disclosure, and chunk text the model actually received. Later
     // Knowledge extraction cites against this, never re-reading live documents. Covers everything the
     // model could ground a claim on: retrieved chunks, core references, and the production-status doc.
-    const retrievedSources: RunSourceSnapshot[] = [
-      ...retrieved,
-      ...coreRefs,
-      ...(productionStatus ? [productionStatus] : []),
-    ].map((r) => ({
+    const suppliedSources = [...retrieved, ...coreRefs, ...(productionStatus ? [productionStatus] : [])];
+    const retrievedSources: RunSourceSnapshot[] = suppliedSources.map((r) => ({
       relativePath: r.relativePath,
       sha256: r.sha256,
       disclosure: r.disclosure,
       chunkIndex: r.chunkIndex,
       rank: r.rank,
       excerpt: r.content,
+      // Present only under the versioned path — the exact immutable version this evidence came from.
+      documentVersionId: r.documentVersionId,
     }));
 
     // The manifest is the explainable record of the assembled package.
@@ -380,6 +378,22 @@ export async function startRun(
       })
       .returning({ id: runs.id });
     const runId = runInserted[0]!.id;
+
+    // Versioned-path evidence (Stage C2): the normalized run→version relationships are written HERE, in
+    // the same durable operation that created the run and BEFORE provider dispatch — so a successful run
+    // can never end with a Document excerpt in its prompt but no durable version relationship. The
+    // immutable JSON snapshot (retrievedSources, with documentVersionId) is the historical representation;
+    // these rows are the referential-integrity relationship. Idempotent.
+    if (docSources.versioned) {
+      await writeRunVersionEvidence(
+        tx,
+        ctx,
+        runId,
+        suppliedSources
+          .filter((r): r is typeof r & { documentVersionId: string } => !!r.documentVersionId)
+          .map((r) => ({ documentVersionId: r.documentVersionId, chunkIndex: r.chunkIndex, rank: r.rank, disclosure: r.disclosure, retrievalReason: 'run_context' })),
+      );
+    }
 
     // The honest reverse trail: record which decisions and knowledge were INJECTED into this run
     // (supplied, not "influenced").

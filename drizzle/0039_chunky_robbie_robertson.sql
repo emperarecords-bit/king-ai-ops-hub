@@ -1,0 +1,1 @@
+ALTER TABLE "run_document_versions" ALTER COLUMN "rank" SET DATA TYPE real;

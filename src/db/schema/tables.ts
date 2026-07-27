@@ -7,6 +7,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  real,
   text,
   timestamp,
   uniqueIndex,
@@ -34,6 +35,7 @@ import {
   extractionStatusEnum,
   documentKindEnum,
   documentStatusEnum,
+  retrievalModeEnum,
   documentSourceEnum,
   documentJobStatusEnum,
   documentIndexStatusEnum,
@@ -129,6 +131,9 @@ export const projects = pgTable(
     description: text('description').notNull().default(''),
     /** Linked local Project Folder (D-020). Null until the owner links one. */
     documentFolderPath: text('document_folder_path'),
+    /** Server-authoritative document-retrieval mode (Documents increment 1, Stage C2). Defaults to
+     *  `legacy`; an operator advances a workspace to `shadow` then `versioned`. Never client-supplied. */
+    retrievalMode: retrievalModeEnum('retrieval_mode').notNull().default('legacy'),
     archived: boolean('archived').notNull().default(false),
     /** Slice 1: the employee responsible for this project ("who owns this?").
      *  Human membership + roles stay in project_members; this is the employee
@@ -659,6 +664,11 @@ export const documentVersions = pgTable(
     // byte_exact version of the SAME hash can coexist — that is how a disconnected source reconnects
     // (the placeholder is preserved; a verified version is added) without a uniqueness collision.
     uniqueIndex('document_versions_document_sha_uq').on(t.documentId, t.sha256).where(sql`content_fidelity <> 'unavailable'`),
+    // The complementary guard: at most ONE `unavailable` placeholder per (document, expected hash), so a
+    // concurrent or defective writer that bypasses service-level idempotency cannot create duplicate
+    // placeholders. Net invariant: ≤1 unavailable placeholder + ≤1 retained version per (doc, hash), and
+    // the two may coexist.
+    uniqueIndex('document_versions_document_sha_unavailable_uq').on(t.documentId, t.sha256).where(sql`content_fidelity = 'unavailable'`),
   ],
 );
 
@@ -678,7 +688,9 @@ export const runDocumentVersions = pgTable(
     /** Retrieval unit within the version (nullable when whole-doc). -1 sentinel avoids NULL in the uq. */
     chunkIndex: integer('chunk_index').notNull().default(-1),
     retrievalReason: text('retrieval_reason'),
-    rank: integer('rank'),
+    /** The relevance score (Postgres `ts_rank`, a float4) the run saw for this unit; null for whole-doc /
+     *  core references. Context metadata — the integrity relationship is the row itself. */
+    rank: real('rank'),
     disclosureSnapshot: knowledgeDisclosureEnum('disclosure_snapshot').notNull().default('workspace_internal'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },

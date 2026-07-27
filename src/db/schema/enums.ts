@@ -35,6 +35,7 @@ import {
   WORK_ITEM_CONDITIONS,
   ORG_ROLES,
   PROJECT_ROLES,
+  RETRIEVAL_MODES,
   REVIEW_VERDICTS,
   RUN_JOB_STATUSES,
   RUN_STATUSES,
@@ -79,6 +80,7 @@ export const knowledgeDisclosureEnum = pgEnum('knowledge_disclosure', KNOWLEDGE_
 export const cadenceEnum = pgEnum('cadence', CADENCES);
 export const documentKindEnum = pgEnum('document_kind', DOCUMENT_KINDS);
 export const documentStatusEnum = pgEnum('document_status', DOCUMENT_STATUSES);
+export const retrievalModeEnum = pgEnum('retrieval_mode', RETRIEVAL_MODES);
 export const documentSourceEnum = pgEnum('document_source', DOCUMENT_SOURCES);
 export const documentJobStatusEnum = pgEnum('document_job_status', DOCUMENT_JOB_STATUSES);
 export const documentIndexStatusEnum = pgEnum('document_index_status', DOCUMENT_INDEX_STATUSES);

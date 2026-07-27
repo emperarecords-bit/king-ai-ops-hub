@@ -123,6 +123,15 @@ export const DOCUMENT_STATUSES = [
 ] as const;
 export type DocumentStatus = (typeof DOCUMENT_STATUSES)[number];
 
+/**
+ * Per-workspace document-retrieval mode (Documents increment 1, Stage C2). Server-authoritative (stored
+ * on the workspace, never client-supplied): `legacy` — only legacy null-version retrieval decides the
+ * result; `shadow` — legacy decides, the versioned path is compared non-authoritatively; `versioned` —
+ * the current-version path decides and runs write version-bound evidence.
+ */
+export const RETRIEVAL_MODES = ['legacy', 'shadow', 'versioned'] as const;
+export type RetrievalMode = (typeof RETRIEVAL_MODES)[number];
+
 /** Durable document-indexing job states (O-23), same shape as run jobs. */
 export const DOCUMENT_JOB_STATUSES = ['queued', 'running', 'done', 'failed'] as const;
 export type DocumentJobStatus = (typeof DOCUMENT_JOB_STATUSES)[number];

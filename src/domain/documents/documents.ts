@@ -480,6 +480,11 @@ export async function retrieveRelevant(
     .orderBy(
       sql`(case when ${filenameMatch} then 1 else 0 end) desc`,
       sql`ts_rank(document_chunks.search, ${q}) desc`,
+      // Deterministic tie-break by stable Document identity + chunk index (Stage C2 item 3). Ties no
+      // longer resolve non-deterministically, so the top-N cutoff and order are stable and identical to
+      // the versioned path. Behavior-preserving on the eligible multiset; only pins tied ordering.
+      documents.relativePath,
+      documentChunks.chunkIndex,
     )
     .limit(limit);
 
@@ -521,18 +526,18 @@ export const CORE_REFERENCE_TYPES: ReadonlyArray<{ name: string; test: RegExp }>
   { name: 'Character Arc Tracker', test: /character[ _-]?arc[ _-]?tracker/i },
 ];
 // POSIX alternation for the DB pre-filter; JS RegExps above assign priority.
-const CORE_REFERENCE_POSIX =
+export const CORE_REFERENCE_POSIX =
   '(character[ _-]?bible|story[ _-]?bible|dialogue[ _-]?bible|character[ _-]?arc[ _-]?tracker)';
 // Specific on purpose: matches "Season1_Production_Status", not an unrelated
 // "...event-as-status" file that merely ends in "status".
-const PRODUCTION_STATUS_POSIX = 'production[ _-]?status';
+export const PRODUCTION_STATUS_POSIX = 'production[ _-]?status';
 
 export interface CoreReferenceChunk extends RetrievedChunk {
   /** Which foundational type this is, for the manifest detail. */
   coreType: string;
 }
 
-function coreTypeOf(relativePath: string): string {
+export function coreTypeOf(relativePath: string): string {
   return CORE_REFERENCE_TYPES.find((t) => t.test.test(relativePath))?.name ?? 'Core reference';
 }
 

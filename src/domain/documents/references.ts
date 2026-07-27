@@ -1,6 +1,6 @@
 import 'server-only';
 import { and, eq } from 'drizzle-orm';
-import { type TenantContext } from '@/types/domain';
+import { type KnowledgeDisclosure, type TenantContext } from '@/types/domain';
 import { type DbTx } from '@/db/client';
 import { knowledgeSources, runDocumentVersions } from '@/db/schema';
 
@@ -14,6 +14,46 @@ import { knowledgeSources, runDocumentVersions } from '@/db/schema';
  * three chunks is ONE user of that version, not four. Retention (purge protection) may treat either
  * relationship as sufficient.
  */
+
+export interface SuppliedVersionRef {
+  documentVersionId: string;
+  chunkIndex: number;
+  rank: number | null;
+  disclosure: KnowledgeDisclosure;
+  retrievalReason?: string | null;
+}
+
+/**
+ * Write the normalized run→version evidence for a run whose prompt was assembled by the VERSIONED path.
+ * For every supplied version: one version-level relationship (`chunk_index = -1`, "this run received
+ * evidence from this version") plus one chunk-level relationship per supplied chunk. Idempotent
+ * (`onConflictDoNothing` against the uniqueness constraints) so a retry of the same durable operation
+ * never duplicates. Called in the SAME transaction that creates the run, BEFORE provider dispatch — a
+ * successful run must never end with a prompt excerpt but no durable version relationship.
+ */
+export async function writeRunVersionEvidence(tx: DbTx, ctx: TenantContext, runId: string, supplied: SuppliedVersionRef[]): Promise<{ versionLevel: number; chunkLevel: number }> {
+  let versionLevel = 0;
+  let chunkLevel = 0;
+  const versionSeen = new Set<string>();
+  for (const s of supplied) {
+    if (!versionSeen.has(s.documentVersionId)) {
+      versionSeen.add(s.documentVersionId);
+      const insVer = await tx
+        .insert(runDocumentVersions)
+        .values({ orgId: ctx.orgId, projectId: ctx.projectId, runId, documentVersionId: s.documentVersionId, chunkIndex: -1, rank: s.rank ?? null, disclosureSnapshot: s.disclosure })
+        .onConflictDoNothing()
+        .returning({ id: runDocumentVersions.id });
+      if (insVer.length > 0) versionLevel += 1;
+    }
+    const insChunk = await tx
+      .insert(runDocumentVersions)
+      .values({ orgId: ctx.orgId, projectId: ctx.projectId, runId, documentVersionId: s.documentVersionId, chunkIndex: s.chunkIndex, rank: s.rank ?? null, disclosureSnapshot: s.disclosure, retrievalReason: s.retrievalReason ?? null })
+      .onConflictDoNothing()
+      .returning({ id: runDocumentVersions.id });
+    if (insChunk.length > 0) chunkLevel += 1;
+  }
+  return { versionLevel, chunkLevel };
+}
 
 /** DISTINCT runs that received evidence from a version (deduped across version-level + chunk-level rows). */
 export async function runsReferencingVersion(tx: DbTx, ctx: TenantContext, versionId: string): Promise<string[]> {
