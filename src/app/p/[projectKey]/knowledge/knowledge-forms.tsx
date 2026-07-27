@@ -55,13 +55,14 @@ export function NewKnowledgeForm({ projectKey }: { projectKey: string }) {
         required
         rows={4}
         maxLength={20_000}
-        placeholder="What should your team know? This is consulted before every piece of work in this workspace."
+        placeholder="Add context the Hub may consider for relevant AI work — after scope, trust, and disclosure checks."
         className={inputCls}
       />
       <div className="flex items-center gap-4">
         <label className="flex items-center gap-2 text-sm">
-          <input type="checkbox" name="activate" defaultChecked className="accent-[var(--accent)]" />
-          Activate immediately (you are the approver)
+          {/* Not silent: default OFF, and the label is explicit about what activation means (and doesn't). */}
+          <input type="checkbox" name="activate" className="accent-[var(--accent)]" />
+          Activate immediately as a human assertion. This does not verify the claim.
         </label>
         <button
           type="submit"

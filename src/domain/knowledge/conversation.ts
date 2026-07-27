@@ -121,7 +121,10 @@ const FRESHNESS_PHRASE: Record<FreshnessState, string> = {
   review_due: 'within its validity period, but its scheduled review date has passed',
   stale: 'past its validity — no longer safe as a current fact',
   historical: 'tied to closed work — historical',
-  unknown: 'continuing validity has not been established',
+  // Reads naturally for authored statements (mission/values/charter) as well as dated facts; the
+  // asOf-specific wording ("continuing validity not established") is applied separately when an asOf
+  // is present, where it fits.
+  unknown: 'no review date recorded',
 };
 
 /** ~4kB of prose is unlikely to be one honestly-uniform claim; flag it so a verdict isn't over-applied. */

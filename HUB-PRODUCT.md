@@ -1818,6 +1818,21 @@ project `member` ctx) in `knowledge-portfolio.test.ts`: admin → full content; 
 only, no `ref`/`applications`/`sources` keys and no restricted strings in the serialized payload; a
 non-restricted record IS visible to the member (access is per-record). Full suite **530/530**.
 
+**Portfolio visual-pass corrections (built 2026-07-26):** copy no longer overclaims universal
+consultation ("Active Knowledge is *considered* when the Hub assembles context for relevant AI work");
+the add-knowledge form no longer silently activates (activate defaults OFF, labelled "as a human
+assertion; this does not verify the claim"); Needs-Review renders concise references (title + specific
+concern sentence), not duplicated cards; a broken *supplemental* source reads "some supplemental sources
+unavailable" (distinct from a broken *relied* source); restricted records report their INSTITUTIONAL
+grant state ("disclosure grant on file" vs "no usable grant") rather than being flattened by the
+operator page having no consuming agent — a granted restricted record is configured, not a concern;
+awaiting-review proposals show "awaiting review" + "originating task is closed (affects suggested
+scope)" instead of reading as archival; Historical records keep their specific reason (Expired / Rejected
+/ Split into replacement proposals / Superseded / Inactive—scope closed / Archived); qualification copy
+softened ("no review date recorded"); the workspace-internal default and the zero-application state are
+no longer chipped. Locked by portfolio tests (restricted-with-grant configured; specific historical
+reasons). Full suite **532/532**. *Portfolio re-pass + full Detail visual pass still required.*
+
 *Knowledge closure conditions: (1) Needs-Review not a selector gate ✓, (2) selection independent of
 Portfolio grouping ✓, (3) authenticated viewer access enforced at the data boundary ✓ — the non-admin
 boundary is now exercised by automated route-loader tests with the non-admin identity (not inferred from

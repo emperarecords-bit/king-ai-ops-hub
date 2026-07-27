@@ -12,6 +12,7 @@ import {
   attachKnowledgeSource,
   createKnowledge,
   recordSupportJudgment,
+  reviseKnowledge,
   selectRelevantKnowledge,
   setKnowledgeVerification,
 } from '@/domain/knowledge/knowledge';
@@ -103,6 +104,26 @@ describe.skipIf(!available)('knowledge portfolio grouping + cross-surface integr
     expect(pf.needsReviewLens.find((r) => r.id === restricted)!.concerns).toContain('restricted_no_disclosure_path');
     expect(pf.needsReviewLens.find((r) => r.id === disputed)!.concerns).toContain('disputed');
     expect(pf.needsReviewLens.find((r) => r.id === reviewDue)!.concerns).toContain('review_due');
+  });
+
+  it('a restricted record WITH a live grant is configured (granted), not a Needs-Review concern', async () => {
+    const r = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Upsilon granted directive', body: 'Upsilon directive handled by a bounded agent.', kind: 'fact', disclosure: 'restricted', activate: true }));
+    await withTenant(ctx, (tx) => createDisclosureGrant(tx, ctx, { knowledgeItemId: r, agentId, purpose: 'current_operational_fact', expiresAt: future() }));
+    const pf = await withTenant(ctx, (tx) => buildKnowledgePortfolio(tx, ctx));
+    const ref = Object.values(pf.groups).flat().find((x) => x.id === r)!;
+    expect(ref.restrictedGrantState).toBe('granted');
+    expect(ref.group).not.toBe('needs_review'); // a live grant means it is configured, not a defect
+    expect(pf.needsReviewLens.map((x) => x.id)).not.toContain(r);
+  });
+
+  it('Historical records keep their specific institutional reason', async () => {
+    const staleId = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Phi expired figure', body: 'Old figure.', kind: 'fact', expiresAt: past(), activate: true }));
+    const v1 = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Chi runtime', body: 'Runtime is 22 minutes.', kind: 'fact', activate: true }));
+    await withTenant(ctx, (tx) => reviseKnowledge(tx, ctx, v1, { body: 'Runtime is 24 minutes.', activate: true })); // supersedes v1
+    const pf = await withTenant(ctx, (tx) => buildKnowledgePortfolio(tx, ctx));
+    const historical = pf.groups.historical;
+    expect(historical.find((x) => x.id === staleId)?.historicalReason).toBe('Expired for current use');
+    expect(historical.find((x) => x.id === v1)?.historicalReason).toBe('Superseded by a newer version');
   });
 
   it('Detail verdict never contradicts the Portfolio group', async () => {
