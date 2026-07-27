@@ -1744,6 +1744,40 @@ separately. Locked by `tests/unit/knowledge-conversation.test.ts` (14). Full sui
   assessment · authorized-operator-inspects · unauthorized-operator-gets-reason-only-content-absent).
   Full suite **519/519**. **Operating-partner conversation CLOSED.**
 
-*The Knowledge Portfolio & Detail pages (NEXT) render from this same descriptor object — no second
-interpretation of trust. Decision↔Knowledge link semantics and the Documents classification authoring
-UI (+ artifact evidence) are separate future increments, explicitly NOT built here.*
+### Surface increment 6 — Knowledge Portfolio & Detail (built 2026-07-26)
+
+Both pages render from ONE aggregator (`knowledge/portfolio.ts`) that turns each record into the shared
+conversation descriptor — so the Portfolio, the Detail, and the selector cannot disagree. No new trust
+classification; it reuses `assessKnowledge` (current AND historical) / `assessKnowledgeProvenance` /
+disclosure / `describeKnowledgeForConversation`.
+
+- **`buildKnowledgePortfolio`** — canonical, mutually-exclusive groups by lifecycle + current usability:
+  `awaiting_review` (drafts + pending proposals), `available` (active, usable), `use_with_qualification`
+  (active, qualified), `needs_review` (active but withheld for a non-freshness reason), `historical`
+  (archived / superseded / stale / scope-closed). A cross-cutting **Needs-Review lens** references
+  canonical records carrying evidence-backed concerns (review_due · provenance_broken ·
+  invalid_or_closed_scope · disputed · possibly_multiple_claims · restricted_no_disclosure_path) — it
+  does not duplicate cards.
+- **`buildKnowledgeReference`** — one record's descriptor for the Detail surface.
+- **Portfolio page**: groups + lens; each reference shows formation · verification · freshness ·
+  provenance · disclosure · "supplied to N operations" — Available never reads as verified.
+- **Detail page**: the evidence conversation in sections (claim + multi-claim caution · current/
+  historical verdict · formation · provenance with relied/supplemental · verification stated separately
+  from provenance · freshness · scope/relevance · disclosure · AI application/dispatch history ·
+  extraction/promotion for proposals · "No authoritative Decision relationship is recorded"). Only
+  implemented actions are surfaced (revise/activate/archive); promotion/split/support-judgment/grant/
+  declassify controls are flagged as domain-ready, UI follow-on.
+- **Shared surface integrity** locked by `knowledge-portfolio.test.ts` (3): canonical grouping across
+  the representative states; the Detail verdict never contradicts the Portfolio group; the selector
+  injects Available/Qualified relevant records and never a Needs-Review one, matching the Portfolio.
+  Full suite **522/522**, build clean.
+
+**Knowledge area — the trust model is now end to end**: create/propose → relevance-gated selection →
+evidence-not-directive rendering → shared assessment → durable/idempotent ops → live-resolved provenance
+→ enforceable disclosure (execution identity + derived purpose) → AI extraction/promotion with source
+integrity → the operating-partner conversation → Portfolio & Detail, all reading one assessment.
+
+*Deferred follow-ons (explicitly not built): the newer action controls' UI (promote/split/support-
+judgment/restrict/declassify/grant-revoke forms); Decision↔Knowledge link semantics; the Documents
+classification authoring UI + artifact-as-evidence. Interactive staging visual acceptance of the two
+pages remains to be walked through with an authenticated session.*
