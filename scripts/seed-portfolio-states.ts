@@ -85,14 +85,10 @@ async function main() {
   await tx((t) => ingestDocumentVersion(t as never, ctx, store, { documentId: multi.docId, bytes: Buffer.from('# V2\n\nsecond version body', 'utf8'), text: '# V2\n\nsecond version body', mimeType: 'text/markdown', disclosure: 'workspace_internal', chunk: chunkText }));
   const newerFailed = await byteExact(`${PREFIX}available-newer-failed.md`, '# Current\n\ncurrent good body');
   await db.insert(documentVersions).values({ orgId: ctx.orgId, projectId: ctx.projectId, documentId: newerFailed.docId, sha256: shaOf(newerFailed.docId + 'nf'), sizeBytes: 1, contentFidelity: 'reconstructed_text', indexStatus: 'failed', parserVersion: 'chunk-v1' });
-  await insDoc(`${PREFIX}processing-upload.md`, { status: 'uploaded' });
-  await insDoc(`${PREFIX}processing-indexing.md`, { status: 'indexing' });
   { // source disconnected: no chunks → backfill → unavailable → source_unavailable
     await insDoc(`${PREFIX}source-disconnected.md`, { source: 'local_folder', status: 'active' });
     await tx((t) => backfillProject(t, ctx, store, { operationId: randomUUID() }));
   }
-  await insDoc(`${PREFIX}initial-indexing-failed.md`, { status: 'failed' });
-  await insDoc(`${PREFIX}unsupported-source.md`, { status: 'unsupported' });
   { // archived
     const a = await byteExact(`${PREFIX}archived.md`, '# Archived\n\narchived body');
     await db.update(documents).set({ status: 'archived' }).where(eq(documents.id, a.docId));
@@ -116,6 +112,13 @@ async function main() {
     await db.update(documentVersions).set({ indexDegraded: true }).where(eq(documentVersions.id, g.versionId));
   }
   await byteExact(`${PREFIX}no-reference-normal.md`, '# Normal\n\nordinary unreferenced source');
+
+  // Pure in-progress / failed / unsupported states LAST — no backfill runs after these, so a project-wide
+  // backfill (which corrects active/indexing → source_unavailable) never mutates them.
+  await insDoc(`${PREFIX}processing-upload.md`, { status: 'uploaded' });
+  await insDoc(`${PREFIX}processing-indexing.md`, { status: 'indexing' });
+  await insDoc(`${PREFIX}initial-indexing-failed.md`, { status: 'failed' });
+  await insDoc(`${PREFIX}unsupported-source.md`, { status: 'unsupported' });
 
   const demo = (await db.select({ id: documents.id, relativePath: documents.relativePath }).from(documents).where(and(eq(documents.orgId, ctx.orgId), eq(documents.projectId, ctx.projectId)))).filter((d) => d.relativePath.startsWith(PREFIX)).length;
   console.log(`seeded ${demo} __pf-demo- fixtures into ${key}.`);
