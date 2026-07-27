@@ -23,6 +23,7 @@
     "db:seed": "tsx scripts/seed.ts",
     "seed:knowledge-states": "tsx --conditions=react-server scripts/seed-knowledge-states.ts",
     "archive:demo-knowledge": "tsx --conditions=react-server scripts/archive-demo-knowledge.ts",
+    "backfill:document-versions": "tsx --conditions=react-server scripts/backfill-document-versions.ts",
     "observe": "tsx scripts/observe.ts",
     "worker": "tsx --conditions=react-server scripts/worker.ts",
     "standing:tick": "tsx --conditions=react-server scripts/run-standing-work.ts",

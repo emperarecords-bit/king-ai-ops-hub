@@ -24,6 +24,9 @@ export interface ObjectStore {
   get(key: string): Promise<Buffer>;
   head(key: string): Promise<StoredObjectHead | null>;
   delete(key: string): Promise<void>;
+  /** List every object key under a prefix. READ-ONLY, for the backfill/audit orphan scan only — never on
+   *  a request path. Optional so a store can omit it; the audit reports "not scanned" when absent. */
+  list?(prefix: string): Promise<string[]>;
 }
 
 /** Thrown when a key is absent — the caller maps this to `source_unavailable`

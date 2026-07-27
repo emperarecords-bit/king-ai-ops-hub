@@ -62,10 +62,26 @@ export function signS3Request(
     payloadHash: string; // sha256 hex of body, or UNSIGNED
     amzDate: string;
     extraHeaders?: Record<string, string>;
+    /** Canonical query parameters (e.g. ListObjectsV2). Omitted ⇒ empty query, byte-for-byte the same
+     *  signing as before (the SigV4 reference vector test exercises this default path). */
+    query?: Record<string, string>;
+    /** Bucket-level operation (ListObjectsV2): canonical URI is `/{bucket}`, not a key path. */
+    bucketLevel?: boolean;
   },
 ): SignedRequest {
   const host = new URL(cfg.endpoint).host;
-  const canonicalUri = canonicalKeyPath(cfg.bucket, args.key);
+  const canonicalUri = args.bucketLevel ? `/${encodeSegment(cfg.bucket)}` : canonicalKeyPath(cfg.bucket, args.key);
+  // Canonical query string: params sorted by encoded key, each key and value RFC-3986 encoded.
+  const canonicalQuery = args.query
+    ? Object.keys(args.query)
+        .map(encodeSegment)
+        .sort()
+        .map((k) => {
+          const rawKey = Object.keys(args.query!).find((o) => encodeSegment(o) === k)!;
+          return `${k}=${encodeSegment(args.query![rawKey]!)}`;
+        })
+        .join('&')
+    : '';
   const dateStamp = args.amzDate.slice(0, 8);
   const scope = `${dateStamp}/${cfg.region}/s3/aws4_request`;
 
@@ -86,7 +102,7 @@ export function signS3Request(
   const canonicalRequest = [
     args.method,
     canonicalUri,
-    '', // canonical query string (none)
+    canonicalQuery,
     canonicalHeaders,
     signedHeaders,
     args.payloadHash,
@@ -110,9 +126,19 @@ export function signS3Request(
     `SignedHeaders=${signedHeaders}, Signature=${signature}`;
 
   return {
-    url: `${cfg.endpoint}${canonicalUri}`,
+    url: `${cfg.endpoint}${canonicalUri}${canonicalQuery ? `?${canonicalQuery}` : ''}`,
     headers: { ...baseHeaders, Authorization: authorization },
   };
+}
+
+/** Decode the handful of XML entities that can appear in an S3 <Key>. */
+function decodeXmlEntities(s: string): string {
+  return s
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
 }
 
 function amzDateNow(): string {
@@ -196,5 +222,31 @@ export class S3ObjectStore implements ObjectStore {
     const res = await fetch(signed.url, { method: 'DELETE', headers: signed.headers });
     // S3 returns 204 on delete; treat 404 as already-gone (idempotent).
     if (!res.ok && res.status !== 404) throw new Error(`S3 DELETE ${key} failed: ${res.status}`);
+  }
+
+  /** ListObjectsV2 under a prefix, following continuation tokens. READ-ONLY (backfill orphan scan). */
+  async list(prefix: string): Promise<string[]> {
+    const keys: string[] = [];
+    let token: string | undefined;
+    do {
+      const query: Record<string, string> = { 'list-type': '2', prefix };
+      if (token) query['continuation-token'] = token;
+      const signed = signS3Request(this.cfg, {
+        method: 'GET',
+        key: '',
+        payloadHash: UNSIGNED,
+        amzDate: amzDateNow(),
+        query,
+        bucketLevel: true,
+      });
+      const res = await fetch(signed.url, { method: 'GET', headers: signed.headers });
+      if (!res.ok) throw new Error(`S3 LIST ${prefix} failed: ${res.status}`);
+      const xml = await res.text();
+      for (const m of xml.matchAll(/<Key>([^<]*)<\/Key>/g)) keys.push(decodeXmlEntities(m[1]!));
+      const truncated = /<IsTruncated>\s*true\s*<\/IsTruncated>/.test(xml);
+      const next = xml.match(/<NextContinuationToken>([^<]*)<\/NextContinuationToken>/);
+      token = truncated && next ? decodeXmlEntities(next[1]!) : undefined;
+    } while (token);
+    return keys;
   }
 }

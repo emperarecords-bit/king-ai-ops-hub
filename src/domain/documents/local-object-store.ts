@@ -1,5 +1,5 @@
 import 'server-only';
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { type ObjectStore, ObjectNotFoundError, type StoredObjectHead } from './object-store';
@@ -62,5 +62,30 @@ export class LocalObjectStore implements ObjectStore {
     const p = this.pathFor(key);
     await rm(p, { force: true });
     await rm(`${p}.meta`, { force: true });
+  }
+
+  /** Recursively list object keys under `prefix` (excludes the `.meta` sidecars). Keys are returned in
+   *  the same forward-slash form used to store them. Read-only; used by the backfill orphan scan. */
+  async list(prefix: string): Promise<string[]> {
+    const root = this.pathFor(prefix);
+    const out: string[] = [];
+    const walk = async (dir: string): Promise<void> => {
+      let entries;
+      try {
+        entries = await readdir(dir, { withFileTypes: true });
+      } catch {
+        return; // prefix has no objects yet
+      }
+      for (const e of entries) {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) {
+          await walk(full);
+        } else if (!e.name.endsWith('.meta')) {
+          out.push(full.slice(this.base.length + 1).split(sep).join('/'));
+        }
+      }
+    };
+    await walk(root);
+    return out;
   }
 }

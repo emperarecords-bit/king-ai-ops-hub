@@ -1932,3 +1932,46 @@ version-unavailable); C2 — shadow-read validation then the current-vs-historic
 evidence version-pointers + resolveKnowledgeSource by version; D — purge safeguards + viewer access at
 retrieval + the full 35-test set. Then report the full increment-1 completion. Backfill and the retrieval
 switch do NOT start until Stage B is reviewed.*
+
+### Sub-area 1 — immutable versions, STAGE C1: backfill + fidelity audit + reference reconciliation (built 2026-07-27)
+
+**Stage C1** populates the version model for pre-Stage-B (and any missed-dual-write) documents and audits
+integrity — WITHOUT switching retrieval, deleting legacy columns, purging orphans, rewriting historical
+prompt JSON, or building UI. It is restart-safe and reconciles rather than duplicating.
+- **Backfill service (`backfill.ts`)** — per-workspace `backfillProject`: baseline inventory → per-document
+  version backfill → evidence-reference reconciliation → integrity/orphan audit → the dual-write
+  completeness gate, returning one structured `ProjectBackfillReport`.
+- **Fidelity, honestly classified** — `byte_exact` ONLY when raw bytes are readable, hash-verified against
+  the recorded document hash, AND retained under the immutable version key (cloud object re-verified;
+  local file re-read + hashed). A readable local path whose bytes DON'T match the recorded hash is NOT
+  claimed as the legacy version — it becomes `reconstructed_text` from the retained chunks and the changed
+  bytes are deferred to normal ingestion. `reconstructed_text` when exact bytes can't be verified but
+  legacy chunks preserve inspectable text; `unavailable` (terminal, no preview, never current) when
+  neither bytes nor chunks remain. A transient cloud read error is a *retryable defect*, never mislabeled
+  unavailable.
+- **Chunks copied, never moved** — version chunks are COPIES of the legacy null-version chunks (ordering,
+  text, indexes, locator preserved; parser + content-hash added). The null-version set is never touched,
+  so legacy retrieval is byte-for-byte unchanged. Migration is idempotent and repairs a partial crash.
+- **Conservative current pointers** — a backfilled current is assigned only to an indexed version of an
+  active document; `byte_exact` and (transitionally) chunk-backed `reconstructed_text` may be current;
+  `unavailable` never is. No valid version ⇒ pointer left unset + a recorded defect (never a silent
+  substitution).
+- **Evidence reconciliation** — `knowledge_sources.documentVersionId` bound only on an exact
+  (org, project, path, hash, single-candidate) match; path-only / hash-mismatch / ambiguous / cross-
+  workspace stay unresolved with a reason. Normalized `run_document_versions` rows created from
+  `runs.retrieved_sources` only on exact resolution — one version-level row (`chunk_index = -1` sentinel,
+  which already gives working uniqueness for chunk-less references) plus per-chunk rows, idempotent. The
+  immutable run JSON is never rewritten.
+- **Audit, report-only** — byte_exact objects re-hashed; missing/invalid objects, orphan version chunks,
+  current-pointer invariant breaks, and orphan storage objects (via a new read-only `ObjectStore.list` —
+  local dir-walk + S3 ListObjectsV2 through a backward-compatible SigV4 query extension) are all reported,
+  never deleted. The **dual-write completeness gate** counts active-indexed documents with vs. without a
+  valid current version — C2 may not begin until that unresolved-active count is zero (or each exception
+  is explicitly accepted).
+- **Restart-safe runner (`scripts/backfill-document-versions.ts`, `npm run backfill:document-versions`)** —
+  stable per-project operation identity via the `ai_operations` idempotency key; each project's
+  reconciliation report persisted to its operation row, the aggregate emitted. A rerun reuses versions,
+  objects, migrated chunks, and references — no duplicates.
+tsc + build clean, full suite **585/585** (+27 C1 tests). No retrieval switch; no columns dropped; no
+orphans purged. *Principle: a currently-readable path is not evidence of the earlier indexed state unless
+its bytes match the recorded hash.*
