@@ -40,7 +40,7 @@ function DocRow({ projectKey, r, isAdmin }: { projectKey: string; r: PortfolioRe
   return (
     <tr className="border-b border-[var(--border)] align-top">
       <td className="py-2 pr-4">
-        <span className="font-mono text-xs">{r.relativePath}</span>
+        <a href={`/p/${projectKey}/documents/${r.id}`} className="font-mono text-xs hover:underline">{r.relativePath}</a>
         {r.classification === 'restricted' ? (
           <span className="ml-2 rounded bg-[#3a2a1f] px-1.5 py-0.5 text-[10px] font-medium uppercase text-[var(--warning,#e0a458)]">Restricted</span>
         ) : null}

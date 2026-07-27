@@ -14,7 +14,7 @@ import { markIndexDegraded } from '@/domain/documents/integrity';
 import { ingestDocumentVersion } from '@/domain/documents/versions';
 import { LocalObjectStore } from '@/domain/documents/local-object-store';
 import { tenantObjectKey } from '@/domain/documents/object-store';
-import { type DocumentDetail, loadDocumentDetail } from '@/domain/documents/detail';
+import { type DocumentDetail, loadDetailWithInspection, loadDocumentDetail } from '@/domain/documents/detail';
 
 process.env.DATABASE_URL = process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL ?? 'postgresql://king:king@localhost:5433/king_ai_hub';
 let available = false;
@@ -60,6 +60,16 @@ async function byteExactDoc(ctx: TenantContext, relPath: string, body: string, d
   await db().update(documents).set({ chunkCount: chunkText(body).length, indexedAt: new Date() }).where(eq(documents.id, docId));
   await runBackfill(ctx);
   const v = (await db().select({ id: documentVersions.id }).from(documentVersions).where(and(eq(documentVersions.documentId, docId), eq(documentVersions.contentFidelity, 'byte_exact'))))[0]!;
+  return { docId, versionId: v.id };
+}
+async function reconstructedDoc(ctx: TenantContext, relPath: string, chunks: string[]) {
+  const body = chunks.join('\n\n');
+  const ins = await db().insert(documents).values({ orgId: ctx.orgId, projectId: ctx.projectId, source: 'local_folder', sourceId: relPath, relativePath: relPath, kind: 'markdown', sha256: shaOf(body), sizeBytes: 10, status: 'active' }).returning({ id: documents.id });
+  const docId = ins[0]!.id;
+  await db().insert(documentChunks).values(chunks.map((content, i) => ({ orgId: ctx.orgId, projectId: ctx.projectId, documentId: docId, chunkIndex: i, content })));
+  await db().update(documents).set({ chunkCount: chunks.length, indexedAt: new Date() }).where(eq(documents.id, docId));
+  await runBackfill(ctx);
+  const v = (await db().select({ id: documentVersions.id }).from(documentVersions).where(and(eq(documentVersions.documentId, docId), eq(documentVersions.indexStatus, 'indexed'))))[0]!;
   return { docId, versionId: v.id };
 }
 async function newVersion(ctx: TenantContext, docId: string, body: string): Promise<string> {
@@ -487,5 +497,107 @@ describe.skipIf(!available)('Documents Detail — Blocker 4: lifecycle history c
     const res = await detail(member, docId);
     expect(res.found).toBe(false);
     expect(JSON.stringify(res)).not.toContain('"history"');
+  });
+});
+
+describe.skipIf(!available)('Documents Detail — P2: gated evidence inspection (route/UI data path)', () => {
+  const inspect = (ctx: TenantContext, docId: string, versionId: string | undefined, accessType: 'preview' | 'download') =>
+    db().transaction((t) => loadDetailWithInspection(t as unknown as DbTx, ctx, store, docId, versionId, { accessType, purpose: 'test' }));
+  const previewText = (r: Awaited<ReturnType<typeof inspect>>) => r.inspection?.inspection?.chunks?.map((c) => c.content).join('\n\n') ?? null;
+  const auditCount = async (ctx: TenantContext, docId: string, action: string) => {
+    const { auditLogs } = await import('@/db/schema');
+    return (await db().select({ id: auditLogs.id }).from(auditLogs).where(and(eq(auditLogs.projectId, ctx.projectId), eq(auditLogs.entityType, 'document'), eq(auditLogs.entityId, docId), eq(auditLogs.action, action)))).length;
+  };
+
+  it('P2.1 default selection releases the CURRENT version content, downloadable for byte-exact', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'p2-cur.md', 'the current body text');
+    const r = await inspect(ctx, docId, undefined, 'preview');
+    expect(r.detail.found && r.detail.selected.isCurrent).toBe(true);
+    expect(r.inspection?.state).toBe('released');
+    expect(previewText(r)).toContain('the current body text');
+    expect(r.inspection?.inspection?.downloadable).toBe(true);
+  });
+
+  it('P2.2/P2.3 an exact historical selection releases THAT version content and is stable on repeat (share/refresh)', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId: v1 } = await byteExactDoc(ctx, 'p2-hist.md', 'ORIGINAL body');
+    await newVersion(ctx, docId, 'REVISED body');
+    const a = await inspect(ctx, docId, v1, 'preview');
+    expect(a.detail.found && a.detail.selected.versionId).toBe(v1);
+    expect(previewText(a)).toContain('ORIGINAL body');
+    expect(previewText(a)).not.toContain('REVISED body'); // never the current version's content
+    const b = await inspect(ctx, docId, v1, 'preview'); // refresh/share the same URL
+    expect(b.detail.found && b.detail.selected.versionId).toBe(v1);
+    expect(previewText(b)).toBe(previewText(a));
+  });
+
+  it('P2.4 a missing selected version releases nothing (no fall-back to current)', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'p2-missing.md', 'body');
+    const r = await inspect(ctx, docId, randomUUID(), 'preview');
+    expect(r.detail.found && r.detail.selected.resolution).toBe('missing');
+    expect(r.inspection).toBeNull();
+  });
+
+  it('P2.5 a cross-document selection releases nothing', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'p2-a.md', 'a');
+    const other = await byteExactDoc(ctx, 'p2-b.md', 'b');
+    const r = await inspect(ctx, docId, other.versionId, 'preview');
+    expect(r.inspection).toBeNull();
+    expect(previewText(r)).toBeNull();
+  });
+
+  it('P2.6 a cross-workspace selection releases nothing and leaks no content', async () => {
+    const ctxA = await makeWorkspace();
+    const ctxB = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctxA, 'p2-mine.md', 'mine');
+    const foreign = await byteExactDoc(ctxB, 'p2-foreign.md', 'FOREIGN SECRET');
+    const r = await inspect(ctxA, docId, foreign.versionId, 'preview');
+    expect(r.inspection).toBeNull();
+    expect(JSON.stringify(r)).not.toContain('FOREIGN SECRET');
+  });
+
+  it('P2.7 preview authorization is gated — an ordinary member of a restricted source gets no content', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'p2-restricted.md', 'SENSITIVE', 'restricted');
+    const member = await addMember(ctx, 'member');
+    const r = await inspect(member, docId, undefined, 'preview');
+    expect(r.detail.found).toBe(false);
+    expect(r.inspection).toBeNull();
+    expect(JSON.stringify(r)).not.toContain('SENSITIVE');
+  });
+
+  it('P2.8 download authorization: reconstructed text is never downloadable; byte-exact is', async () => {
+    const ctx = await makeWorkspace();
+    const be = await byteExactDoc(ctx, 'p2-be.md', 'exact');
+    const rc = await reconstructedDoc(ctx, 'p2-rc.md', ['reconstructed only']);
+    expect((await inspect(ctx, be.docId, undefined, 'download')).inspection?.inspection?.downloadable).toBe(true);
+    const r = await inspect(ctx, rc.docId, undefined, 'download');
+    expect(r.inspection?.state).toBe('released');
+    expect(r.inspection?.inspection?.downloadable).toBe(false); // no fake original
+  });
+
+  it('P2.9 unavailable content exposes no preview or download', async () => {
+    const ctx = await makeWorkspace();
+    await db().insert(documents).values({ orgId: ctx.orgId, projectId: ctx.projectId, source: 'local_folder', sourceId: 'p2-unav.md', relativePath: 'p2-unav.md', kind: 'markdown', sha256: shaOf('unav'), sizeBytes: 1, status: 'active' });
+    await runBackfill(ctx);
+    const doc = (await db().select({ id: documents.id }).from(documents).where(and(eq(documents.projectId, ctx.projectId), eq(documents.relativePath, 'p2-unav.md'))))[0]!;
+    const unav = (await db().select({ id: documentVersions.id }).from(documentVersions).where(and(eq(documentVersions.documentId, doc.id), eq(documentVersions.contentFidelity, 'unavailable'))))[0]!;
+    const r = await inspect(ctx, doc.id, unav.id, 'preview');
+    expect(r.inspection?.state).toBe('unavailable');
+    expect(r.inspection?.inspection?.chunks).toBeUndefined();
+    expect(r.inspection?.inspection?.bytes).toBeUndefined();
+  });
+
+  it('P2.10 an authorized restricted RELEASE is audited; a non-restricted preview is not', async () => {
+    const ctx = await makeWorkspace(); // owner/admin — cleared for restricted
+    const restricted = await byteExactDoc(ctx, 'p2-audit.md', 'restricted body', 'restricted');
+    const plain = await byteExactDoc(ctx, 'p2-plain.md', 'plain body');
+    await inspect(ctx, restricted.docId, undefined, 'preview');
+    await inspect(ctx, plain.docId, undefined, 'preview');
+    expect(await auditCount(ctx, restricted.docId, 'document.restricted_inspected')).toBe(1);
+    expect(await auditCount(ctx, plain.docId, 'document.restricted_inspected')).toBe(0);
   });
 });

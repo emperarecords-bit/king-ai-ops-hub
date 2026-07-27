@@ -9,11 +9,15 @@ import {
   FIDELITY_LABEL,
   assessDocument,
 } from './portfolio';
+import { type ObjectStore } from './object-store';
 import { resolveExactVersion } from './historical';
 import {
   type ClassificationAcrossTime,
+  type GatedInspection,
+  type InspectionAccessType,
   assessDocumentViewerAccess,
   classificationAcrossTime,
+  loadInspectableVersion,
 } from './viewer-access';
 
 /**
@@ -642,4 +646,35 @@ async function loadLifecycleHistory(
   });
   deduped.sort((a, b) => b.at.getTime() - a.at.getTime() || a.kind.localeCompare(b.kind) || (a.documentVersionId ?? '').localeCompare(b.documentVersionId ?? ''));
   return deduped;
+}
+
+export interface DetailWithInspection {
+  detail: DocumentDetailView;
+  /** The gated release for the SELECTED version, or null when there is nothing to release (denied Detail,
+   *  or the selection did not resolve to a version of this Document). Never inferred from Detail metadata —
+   *  the actual authorization + audit happen inside `loadInspectableVersion`. */
+  inspection: GatedInspection | null;
+}
+
+/**
+ * Load the Detail view AND, for the SELECTED version, the gated inspection result the route renders/serves.
+ * Preview and download authorization go ONLY through `loadInspectableVersion` (which re-checks membership +
+ * current disclosure and audits an actual restricted release) — the Detail loader's capability flags are
+ * never used to authorize a retrieval. A selection that did not resolve to a version of this Document
+ * releases nothing (no fall-back to another version's content).
+ */
+export async function loadDetailWithInspection(
+  tx: DbTx,
+  ctx: TenantContext,
+  store: ObjectStore,
+  documentId: string,
+  selectedVersionId: string | undefined,
+  opts: { accessType: InspectionAccessType; purpose: string },
+): Promise<DetailWithInspection> {
+  const detail = await loadDocumentDetail(tx, ctx, documentId, selectedVersionId);
+  if (!detail.found) return { detail, inspection: null };
+  const sel = detail.selected;
+  if (sel.resolution !== 'selected' || !sel.versionId) return { detail, inspection: null };
+  const inspection = await loadInspectableVersion(tx, ctx, store, { kind: 'versionId', versionId: sel.versionId }, opts);
+  return { detail, inspection };
 }
