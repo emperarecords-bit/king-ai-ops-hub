@@ -28,8 +28,10 @@ async function main() {
   const db = drizzle(sql, { schema });
   const tx = <T>(fn: (t: DbTx) => Promise<T>): Promise<T> => db.transaction((t) => fn(t));
 
-  const project = (await db.select().from(projects).where(eq(projects.id, target)).limit(1))[0]
-    ?? (await db.select().from(projects).where(eq(projects.key, target)).limit(1))[0];
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(target);
+  const project = isUuid
+    ? (await db.select().from(projects).where(eq(projects.id, target)).limit(1))[0]
+    : (await db.select().from(projects).where(eq(projects.key, target)).limit(1))[0];
   if (!project) throw new Error(`Project '${target}' not found.`);
   const member = (await db.select({ userId: projectMembers.userId }).from(projectMembers).where(eq(projectMembers.projectId, project.id)).limit(1))[0];
   const ctx: TenantContext = { userId: member?.userId ?? '00000000-0000-0000-0000-000000000000', orgId: project.orgId, projectId: project.id, orgRole: 'owner', projectRole: 'admin' };
