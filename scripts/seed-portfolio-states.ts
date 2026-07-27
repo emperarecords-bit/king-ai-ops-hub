@@ -4,7 +4,9 @@ import { and, eq, inArray, like } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import * as schema from '../src/db/schema';
-import { agents, documentChunks, documentVersions, documents, knowledgeItems, knowledgeSources, projectMembers, projects, runDocumentVersions, runs, tasks } from '../src/db/schema';
+import { agents, documentChunks, documentVersions, documents, knowledgeItems, knowledgeSources, knowledgeVerificationEvents, projectMembers, projects, runDocumentVersions, runSteps, runs, tasks } from '../src/db/schema';
+import { markIndexDegraded } from '../src/domain/documents/integrity';
+import { writeAudit } from '../src/domain/audit/audit';
 import { type DbTx } from '../src/db/client';
 import type { TenantContext } from '../src/types/domain';
 import { getObjectStore } from '../src/domain/documents/object-store';
@@ -55,11 +57,22 @@ async function main() {
     }
     const demoTaskIds = (await db.select({ id: tasks.id }).from(tasks).where(and(eq(tasks.orgId, ctx.orgId), eq(tasks.projectId, ctx.projectId), like(tasks.title, '[pf-demo]%')))).map((t) => t.id);
     if (demoTaskIds.length > 0) {
-      await db.delete(runs).where(inArray(runs.taskId, demoTaskIds));
+      await db.delete(runs).where(inArray(runs.taskId, demoTaskIds)); // cascades run_steps + run_document_versions
       await db.delete(tasks).where(inArray(tasks.id, demoTaskIds));
     }
     await db.delete(agents).where(and(eq(agents.orgId, ctx.orgId), eq(agents.projectId, ctx.projectId), like(agents.name, '[pf-demo]%')));
-    await db.delete(knowledgeItems).where(and(eq(knowledgeItems.orgId, ctx.orgId), eq(knowledgeItems.projectId, ctx.projectId), like(knowledgeItems.title, '[pf-demo]%')));
+    // Support judgments are append-only; deleting the demo knowledge items would cascade-delete them and be
+    // blocked by the guard. Disable it (the seed runs as the owning migration role) only for this delete.
+    const demoItemIds = (await db.select({ id: knowledgeItems.id }).from(knowledgeItems).where(and(eq(knowledgeItems.orgId, ctx.orgId), eq(knowledgeItems.projectId, ctx.projectId), like(knowledgeItems.title, '[pf-demo]%')))).map((k) => k.id);
+    if (demoItemIds.length > 0) {
+      await sql`alter table knowledge_verification_events disable trigger knowledge_verification_events_append_only`;
+      try {
+        await db.delete(knowledgeVerificationEvents).where(inArray(knowledgeVerificationEvents.knowledgeItemId, demoItemIds));
+        await db.delete(knowledgeItems).where(inArray(knowledgeItems.id, demoItemIds));
+      } finally {
+        await sql`alter table knowledge_verification_events enable trigger knowledge_verification_events_append_only`;
+      }
+    }
     if (demoDocIds.length > 0) await db.delete(documents).where(inArray(documents.id, demoDocIds));
   }
   await cleanupDemoBatch();
@@ -112,23 +125,37 @@ async function main() {
     const a = await byteExact(`${PREFIX}archived.md`, '# Archived\n\narchived body');
     await db.update(documents).set({ status: 'archived' }).where(eq(documents.id, a.docId));
   }
-  { // knowledge-referenced
+  { // knowledge-referenced — one RELIED-UPON source (named in a support judgment) + one ATTACHED-not-judged
     const k = await byteExact(`${PREFIX}knowledge-referenced.md`, '# Cited\n\ncited by knowledge');
     const ki = await db.insert(knowledgeItems).values({ orgId: ctx.orgId, projectId: ctx.projectId, title: '[pf-demo] cited', body: 'b', createdBy: ctx.userId }).returning({ id: knowledgeItems.id });
-    await db.insert(knowledgeSources).values({ orgId: ctx.orgId, projectId: ctx.projectId, knowledgeItemId: ki[0]!.id, knowledgeVersion: 1, sourceType: 'document', sourceRef: `${PREFIX}knowledge-referenced.md`, sourceLabel: 'cited', sourceVersionHash: shaOf('h'), transformation: 'quoted', documentVersionId: k.versionId });
+    const reliedSrc = await db.insert(knowledgeSources).values({ orgId: ctx.orgId, projectId: ctx.projectId, knowledgeItemId: ki[0]!.id, knowledgeVersion: 1, sourceType: 'document', sourceRef: `${PREFIX}knowledge-referenced.md`, sourceLabel: 'relied source', sourceVersionHash: shaOf('h'), transformation: 'quoted', documentVersionId: k.versionId }).returning({ id: knowledgeSources.id });
+    await db.insert(knowledgeSources).values({ orgId: ctx.orgId, projectId: ctx.projectId, knowledgeItemId: ki[0]!.id, knowledgeVersion: 1, sourceType: 'document', sourceRef: `${PREFIX}knowledge-referenced.md`, sourceLabel: 'attached source', sourceVersionHash: shaOf('h2'), transformation: 'summarized', documentVersionId: k.versionId });
+    // A recorded support judgment relies on ONLY the first source → the second stays attached_not_judged.
+    await db.insert(knowledgeVerificationEvents).values({ orgId: ctx.orgId, projectId: ctx.projectId, knowledgeItemId: ki[0]!.id, knowledgeVersion: 1, judgment: 'source_supported', verifier: ctx.userId, reliedOnSourceIds: [reliedSrc[0]!.id], resolutionSnapshot: {} });
   }
-  { // supplied to several AI operations
+  { // supplied to several AI operations, with IMMUTABLE primary + reviewer execution steps recorded
     const s = await byteExact(`${PREFIX}supplied-to-ai.md`, '# Supplied\n\nsupplied to runs');
-    const a = await db.insert(agents).values({ orgId: ctx.orgId, projectId: ctx.projectId, name: '[pf-demo] agent', role: 'primary', provider: 'openai', model: 'm', systemPrompt: 'x' }).returning({ id: agents.id });
+    const a = await db.insert(agents).values({ orgId: ctx.orgId, projectId: ctx.projectId, name: '[pf-demo] agent', role: 'primary', provider: 'openai', model: 'agent-current-model', systemPrompt: 'x' }).returning({ id: agents.id });
     for (let i = 0; i < 2; i += 1) {
       const t = await db.insert(tasks).values({ orgId: ctx.orgId, projectId: ctx.projectId, title: `[pf-demo] task ${i}`, input: 'x', providerSelection: 'openai', status: 'completed', createdBy: ctx.userId }).returning({ id: tasks.id });
       const r = await db.insert(runs).values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId: t[0]!.id, status: 'completed', primaryAgentId: a[0]!.id }).returning({ id: runs.id });
+      // Dispatch-time facts frozen on the steps: primary (anthropic) distinct from reviewer (openai).
+      await db.insert(runSteps).values([
+        { orgId: ctx.orgId, projectId: ctx.projectId, runId: r[0]!.id, stepNumber: 1, kind: 'primary', agentId: a[0]!.id, provider: 'anthropic', model: 'claude-primary-dispatch', succeeded: true },
+        { orgId: ctx.orgId, projectId: ctx.projectId, runId: r[0]!.id, stepNumber: 2, kind: 'review', agentId: a[0]!.id, provider: 'openai', model: 'gpt-reviewer-dispatch', succeeded: true },
+      ]);
       await db.insert(runDocumentVersions).values([{ orgId: ctx.orgId, projectId: ctx.projectId, runId: r[0]!.id, documentVersionId: s.versionId, chunkIndex: -1, disclosureSnapshot: 'workspace_internal' }, { orgId: ctx.orgId, projectId: ctx.projectId, runId: r[0]!.id, documentVersionId: s.versionId, chunkIndex: 0, disclosureSnapshot: 'workspace_internal' }]);
     }
   }
-  { // integrity-degraded
+  { // integrity-degraded — degraded via the domain repair path so a version-scoped audit event is recorded
     const g = await byteExact(`${PREFIX}integrity-degraded.md`, '# Degraded\n\ndegraded index body');
-    await db.update(documentVersions).set({ indexDegraded: true }).where(eq(documentVersions.id, g.versionId));
+    await tx((t) => markIndexDegraded(t, ctx, g.versionId, 'demo: faithful rebuild could not be proven'));
+  }
+  { // lifecycle — document-scoped (archive → restore) AND version-scoped (index degraded) history
+    const lc = await byteExact(`${PREFIX}lifecycle-events.md`, '# Lifecycle\n\ndocument with a lifecycle trail');
+    await tx((t) => writeAudit(t, ctx, { action: 'document.archived', entityType: 'document', entityId: lc.docId, detail: { source: 'cloud_upload' } }));
+    await tx((t) => writeAudit(t, ctx, { action: 'document.restored', entityType: 'document', entityId: lc.docId, detail: { source: 'cloud_upload', versionReused: true } }));
+    await tx((t) => markIndexDegraded(t, ctx, lc.versionId, 'demo: version-scoped integrity event'));
   }
   await byteExact(`${PREFIX}no-reference-normal.md`, '# Normal\n\nordinary unreferenced source');
 

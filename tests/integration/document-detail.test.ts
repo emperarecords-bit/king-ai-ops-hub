@@ -600,4 +600,16 @@ describe.skipIf(!available)('Documents Detail — P2: gated evidence inspection 
     expect(await auditCount(ctx, restricted.docId, 'document.restricted_inspected')).toBe(1);
     expect(await auditCount(ctx, plain.docId, 'document.restricted_inspected')).toBe(0);
   });
+
+  it('P2.11 loading Detail METADATA (what render/prefetch does) records NO restricted inspection — only an explicit release does', async () => {
+    const ctx = await makeWorkspace(); // owner — cleared for restricted
+    const { docId } = await byteExactDoc(ctx, 'p2-prefetch.md', 'restricted body', 'restricted');
+    // The page/prefetch path loads metadata only (loadDocumentDetail) — it must never audit a release.
+    await db().transaction((t) => loadDocumentDetail(t as unknown as DbTx, ctx, docId));
+    await db().transaction((t) => loadDocumentDetail(t as unknown as DbTx, ctx, docId)); // e.g. a second prefetch
+    expect(await auditCount(ctx, docId, 'document.restricted_inspected')).toBe(0);
+    // Only the explicit reveal (release) records an inspection.
+    await inspect(ctx, docId, undefined, 'preview');
+    expect(await auditCount(ctx, docId, 'document.restricted_inspected')).toBe(1);
+  });
 });
