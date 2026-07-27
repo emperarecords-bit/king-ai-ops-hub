@@ -2160,3 +2160,55 @@ this workspace possess, which sources are usable now, and where does its evidenc
 - **Actions** stay compact + server-gated (upload/link/refresh; per-row retry/replace/archive from the
   assessment). No purge/repair/historical/classification/Detail in this increment.
 tsc + build clean, full suite **693/693** (+15 Portfolio blocks covering the 26 required cases).
+
+### ★ Documents Portfolio CLOSED (2026-07-27)
+
+Accepted after three review corrections (all in `portfolio.ts` / `backfill.ts` / `documents.ts`):
+- **Processing shows no false fidelity** — backfill no longer manufactures an `unavailable` version for a
+  pending upload (`uploaded`/`queued`); "not yet indexed" ≠ "content unavailable".
+- **Recently Changed = source change, not migration** — new `document_versions.source_change_at` (migration
+  0043), set only by genuine ingestion (prefers the source's own modified time), NULL for backfilled
+  versions. *Infrastructure migration does not imply that source material changed.*
+- **Adapter-neutral archive + explicit restore** — `archiveDocument`/`restoreDocument` work for cloud AND
+  local; `documents.archived_intent_at` (migration 0044) distinguishes an intentional archive (never
+  silently restored by refresh) from an implicit disappearance-archive; `restore_requested_at` records an
+  explicit local restore the next capable refresh completes. *Source adapters determine ingestion, not
+  lifecycle.* Full suite 711/711.
+
+### Documents interface — Detail, PART 1: shared audience-safe loader (built 2026-07-27, CLOSED)
+
+`detail.ts` `loadDocumentDetail(tx, ctx, documentId, selectedVersionId?)` — a read-only view model that
+COMPOSES the Stage D surfaces and decides access ONCE (`assessDocumentViewerAccess`; role-based, never an
+AI grant); non-member / ordinary-member-vs-restricted get a bounded, existence-neutral denial. Distinct
+current / selected / latest-observed / latest-successful facts; a historical selection resolves EXACTLY
+(belongs-to-document + workspace) and never substitutes current; Knowledge relationships are `relied_upon`
+(only where a support judgment recorded it) / `attached_not_judged` (never inferred supplemental); AI
+operations dedupe by run with immutable dispatch provider/model from the PRIMARY `run_steps` row (never the
+agent's current config, never the reviewer step); lifecycle history aggregates Document- and version-scoped
+events + purge tombstones, deduped + deterministic + content-free. Bounded queries (no N+1).
+
+### ★ Documents Detail PART 2 (read-only route + UI) CLOSED (2026-07-27)
+
+The Detail page (`/p/[projectKey]/documents/[documentId]`) + gated evidence inspection, read-only (no
+mutations). Canonical URL selects current; `?version=<id>` selects an exact historical version and is
+preserved on refresh/share; missing/foreign/cross-workspace ids render a bounded "not available" with the
+current version never substituted. Progressive disclosure for hashes/integrity/dispatch/audit metadata;
+responsive shell (nav collapses to a Menu on mobile — the fixed sidebar previously overflowed at 390px).
+
+**Restricted-release rule (invariant):** *Restricted document content and raw bytes may only be released
+through a deliberate, origin-validated POST after authorization and exact-version resolution. Restricted
+GET requests must fail before byte release and before release auditing.* Concretely: the Detail page GET
+auto-releases only NON-restricted content; restricted PREVIEW is a Next.js server action (`detail-actions.ts`
+`revealRestrictedVersionAction`, POST/CSRF); restricted DOWNLOAD is a same-origin POST on the download route
+(`download/route.ts` — GET refuses restricted before any release/audit via `mayRelease()`, cross-origin POST
+→ 403); non-restricted byte-exact keeps its authorized GET download. Restricted release is audited only on
+success; responses are `private, no-store`; `Content-Disposition` filenames are ASCII-encoded.
+
+Evidence: full suite **763/763**, tsc + build clean; authenticated Playwright (mobile 390×844 screenshots;
+restricted GET→404/no-bytes, deliberate POST→exact bytes/attachment/no-store, cross-origin POST→403,
+non-restricted GET download works); authenticated staging visual acceptance (current / historical /
+unavailable / degraded / denied / knowledge-states / primary-vs-reviewer execution / lifecycle-history).
+Deployed commits: Detail P1 `9d232b0` + corrections `93db383`; P2 route/UI `3e56305`, corrections `28558e0`,
+mobile `dd9e0e7`, reveal server action `8486fad` (+ use-server fix `0be58cf`), restricted-download POST
+`8ea56dc`. Staging fixtures cleaned back to the pre-fixture operational state (append-only audit history
+preserved). **Next: Documents Detail P3 — safe lifecycle actions (no purge/integrity execution).**
