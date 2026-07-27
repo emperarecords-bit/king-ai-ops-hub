@@ -2211,4 +2211,31 @@ unavailable / degraded / denied / knowledge-states / primary-vs-reviewer executi
 Deployed commits: Detail P1 `9d232b0` + corrections `93db383`; P2 route/UI `3e56305`, corrections `28558e0`,
 mobile `dd9e0e7`, reveal server action `8486fad` (+ use-server fix `0be58cf`), restricted-download POST
 `8ea56dc`. Staging fixtures cleaned back to the pre-fixture operational state (append-only audit history
-preserved). **Next: Documents Detail P3 — safe lifecycle actions (no purge/integrity execution).**
+preserved).
+
+### ★ Documents Detail PART 3 (safe lifecycle actions) CLOSED (2026-07-27)
+
+Six safe, server-gated lifecycle actions on the Detail surface — Restrict, Declassify, Archive, Restore,
+Retry indexing, Replace cloud source. **No purge / integrity execution / repair.** Button visibility comes
+from the SAME shared `assessDocument` the Portfolio uses; it is never authorization. Every action is a
+server action (POST, origin/CSRF) that re-authenticates + re-checks admin authority, and the domain
+functions re-check tenancy + lifecycle validity and audit ONLY on success.
+
+Guardrails encoded: declassify REQUIRES a reason and only loosens a restricted source; restrict is
+idempotent + can only tighten; classification changes never rewrite historical version/run disclosure
+snapshots; `retryDocument` fails closed on a non-retryable state (cloud, failed/source_unavailable only);
+`replaceDocument` is cloud-only and **fails closed on an archived source** — replacement is never an
+alternate restore path, so `actions.replace=false` while archived and a directly-constructed archived
+replacement is rejected before any object write / version / current-pointer change / audit (Restore is the
+one way back to active). Archive/restore stay adapter-neutral with distinct audit identities and full
+evidence preservation; a folder refresh never silently restores an intentionally-archived local source.
+
+Evidence: full suite **777/777**; typecheck + build clean; authenticated staging acceptance across the
+action matrix (active internal cloud → Restrict/Archive/Replace; after Restrict → Declassify/Archive/
+Replace, mutation audited + re-assessed; failed cloud → +Retry; **archived cloud → Restrict/Restore, NO
+Replace**; **archived local → Restrict/Restore only**); non-admin rejection proven by focused tests; the
+no-silent-restore guarantee by the automated refresh test. Deployed commits: `dd3eb9f` (actions) +
+`c2c5a66` (archive-intent + archived-local corrections). Fixtures cleaned back to the pre-fixture
+operational state (append-only audit history preserved). **Documents Detail increment complete through the
+read-only + safe-lifecycle surface; purge / integrity execution / legacy-object cleanup remain a later
+increment.**
