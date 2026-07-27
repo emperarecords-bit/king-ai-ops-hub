@@ -1,6 +1,6 @@
 import 'server-only';
 import { createHash } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 import { type ContentFidelity, type DocumentIndexStatus, type KnowledgeDisclosure, type TenantContext } from '@/types/domain';
 import { AppError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
@@ -90,11 +90,14 @@ export async function ingestDocumentVersion(tx: DbTx, ctx: TenantContext, store:
 
   // SAME CONTENT → reuse. Never rewrite the immutable version, never duplicate chunks; re-put bytes only
   // if the immutable object is missing/failing verification. Update only lastSeenAt on the logical doc.
+  // An `unavailable` placeholder (an expected hash we never verified — e.g. from a disconnected source) is
+  // NOT a reusable version: when real bytes for that hash finally arrive, we ingest a genuine version and
+  // the placeholder is preserved alongside it (the partial unique index permits the coexistence).
   const existing = (
     await tx
       .select({ id: documentVersions.id, indexStatus: documentVersions.indexStatus, contentFidelity: documentVersions.contentFidelity })
       .from(documentVersions)
-      .where(and(eq(documentVersions.documentId, input.documentId), eq(documentVersions.sha256, sha), eq(documentVersions.orgId, ctx.orgId), eq(documentVersions.projectId, ctx.projectId)))
+      .where(and(eq(documentVersions.documentId, input.documentId), eq(documentVersions.sha256, sha), eq(documentVersions.orgId, ctx.orgId), eq(documentVersions.projectId, ctx.projectId), ne(documentVersions.contentFidelity, 'unavailable')))
       .limit(1)
   )[0];
   if (existing) {

@@ -9,8 +9,9 @@ import { type KnowledgeDisclosure, type RunSourceSnapshot, type TenantContext } 
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { agents, documentChunks, documentVersions, documents, knowledgeItems, knowledgeSources, memberships, organizations, profiles, projectMembers, projects, runDocumentVersions, runs, tasks } from '@/db/schema';
-import { retrieveRelevant } from '@/domain/documents/documents';
+import { refreshIndex, retrieveRelevant } from '@/domain/documents/documents';
 import { backfillProject } from '@/domain/documents/backfill';
+import { isVersionReferenced, runsReferencingVersion } from '@/domain/documents/references';
 import { LocalObjectStore } from '@/domain/documents/local-object-store';
 import { tenantObjectKey } from '@/domain/documents/object-store';
 import { versionObjectKey } from '@/domain/documents/versions';
@@ -169,7 +170,7 @@ describe.skipIf(!available)('Stage C1 — backfill + fidelity + reconciliation',
 
     const second = await runBackfill(ctx);
     expect(second.versions.created).toBe(0);
-    expect(second.versions.reused).toBe(1);
+    expect(second.idempotency.skippedAlreadyReconciled).toBe(1);
     const vAfter2 = await versionsOf(docId);
     expect(vAfter2.length).toBe(1); // no duplicate version
     expect((await versionChunksOf(vAfter2[0]!.id)).length).toBe(chunks1.length); // no duplicate chunks
@@ -271,15 +272,19 @@ describe.skipIf(!available)('Stage C1 — backfill + fidelity + reconciliation',
     expect(v.key).toBeNull(); // no object masquerading as the original
   });
 
-  it('8. a doc with neither bytes nor sufficient chunks becomes unavailable', async () => {
+  it('8. a doc with neither bytes nor sufficient chunks becomes unavailable + source_unavailable', async () => {
     const ctx = await makeWorkspace();
-    const docId = await makeDoc(ctx, { relPath: 'u.md', sha: shaOf('nothing') });
+    const docId = await makeDoc(ctx, { relPath: 'u.md', sha: shaOf('nothing'), status: 'active' });
     // no chunks
-    await runBackfill(ctx);
+    const rep = await runBackfill(ctx);
     const v = (await versionsOf(docId))[0]!;
     expect(v.fidelity).toBe('unavailable');
-    expect(v.status).toBe('failed'); // terminal, never current
+    expect(v.status).toBe('failed'); // terminal version, never current
     expect(v.key).toBeNull();
+    // The logical Document cannot remain active without a retrievable current version.
+    const doc = (await db().select({ s: documents.status }).from(documents).where(eq(documents.id, docId)))[0]!;
+    expect(doc.s).toBe('source_unavailable');
+    expect(rep.stateCorrections.toSourceUnavailable).toBeGreaterThanOrEqual(1);
   });
 
   it('9. reconstructed chunks retain their original ordering and text', async () => {
@@ -461,9 +466,15 @@ describe.skipIf(!available)('Stage C1 — backfill + fidelity + reconciliation',
     const noChunks = await makeDoc(ctx, { relPath: 'g-unavail.md', sha: shaOf('gone2'), status: 'active' });
     const rep = await runBackfill(ctx);
     expect((await versionsOf(withChunks))[0]!.fidelity).toBe('reconstructed_text');
+    expect(await currentOf(withChunks)).not.toBeNull(); // salvaged → active with a current version
     expect((await versionsOf(noChunks))[0]!.fidelity).toBe('unavailable');
     expect(await currentOf(noChunks)).toBeNull();
-    expect(rep.gate.withoutValidCurrent).toBeGreaterThanOrEqual(1);
+    // The unavailable one is corrected to source_unavailable — an explicit non-retrievable state, NOT an
+    // active document silently missing a current version. So the active gate stays clean.
+    const noChunksDoc = (await db().select({ s: documents.status }).from(documents).where(eq(documents.id, noChunks)))[0]!;
+    expect(noChunksDoc.s).toBe('source_unavailable');
+    expect(rep.gate.withoutValidCurrent).toBe(0);
+    expect(rep.stateCorrections.toSourceUnavailable).toBe(1);
   });
 
   it('23. a current pointer is assigned only after version validation', async () => {
@@ -504,16 +515,26 @@ describe.skipIf(!available)('Stage C1 — backfill + fidelity + reconciliation',
 
   it('26. the final reconciliation count accounts for every logical Document', async () => {
     const ctx = await makeWorkspace();
-    await makeDoc(ctx, { relPath: 'acc-be.md', body: 'a' }).then((id) => addLegacyChunks(ctx, id, ['a']));
-    await makeDoc(ctx, { relPath: 'acc-recon.md', sha: shaOf('gone') }).then((id) => addLegacyChunks(ctx, id, ['b']));
-    await makeDoc(ctx, { relPath: 'acc-unavail.md', sha: shaOf('none') });
+    await makeDoc(ctx, { relPath: 'acc-be.md', body: 'a', status: 'active' }).then((id) => addLegacyChunks(ctx, id, ['a']));
+    await makeDoc(ctx, { relPath: 'acc-recon.md', sha: shaOf('gone'), status: 'active' }).then((id) => addLegacyChunks(ctx, id, ['b']));
+    await makeDoc(ctx, { relPath: 'acc-unavail.md', sha: shaOf('none'), status: 'active' });
     const folder = await mkdtemp(join(tmpdir(), 'c1-f26-'));
     await setFolder(ctx, folder);
     await writeFile(join(folder, 'acc-be.md'), 'a');
     const rep = await runBackfill(ctx);
     expect(rep.baseline.documents).toBe(3);
-    // Every document is accounted for: reused (already current) + created + existingVer-reuse.
-    expect(rep.versions.reused + rep.versions.created + rep.versions.duplicatesPrevented).toBe(rep.baseline.documents);
+    expect(rep.counts.logicalDocuments).toBe(3);
+    // Every document is accounted for by a distinct outcome: skipped-already-reconciled + created +
+    // existing-version-reuse. (No transient/retryable defects in this controlled workspace.)
+    expect(rep.idempotency.skippedAlreadyReconciled + rep.versions.created + rep.idempotency.duplicateVersionInsertAvoided).toBe(rep.baseline.documents);
+    // Distinct end-state accounting: 1 byte_exact + 1 reconstructed current + 1 source_unavailable.
+    expect(rep.versions.byFidelity.byte_exact).toBe(1);
+    expect(rep.versions.byFidelity.reconstructed_text).toBe(1);
+    expect(rep.versions.byFidelity.unavailable).toBe(1);
+    expect(rep.counts.docsSourceUnavailable).toBe(1);
+    expect(rep.counts.docsWithNoVersionRow).toBe(0);
+    // Every unavailable fidelity count corresponds to an actual version row.
+    expect(rep.counts.totalVersionRowsAfter).toBe(3);
     await rm(folder, { recursive: true, force: true });
   });
 
@@ -528,5 +549,132 @@ describe.skipIf(!available)('Stage C1 — backfill + fidelity + reconciliation',
     expect(after.map((h) => `${h.relativePath}|${h.content}`)).toEqual(before.map((h) => `${h.relativePath}|${h.content}`));
     expect(await nullVersionChunkCount(docId)).toBe(beforeNull); // null-version chunks untouched
     expect(before.length).toBeGreaterThan(0);
+  });
+
+  // ---- Stage C1 review corrections: unavailable-source lifecycle + reverse-trail dedup ------------
+
+  it('28. no Document is left active without a valid current version', async () => {
+    const ctx = await makeWorkspace();
+    await makeDoc(ctx, { relPath: 'ok.md', body: 'k', status: 'active' }).then((id) => addLegacyChunks(ctx, id, ['k']));
+    await makeDoc(ctx, { relPath: 'gone.md', sha: shaOf('gone'), status: 'active' }); // no bytes, no chunks
+    await runBackfill(ctx);
+    // Query the invariant directly: an active doc must have an indexed current version.
+    const actives = await db().select({ id: documents.id, cur: documents.currentVersionId }).from(documents).where(and(eq(documents.projectId, ctx.projectId), eq(documents.status, 'active')));
+    for (const d of actives) {
+      expect(d.cur).not.toBeNull();
+      const v = (await db().select({ s: documentVersions.indexStatus }).from(documentVersions).where(eq(documentVersions.id, d.cur!)))[0]!;
+      expect(v.s).toBe('indexed');
+    }
+  });
+
+  it('29. an unavailable Document is excluded from legacy retrieval and has no valid current version', async () => {
+    const ctx = await makeWorkspace();
+    const docId = await makeDoc(ctx, { relPath: 'excl.md', sha: shaOf('kubernetes replicas gone'), status: 'active' });
+    await runBackfill(ctx); // → source_unavailable, unavailable version, no current
+    // Legacy retrieval returns nothing from it (status not active + no null-version chunks).
+    const legacy = await withTenant(ctx, (tx) => retrieveRelevant(tx, ctx, 'kubernetes replicas', 5));
+    expect(legacy.some((h) => h.relativePath === 'excl.md')).toBe(false);
+    // And it has no valid current version, so a current-version-gated (versioned) retrieval excludes it too.
+    expect(await currentOf(docId)).toBeNull();
+    const doc = (await db().select({ s: documents.status }).from(documents).where(eq(documents.id, docId)))[0]!;
+    expect(doc.s).toBe('source_unavailable');
+  });
+
+  it('30. an unavailable version preserves identity (expected hash) but exposes no preview', async () => {
+    const ctx = await makeWorkspace();
+    const expected = shaOf('the expected but unretrievable content');
+    const docId = await makeDoc(ctx, { relPath: 'ident.md', sha: expected, status: 'active' });
+    await runBackfill(ctx);
+    const v = (await versionsOf(docId))[0]!;
+    expect(v.fidelity).toBe('unavailable');
+    expect(v.sha).toBe(expected); // identity preserved
+    expect(v.key).toBeNull(); // no object
+    expect((await versionChunksOf(v.id)).length).toBe(0); // no preview/chunks
+  });
+
+  it('31. reconnection ingests a new byte_exact version (even at the same hash) and restores active', async () => {
+    const ctx = await makeWorkspace();
+    const RECONNECT_BODY = '# Reconnected\n\nThe exact original content is back on disk.';
+    const expected = shaOf(RECONNECT_BODY);
+    const docId = await makeDoc(ctx, { relPath: 'reconnect.md', sha: expected, status: 'active' });
+    await runBackfill(ctx); // disconnected → source_unavailable + unavailable version at `expected`
+    const unavailableV = (await versionsOf(docId)).find((v) => v.fidelity === 'unavailable')!;
+    expect(unavailableV).toBeTruthy();
+
+    // The folder comes back with the exact original bytes (same hash) → normal ingestion.
+    const folder = await mkdtemp(join(tmpdir(), 'c1-reconnect-'));
+    await setFolder(ctx, folder);
+    await writeFile(join(folder, 'reconnect.md'), RECONNECT_BODY);
+    await db().transaction((t) => refreshIndex(t, ctx));
+
+    // A genuine byte_exact version now exists at the same hash, is current, and the doc is active again.
+    const byteExact = (await versionsOf(docId)).find((v) => v.fidelity === 'byte_exact');
+    expect(byteExact).toBeTruthy();
+    expect(await currentOf(docId)).toBe(byteExact!.id);
+    const doc = (await db().select({ s: documents.status }).from(documents).where(eq(documents.id, docId)))[0]!;
+    expect(doc.s).toBe('active');
+    await rm(folder, { recursive: true, force: true });
+  });
+
+  it('32. reconnection does not rewrite the unavailable historical version', async () => {
+    const ctx = await makeWorkspace();
+    const RECONNECT_BODY = 'reconnect body two';
+    const expected = shaOf(RECONNECT_BODY);
+    const docId = await makeDoc(ctx, { relPath: 'preserve.md', sha: expected, status: 'active' });
+    await runBackfill(ctx);
+    const before = (await versionsOf(docId)).find((v) => v.fidelity === 'unavailable')!;
+    const folder = await mkdtemp(join(tmpdir(), 'c1-preserve-'));
+    await setFolder(ctx, folder);
+    await writeFile(join(folder, 'preserve.md'), RECONNECT_BODY);
+    await db().transaction((t) => refreshIndex(t, ctx));
+    // The unavailable row is byte-identical (still unavailable, still failed, same object=null).
+    const after = (await versionsOf(docId)).find((v) => v.id === before.id)!;
+    expect(after.fidelity).toBe('unavailable');
+    expect(after.status).toBe('failed');
+    expect(after.key).toBeNull();
+    await rm(folder, { recursive: true, force: true });
+  });
+
+  it('33. every unavailable fidelity count corresponds to an actual version row', async () => {
+    const ctx = await makeWorkspace();
+    await makeDoc(ctx, { relPath: 'u-a.md', sha: shaOf('a'), status: 'active' });
+    await makeDoc(ctx, { relPath: 'u-b.md', sha: shaOf('b'), status: 'active' });
+    const rep = await runBackfill(ctx);
+    const rows = await db().select({ id: documentVersions.id }).from(documentVersions).where(and(eq(documentVersions.projectId, ctx.projectId), eq(documentVersions.contentFidelity, 'unavailable')));
+    expect(rep.versions.byFidelity.unavailable).toBe(rows.length);
+    expect(rows.length).toBe(2);
+  });
+
+  it('34. reconciliation counts Documents-without-versions separately from Documents-without-current', async () => {
+    const ctx = await makeWorkspace();
+    // An archived doc with legacy chunks: backfill makes a reconstructed version, but an ARCHIVED doc is
+    // never assigned a current pointer → it lands in "has a version, no current", NOT "no version row".
+    const arch = await makeDoc(ctx, { relPath: 'arch34.md', sha: shaOf('x'), status: 'archived' });
+    await addLegacyChunks(ctx, arch, ['archived chunk']);
+    const rep = await runBackfill(ctx);
+    expect(rep.counts.logicalDocuments).toBe(1);
+    // The two categories are computed as DISTINCT counters: after a complete backfill every doc has a
+    // version row (so no-version = 0), while the archived doc has a version but no current pointer.
+    expect(rep.counts.docsWithNoVersionRow).toBe(0);
+    expect(rep.counts.docsWithVersionNoCurrentPointer).toBe(1);
+  });
+
+  it('35. reverse-trail queries deduplicate version-level and chunk-level rows for the same run', async () => {
+    const ctx = await makeWorkspace();
+    const body = 'reverse trail evidence';
+    const docId = await makeDoc(ctx, { relPath: 'rt.md', body, status: 'active' });
+    await addLegacyChunks(ctx, docId, [body, 'second chunk']);
+    await runBackfill(ctx);
+    // One run that cited the version via two chunks → a version-level (-1) row + two chunk rows (3 rows).
+    const runId = await makeRun(ctx, [snap('rt.md', shaOf(body), 0), snap('rt.md', shaOf(body), 1)]);
+    await runBackfill(ctx);
+    const v = (await versionsOf(docId))[0]!;
+    const rawRows = await db().select({ id: runDocumentVersions.id }).from(runDocumentVersions).where(eq(runDocumentVersions.documentVersionId, v.id));
+    expect(rawRows.length).toBe(3); // 1 version-level + 2 chunk-level
+    // The reverse trail deduplicates to ONE run.
+    const runsRef = await withTenant(ctx, (tx) => runsReferencingVersion(tx, ctx, v.id));
+    expect(runsRef).toEqual([runId]);
+    // Retention stays blocked after dedup.
+    expect(await withTenant(ctx, (tx) => isVersionReferenced(tx, ctx, v.id))).toBe(true);
   });
 });

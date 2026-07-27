@@ -1975,3 +1975,32 @@ prompt JSON, or building UI. It is restart-safe and reconciles rather than dupli
 tsc + build clean, full suite **585/585** (+27 C1 tests). No retrieval switch; no columns dropped; no
 orphans purged. *Principle: a currently-readable path is not evidence of the earlier indexed state unless
 its bytes match the recorded hash.*
+
+**Stage C1 review corrections (2026-07-27).** Applied before closure:
+- **Active ⇒ retrievable.** New principle: *a Document cannot be operationally active unless the Hub has a
+  valid current version it can retrieve.* A backfill that yields only an `unavailable` version now moves
+  the logical Document from `active` to the explicit `source_unavailable` lifecycle state (identity,
+  expected hash, adapter/path, audit, and all relationships preserved) — retrieval excludes it by
+  lifecycle, not by an undocumented migration exception.
+- **Reconnection.** When the source is reachable again, normal ingestion creates a new `byte_exact`
+  version and restores the Document to `active`, preserving the immutable `unavailable` version + the
+  disconnection history — no manual recreation. Enabled by a **partial unique index**
+  (`(document_id, sha256) WHERE content_fidelity <> 'unavailable'`, migration 0036) + ingestion skipping
+  `unavailable` placeholders on its reuse check, so a real version can coexist with the placeholder even
+  at the same hash.
+- **Count reconciliation.** Distinct, unambiguous counters (total version rows after; created by
+  fidelity; existing reused split into indexed vs unavailable; docs with no version row vs docs with a
+  version but no current pointer; docs source-unavailable) and split idempotency outcomes (skipped
+  already-reconciled, duplicate version/chunk/run-ref/knowledge-bind avoided) — no opaque "duplicates".
+- **Legacy objects reclassified.** The pre-version filename-keyed cloud objects are RETAINED
+  *legacy superseded object candidates* (still referenced by `documents.object_key`), not disposable
+  orphans; they stay through shadow-read, the retrieval switch, and the rollback window. The orphan scan
+  now treats both `documents.object_key` and version keys as referenced, so true orphans = referenced by
+  neither.
+- **Reverse-trail dedup (`references.ts`).** A run that cited a version via a version-level (`-1`) row +
+  chunk rows counts as ONE run in a version's reverse trail; retention treats either relationship as
+  sufficient (purge stays blocked after dedup).
+tsc + build clean, full suite **593/593** (+8 review tests: active-requires-current, unavailable excluded
+from retrieval, unavailable preserves identity/no-preview, reconnection creates byte_exact + restores
+active, reconnection preserves the unavailable row, fidelity counts = real rows, no-version vs no-current
+counted separately, reverse-trail dedup).

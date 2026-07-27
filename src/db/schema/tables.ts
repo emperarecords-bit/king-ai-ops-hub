@@ -654,7 +654,11 @@ export const documentVersions = pgTable(
   },
   (t) => [
     index('document_versions_document_idx').on(t.documentId),
-    uniqueIndex('document_versions_document_sha_uq').on(t.documentId, t.sha256),
+    // Same-content idempotency for RETRIEVABLE versions. Partial: `unavailable` placeholders are excluded
+    // so an unavailable version (which records an expected hash it never verified) and a later real
+    // byte_exact version of the SAME hash can coexist — that is how a disconnected source reconnects
+    // (the placeholder is preserved; a verified version is added) without a uniqueness collision.
+    uniqueIndex('document_versions_document_sha_uq').on(t.documentId, t.sha256).where(sql`content_fidelity <> 'unavailable'`),
   ],
 );
 

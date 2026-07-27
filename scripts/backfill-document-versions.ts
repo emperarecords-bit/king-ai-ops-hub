@@ -78,7 +78,9 @@ async function main() {
     }
     await db.update(aiOperations).set({ status: 'completed', completedAt: new Date(), resultData: report as unknown as Record<string, unknown> }).where(eq(aiOperations.id, operationId));
     reports.push(report);
-    console.log(`[backfill] ${p.key}: created=${report.versions.created} reused=${report.versions.reused} current+=${report.versions.currentAssigned} withheld=${report.versions.currentWithheld} gate(without=${report.gate.withoutValidCurrent}/${report.gate.activeIndexed})`);
+    console.log(
+      `[backfill] ${p.key}: created=${report.versions.created} skipped=${report.idempotency.skippedAlreadyReconciled} current+=${report.versions.currentAssigned} source_unavailable+=${report.stateCorrections.toSourceUnavailable} gate(without=${report.gate.withoutValidCurrent}/${report.gate.activeIndexed})`,
+    );
   }
 
   const agg = aggregateReports(reports);

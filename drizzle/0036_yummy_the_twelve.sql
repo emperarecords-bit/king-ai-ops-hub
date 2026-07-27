@@ -1,0 +1,2 @@
+DROP INDEX "document_versions_document_sha_uq";--> statement-breakpoint
+CREATE UNIQUE INDEX "document_versions_document_sha_uq" ON "document_versions" USING btree ("document_id","sha256") WHERE content_fidelity <> 'unavailable';

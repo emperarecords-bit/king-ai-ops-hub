@@ -64,12 +64,33 @@ export interface ProjectBackfillReport {
   };
   versions: {
     created: number;
-    reused: number;
     byFidelity: FidelityCounts;
     chunksCopied: number;
     currentAssigned: number;
     currentWithheld: number;
-    duplicatesPrevented: number;
+  };
+  /** Distinct end-state counts so the reconciliation is unambiguous (no opaque totals). */
+  counts: {
+    logicalDocuments: number;
+    totalVersionRowsAfter: number;
+    docsWithNoVersionRow: number;
+    docsWithVersionNoCurrentPointer: number;
+    docsSourceUnavailable: number;
+  };
+  /** Idempotency outcomes, split so unrelated events are never merged into one "duplicates" number. */
+  idempotency: {
+    skippedAlreadyReconciled: number;
+    existingIndexedVersionReused: number;
+    existingUnavailableVersionReused: number;
+    duplicateVersionInsertAvoided: number;
+    duplicateChunkCopyAvoided: number;
+    duplicateRunRefAvoided: number;
+    duplicateKnowledgeBindAvoided: number;
+  };
+  /** Lifecycle corrections: a Document with no valid current version cannot remain operationally active. */
+  stateCorrections: {
+    toSourceUnavailable: number;
+    docIds: string[];
   };
   fidelityByAdapter: Record<string, FidelityCounts>;
   storage: {
@@ -78,7 +99,11 @@ export interface ProjectBackfillReport {
     hashMismatches: number;
     missingObjects: number;
     bytesRetained: number;
+    /** Objects present in the store referenced by NO document and NO version row (true orphans). */
     orphanObjects: number;
+    /** Legacy filename-keyed cloud objects still referenced by documents.object_key but superseded by a
+     *  byte_exact version object — RETAINED cleanup candidates, never orphans, never deleted here. */
+    legacySupersededObjectCandidates: number;
     orphanScan: 'local' | 's3' | 'skipped';
   };
   knowledgeRefs: {
@@ -97,8 +122,9 @@ export interface ProjectBackfillReport {
   dualWrite: {
     examined: number;
     gaps: number;
-    reconciled: number;
-    remainingDefects: number;
+    reconciled: number; // gap docs that now have a valid byte_exact/reconstructed current version
+    correctedToUnavailable: number; // gap docs with no retrievable evidence → moved to source_unavailable
+    remainingDefects: number; // transient/retryable gaps still unresolved (a rerun should clear these)
   };
   integrity: {
     byteExactMissingObject: number;
@@ -133,12 +159,15 @@ function emptyReport(orgId: string, projectId: string): ProjectBackfillReport {
       knowledgeDocSources: 0,
       runSnapshotDocRefs: 0,
     },
-    versions: { created: 0, reused: 0, byFidelity: zeroFidelity(), chunksCopied: 0, currentAssigned: 0, currentWithheld: 0, duplicatesPrevented: 0 },
+    versions: { created: 0, byFidelity: zeroFidelity(), chunksCopied: 0, currentAssigned: 0, currentWithheld: 0 },
+    counts: { logicalDocuments: 0, totalVersionRowsAfter: 0, docsWithNoVersionRow: 0, docsWithVersionNoCurrentPointer: 0, docsSourceUnavailable: 0 },
+    idempotency: { skippedAlreadyReconciled: 0, existingIndexedVersionReused: 0, existingUnavailableVersionReused: 0, duplicateVersionInsertAvoided: 0, duplicateChunkCopyAvoided: 0, duplicateRunRefAvoided: 0, duplicateKnowledgeBindAvoided: 0 },
+    stateCorrections: { toSourceUnavailable: 0, docIds: [] },
     fidelityByAdapter: { local_folder: zeroFidelity(), cloud_upload: zeroFidelity() },
-    storage: { objectsCreated: 0, objectsReused: 0, hashMismatches: 0, missingObjects: 0, bytesRetained: 0, orphanObjects: 0, orphanScan: 'skipped' },
+    storage: { objectsCreated: 0, objectsReused: 0, hashMismatches: 0, missingObjects: 0, bytesRetained: 0, orphanObjects: 0, legacySupersededObjectCandidates: 0, orphanScan: 'skipped' },
     knowledgeRefs: { resolved: 0, unresolved: 0, unresolvedByReason: {} },
     runRefs: { versionLevelCreated: 0, chunkLevelCreated: 0, resolved: 0, unresolved: 0, ambiguous: 0, crossWorkspaceRejected: 0 },
-    dualWrite: { examined: 0, gaps: 0, reconciled: 0, remainingDefects: 0 },
+    dualWrite: { examined: 0, gaps: 0, reconciled: 0, correctedToUnavailable: 0, remainingDefects: 0 },
     integrity: { byteExactMissingObject: 0, byteExactHashMismatch: 0, versionChunksOrphaned: 0, currentPointerInvariant: 0, localChangedSinceIndex: 0 },
     gate: { activeIndexed: 0, withValidCurrent: 0, withoutValidCurrent: 0, unresolvedActiveDocIds: [] },
     defects: [],
@@ -224,6 +253,7 @@ export async function backfillProject(
   // ---- Audit: integrity of byte_exact objects, orphan chunks, orphan objects, and the gate ------
   await auditIntegrity(tx, ctx, store, report);
   await computeGate(tx, ctx, report);
+  await computeCounts(tx, ctx, report);
 
   return report;
 }
@@ -330,7 +360,7 @@ async function backfillOneDocument(
   }
 
   if (currentValid) {
-    report.versions.reused += 1;
+    report.idempotency.skippedAlreadyReconciled += 1;
     report.fidelityByAdapter[doc.source]![currentVer!.contentFidelity] += 1;
     return; // already reconciled (Stage B dual-write or a prior backfill run)
   }
@@ -354,7 +384,9 @@ async function backfillOneDocument(
     versionId = existingVer.id;
     fidelity = existingVer.contentFidelity;
     indexStatus = existingVer.indexStatus;
-    report.versions.duplicatesPrevented += 1;
+    report.idempotency.duplicateVersionInsertAvoided += 1;
+    if (fidelity === 'unavailable') report.idempotency.existingUnavailableVersionReused += 1;
+    else report.idempotency.existingIndexedVersionReused += 1;
     // Top up a byte_exact object if we can (idempotent, hash-verified).
     if (fidelity === 'byte_exact' && existingVer.objectKey) {
       const bytes = await materializeBytes(store, doc, folderPath, legacyHash, report);
@@ -416,6 +448,8 @@ async function backfillOneDocument(
         })),
       );
       report.versions.chunksCopied += legacyChunks.length;
+    } else {
+      report.idempotency.duplicateChunkCopyAvoided += 1; // already migrated (rerun)
     }
   }
 
@@ -428,9 +462,18 @@ async function backfillOneDocument(
         .where(and(eq(documentVersions.id, versionId), eq(documentVersions.indexStatus, 'pending')));
     }
     report.versions.currentWithheld += 1;
-    report.defects.push({ docId: doc.id, kind: 'no_current_version', detail: 'evidence unavailable' });
-    if (doc.status === 'active') report.gate.unresolvedActiveDocIds.push(doc.id);
-    if (isStageBGap) report.dualWrite.remainingDefects += 1;
+    // A Document cannot be operationally active without a valid, retrievable current version. Move a
+    // still-"active" logical Document into the explicit non-retrievable `source_unavailable` state —
+    // preserving identity, expected hash (on the version), adapter/path, audit, and all relationships.
+    // Reconnection (a later refresh that can read the bytes) restores it to `active` via normal ingestion;
+    // this immutable unavailable version and the disconnection history are kept.
+    if (doc.status === 'active' || doc.status === 'indexing') {
+      await tx.update(documents).set({ status: 'source_unavailable', errorMessage: 'source unavailable at backfill — no retrievable evidence', updatedAt: new Date() }).where(eq(documents.id, doc.id));
+      report.stateCorrections.toSourceUnavailable += 1;
+      report.stateCorrections.docIds.push(doc.id);
+    }
+    report.defects.push({ docId: doc.id, kind: 'source_unavailable', detail: 'evidence unavailable — logical state corrected to source_unavailable' });
+    if (isStageBGap) report.dualWrite.correctedToUnavailable += 1; // gap resolved by honest state-correction
     return;
   }
 
@@ -549,6 +592,7 @@ async function reconcileKnowledgeRefs(tx: DbTx, ctx: TenantContext, report: Proj
   for (const ks of rows) {
     if (ks.documentVersionId) {
       report.knowledgeRefs.resolved += 1; // already bound (idempotent)
+      report.idempotency.duplicateKnowledgeBindAvoided += 1;
       continue;
     }
     if (!ks.sourceVersionHash) {
@@ -626,6 +670,7 @@ async function reconcileRunRefs(tx: DbTx, ctx: TenantContext, report: ProjectBac
           .onConflictDoNothing()
           .returning({ id: runDocumentVersions.id });
         if (insVer.length > 0) report.runRefs.versionLevelCreated += 1;
+        else report.idempotency.duplicateRunRefAvoided += 1;
       }
       // Chunk-level relationship: one per (run, version, chunk).
       const insChunk = await tx
@@ -634,6 +679,7 @@ async function reconcileRunRefs(tx: DbTx, ctx: TenantContext, report: ProjectBac
         .onConflictDoNothing()
         .returning({ id: runDocumentVersions.id });
       if (insChunk.length > 0) report.runRefs.chunkLevelCreated += 1;
+      else report.idempotency.duplicateRunRefAvoided += 1;
     }
   }
 }
@@ -646,7 +692,23 @@ async function auditIntegrity(tx: DbTx, ctx: TenantContext, store: ObjectStore, 
     .from(documentVersions)
     .where(and(eq(documentVersions.orgId, ctx.orgId), eq(documentVersions.projectId, ctx.projectId)));
 
+  // Known keys = every object referenced by a version row OR a legacy document.object_key. The latter
+  // matters: the pre-version cloud objects are STILL referenced by documents.object_key (upload/download/
+  // retry paths), so they are NOT orphans — they are legacy superseded cleanup candidates, counted below.
   const knownKeys = new Set<string>();
+  const docObjs = await tx
+    .select({ objectKey: documents.objectKey, source: documents.source, currentVersionId: documents.currentVersionId })
+    .from(documents)
+    .where(and(eq(documents.orgId, ctx.orgId), eq(documents.projectId, ctx.projectId)));
+  const currentVersionKey = new Map(vers.map((v) => [v.id, v.objectKey] as const));
+  for (const d of docObjs) {
+    if (d.objectKey) {
+      knownKeys.add(d.objectKey);
+      // A legacy filename-keyed cloud object superseded by a distinct byte_exact version object.
+      const curKey = d.currentVersionId ? currentVersionKey.get(d.currentVersionId) ?? null : null;
+      if (d.source === 'cloud_upload' && curKey && curKey !== d.objectKey) report.storage.legacySupersededObjectCandidates += 1;
+    }
+  }
   for (const v of vers) {
     if (v.contentFidelity === 'byte_exact') {
       if (!v.objectKey) {
@@ -691,7 +753,7 @@ async function auditIntegrity(tx: DbTx, ctx: TenantContext, store: ObjectStore, 
         if (!keyBelongsToTenant(k, ctx)) continue; // defensive
         if (!knownKeys.has(k)) {
           report.storage.orphanObjects += 1;
-          report.defects.push({ kind: 'orphan_object', detail: `object ${k} has no version row (not deleted)` });
+          report.defects.push({ kind: 'orphan_object', detail: `object ${k} referenced by no document or version (not deleted)` });
         }
       }
     } catch {
@@ -733,17 +795,50 @@ async function computeGate(tx: DbTx, ctx: TenantContext, report: ProjectBackfill
   report.dualWrite.remainingDefects = Math.max(report.dualWrite.remainingDefects, 0);
 }
 
+/** Distinct end-state counts so every logical Document is accounted for unambiguously. */
+async function computeCounts(tx: DbTx, ctx: TenantContext, report: ProjectBackfillReport): Promise<void> {
+  const docs = await tx
+    .select({ id: documents.id, status: documents.status, currentVersionId: documents.currentVersionId })
+    .from(documents)
+    .where(and(eq(documents.orgId, ctx.orgId), eq(documents.projectId, ctx.projectId)));
+  report.counts.logicalDocuments = docs.length;
+
+  const allVersions = await tx
+    .select({ id: documentVersions.id, documentId: documentVersions.documentId, indexStatus: documentVersions.indexStatus })
+    .from(documentVersions)
+    .where(and(eq(documentVersions.orgId, ctx.orgId), eq(documentVersions.projectId, ctx.projectId)));
+  report.counts.totalVersionRowsAfter = allVersions.length;
+  const versionsByDoc = new Map<string, { id: string; indexStatus: string }[]>();
+  for (const v of allVersions) {
+    const arr = versionsByDoc.get(v.documentId) ?? [];
+    arr.push({ id: v.id, indexStatus: v.indexStatus });
+    versionsByDoc.set(v.documentId, arr);
+  }
+  for (const d of docs) {
+    const vs = versionsByDoc.get(d.id) ?? [];
+    if (vs.length === 0) report.counts.docsWithNoVersionRow += 1;
+    else {
+      const valid = d.currentVersionId ? vs.some((v) => v.id === d.currentVersionId && v.indexStatus === 'indexed') : false;
+      if (!valid) report.counts.docsWithVersionNoCurrentPointer += 1;
+    }
+    if (d.status === 'source_unavailable') report.counts.docsSourceUnavailable += 1;
+  }
+}
+
 /** Merge a set of per-project reports into one aggregate for the operation-level reconciliation report. */
 export function aggregateReports(reports: ProjectBackfillReport[]): AggregateBackfillReport {
   const agg: AggregateBackfillReport = {
     projects: reports.length,
     baseline: { documents: 0, withCurrentVersion: 0, withoutCurrentVersion: 0, legacyChunks: 0, knowledgeDocSources: 0, runSnapshotDocRefs: 0 },
-    versions: { created: 0, reused: 0, byFidelity: zeroFidelity(), chunksCopied: 0, currentAssigned: 0, currentWithheld: 0, duplicatesPrevented: 0 },
+    versions: { created: 0, byFidelity: zeroFidelity(), chunksCopied: 0, currentAssigned: 0, currentWithheld: 0 },
+    counts: { logicalDocuments: 0, totalVersionRowsAfter: 0, docsWithNoVersionRow: 0, docsWithVersionNoCurrentPointer: 0, docsSourceUnavailable: 0 },
+    idempotency: { skippedAlreadyReconciled: 0, existingIndexedVersionReused: 0, existingUnavailableVersionReused: 0, duplicateVersionInsertAvoided: 0, duplicateChunkCopyAvoided: 0, duplicateRunRefAvoided: 0, duplicateKnowledgeBindAvoided: 0 },
+    stateCorrections: { toSourceUnavailable: 0, docIds: [] },
     fidelityByAdapter: { local_folder: zeroFidelity(), cloud_upload: zeroFidelity() },
-    storage: { objectsCreated: 0, objectsReused: 0, hashMismatches: 0, missingObjects: 0, bytesRetained: 0, orphanObjects: 0 },
+    storage: { objectsCreated: 0, objectsReused: 0, hashMismatches: 0, missingObjects: 0, bytesRetained: 0, orphanObjects: 0, legacySupersededObjectCandidates: 0 },
     knowledgeRefs: { resolved: 0, unresolved: 0, unresolvedByReason: {} },
     runRefs: { versionLevelCreated: 0, chunkLevelCreated: 0, resolved: 0, unresolved: 0, ambiguous: 0, crossWorkspaceRejected: 0 },
-    dualWrite: { examined: 0, gaps: 0, reconciled: 0, remainingDefects: 0 },
+    dualWrite: { examined: 0, gaps: 0, reconciled: 0, correctedToUnavailable: 0, remainingDefects: 0 },
     integrity: { byteExactMissingObject: 0, byteExactHashMismatch: 0, versionChunksOrphaned: 0, currentPointerInvariant: 0, localChangedSinceIndex: 0 },
     gate: { activeIndexed: 0, withValidCurrent: 0, withoutValidCurrent: 0, unresolvedActiveDocIds: [] },
     defectCount: 0,
@@ -756,22 +851,35 @@ export function aggregateReports(reports: ProjectBackfillReport[]): AggregateBac
     agg.baseline.knowledgeDocSources += r.baseline.knowledgeDocSources;
     agg.baseline.runSnapshotDocRefs += r.baseline.runSnapshotDocRefs;
     agg.versions.created += r.versions.created;
-    agg.versions.reused += r.versions.reused;
     agg.versions.chunksCopied += r.versions.chunksCopied;
     agg.versions.currentAssigned += r.versions.currentAssigned;
     agg.versions.currentWithheld += r.versions.currentWithheld;
-    agg.versions.duplicatesPrevented += r.versions.duplicatesPrevented;
     for (const k of ['byte_exact', 'reconstructed_text', 'unavailable'] as const) {
       agg.versions.byFidelity[k] += r.versions.byFidelity[k];
       agg.fidelityByAdapter.local_folder![k] += r.fidelityByAdapter.local_folder?.[k] ?? 0;
       agg.fidelityByAdapter.cloud_upload![k] += r.fidelityByAdapter.cloud_upload?.[k] ?? 0;
     }
+    agg.counts.logicalDocuments += r.counts.logicalDocuments;
+    agg.counts.totalVersionRowsAfter += r.counts.totalVersionRowsAfter;
+    agg.counts.docsWithNoVersionRow += r.counts.docsWithNoVersionRow;
+    agg.counts.docsWithVersionNoCurrentPointer += r.counts.docsWithVersionNoCurrentPointer;
+    agg.counts.docsSourceUnavailable += r.counts.docsSourceUnavailable;
+    agg.idempotency.skippedAlreadyReconciled += r.idempotency.skippedAlreadyReconciled;
+    agg.idempotency.existingIndexedVersionReused += r.idempotency.existingIndexedVersionReused;
+    agg.idempotency.existingUnavailableVersionReused += r.idempotency.existingUnavailableVersionReused;
+    agg.idempotency.duplicateVersionInsertAvoided += r.idempotency.duplicateVersionInsertAvoided;
+    agg.idempotency.duplicateChunkCopyAvoided += r.idempotency.duplicateChunkCopyAvoided;
+    agg.idempotency.duplicateRunRefAvoided += r.idempotency.duplicateRunRefAvoided;
+    agg.idempotency.duplicateKnowledgeBindAvoided += r.idempotency.duplicateKnowledgeBindAvoided;
+    agg.stateCorrections.toSourceUnavailable += r.stateCorrections.toSourceUnavailable;
+    agg.stateCorrections.docIds.push(...r.stateCorrections.docIds);
     agg.storage.objectsCreated += r.storage.objectsCreated;
     agg.storage.objectsReused += r.storage.objectsReused;
     agg.storage.hashMismatches += r.storage.hashMismatches;
     agg.storage.missingObjects += r.storage.missingObjects;
     agg.storage.bytesRetained += r.storage.bytesRetained;
     agg.storage.orphanObjects += r.storage.orphanObjects;
+    agg.storage.legacySupersededObjectCandidates += r.storage.legacySupersededObjectCandidates;
     agg.knowledgeRefs.resolved += r.knowledgeRefs.resolved;
     agg.knowledgeRefs.unresolved += r.knowledgeRefs.unresolved;
     for (const [reason, n] of Object.entries(r.knowledgeRefs.unresolvedByReason)) {
@@ -785,6 +893,7 @@ export function aggregateReports(reports: ProjectBackfillReport[]): AggregateBac
     agg.dualWrite.examined += r.dualWrite.examined;
     agg.dualWrite.gaps += r.dualWrite.gaps;
     agg.dualWrite.reconciled += r.dualWrite.reconciled;
+    agg.dualWrite.correctedToUnavailable += r.dualWrite.correctedToUnavailable;
     agg.dualWrite.remainingDefects += r.dualWrite.remainingDefects;
     agg.integrity.byteExactMissingObject += r.integrity.byteExactMissingObject;
     agg.integrity.byteExactHashMismatch += r.integrity.byteExactHashMismatch;
@@ -804,8 +913,11 @@ export interface AggregateBackfillReport {
   projects: number;
   baseline: { documents: number; withCurrentVersion: number; withoutCurrentVersion: number; legacyChunks: number; knowledgeDocSources: number; runSnapshotDocRefs: number };
   versions: ProjectBackfillReport['versions'];
+  counts: ProjectBackfillReport['counts'];
+  idempotency: ProjectBackfillReport['idempotency'];
+  stateCorrections: ProjectBackfillReport['stateCorrections'];
   fidelityByAdapter: Record<string, FidelityCounts>;
-  storage: { objectsCreated: number; objectsReused: number; hashMismatches: number; missingObjects: number; bytesRetained: number; orphanObjects: number };
+  storage: { objectsCreated: number; objectsReused: number; hashMismatches: number; missingObjects: number; bytesRetained: number; orphanObjects: number; legacySupersededObjectCandidates: number };
   knowledgeRefs: ProjectBackfillReport['knowledgeRefs'];
   runRefs: ProjectBackfillReport['runRefs'];
   dualWrite: ProjectBackfillReport['dualWrite'];
