@@ -1,7 +1,9 @@
 'use client';
 
 import { useActionState } from 'react';
-import { type RevealState, revealInitial, revealRestrictedVersionAction } from './detail-actions';
+import { type RevealState, revealRestrictedVersionAction } from './detail-actions';
+
+const revealInitial: RevealState = { released: false, previewText: null, qualification: null, downloadable: false, message: null };
 
 /**
  * The explicit restricted-content release control. Submitting it POSTs the server action (origin/CSRF

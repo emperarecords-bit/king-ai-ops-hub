@@ -26,8 +26,8 @@ export interface RevealState {
   message: string | null;
 }
 
-export const revealInitial: RevealState = { released: false, previewText: null, qualification: null, downloadable: false, message: null };
-
+// NOTE: a 'use server' module may export ONLY async functions — the initial state constant lives in the
+// client component, not here.
 const DENIED: RevealState = { released: false, previewText: null, qualification: null, downloadable: false, message: 'This source is not available to your account.' };
 
 export async function revealRestrictedVersionAction(_prev: RevealState, formData: FormData): Promise<RevealState> {
