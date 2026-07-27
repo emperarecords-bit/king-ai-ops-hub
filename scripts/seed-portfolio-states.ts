@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { createHash, randomUUID } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray, like } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import * as schema from '../src/db/schema';
@@ -38,12 +38,31 @@ async function main() {
   const member = (await db.select({ userId: projectMembers.userId }).from(projectMembers).where(eq(projectMembers.projectId, project.id)).limit(1))[0];
   const ctx: TenantContext = { userId: member!.userId, orgId: project.orgId, projectId: project.id, orgRole: 'owner', projectRole: 'admin' };
 
-  // Always clean the prior demo batch first (delete the logical docs; cascades versions/chunks).
-  const prior = await db.select({ id: documents.id }).from(documents).where(and(eq(documents.orgId, ctx.orgId), eq(documents.projectId, ctx.projectId)));
-  for (const d of prior) {
-    const doc = (await db.select({ relativePath: documents.relativePath }).from(documents).where(eq(documents.id, d.id)))[0];
-    if (doc && doc.relativePath.startsWith(PREFIX)) await db.delete(documents).where(eq(documents.id, d.id));
+  // Lifecycle-safe removal of the prior demo batch. Evidence relationships use RESTRICT (deleting a
+  // referenced version is refused), so dependents must go first, in order: run↔version and knowledge↔version
+  // links → demo runs/tasks/agents (tagged '[pf-demo]…') → demo knowledge items → the documents (which then
+  // cascade their versions + chunks). Only ever touches `__pf-demo-` docs and '[pf-demo]'-tagged rows.
+  async function cleanupDemoBatch() {
+    const demoDocIds = (await db.select({ id: documents.id, relativePath: documents.relativePath }).from(documents).where(and(eq(documents.orgId, ctx.orgId), eq(documents.projectId, ctx.projectId))))
+      .filter((d) => d.relativePath.startsWith(PREFIX))
+      .map((d) => d.id);
+    if (demoDocIds.length > 0) {
+      const verIds = (await db.select({ id: documentVersions.id }).from(documentVersions).where(inArray(documentVersions.documentId, demoDocIds))).map((v) => v.id);
+      if (verIds.length > 0) {
+        await db.delete(runDocumentVersions).where(inArray(runDocumentVersions.documentVersionId, verIds));
+        await db.delete(knowledgeSources).where(inArray(knowledgeSources.documentVersionId, verIds));
+      }
+    }
+    const demoTaskIds = (await db.select({ id: tasks.id }).from(tasks).where(and(eq(tasks.orgId, ctx.orgId), eq(tasks.projectId, ctx.projectId), like(tasks.title, '[pf-demo]%')))).map((t) => t.id);
+    if (demoTaskIds.length > 0) {
+      await db.delete(runs).where(inArray(runs.taskId, demoTaskIds));
+      await db.delete(tasks).where(inArray(tasks.id, demoTaskIds));
+    }
+    await db.delete(agents).where(and(eq(agents.orgId, ctx.orgId), eq(agents.projectId, ctx.projectId), like(agents.name, '[pf-demo]%')));
+    await db.delete(knowledgeItems).where(and(eq(knowledgeItems.orgId, ctx.orgId), eq(knowledgeItems.projectId, ctx.projectId), like(knowledgeItems.title, '[pf-demo]%')));
+    if (demoDocIds.length > 0) await db.delete(documents).where(inArray(documents.id, demoDocIds));
   }
+  await cleanupDemoBatch();
   if (process.env.SEED_MODE === 'clean') {
     console.log('cleaned __pf-demo- batch.');
     await sql.end();
