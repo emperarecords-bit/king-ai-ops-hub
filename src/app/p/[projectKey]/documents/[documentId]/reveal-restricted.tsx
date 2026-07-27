@@ -31,7 +31,10 @@ export function RevealRestricted({
         {state.qualification ? <p className="mb-2 rounded bg-[#3a2a1f] px-3 py-2 text-xs text-[var(--warning,#e0a458)]">{state.qualification}</p> : null}
         <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded bg-[var(--background)] p-3 text-xs">{state.previewText}</pre>
         {state.downloadable ? (
-          <a href={downloadHref} className="mt-2 inline-block rounded-md border border-[var(--border)] px-3 py-1 text-xs font-medium hover:border-[var(--accent)]">Download exact source</a>
+          // Restricted bytes are released ONLY by a deliberate, origin-validated POST — never a shareable GET.
+          <form method="post" action={downloadHref} className="mt-2">
+            <button type="submit" className="inline-block rounded-md border border-[var(--border)] px-3 py-1 text-xs font-medium hover:border-[var(--accent)]">Download exact source</button>
+          </form>
         ) : (
           <p className="mt-2 text-xs text-[var(--muted)]">Reconstructed indexed text — the original bytes were not retained, so there is no exact download.</p>
         )}

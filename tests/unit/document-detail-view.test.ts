@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { DetailKnowledgeRef, DetailLifecycleEvent, DetailRunRef } from '@/domain/documents/detail';
 import { AiOperationsSection, HistorySection, KnowledgeSection } from '@/app/p/[projectKey]/documents/[documentId]/detail-view';
+import { mayRelease } from '@/app/p/[projectKey]/documents/[documentId]/download/route';
 
 /**
  * Render-level coverage for the read-only Detail UI (P2 blockers 2/3/4). These sections use no client link
@@ -54,6 +55,15 @@ describe('Detail view — AI execution rendering (Blocker 3)', () => {
     expect(html).toContain('provider: Not recorded');
     expect(html).toContain('model: Not recorded');
     expect(html).toContain('(failed)'); // a failed run still shows, with its recorded status
+  });
+});
+
+describe('Detail download — GET never releases restricted content', () => {
+  it('a GET may release only NON-restricted content; a POST (deliberate) may release restricted', () => {
+    expect(mayRelease('GET', false)).toBe(true); // non-restricted GET download allowed
+    expect(mayRelease('GET', true)).toBe(false); // restricted GET download refused (before any release/audit)
+    expect(mayRelease('POST', true)).toBe(true); // restricted release only by the deliberate POST
+    expect(mayRelease('POST', false)).toBe(true);
   });
 });
 
