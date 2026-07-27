@@ -50,15 +50,15 @@ function Chip({ children, tone = 'muted' }: { children: React.ReactNode; tone?: 
   return <span className="rounded border px-1.5 py-0.5 text-xs" style={{ borderColor: 'var(--border)', color }}>{children}</span>;
 }
 
-function ReferenceRow({ projectKey, ref }: { projectKey: string; ref: KnowledgePortfolioReference }) {
-  const d = ref.descriptor;
+function ReferenceRow({ projectKey, reference }: { projectKey: string; reference: KnowledgePortfolioReference }) {
+  const d = reference.descriptor;
   const title = d.claim?.title ?? '(restricted — withheld from this view)';
   return (
     <li className="rounded-md border border-[var(--border)] p-3">
       <div className="mb-1 flex items-center justify-between gap-3">
-        <Link href={`/p/${projectKey}/knowledge/${ref.id}`} className="text-sm font-medium hover:underline">
+        <Link href={`/p/${projectKey}/knowledge/${reference.id}`} className="text-sm font-medium hover:underline">
           {title}
-          {ref.version > 1 ? <span className="ml-2 text-xs text-[var(--muted)]">v{ref.version}</span> : null}
+          {reference.version > 1 ? <span className="ml-2 text-xs text-[var(--muted)]">v{reference.version}</span> : null}
         </Link>
         <Chip tone="accent">{CATEGORY_LABEL[d.category] ?? d.category}</Chip>
       </div>
@@ -71,9 +71,9 @@ function ReferenceRow({ projectKey, ref }: { projectKey: string; ref: KnowledgeP
         <Chip tone={d.disclosure.permitted ? 'muted' : 'warn'}>{d.disclosure.permitted ? 'workspace-internal' : 'restricted'}</Chip>
         <Chip>{d.applications.phrase}</Chip>
       </div>
-      {ref.concerns.length > 0 ? (
+      {reference.concerns.length > 0 ? (
         <div className="mt-1.5 flex flex-wrap gap-1.5">
-          {ref.concerns.map((c) => (
+          {reference.concerns.map((c) => (
             <Chip key={c} tone="warn">{CONCERN_LABEL[c]}</Chip>
           ))}
         </div>
@@ -114,8 +114,8 @@ export default async function KnowledgePage({ params }: { params: Promise<{ proj
         <Card title={`Needs review (${pf.needsReviewLens.length})`} className="mb-6 border-[var(--accent)]">
           <p className="mb-3 text-xs text-[var(--muted)]">Active records with an evidence-backed concern — a lens over the groups below, not a separate bucket.</p>
           <ul className="space-y-3">
-            {pf.needsReviewLens.map((ref) => (
-              <ReferenceRow key={ref.id} projectKey={projectKey} ref={ref} />
+            {pf.needsReviewLens.map((r) => (
+              <ReferenceRow key={r.id} projectKey={projectKey} reference={r} />
             ))}
           </ul>
         </Card>
@@ -126,8 +126,8 @@ export default async function KnowledgePage({ params }: { params: Promise<{ proj
           <Card key={key} title={`${title} (${pf.groups[key].length})`} className="mb-6">
             <p className="mb-3 text-xs text-[var(--muted)]">{purpose}</p>
             <ul className="space-y-3">
-              {pf.groups[key].map((ref) => (
-                <ReferenceRow key={ref.id} projectKey={projectKey} ref={ref} />
+              {pf.groups[key].map((r) => (
+                <ReferenceRow key={r.id} projectKey={projectKey} reference={r} />
               ))}
             </ul>
           </Card>
