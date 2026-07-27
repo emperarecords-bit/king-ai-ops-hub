@@ -26,6 +26,7 @@
     "backfill:document-versions": "tsx --conditions=react-server scripts/backfill-document-versions.ts",
     "shadow:retrieval": "tsx --conditions=react-server scripts/shadow-retrieval.ts",
     "set:retrieval-mode": "tsx --conditions=react-server scripts/set-retrieval-mode.ts",
+    "verify:versioned-evidence": "tsx --conditions=react-server scripts/verify-versioned-evidence.ts",
     "observe": "tsx scripts/observe.ts",
     "worker": "tsx --conditions=react-server scripts/worker.ts",
     "standing:tick": "tsx --conditions=react-server scripts/run-standing-work.ts",
