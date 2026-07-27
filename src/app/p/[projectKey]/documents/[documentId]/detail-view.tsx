@@ -55,7 +55,7 @@ export function SelectedPanel({
   previewText,
   qualification,
   downloadHref,
-  revealHref,
+  revealSlot,
 }: {
   detail: DocumentDetail;
   selectedVersion: DetailVersion | null;
@@ -63,9 +63,9 @@ export function SelectedPanel({
   previewText: string | null;
   qualification: string | null;
   downloadHref: string | null;
-  /** When set, the selected version is restricted and NOT yet released — show an explicit reveal control
-   *  (an audited release) instead of content. Auto-render/prefetch therefore never releases restricted content. */
-  revealHref: string | null;
+  /** When set, the selected version is restricted and NOT yet released — render the explicit release
+   *  control (a POST server action) instead of content. Rendering/refresh/prefetch never releases. */
+  revealSlot: React.ReactNode | null;
 }) {
   const sel = detail.selected;
   const historical = sel.versionId != null && !sel.isCurrent;
@@ -93,11 +93,8 @@ export function SelectedPanel({
         <p className="mb-2 text-xs text-[var(--muted)]">You are inspecting a historical version. The Document’s current version and lifecycle state remain shown above.</p>
       ) : null}
 
-      {revealHref ? (
-        <div className="rounded bg-[#3a2a1f] px-3 py-3 text-sm">
-          <p className="mb-2 text-[var(--warning,#e0a458)]">This is restricted content. Revealing it records an access to your account.</p>
-          <Link href={revealHref} prefetch={false} className="inline-block rounded-md border border-[var(--border)] px-3 py-1 text-xs font-medium hover:border-[var(--accent)]">Reveal restricted content</Link>
-        </div>
+      {revealSlot ? (
+        revealSlot
       ) : inspectionState === 'released' && previewText != null ? (
         <>
           {qualification ? <p className="mb-2 rounded bg-[#3a2a1f] px-3 py-2 text-xs text-[var(--warning,#e0a458)]">{qualification}</p> : null}

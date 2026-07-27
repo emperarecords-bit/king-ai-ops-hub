@@ -612,4 +612,45 @@ describe.skipIf(!available)('Documents Detail — P2: gated evidence inspection 
     await inspect(ctx, docId, undefined, 'preview');
     expect(await auditCount(ctx, docId, 'document.restricted_inspected')).toBe(1);
   });
+
+  // The restricted release is an explicit server action (POST), not a replayable GET. These exercise the
+  // action's core (loadDetailWithInspection) and the GET page path (loadDocumentDetail).
+  it('P2.12 one explicit release records exactly one inspection; a following page refresh/back records none', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await byteExactDoc(ctx, 'p2-reveal.md', 'restricted body', 'restricted');
+    const r = await inspect(ctx, docId, versionId, 'preview'); // the explicit release action releases the exact version
+    expect(r.inspection?.state).toBe('released');
+    expect(await auditCount(ctx, docId, 'document.restricted_inspected')).toBe(1);
+    // A refresh / back-forward is a GET → metadata only → no additional inspection.
+    await db().transaction((t) => loadDocumentDetail(t as unknown as DbTx, ctx, docId, versionId));
+    await db().transaction((t) => loadDocumentDetail(t as unknown as DbTx, ctx, docId, versionId));
+    expect(await auditCount(ctx, docId, 'document.restricted_inspected')).toBe(1);
+  });
+
+  it('P2.13 an unauthorized viewer\'s release attempt releases nothing and records no inspection', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await byteExactDoc(ctx, 'p2-unauth.md', 'SECRET', 'restricted');
+    const member = await addMember(ctx, 'member');
+    const r = await inspect(member, docId, versionId, 'preview'); // the action reauthorizes and denies
+    expect(r.detail.found).toBe(false);
+    expect(r.inspection).toBeNull();
+    expect(await auditCount(ctx, docId, 'document.restricted_inspected')).toBe(0);
+    expect(JSON.stringify(r)).not.toContain('SECRET');
+  });
+
+  it('P2.14 the release rejects a foreign / cross-workspace version and records nothing', async () => {
+    const a = await makeWorkspace();
+    const b = await makeWorkspace();
+    const mine = await byteExactDoc(a, 'p2-mine-r.md', 'body', 'restricted');
+    const otherDoc = await byteExactDoc(a, 'p2-other-r.md', 'other', 'restricted'); // same ws, different doc
+    const foreign = await byteExactDoc(b, 'p2-foreign-r.md', 'FOREIGN', 'restricted');
+    // foreign document version → rejected, nothing released, no audit on my doc.
+    const rForeign = await inspect(a, mine.docId, otherDoc.versionId, 'preview');
+    expect(rForeign.inspection).toBeNull();
+    // cross-workspace version → rejected, no leak.
+    const rCross = await inspect(a, mine.docId, foreign.versionId, 'preview');
+    expect(rCross.inspection).toBeNull();
+    expect(JSON.stringify(rCross)).not.toContain('FOREIGN');
+    expect(await auditCount(a, mine.docId, 'document.restricted_inspected')).toBe(0);
+  });
 });

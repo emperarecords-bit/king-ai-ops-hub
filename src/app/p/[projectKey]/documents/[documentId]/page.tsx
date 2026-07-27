@@ -15,6 +15,7 @@ import {
   VersionHistoryTable,
   shortId,
 } from './detail-view';
+import { RevealRestricted } from './reveal-restricted';
 
 // Sensitive per-viewer content: always render fresh + per request, never statically or cross-user cached.
 export const dynamic = 'force-dynamic';
@@ -26,25 +27,23 @@ export default async function DocumentDetailPage({
   searchParams,
 }: {
   params: Promise<{ projectKey: string; documentId: string }>;
-  searchParams: Promise<{ version?: string; reveal?: string }>;
+  searchParams: Promise<{ version?: string }>;
 }) {
   const { projectKey, documentId } = await params;
-  const { version, reveal } = await searchParams;
+  const { version } = await searchParams;
   const ctx = await requireTenant(projectKey);
   const store = await getObjectStore();
 
-  // Load METADATA always (no content release, no audit). Release the selected version's content ONLY when
-  // it is safe to auto-show (non-restricted) OR the viewer explicitly asked to reveal restricted content —
-  // so merely rendering or prefetching this page never records a restricted inspection.
+  // A GET render loads METADATA always, and auto-releases content ONLY for NON-restricted sources (which
+  // records nothing). Restricted content is NEVER released on GET — not on render, refresh, prefetch, or a
+  // shared/replayed URL. Its release is a deliberate POST server action (see RevealRestricted), so a page
+  // view can never forge a restricted-inspection record.
   const { detail, inspection } = await withTenant(ctx, async (tx) => {
     const detail = await loadDocumentDetail(tx, ctx, documentId, version);
-    if (!detail.found || detail.selected.resolution !== 'selected' || !detail.selected.versionId) {
+    if (!detail.found || detail.restricted || detail.selected.resolution !== 'selected' || !detail.selected.versionId) {
       return { detail, inspection: null };
     }
-    const mayRelease = !detail.restricted || reveal === '1';
-    const inspection = mayRelease
-      ? await loadInspectableVersion(tx, ctx, store, { kind: 'versionId', versionId: detail.selected.versionId }, { accessType: 'preview', purpose: 'documents detail preview' })
-      : null;
+    const inspection = await loadInspectableVersion(tx, ctx, store, { kind: 'versionId', versionId: detail.selected.versionId }, { accessType: 'preview', purpose: 'documents detail preview' });
     return { detail, inspection };
   });
 
@@ -69,13 +68,13 @@ export default async function DocumentDetailPage({
   // released solely by the gated download route).
   const previewText = inspection?.inspection?.chunks ? inspection.inspection.chunks.map((c) => c.content).join('\n\n') : null;
   const qualification = inspection?.inspection?.qualification ?? null;
-  const downloadHref =
-    inspection?.state === 'released' && inspection.inspection?.downloadable && detail.selected.versionId
-      ? `/p/${projectKey}/documents/${documentId}/download?version=${detail.selected.versionId}`
-      : null;
-  const revealHref =
-    detail.restricted && reveal !== '1' && detail.selected.resolution === 'selected' && detail.selected.versionId
-      ? (detail.selected.isCurrent ? `/p/${projectKey}/documents/${documentId}?reveal=1` : `/p/${projectKey}/documents/${documentId}?version=${detail.selected.versionId}&reveal=1`)
+  const downloadBase = detail.selected.versionId ? `/p/${projectKey}/documents/${documentId}/download?version=${detail.selected.versionId}` : null;
+  // The inline (non-restricted) preview shows a download link only for an actually-downloadable release.
+  const previewDownloadHref = inspection?.state === 'released' && inspection.inspection?.downloadable ? downloadBase : null;
+  // Restricted + a resolved selection → the explicit POST release control (no GET release path exists).
+  const revealSlot =
+    detail.restricted && detail.selected.resolution === 'selected' && detail.selected.versionId && downloadBase
+      ? <RevealRestricted projectKey={projectKey} documentId={documentId} versionId={detail.selected.versionId} downloadHref={downloadBase} />
       : null;
 
   return (
@@ -127,8 +126,8 @@ export default async function DocumentDetailPage({
           inspectionState={inspection?.state ?? null}
           previewText={previewText}
           qualification={qualification}
-          downloadHref={downloadHref}
-          revealHref={revealHref}
+          downloadHref={previewDownloadHref}
+          revealSlot={revealSlot}
         />
 
         <Card title="3. Version history"><VersionHistoryTable detail={detail} projectKey={projectKey} documentId={documentId} /></Card>
