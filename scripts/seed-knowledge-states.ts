@@ -47,7 +47,12 @@ async function main() {
 
   const projectKey = process.env.SEED_PROJECT_KEY ?? 'king-ai-ops-hub';
   const project = (await db.select().from(projects).where(eq(projects.key, projectKey)).limit(1))[0];
-  if (!project) throw new Error(`Project '${projectKey}' not found — run npm run db:seed first.`);
+  if (!project) {
+    const keys = (await db.select({ key: projects.key }).from(projects).orderBy(projects.key)).map((r) => r.key);
+    console.error(`Project '${projectKey}' not found. Available project keys:\n${keys.map((k) => `  - ${k}`).join('\n')}\nRe-run with SEED_PROJECT_KEY=<one of the above>.`);
+    await sql.end();
+    process.exit(1);
+  }
   const member = (await db.select().from(projectMembers).where(eq(projectMembers.projectId, project.id)).limit(1))[0];
   if (!member) throw new Error(`No project member for '${projectKey}'.`);
   const ctx: TenantContext = { userId: member.userId, orgId: project.orgId, projectId: project.id, orgRole: 'owner', projectRole: 'admin' };
