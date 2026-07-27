@@ -242,6 +242,12 @@ export async function replaceDocument(
   input: UploadInput,
 ): Promise<UploadOutcome> {
   const doc = await requireOwnedCloudDoc(tx, ctx, documentId);
+  // Fail closed: replacement is never an alternate restore path. An intentionally-archived source must be
+  // explicitly RESTORED first; a directly-constructed replacement against an archived document is rejected
+  // before any object write, version, current-pointer change, or audit.
+  if (doc.status === 'archived') {
+    throw new AppError('conflict', 'Restore this document before replacing its source.');
+  }
   // Reuse the source id so the replacement updates in place regardless of the
   // new file's name.
   return uploadDocument(tx, ctx, store, { ...input, rawFilename: doc.sourceId ?? input.rawFilename });

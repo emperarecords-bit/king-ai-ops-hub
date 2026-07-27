@@ -6,6 +6,7 @@ import postgres from 'postgres';
 import * as schema from '../src/db/schema';
 import { agents, documentChunks, documentVersions, documents, knowledgeItems, knowledgeSources, knowledgeVerificationEvents, projectMembers, projects, runDocumentVersions, runSteps, runs, tasks } from '../src/db/schema';
 import { markIndexDegraded } from '../src/domain/documents/integrity';
+import { archiveDocument } from '../src/domain/documents/documents';
 import { writeAudit } from '../src/domain/audit/audit';
 import { type DbTx } from '../src/db/client';
 import type { TenantContext } from '../src/types/domain';
@@ -121,9 +122,14 @@ async function main() {
     await insDoc(`${PREFIX}source-disconnected.md`, { source: 'local_folder', status: 'active' });
     await tx((t) => backfillProject(t, ctx, store, { operationId: randomUUID() }));
   }
-  { // archived
+  { // archived (cloud)
     const a = await byteExact(`${PREFIX}archived.md`, '# Archived\n\narchived body');
     await db.update(documents).set({ status: 'archived' }).where(eq(documents.id, a.docId));
+  }
+  { // archived LOCAL — an intentionally-archived local-folder source (archivedIntentAt set via the domain
+    // action, so a folder refresh never silently restores it; only Restore is offered).
+    const al = await reconstructed(`${PREFIX}archived-local.md`, ['archived local body']);
+    await tx((t) => archiveDocument(t, ctx, al.docId));
   }
   { // knowledge-referenced — one RELIED-UPON source (named in a support judgment) + one ATTACHED-not-judged
     const k = await byteExact(`${PREFIX}knowledge-referenced.md`, '# Cited\n\ncited by knowledge');

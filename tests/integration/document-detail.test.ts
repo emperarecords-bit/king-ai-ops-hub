@@ -800,4 +800,34 @@ describe.skipIf(!available)('Documents Detail — P3: safe lifecycle actions', (
     const { docId } = await reconstructedDoc(ctx, 'p3-local-replace.md', ['body']);
     await expect(tx((t) => replaceDocument(t, ctx, store, docId, { rawFilename: 'x.md', declaredMime: 'text/markdown', bytes: Buffer.from('new', 'utf8') }))).rejects.toThrow();
   });
+
+  // ---- replace must not bypass archive intent (Blocker 1) -----------------------------------------
+  it('P3.12 the shared assessment does not offer Replace for an archived document (restore stays the way back)', () => {
+    const archivedCloud = assessDocument(aInput({ status: 'archived', currentVersionId: null, currentVersion: null }), NOW3).actions;
+    expect(archivedCloud.replace).toBe(false);
+    expect(archivedCloud.archive).toBe(false);
+    expect(archivedCloud.restore).toBe(true);
+    // Replace becomes available again only once the source is active (i.e. after an explicit restore).
+    expect(assessDocument(aInput({ status: 'active' }), NOW3).actions.replace).toBe(true);
+  });
+
+  it('P3.13 a manually-constructed replacement of an ARCHIVED cloud document fails closed — no version, no audit', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'p3-arch-replace.md', 'body');
+    await tx((t) => archiveDocument(t, ctx, docId));
+    const beforeVersions = (await versionsOf(docId)).length;
+    await expect(tx((t) => replaceDocument(t, ctx, store, docId, { rawFilename: 'p3-arch-replace.md', declaredMime: 'text/markdown', bytes: Buffer.from('# NEW\n\nreplacement', 'utf8') }))).rejects.toThrow();
+    expect((await versionsOf(docId)).length).toBe(beforeVersions); // no new version
+    expect(await statusOf(docId)).toBe('archived'); // still archived; not reactivated
+    expect((await audits(ctx, docId, 'document.uploaded')).length).toBe(0); // no replacement/upload audit
+  });
+
+  // ---- archived-local action set (Blocker 2) -----------------------------------------------------
+  it('P3.14 an archived LOCAL document offers only Restore (+ classification) — never Archive/Replace/Retry', () => {
+    const a = assessDocument(aInput({ source: 'local_folder', status: 'archived', currentVersionId: null, currentVersion: null }), NOW3).actions;
+    expect(a.restore).toBe(true);
+    expect(a.archive).toBe(false);
+    expect(a.replace).toBe(false); // replace is cloud-only anyway, and archived doubly forbids it
+    expect(a.retry).toBe(false); // no local retry path
+  });
 });

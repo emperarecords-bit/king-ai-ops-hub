@@ -217,7 +217,9 @@ export function assessDocument(d: DocumentAssessmentInput, now: Date): Portfolio
   const isCloud = d.source === 'cloud_upload';
   const actions: DocumentActionAvailability = {
     retry: isCloud && d.viewerIsAdmin && (d.status === 'failed' || d.status === 'source_unavailable'),
-    replace: isCloud && d.viewerIsAdmin,
+    // Replacement must NOT be an alternate restore path: an intentionally-archived source cannot be
+    // replaced until it is explicitly restored (restore stays the one way back to active).
+    replace: isCloud && d.viewerIsAdmin && d.status !== 'archived',
     archive: d.viewerIsAdmin && d.status !== 'archived',
     restore: d.viewerIsAdmin && d.status === 'archived',
     // Classification changes are admin-only and independent of lifecycle group. Server re-checks + audits.
