@@ -7,9 +7,11 @@ import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import {
   archiveDocument,
+  declassifyDocument,
   linkFolder,
   refreshIndex,
   restoreDocument,
+  restrictDocument,
   type IndexSummary,
 } from '@/domain/documents/documents';
 import {
@@ -133,6 +135,12 @@ export async function uploadDocumentsAction(
   }
 }
 
+/** Revalidate both surfaces that share the assessment — the Portfolio list and the Document's Detail. */
+function revalidateDocumentSurfaces(projectKey: string, documentId: string): void {
+  revalidatePath(`/p/${projectKey}/documents`);
+  revalidatePath(`/p/${projectKey}/documents/${documentId}`);
+}
+
 async function adminDocMutation(
   formData: FormData,
   verb: string,
@@ -141,13 +149,54 @@ async function adminDocMutation(
   const projectKey = String(formData.get('projectKey') ?? '');
   const documentId = String(formData.get('documentId') ?? '');
   try {
+    // Fail closed at the server boundary: re-authenticate + re-check admin authority EVERY call; button
+    // visibility is never authorization. Tenancy (workspace membership + document ownership) is re-checked
+    // inside the domain function, and lifecycle validity is enforced there too.
     const ctx = await requireTenant(projectKey);
     if (ctx.projectRole !== 'admin') return { error: `Only admins can ${verb} documents.`, message: null };
     await fn(ctx, documentId);
-    revalidatePath(`/p/${projectKey}/documents`);
+    revalidateDocumentSurfaces(projectKey, documentId);
     return { error: null, message: `Document ${verb}d.` };
   } catch (err) {
     if (!(err instanceof AppError)) log.error(`${verb}Document failed`, { err });
+    return { error: toPublicMessage(err), message: null };
+  }
+}
+
+/** RESTRICT — classify an internal source as restricted (admin). Idempotent + can only tighten (the domain
+ *  refuses to loosen); future disclosure authorization only, history untouched. Audited in the domain. */
+export async function restrictDocumentAction(_prev: DocumentsState, formData: FormData): Promise<DocumentsState> {
+  const projectKey = String(formData.get('projectKey') ?? '');
+  const documentId = String(formData.get('documentId') ?? '');
+  const reason = String(formData.get('reason') ?? '').trim() || undefined;
+  try {
+    const ctx = await requireTenant(projectKey);
+    if (ctx.projectRole !== 'admin') return { error: 'Only admins can restrict documents.', message: null };
+    await withTenant(ctx, (tx) => restrictDocument(tx, ctx, documentId, reason));
+    revalidateDocumentSurfaces(projectKey, documentId);
+    return { error: null, message: 'Document restricted.' };
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('restrictDocument failed', { err });
+    return { error: toPublicMessage(err), message: null };
+  }
+}
+
+/** DECLASSIFY — loosen restricted → internal (admin). REQUIRES a meaningful reason; the domain refuses when
+ *  the source is not restricted. Existing run/disclosure snapshots keep the classification they were made
+ *  under; only future extractions see the looser policy. Audited (with the reason) in the domain. */
+export async function declassifyDocumentAction(_prev: DocumentsState, formData: FormData): Promise<DocumentsState> {
+  const projectKey = String(formData.get('projectKey') ?? '');
+  const documentId = String(formData.get('documentId') ?? '');
+  const reason = String(formData.get('reason') ?? '').trim();
+  try {
+    const ctx = await requireTenant(projectKey);
+    if (ctx.projectRole !== 'admin') return { error: 'Only admins can declassify documents.', message: null };
+    if (!reason) return { error: 'Declassifying a document requires a reason — it removes a sensitivity marker.', message: null };
+    await withTenant(ctx, (tx) => declassifyDocument(tx, ctx, documentId, reason));
+    revalidateDocumentSurfaces(projectKey, documentId);
+    return { error: null, message: 'Document declassified.' };
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('declassifyDocument failed', { err });
     return { error: toPublicMessage(err), message: null };
   }
 }
@@ -175,7 +224,7 @@ export async function restoreDocumentAction(_prev: DocumentsState, formData: For
     if (ctx.projectRole !== 'admin') return { error: 'Only admins can restore documents.', message: null };
     const store = await getObjectStore();
     const outcome = await withTenant(ctx, (tx) => restoreDocument(tx, ctx, store, documentId));
-    revalidatePath(`/p/${projectKey}/documents`);
+    revalidateDocumentSurfaces(projectKey, documentId);
     if (outcome.restored) {
       return { error: null, message: outcome.versionReused ? 'Restored (source unchanged).' : 'Restored (new version ingested).' };
     }
@@ -200,7 +249,7 @@ export async function replaceDocumentAction(_prev: DocumentsState, formData: For
     await withTenant(ctx, (tx) =>
       replaceDocument(tx, ctx, store, documentId, { rawFilename: file.name, declaredMime: file.type, bytes }),
     );
-    revalidatePath(`/p/${projectKey}/documents`);
+    revalidateDocumentSurfaces(projectKey, documentId);
     return { error: null, message: 'Replacement uploaded and queued for indexing.' };
   } catch (err) {
     if (!(err instanceof AppError)) log.error('replaceDocument failed', { err });

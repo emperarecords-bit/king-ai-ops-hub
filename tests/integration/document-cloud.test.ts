@@ -9,8 +9,8 @@ import { type TenantContext } from '@/types/domain';
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { documentChunks, documents, memberships, organizations, profiles, projectMembers, projects } from '@/db/schema';
-import { archiveDocument, retrieveRelevant } from '@/domain/documents/documents';
-import { retryDocument, uploadDocument } from '@/domain/documents/cloud';
+import { archiveDocument, restoreDocument, retrieveRelevant } from '@/domain/documents/documents';
+import { uploadDocument } from '@/domain/documents/cloud';
 import { claimNextDocumentJob, reconcileStaleDocumentJobs, runClaimedDocumentJob } from '@/domain/documents/document-jobs';
 import { LocalObjectStore } from '@/domain/documents/local-object-store';
 
@@ -232,11 +232,12 @@ describe.skipIf(!available)('O-23 cloud ingestion', () => {
     await drainDocumentJobs();
     const cloudId = (up as { documentId: string }).documentId;
 
-    // Archive then retry the cloud doc — full lifecycle available.
+    // Archive then RESTORE the cloud doc — full lifecycle available (restore un-archives; retry is only
+    // for failed/stuck indexing, not for reversing an intentional archive).
     await withTenant(ctx, (tx) => archiveDocument(tx, ctx, cloudId));
     let s = await getSetupDb().select({ s: documents.status }).from(documents).where(eq(documents.id, cloudId));
     expect(s[0]!.s).toBe('archived');
-    await withTenant(ctx, (tx) => retryDocument(tx, ctx, cloudId));
+    await withTenant(ctx, (tx) => restoreDocument(tx, ctx, store, cloudId));
     await drainDocumentJobs();
     s = await getSetupDb().select({ s: documents.status }).from(documents).where(eq(documents.id, cloudId));
     expect(s[0]!.s).toBe('active');

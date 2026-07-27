@@ -75,6 +75,10 @@ export interface DocumentActionAvailability {
   /** Restore an intentionally-archived Document, also adapter-neutral (cloud completes immediately; local
    *  completes on the next refresh from a host that can reach the path). */
   restore: boolean;
+  /** Classify an internal source as restricted (admin) — future disclosure authorization only; history intact. */
+  restrict: boolean;
+  /** Loosen a restricted source to internal (admin) — requires a reason at the server boundary. */
+  declassify: boolean;
 }
 
 export interface PortfolioRecord {
@@ -212,10 +216,13 @@ export function assessDocument(d: DocumentAssessmentInput, now: Date): Portfolio
   // lifecycle. The server re-checks authorization + lifecycle on every action; these flags only gate the UI.
   const isCloud = d.source === 'cloud_upload';
   const actions: DocumentActionAvailability = {
-    retry: isCloud && (d.status === 'failed' || d.status === 'source_unavailable'),
+    retry: isCloud && d.viewerIsAdmin && (d.status === 'failed' || d.status === 'source_unavailable'),
     replace: isCloud && d.viewerIsAdmin,
     archive: d.viewerIsAdmin && d.status !== 'archived',
     restore: d.viewerIsAdmin && d.status === 'archived',
+    // Classification changes are admin-only and independent of lifecycle group. Server re-checks + audits.
+    restrict: d.viewerIsAdmin && d.disclosure === 'workspace_internal',
+    declassify: d.viewerIsAdmin && d.disclosure === 'restricted',
   };
 
   return {

@@ -247,9 +247,14 @@ export async function replaceDocument(
   return uploadDocument(tx, ctx, store, { ...input, rawFilename: doc.sourceId ?? input.rawFilename });
 }
 
-/** Re-enqueue indexing for a failed/stuck cloud document (admin). */
+/** Re-enqueue indexing for a failed/stuck cloud document (admin). Fail closed: only a genuinely retryable
+ *  state (failed / source_unavailable) may be retried — a manually-constructed retry on a healthy active
+ *  document is rejected, never silently re-queued. */
 export async function retryDocument(tx: DbTx, ctx: TenantContext, documentId: string): Promise<void> {
   const doc = await requireOwnedCloudDoc(tx, ctx, documentId);
+  if (doc.status !== 'failed' && doc.status !== 'source_unavailable') {
+    throw new AppError('conflict', 'This document is not in a retryable state.');
+  }
   if (!doc.objectKey) throw new AppError('validation', 'This document has no stored object to re-index.');
   await tx
     .update(documents)
@@ -272,6 +277,7 @@ interface OwnedCloudDoc {
   sourceId: string | null;
   objectKey: string | null;
   sha256: string;
+  status: string;
 }
 
 /** Server-side ownership + adapter check for a cloud document. Throws NotFound
@@ -290,6 +296,7 @@ async function requireOwnedCloudDoc(
         objectKey: documents.objectKey,
         sha256: documents.sha256,
         source: documents.source,
+        status: documents.status,
       })
       .from(documents)
       .where(
@@ -304,7 +311,7 @@ async function requireOwnedCloudDoc(
   if (!row || row.source !== 'cloud_upload') {
     throw new AppError('not_found', 'No such document in this workspace.');
   }
-  return { id: row.id, sourceId: row.sourceId, objectKey: row.objectKey, sha256: row.sha256 };
+  return { id: row.id, sourceId: row.sourceId, objectKey: row.objectKey, sha256: row.sha256, status: row.status };
 }
 
 export interface IndexJobResult {

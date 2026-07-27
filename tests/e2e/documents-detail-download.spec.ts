@@ -64,8 +64,7 @@ test.describe('documents detail — restricted download', () => {
 
   test('a non-restricted byte-exact document still downloads over an authorized GET', async ({ page }) => {
     await signIn(page);
-    const detailUrl = await openFixture(page, '__pf-demo-available-byte-exact.md');
-    const documentId = detailUrl.match(/documents\/([0-9a-f-]{36})/)![1];
+    await openFixture(page, '__pf-demo-available-byte-exact.md');
     // The inline (non-restricted) preview shows a GET download link.
     const href = await page.getByRole('link', { name: 'Download exact source' }).getAttribute('href');
     const getResp = await page.request.get(`${base}${href}`);

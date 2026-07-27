@@ -8,10 +8,12 @@ import { fixtureKey } from '@tests/support/fixture-key';
 import { type KnowledgeDisclosure, type TenantContext } from '@/types/domain';
 import { type DbTx, getSetupDb } from '@/db/client';
 import { agents, documentChunks, documentVersionTombstones, documentVersions, documents, knowledgeItems, knowledgeSources, knowledgeVerificationEvents, memberships, organizations, profiles, projectMembers, projects, runDocumentVersions, runSteps, runs, tasks } from '@/db/schema';
-import { chunkText, declassifyDocument, restrictDocument } from '@/domain/documents/documents';
+import { archiveDocument, chunkText, declassifyDocument, restoreDocument, restrictDocument } from '@/domain/documents/documents';
+import { indexCloudDocument, replaceDocument, retryDocument } from '@/domain/documents/cloud';
 import { backfillProject } from '@/domain/documents/backfill';
 import { markIndexDegraded } from '@/domain/documents/integrity';
 import { ingestDocumentVersion } from '@/domain/documents/versions';
+import { type DocumentAssessmentInput, assessDocument } from '@/domain/documents/portfolio';
 import { LocalObjectStore } from '@/domain/documents/local-object-store';
 import { tenantObjectKey } from '@/domain/documents/object-store';
 import { type DocumentDetail, loadDetailWithInspection, loadDocumentDetail } from '@/domain/documents/detail';
@@ -652,5 +654,150 @@ describe.skipIf(!available)('Documents Detail — P2: gated evidence inspection 
     expect(rCross.inspection).toBeNull();
     expect(JSON.stringify(rCross)).not.toContain('FOREIGN');
     expect(await auditCount(a, mine.docId, 'document.restricted_inspected')).toBe(0);
+  });
+});
+
+describe.skipIf(!available)('Documents Detail — P3: safe lifecycle actions', () => {
+  const tx = <T,>(fn: (t: DbTx) => Promise<T>) => db().transaction((t) => fn(t as unknown as DbTx));
+  const NOW3 = new Date('2026-07-27T12:00:00Z');
+  const audits = async (ctx: TenantContext, docId: string, action: string) => {
+    const { auditLogs } = await import('@/db/schema');
+    return (await db().select({ id: auditLogs.id, detail: auditLogs.detail }).from(auditLogs).where(and(eq(auditLogs.projectId, ctx.projectId), eq(auditLogs.entityType, 'document'), eq(auditLogs.entityId, docId), eq(auditLogs.action, action))));
+  };
+  const versionsOf = (docId: string) => db().select({ id: documentVersions.id, disclosureSnapshot: documentVersions.disclosureSnapshot }).from(documentVersions).where(eq(documentVersions.documentId, docId));
+  const disclosureOf = async (docId: string) => (await db().select({ d: documents.disclosure }).from(documents).where(eq(documents.id, docId)))[0]!.d;
+  const statusOf = async (docId: string) => (await db().select({ s: documents.status }).from(documents).where(eq(documents.id, docId)))[0]!.s;
+  const aInput = (over: Partial<DocumentAssessmentInput>): DocumentAssessmentInput => ({
+    id: 'x', relativePath: 'p.md', source: 'cloud_upload', status: 'active', disclosure: 'workspace_internal', currentVersionId: 'v1', indexedAt: null,
+    currentVersion: { id: 'v1', contentFidelity: 'byte_exact', indexStatus: 'indexed', indexDegraded: false },
+    latestVersion: { id: 'v1', contentFidelity: 'byte_exact', indexStatus: 'indexed', createdAt: NOW3 },
+    versionCount: 1, knowledgeRefCount: 0, aiOperationCount: 0, lastSourceChangeAt: null, viewerIsAdmin: true, ...over,
+  });
+
+  // ---- shared action assessment (button visibility only; server re-checks) -----------------------
+  it('P3.1 the shared assessment gates classification/lifecycle actions by admin authority + state', () => {
+    const adminInternal = assessDocument(aInput({ disclosure: 'workspace_internal' }), NOW3).actions;
+    expect(adminInternal.restrict).toBe(true);
+    expect(adminInternal.declassify).toBe(false);
+    expect(adminInternal.archive).toBe(true);
+
+    const adminRestricted = assessDocument(aInput({ disclosure: 'restricted' }), NOW3).actions;
+    expect(adminRestricted.restrict).toBe(false);
+    expect(adminRestricted.declassify).toBe(true);
+
+    const member = assessDocument(aInput({ viewerIsAdmin: false }), NOW3).actions;
+    expect([member.restrict, member.declassify, member.archive, member.restore, member.retry, member.replace].every((x) => x === false)).toBe(true);
+
+    const archived = assessDocument(aInput({ status: 'archived', currentVersionId: null, currentVersion: null }), NOW3).actions;
+    expect(archived.archive).toBe(false);
+    expect(archived.restore).toBe(true);
+
+    const failedCloud = assessDocument(aInput({ status: 'failed', currentVersionId: null, currentVersion: null }), NOW3).actions;
+    expect(failedCloud.retry).toBe(true);
+    const activeCloud = assessDocument(aInput({ status: 'active' }), NOW3).actions;
+    expect(activeCloud.retry).toBe(false);
+
+    const local = assessDocument(aInput({ source: 'local_folder', status: 'failed' }), NOW3).actions;
+    expect(local.retry).toBe(false); // retry/replace are cloud ingestion capabilities
+    expect(local.replace).toBe(false);
+    expect(local.archive).toBe(true); // archive is adapter-neutral
+  });
+
+  // ---- restrict & declassify ---------------------------------------------------------------------
+  it('P3.2 an available document can be restricted (admin); it is idempotent and audited', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'p3-restrict.md', 'body');
+    await tx((t) => restrictDocument(t, ctx, docId));
+    expect(await disclosureOf(docId)).toBe('restricted');
+    await tx((t) => restrictDocument(t, ctx, docId)); // idempotent, no error
+    expect((await audits(ctx, docId, 'document.restricted')).length).toBe(1); // one success audit
+  });
+
+  it('P3.3 declassification requires a reason, only loosens a restricted source, and records the reason', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'p3-declass.md', 'body', 'restricted');
+    await expect(tx((t) => declassifyDocument(t, ctx, docId, ''))).rejects.toThrow(); // no reason → rejected
+    await tx((t) => declassifyDocument(t, ctx, docId, 'no longer sensitive'));
+    expect(await disclosureOf(docId)).toBe('workspace_internal');
+    const ev = await audits(ctx, docId, 'document.declassified');
+    expect(ev.length).toBe(1);
+    expect(JSON.stringify(ev[0]!.detail)).toContain('no longer sensitive');
+    await expect(tx((t) => declassifyDocument(t, ctx, docId, 'again'))).rejects.toThrow(); // not restricted now → rejected
+  });
+
+  it('P3.4 restrict does not rewrite historical version or run snapshots', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await byteExactDoc(ctx, 'p3-history.md', 'body');
+    const { runId } = await supplyToRun(ctx, versionId, [0]); // recorded at workspace_internal
+    await tx((t) => restrictDocument(t, ctx, docId));
+    // The version's ingest snapshot and the run's dispatch snapshot remain what they were.
+    expect((await versionsOf(docId)).find((v) => v.id === versionId)!.disclosureSnapshot).toBe('workspace_internal');
+    const rdv = await db().select({ d: runDocumentVersions.disclosureSnapshot }).from(runDocumentVersions).where(and(eq(runDocumentVersions.runId, runId), eq(runDocumentVersions.documentVersionId, versionId)));
+    expect(rdv.every((r) => r.d === 'workspace_internal')).toBe(true);
+  });
+
+  it('P3.5 restrict/declassify on a cross-workspace document id is rejected (not found)', async () => {
+    const a = await makeWorkspace();
+    const b = await makeWorkspace();
+    const foreign = await byteExactDoc(b, 'p3-foreign.md', 'body');
+    await expect(tx((t) => restrictDocument(t, a, foreign.docId))).rejects.toThrow();
+  });
+
+  // ---- archive & restore (distinct audit identities; evidence preserved) --------------------------
+  it('P3.6 archive and restore write distinct action audits and preserve identity + versions', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await byteExactDoc(ctx, 'p3-arch.md', 'body');
+    await tx((t) => archiveDocument(t, ctx, docId));
+    expect(await statusOf(docId)).toBe('archived');
+    const outcome = await tx((t) => restoreDocument(t, ctx, store, docId));
+    expect(outcome.restored).toBe(true);
+    expect(await statusOf(docId)).toBe('active');
+    expect((await versionsOf(docId)).some((v) => v.id === versionId)).toBe(true); // version survived
+    expect((await audits(ctx, docId, 'document.archived')).length).toBe(1);
+    expect((await audits(ctx, docId, 'document.restored')).length).toBe(1);
+  });
+
+  it('P3.7 restore of a non-archived document is rejected', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'p3-notarch.md', 'body'); // active
+    await expect(tx((t) => restoreDocument(t, ctx, store, docId))).rejects.toThrow();
+  });
+
+  // ---- retry indexing ----------------------------------------------------------------------------
+  it('P3.8 retry is allowed only in a retryable state; a healthy active document cannot be retried', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'p3-retry.md', 'body');
+    await expect(tx((t) => retryDocument(t, ctx, docId))).rejects.toThrow(); // active → fail closed
+    await db().update(documents).set({ status: 'failed' }).where(eq(documents.id, docId));
+    await tx((t) => retryDocument(t, ctx, docId));
+    expect(await statusOf(docId)).toBe('queued');
+    expect((await audits(ctx, docId, 'document.retry')).length).toBe(1);
+  });
+
+  it('P3.9 retry on a local-folder document is rejected (cloud-only capability)', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await reconstructedDoc(ctx, 'p3-local.md', ['body']); // local adapter
+    await db().update(documents).set({ status: 'failed' }).where(eq(documents.id, docId));
+    await expect(tx((t) => retryDocument(t, ctx, docId))).rejects.toThrow();
+  });
+
+  // ---- replace cloud source ----------------------------------------------------------------------
+  it('P3.10 a cloud replacement ingests a NEW immutable version; the prior version remains inspectable', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId: v1 } = await byteExactDoc(ctx, 'p3-replace.md', '# A\n\noriginal body');
+    await tx((t) => replaceDocument(t, ctx, store, docId, { rawFilename: 'p3-replace.md', declaredMime: 'text/markdown', bytes: Buffer.from('# B\n\nreplaced body', 'utf8') }));
+    // Prior current version is not displaced merely by queuing the replacement.
+    expect((await db().select({ c: documents.currentVersionId }).from(documents).where(eq(documents.id, docId)))[0]!.c).toBe(v1);
+    await tx((t) => indexCloudDocument(t, ctx, store, docId)); // the worker indexes the replacement
+    const vs = await versionsOf(docId);
+    expect(vs.length).toBe(2); // a new immutable version, prior retained
+    expect(vs.some((v) => v.id === v1)).toBe(true); // the prior version still exists (inspectable)
+    expect((await db().select({ c: documents.currentVersionId }).from(documents).where(eq(documents.id, docId)))[0]!.c).not.toBe(v1); // current now the new version
+  });
+
+  it('P3.11 replace on a local-folder document is rejected (unsupported adapter)', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await reconstructedDoc(ctx, 'p3-local-replace.md', ['body']);
+    await expect(tx((t) => replaceDocument(t, ctx, store, docId, { rawFilename: 'x.md', declaredMime: 'text/markdown', bytes: Buffer.from('new', 'utf8') }))).rejects.toThrow();
   });
 });

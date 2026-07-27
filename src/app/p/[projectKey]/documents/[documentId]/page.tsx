@@ -16,6 +16,7 @@ import {
   shortId,
 } from './detail-view';
 import { RevealRestricted } from './reveal-restricted';
+import { DetailLifecycleActions } from './detail-lifecycle-actions';
 
 // Sensitive per-viewer content: always render fresh + per request, never statically or cross-user cached.
 export const dynamic = 'force-dynamic';
@@ -134,6 +135,13 @@ export default async function DocumentDetailPage({
         <Card title="6. Knowledge relationships"><KnowledgeSection refs={detail.knowledge} /></Card>
         <Card title={`7. AI operations (${detail.aiOperationCount})`}><AiOperationsSection ops={detail.aiOperations} /></Card>
         <Card title="9. Lifecycle history"><HistorySection events={detail.history} /></Card>
+
+        {detail.actions.restrict || detail.actions.declassify || detail.actions.archive || detail.actions.restore || detail.actions.retry || detail.actions.replace ? (
+          <Card title="Safe actions">
+            <p className="mb-3 text-xs text-[var(--muted)]">Lifecycle and classification actions. Each is re-checked and audited on the server. Purge, integrity repair, and evidence deletion are not available here.</p>
+            <DetailLifecycleActions projectKey={projectKey} documentId={documentId} actions={detail.actions} />
+          </Card>
+        ) : null}
       </div>
     </div>
   );
