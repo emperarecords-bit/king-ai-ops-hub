@@ -1809,10 +1809,21 @@ Portfolio & Detail, all reading one assessment.
   drafts, rejection preserves the record). Document classification is linked to Documents; disclosure
   grants to Governance — a restricted record is never a dead end. Full suite **527/527**, build clean.
 
+**Detail route-loader + non-admin boundary proof (built 2026-07-26):** the Detail page's data loading is
+now one gated function, `loadKnowledgeDetail` (`knowledge/detail.ts`): it resolves visibility FIRST and,
+for a record the viewer may not see, returns `{ visible: false }` and never runs the item / application /
+source queries — so direct navigation to a restricted detail URL cannot return sensitive data in the
+payload (denied content is absent, not component-hidden). Exercised with a REAL non-admin identity (a
+project `member` ctx) in `knowledge-portfolio.test.ts`: admin → full content; member → bounded notice
+only, no `ref`/`applications`/`sources` keys and no restricted strings in the serialized payload; a
+non-restricted record IS visible to the member (access is per-record). Full suite **530/530**.
+
 *Knowledge closure conditions: (1) Needs-Review not a selector gate ✓, (2) selection independent of
-Portfolio grouping ✓, (3) authenticated viewer access enforced at the data boundary ✓, (4) core review
-controls wired ✓, (5) seeded authenticated visual acceptance — OUTSTANDING (needs a logged-in staging
-walkthrough), (6) suite + build clean ✓. Knowledge is NOT closed until (5) is done. Remaining deferred
+Portfolio grouping ✓, (3) authenticated viewer access enforced at the data boundary ✓ — the non-admin
+boundary is now exercised by automated route-loader tests with the non-admin identity (not inferred from
+the admin view), (4) core review controls wired ✓, (5) seeded authenticated VISUAL acceptance — still
+OUTSTANDING (operator's eyeball on the 15-state matrix; data seeded on staging as tag ab20), (6) suite +
+build clean ✓. Knowledge is NOT closed until (5) passes and any surfaced defects are fixed. Deferred
 follow-ons: split/support-judgment richer pickers, disclosure-grant UI (Governance), document
 classification UI + artifact-as-evidence (Documents).*
 

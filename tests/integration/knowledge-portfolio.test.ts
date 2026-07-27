@@ -17,6 +17,7 @@ import {
 } from '@/domain/knowledge/knowledge';
 import { createDisclosureGrant } from '@/domain/knowledge/disclosure';
 import { buildKnowledgePortfolio, buildKnowledgeReference, type KnowledgePortfolioGroup } from '@/domain/knowledge/portfolio';
+import { loadKnowledgeDetail } from '@/domain/knowledge/detail';
 
 /**
  * SHARED SURFACE INTEGRITY. The Portfolio, the Detail, and the selector must all read the same trust
@@ -199,5 +200,33 @@ describe.skipIf(!available)('viewer access is resolved from the authenticated re
     const redacted = allRefs.find((r) => r.id === restrictedId);
     expect(redacted).toBeDefined();
     expect(redacted!.descriptor.claim).toBeNull();
+  });
+
+  // The Detail ROUTE LOADER exercised with the real non-admin identity — direct navigation must not
+  // return sensitive data in the payload, and the sensitive queries must not run.
+  it('the Detail loader returns full content to an admin', async () => {
+    const view = await withTenant(ctx, (tx) => loadKnowledgeDetail(tx, ctx, restrictedId));
+    expect(view?.visible).toBe(true);
+    if (view?.visible) expect(view.ref.descriptor.claim?.title).toBe('Phi secret codename');
+  });
+
+  it('the Detail loader returns ONLY a bounded notice to a non-admin — no content, no application/source data', async () => {
+    const view = await withTenant(memberCtx, (tx) => loadKnowledgeDetail(tx, memberCtx, restrictedId));
+    expect(view).not.toBeNull();
+    expect(view!.visible).toBe(false);
+    // The sensitive branch (ref/item/applications/sources) is absent entirely — not merely hidden.
+    expect(view as { ref?: unknown }).not.toHaveProperty('ref');
+    expect(view as { applications?: unknown }).not.toHaveProperty('applications');
+    expect(view as { sources?: unknown }).not.toHaveProperty('sources');
+    const serialized = JSON.stringify(view);
+    expect(serialized).not.toContain('Phi secret codename');
+    expect(serialized).not.toContain('confidential acquisition');
+  });
+
+  it('a non-admin CAN see a non-restricted record through the Detail loader (access is per-record)', async () => {
+    const openId = await withTenant(ctx, (tx) => createKnowledge(tx, ctx, { title: 'Chi open note', body: 'Ordinary workspace fact.', kind: 'fact', activate: true }));
+    const view = await withTenant(memberCtx, (tx) => loadKnowledgeDetail(tx, memberCtx, openId));
+    expect(view?.visible).toBe(true);
+    if (view?.visible) expect(view.ref.descriptor.claim?.title).toBe('Chi open note');
   });
 });

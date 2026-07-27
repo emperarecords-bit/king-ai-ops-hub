@@ -2,9 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
-import { buildKnowledgeReference } from '@/domain/knowledge/portfolio';
-import { listInjectionsForKnowledge, listKnowledge, listKnowledgeSources } from '@/domain/knowledge/knowledge';
-import { listKnowledgeProposals } from '@/domain/knowledge/extraction';
+import { loadKnowledgeDetail } from '@/domain/knowledge/detail';
 import { Card, PageHeader } from '@/components/ui';
 import { KnowledgeStatusButtons, ReviseKnowledgeForm } from '../knowledge-forms';
 import {
@@ -35,13 +33,11 @@ export default async function KnowledgeDetailPage({ params }: { params: Promise<
   const { projectKey, itemId } = await params;
   const ctx = await requireTenant(projectKey);
 
-  const ref = await withTenant(ctx, (tx) => buildKnowledgeReference(tx, ctx, itemId));
-  if (!ref) notFound();
-  const d = ref.descriptor;
+  // ONE gated loader (access resolved + sensitive queries gated at retrieval).
+  const view = await withTenant(ctx, (tx) => loadKnowledgeDetail(tx, ctx, itemId));
+  if (!view) notFound();
 
-  // ACCESS FILTERED AT RETRIEVAL: a viewer without access to a restricted record never causes the
-  // sensitive queries (item body, application/subject details) to run — the bounded notice is all.
-  if (d.visibility.operator !== 'full' || d.claim === null) {
+  if (!view.visible) {
     return (
       <div>
         <div className="mb-3">
@@ -55,14 +51,9 @@ export default async function KnowledgeDetailPage({ params }: { params: Promise<
     );
   }
 
-  const items = await withTenant(ctx, (tx) => listKnowledge(tx, ctx));
-  const item = items.find((i) => i.id === itemId);
-  const applications = await withTenant(ctx, (tx) => listInjectionsForKnowledge(tx, ctx, itemId));
+  const { ref, item, applications, sources, proposal } = view;
+  const d = ref.descriptor;
   const isPendingProposal = ref.proposalReviewStatus === 'pending';
-  const proposals = isPendingProposal ? await withTenant(ctx, (tx) => listKnowledgeProposals(tx, ctx, 'pending')) : [];
-  const proposal = proposals.find((p) => p.knowledgeItemId === itemId) ?? null;
-  // Sources are needed for a source-support judgment on a draft (proposals carry cited sources).
-  const sources = item && item.status === 'draft' ? await withTenant(ctx, (tx) => listKnowledgeSources(tx, ctx, itemId, item.version)) : [];
   const verdictTone = d.currentUseVerdict.state === 'usable' ? 'var(--muted)' : d.currentUseVerdict.state === 'usable_with_qualification' ? 'var(--accent)' : 'var(--danger, #b45309)';
 
   return (
