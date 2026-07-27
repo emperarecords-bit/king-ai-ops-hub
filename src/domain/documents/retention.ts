@@ -4,7 +4,6 @@ import { and, eq, ne } from 'drizzle-orm';
 import { type RunSourceSnapshot, type TenantContext } from '@/types/domain';
 import { AppError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
-import { withTenant } from '@/db/tenant';
 import { documentChunks, documentVersionTombstones, documentVersions, documents, knowledgeSources, runDocumentVersions, runs } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 import { type ObjectStore } from './object-store';
@@ -166,16 +165,21 @@ export async function purgePhase2(tx: DbTx, ctx: TenantContext, store: ObjectSto
   }
 }
 
+/** Runs a callback in its OWN committed transaction. Purge is a privileged operation that deletes an
+ *  immutable version row (which the app_server role deliberately cannot) — so the caller (an admin route
+ *  or maintenance script) supplies a runner bound to a privileged connection, not the app_server path. */
+export type PurgeTxRunner = <T>(fn: (tx: DbTx) => Promise<T>) => Promise<T>;
+
 /**
  * Orchestrate a full purge: phase 1 in its own transaction (authoritative DB revocation), then phase 2 in
  * a second transaction (restartable object cleanup). A phase-2 failure leaves a visible, retryable
- * `object_cleanup_pending` tombstone — it never claims completion. Uses withTenant so each phase commits
- * independently.
+ * `object_cleanup_pending` tombstone — it never claims completion. Each phase commits independently via the
+ * caller-provided privileged transaction runner.
  */
-export async function executePurge(ctx: TenantContext, store: ObjectStore, versionId: string, reason?: string): Promise<PurgeResult> {
-  const p1 = await withTenant(ctx, (tx) => purgePhase1(tx, ctx, versionId, reason));
+export async function executePurge(runTx: PurgeTxRunner, ctx: TenantContext, store: ObjectStore, versionId: string, reason?: string): Promise<PurgeResult> {
+  const p1 = await runTx((tx) => purgePhase1(tx, ctx, versionId, reason));
   if (!p1.purged || !p1.tombstoneId) return p1;
-  const p2 = await withTenant(ctx, (tx) => purgePhase2(tx, ctx, store, p1.tombstoneId!));
+  const p2 = await runTx((tx) => purgePhase2(tx, ctx, store, p1.tombstoneId!));
   return { ...p1, status: p2.status, objectDeleted: p2.objectDeleted };
 }
 

@@ -319,7 +319,7 @@ describe.skipIf(!available)('Stage D — exact historical retrieval, viewer acce
     const other = await reconDoc(ctx, 'other22.md', ['unrelated']); // untouched control
     const a = await tx((t) => assessPurge(t, ctx, v1));
     expect(a.decision).toBe('purge_permitted'); // 22 (categories + counts)
-    const res = await executePurge(ctx, store, v1, 'stage-d test');
+    const res = await executePurge(tx, ctx, store, v1, 'stage-d test');
     expect(res.purged).toBe(true);
     expect(res.objectDeleted).toBe(true); // 24: v1's object was not shared
     // 26: only v1 + its chunks gone; v2 + other intact.
@@ -340,7 +340,7 @@ describe.skipIf(!available)('Stage D — exact historical retrieval, viewer acce
     // Manually create a second retained version pointing at the SAME object key (simulating a share).
     await db().insert(documentVersions).values({ orgId: ctx.orgId, projectId: ctx.projectId, documentId: docId, sha256: shaOf('shared body v2 identity'), sizeBytes: 1, contentFidelity: 'byte_exact', indexStatus: 'indexed', objectKey: versionKey });
     await newVersion(ctx, docId, 'make v1 non-current'); // so v1 is purgeable
-    const res = await executePurge(ctx, store, v1, 'shared-object test');
+    const res = await executePurge(tx, ctx, store, v1, 'shared-object test');
     expect(res.purged).toBe(true);
     expect(res.objectDeleted).toBe(false); // shared → object retained
     expect((await store.get(versionKey)).toString('utf8')).toBe('shared body'); // object survives
@@ -463,7 +463,7 @@ describe.skipIf(!available)('Stage D — exact historical retrieval, viewer acce
     // A new institutional relationship appears AFTER the assessment.
     await makeKnowledgeSourceBound(ctx, 'p39.md', shaOf('v1 body'), v1);
     // Execution re-checks NOW and refuses.
-    const res = await executePurge(ctx, store, v1, 'should be blocked');
+    const res = await executePurge(tx, ctx, store, v1, 'should be blocked');
     expect(res.purged).toBe(false);
     expect(res.decision).toBe('purge_blocked_by_institutional_evidence');
     expect((await db().select({ id: documentVersions.id }).from(documentVersions).where(eq(documentVersions.id, v1))).length).toBe(1); // not deleted

@@ -6,8 +6,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
-import { getSetupDb } from '@/db/client';
-import { withTenant } from '@/db/tenant';
+import { type DbTx, getSetupDb } from '@/db/client';
 import { agents, auditLogs, documentChunks, documentVersionTombstones, documentVersions, documents, knowledgeItems, knowledgeSources, memberships, organizations, profiles, projectMembers, projects, runDocumentVersions, runs, tasks } from '@/db/schema';
 import { chunkText } from '@/domain/documents/documents';
 import { backfillProject } from '@/domain/documents/backfill';
@@ -39,6 +38,8 @@ const db = () => getSetupDb();
 const shaOf = (s: string) => createHash('sha256').update(Buffer.from(s, 'utf8')).digest('hex');
 const future = () => new Date(Date.now() + 3_600_000);
 const txn = <T>(fn: (t: never) => Promise<T>): Promise<T> => db().transaction((t) => fn(t as never)) as Promise<T>;
+/** A privileged transaction runner — purge deletes immutable version rows, which app_server cannot. */
+const dtx = <T>(fn: (t: DbTx) => Promise<T>): Promise<T> => db().transaction((t) => fn(t as unknown as DbTx));
 
 async function makeWorkspace(): Promise<TenantContext> {
   const p = await db().insert(projects).values({ orgId, key: fixtureKey('db'), name: 'DB WS' }).returning({ id: projects.id });
@@ -114,7 +115,7 @@ describe.skipIf(!available)('Stage D — Blocker 1: crash-safe two-phase purge',
     const ctx = await makeWorkspace();
     const { docId, versionId, versionKey } = await byteExactDoc(ctx, 'b1-1.md', 'body');
     await newVersion(ctx, docId, 'v2');
-    const p1 = await withTenant(ctx, (t) => purgePhase1(t, ctx, versionId, 'phase1'));
+    const p1 = await dtx((t) => purgePhase1(t, ctx, versionId, "phase1"));
     expect(p1.purged).toBe(true);
     expect(p1.status).toBe('object_cleanup_pending');
     // Phase 1 committed (version gone) but the object is untouched until phase 2.
@@ -138,16 +139,16 @@ describe.skipIf(!available)('Stage D — Blocker 1: crash-safe two-phase purge',
     const ctx = await makeWorkspace();
     const { docId, versionId, versionKey } = await byteExactDoc(ctx, 'b1-3.md', 'body');
     await newVersion(ctx, docId, 'v2');
-    const p1 = await withTenant(ctx, (t) => purgePhase1(t, ctx, versionId, 'p'));
+    const p1 = await dtx((t) => purgePhase1(t, ctx, versionId, 'p'));
     // Phase 2 with a failing store → tombstone stays pending, error + attempt recorded.
-    await withTenant(ctx, (t) => purgePhase2(t, ctx, failingDeleteStore(store), p1.tombstoneId!));
+    await dtx((t) => purgePhase2(t, ctx, failingDeleteStore(store), p1.tombstoneId!));
     let tomb = (await db().select({ status: documentVersionTombstones.status, attempts: documentVersionTombstones.cleanupAttempts, err: documentVersionTombstones.cleanupError }).from(documentVersionTombstones).where(eq(documentVersionTombstones.id, p1.tombstoneId!)))[0]!;
     expect(tomb.status).toBe('object_cleanup_pending');
     expect(tomb.attempts).toBe(1);
     expect(tomb.err).toContain('simulated');
     expect((await store.get(versionKey))).toBeTruthy(); // object still present
     // Retry with the real store → completes; DB deletion is NOT repeated (version already gone).
-    await withTenant(ctx, (t) => purgePhase2(t, ctx, store, p1.tombstoneId!));
+    await dtx((t) => purgePhase2(t, ctx, store, p1.tombstoneId!));
     tomb = (await db().select({ status: documentVersionTombstones.status, attempts: documentVersionTombstones.cleanupAttempts, err: documentVersionTombstones.cleanupError }).from(documentVersionTombstones).where(eq(documentVersionTombstones.id, p1.tombstoneId!)))[0]!;
     expect(tomb.status).toBe('completed');
     await expect(store.get(versionKey)).rejects.toThrow(); // object now deleted
@@ -158,7 +159,7 @@ describe.skipIf(!available)('Stage D — Blocker 1: crash-safe two-phase purge',
     const { docId, versionId, versionKey } = await byteExactDoc(ctx, 'b1-5.md', 'shared body');
     await db().insert(documentVersions).values({ orgId: ctx.orgId, projectId: ctx.projectId, documentId: docId, sha256: shaOf('sharer'), sizeBytes: 1, contentFidelity: 'byte_exact', indexStatus: 'indexed', objectKey: versionKey });
     await newVersion(ctx, docId, 'v2');
-    const res = await executePurge(ctx, store, versionId, 'shared');
+    const res = await executePurge(dtx, ctx, store, versionId, 'shared');
     expect(res.purged).toBe(true);
     expect(res.status).toBe('completed_object_retained_shared');
     expect((await store.get(versionKey)).toString('utf8')).toBe('shared body');
@@ -170,7 +171,7 @@ describe.skipIf(!available)('Stage D — Blocker 1: crash-safe two-phase purge',
     await newVersion(ctx, docId, 'v2');
     const runId = await makeRun(ctx);
     await db().insert(runDocumentVersions).values({ orgId: ctx.orgId, projectId: ctx.projectId, runId, documentVersionId: versionId, chunkIndex: -1, disclosureSnapshot: 'workspace_internal' });
-    const res = await executePurge(ctx, store, versionId, 'blocked');
+    const res = await executePurge(dtx, ctx, store, versionId, 'blocked');
     expect(res.purged).toBe(false);
     expect(res.decision).toBe('purge_blocked_by_institutional_evidence');
     expect((await db().select({ id: documentVersions.id }).from(documentVersions).where(eq(documentVersions.id, versionId))).length).toBe(1);
@@ -179,7 +180,7 @@ describe.skipIf(!available)('Stage D — Blocker 1: crash-safe two-phase purge',
   it('8. a current-version pointer is never cleared by purge', async () => {
     const ctx = await makeWorkspace();
     const { docId, versionId } = await byteExactDoc(ctx, 'b1-8.md', 'body'); // versionId is current
-    const res = await executePurge(ctx, store, versionId, 'blocked');
+    const res = await executePurge(dtx, ctx, store, versionId, 'blocked');
     expect(res.decision).toBe('purge_blocked_by_current_use');
     expect((await db().select({ c: documents.currentVersionId }).from(documents).where(eq(documents.id, docId)))[0]!.c).toBe(versionId); // pointer intact
   });
@@ -189,7 +190,7 @@ describe.skipIf(!available)('Stage D — Blocker 1: crash-safe two-phase purge',
     const { docId, versionId } = await byteExactDoc(ctx, 'b1-9.md', 'body');
     await newVersion(ctx, docId, 'v2');
     const ksId = await bindKnowledge(ctx, 'b1-9.md', shaOf('body'), versionId);
-    const res = await executePurge(ctx, store, versionId, 'blocked');
+    const res = await executePurge(dtx, ctx, store, versionId, 'blocked');
     expect(res.purged).toBe(false);
     expect((await db().select({ id: knowledgeSources.id }).from(knowledgeSources).where(eq(knowledgeSources.id, ksId))).length).toBe(1); // relationship intact
   });
@@ -198,7 +199,7 @@ describe.skipIf(!available)('Stage D — Blocker 1: crash-safe two-phase purge',
     const ctx = await makeWorkspace();
     const { docId, versionId, versionKey } = await byteExactDoc(ctx, 'b1-10.md', 'body');
     await newVersion(ctx, docId, 'v2');
-    const res = await executePurge(ctx, store, versionId, 'full');
+    const res = await executePurge(dtx, ctx, store, versionId, 'full');
     expect(res.status).toBe('completed');
     expect(res.objectDeleted).toBe(true);
     expect((await db().select({ id: documentVersions.id }).from(documentVersions).where(eq(documentVersions.id, versionId))).length).toBe(0);
