@@ -709,6 +709,34 @@ export const documentVersions = pgTable(
 );
 
 /**
+ * Purge tombstone (Documents increment 1, Stage D). A privileged purge deletes a version row, its chunks,
+ * and (if unshared) its object; this immutable record survives so the identity of what was destroyed —
+ * and who authorized it — is auditable forever. Not an FK to document_versions (that row is gone).
+ */
+export const documentVersionTombstones = pgTable(
+  'document_version_tombstones',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    /** The purged version's id + document + content identity, retained for audit. */
+    versionId: uuid('version_id').notNull(),
+    documentId: uuid('document_id').notNull(),
+    sha256: text('sha256').notNull(),
+    contentFidelity: text('content_fidelity').notNull(),
+    objectKey: text('object_key'),
+    objectDeleted: boolean('object_deleted').notNull().default(false),
+    reason: text('reason'),
+    purgedBy: uuid('purged_by').references(() => profiles.id, { onDelete: 'set null' }),
+    purgedAt: timestamp('purged_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('document_version_tombstones_version_uq').on(t.versionId),
+    index('document_version_tombstones_doc_idx').on(t.documentId),
+  ],
+);
+
+/**
  * Normalized run→version references — the referentially-safe complement to the immutable JSON
  * `runs.retrieved_sources` snapshot. "Historical prompt snapshots preserve representation; normalized
  * references preserve integrity." Used for reverse trails, retention/purge checks, and usage queries.

@@ -2074,3 +2074,38 @@ stays `legacy`. No columns dropped, no legacy objects deleted, no purge.
 tsc + build clean, full suite **627/627** (+12: 10 access checks, 2 evidence-boundary, 1 tie-break
 regression; C2 test 12 adjusted to the enforced withhold behavior). `empera-international` may remain
 versioned (its access path withholds restricted); `accuratebids-com` stays legacy.
+
+### Sub-area 1 — immutable versions, STAGE D: evidence system — historical retrieval, viewer access, purge, integrity (built 2026-07-27)
+
+**Stage D** closes the evidence-system responsibilities so Increment 1 can end — no UI, no legacy deletion,
+no auto-purge. *Primary question: can the Hub retrieve the exact historical evidence requested, show it only
+to an authorized party, and prevent institutional evidence from being destroyed?*
+- **D1/D2 exact historical retrieval (`historical.ts`).** A resolver separate from current retrieval: given
+  a version id / Knowledge-source / run-version / run-snapshot / legacy identity+hash, it returns THAT
+  immutable version or a precise failure — `resolved | inaccessible | unavailable | missing |
+  version_mismatch | unsupported | integrity_failure` — and **never substitutes a newer source**.
+  Fidelity-aware: `byte_exact` re-verifies the object hash at retrieval (mismatch → integrity_failure) and
+  serves exact bytes/hash/mime/chunks/locators; `reconstructed_text` serves qualified chunks with no
+  download ("Reconstructed from indexed text; original source bytes were not retained."); `unavailable`
+  exposes identity only, no preview.
+- **D3/D4 viewer access (`viewer-access.ts`).** Human viewer authorization, **distinct from AI grants and
+  never reusing them**: present access is decided by the CURRENT logical disclosure — the version and
+  dispatch snapshots are historical facts, surfaced but not used to gate now (so declassification reopens
+  inspection while history is unchanged; re-restriction gates it). Conservative v1: restricted inspection
+  is owner/admin-only and audited. One gated decision fronts every direct path.
+- **D5/D6 retention (`retention.ts`, tombstone migration 0041).** Archive ≠ purge. Purge is privileged +
+  destructive and begins with a retention assessment that blocks on a current-version pointer, any
+  institutional evidence (Knowledge citation, normalized run reference, or immutable run snapshot — the
+  JSON scanned as a backstop), or a retention hold — returning a precise decision + blocking
+  categories/counts (no restricted leak). Execution **re-checks inside the destructive transaction**,
+  deletes chunks + the version row, deletes the object only when unshared, clears dangling pointers, and
+  writes an immutable tombstone + audit. *Principle: purge authorization is a current judgment, not a
+  reusable token.* The 56 legacy objects get a read-only cleanup assessment (all still referenced /
+  rollback-required) — none cleaned.
+- **D7/D8 integrity + evidence (`integrity.ts` + `historical.ts`).** A read-only audit over 16 defect
+  categories with bounded, audited repairs (reverify object; rebuild chunks from exact bytes preserving
+  identity+hash; restore a normalized run reference from the immutable snapshot) that never rewrite
+  history. Evidence paths keep the two authorities distinct: the run snapshot is authoritative for the
+  exact supplied prompt text, the retained version for the source evidence.
+tsc + build clean, full suite **658/658** (+31 blocks covering the 40 required Stage D cases). No UI, no
+legacy deletion, no auto-purge.
