@@ -2108,4 +2108,31 @@ to an authorized party, and prevent institutional evidence from being destroyed?
   history. Evidence paths keep the two authorities distinct: the run snapshot is authoritative for the
   exact supplied prompt text, the retained version for the source evidence.
 tsc + build clean, full suite **658/658** (+31 blocks covering the 40 required Stage D cases). No UI, no
-legacy deletion, no auto-purge.
+legacy deletion, no auto-purge. **Stage D implementation deployed and staging acceptance exercised; final
+closure pending review.**
+
+**Stage D review corrections (2026-07-27).** Applied before closure:
+- **Crash-safe two-phase purge (Blocker 1).** Object storage and Postgres can't share a transaction, so
+  purge is now a restart-safe state machine. Phase 1 (one DB txn) locks the version + document `FOR
+  UPDATE`, re-assesses, writes a tombstone with the assessment snapshot + status `object_cleanup_pending`
+  (or `completed_object_retained_shared` if the object is shared, `completed` if none), deletes chunks +
+  the version row, and commits — *database revocation is authoritative*. Phase 2 (after commit) reconfirms
+  the object is unshared, deletes it, and marks `completed`; a failure keeps `object_cleanup_pending` with
+  the error + attempt count for an audited retry — *object cleanup is restartable* and never claims false
+  completion. Purge **never clears an evidence relationship or a valid current pointer** to manufacture
+  eligibility — those block it (dangling pointers are integrity's job, not purge's).
+- **Representation-safe chunk repair (Blocker 2).** A rebuild restores chunk content from the exact bytes
+  ONLY when it reproduces the identical historical representation: the existing chunk rows are the expected
+  manifest (indexes + content hashes + locators + parser version), and the reparse must match it exactly
+  (same count + per-chunk hash). Otherwise nothing is mutated and the version is marked `index_degraded`
+  (new column) — no manifest, a parser-version mismatch, or a manifest mismatch all degrade rather than
+  rechunk. *Repair may restore an identical representation; it may not replace it with a new
+  interpretation.*
+- **Restricted viewer matrix + audit-on-release (Blocker 3).** One shared gated loader
+  (`loadInspectableVersion`) fronts every direct path (preview / raw bytes / download / chunks / Knowledge
+  provenance / run source). Owner + admin permitted, ordinary member denied, non-member denied WITHOUT
+  revealing existence (identical bounded message), AI grants never authorize human access. The audit fires
+  ONLY on an actual restricted-content release (not on a permission check), recording
+  viewer/workspace/doc/version/access-type/purpose/policy — never the content.
+tsc + build clean, full suite **678/678** (+20 blocks: 10 purge, 8 repair, 10 viewer). No UI, no legacy
+deletion, no auto-purge.

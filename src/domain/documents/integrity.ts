@@ -92,7 +92,8 @@ export async function auditDocumentIntegrity(tx: DbTx, ctx: TenantContext, store
     if (c.versionId) chunkCountByVersion.set(c.versionId, (chunkCountByVersion.get(c.versionId) ?? 0) + 1);
     // chunk-content hash consistency
     if (c.versionId && c.contentHash && c.contentHash !== sha256Hex(Buffer.from(c.content, 'utf8'))) {
-      add({ category: 'chunk_content_hash_mismatch', versionId: c.versionId, detail: 'chunk content_hash does not match its text', repair: 'operator_review' });
+      // The manifest hash is intact but the text is corrupted → a manifest-verified rebuild can restore it.
+      add({ category: 'chunk_content_hash_mismatch', versionId: c.versionId, detail: 'chunk content_hash does not match its text', repair: 'rebuild_chunks_from_bytes' });
     }
     // chunk belongs to a version of the WRONG document/workspace
     if (c.versionId) {
@@ -120,7 +121,8 @@ export async function auditDocumentIntegrity(tx: DbTx, ctx: TenantContext, store
     } else if (v.contentFidelity === 'reconstructed_text') {
       if (chunkN === 0) add({ category: 'reconstructed_without_chunks', versionId: v.id, documentId: v.documentId, detail: 'reconstructed_text version has no chunks', repair: 'operator_review' });
     } else if (v.contentFidelity === 'byte_exact') {
-      if (v.indexStatus === 'indexed' && chunkN === 0) add({ category: 'indexed_without_chunks', versionId: v.id, documentId: v.documentId, detail: 'indexed byte_exact version has no chunks', repair: 'rebuild_chunks_from_bytes' });
+      // No chunks ⇒ no manifest ⇒ a faithful rebuild cannot be proven; do not silently rechunk.
+      if (v.indexStatus === 'indexed' && chunkN === 0) add({ category: 'indexed_without_chunks', versionId: v.id, documentId: v.documentId, detail: 'indexed byte_exact version has no chunks (no manifest to prove a faithful rebuild)', repair: 'operator_review' });
       if (!v.objectKey) {
         add({ category: 'byte_exact_object_missing', versionId: v.id, documentId: v.documentId, detail: 'byte_exact version has no object key', repair: 'mark_object_unavailable' });
       } else {
@@ -214,24 +216,63 @@ export async function reverifyObject(tx: DbTx, ctx: TenantContext, store: Object
   }
 }
 
+export type ChunkRepairState = 'repaired' | 'no_change_needed' | 'not_byte_exact' | 'source_hash_mismatch' | 'parser_mismatch' | 'manifest_mismatch' | 'no_manifest';
+export interface ChunkRepairResult {
+  state: ChunkRepairState;
+  chunks?: number;
+}
+
+const REPAIR_PARSER = 'chunk-v1';
+
+/** Mark a version's DERIVED index as degraded — the source bytes stay inspectable, but chunk-level
+ *  evidence cannot be reproduced identically and must not be silently rechunked. Never rewrites history. */
+export async function markIndexDegraded(tx: DbTx, ctx: TenantContext, versionId: string, why: string): Promise<void> {
+  await tx.update(documentVersions).set({ indexDegraded: true }).where(and(eq(documentVersions.id, versionId), eq(documentVersions.orgId, ctx.orgId), eq(documentVersions.projectId, ctx.projectId)));
+  await writeAudit(tx, ctx, { action: 'document.version_index_degraded', entityType: 'document_version', entityId: versionId, detail: { why } });
+}
+
 /**
- * Rebuild the version-specific chunks of a byte_exact version FROM its exact retained bytes. Preserves the
- * version identity and hash (the bytes and thus the derived chunks are unchanged); only used when the
- * chunks were lost. Never rewrites historical text. Audited.
+ * Restore a byte_exact version's chunk CONTENT from its exact retained bytes — but ONLY when it can
+ * reproduce the IDENTICAL historical representation. The existing chunk rows are the expected manifest
+ * (indexes, content hashes, locators, parser version); a rebuild is applied only when the source bytes are
+ * byte-exact + hash-verified, the parser version matches, and the reparsed output matches the manifest
+ * EXACTLY (same count, same per-chunk content hash). Otherwise nothing is mutated and the version is marked
+ * index-degraded — repair may restore an identical representation, never replace it with a new
+ * interpretation. Chunk indexes, locators, and hashes are never changed; historical snapshots are never
+ * touched.
  */
-export async function rebuildVersionChunksFromBytes(tx: DbTx, ctx: TenantContext, store: ObjectStore, versionId: string): Promise<{ rebuilt: boolean; chunks: number }> {
-  const v = (await tx.select({ id: documentVersions.id, documentId: documentVersions.documentId, sha256: documentVersions.sha256, objectKey: documentVersions.objectKey, contentFidelity: documentVersions.contentFidelity }).from(documentVersions).where(and(eq(documentVersions.id, versionId), eq(documentVersions.orgId, ctx.orgId), eq(documentVersions.projectId, ctx.projectId))).limit(1))[0];
-  if (!v || v.contentFidelity !== 'byte_exact' || !v.objectKey) throw new AppError('validation', 'Only a byte_exact version with a retained object can rebuild chunks.');
-  const existing = (await tx.select({ id: documentChunks.id }).from(documentChunks).where(eq(documentChunks.documentVersionId, versionId))).length;
-  if (existing > 0) return { rebuilt: false, chunks: existing }; // never duplicate existing chunks
-  const bytes = await store.get(v.objectKey);
-  if (sha256Hex(bytes) !== v.sha256) throw new AppError('conflict', 'Retained object hash no longer matches — cannot rebuild as byte_exact.');
-  const contents = chunkText(bytes.toString('utf8'));
-  if (contents.length > 0) {
-    await tx.insert(documentChunks).values(contents.map((content, i) => ({ orgId: ctx.orgId, projectId: ctx.projectId, documentId: v.documentId, documentVersionId: versionId, chunkIndex: i, content, parserVersion: 'chunk-v1', contentHash: sha256Hex(Buffer.from(content, 'utf8')) })));
+export async function rebuildVersionChunksFromBytes(tx: DbTx, ctx: TenantContext, store: ObjectStore, versionId: string): Promise<ChunkRepairResult> {
+  const v = (await tx.select({ id: documentVersions.id, documentId: documentVersions.documentId, sha256: documentVersions.sha256, objectKey: documentVersions.objectKey, contentFidelity: documentVersions.contentFidelity, parserVersion: documentVersions.parserVersion }).from(documentVersions).where(and(eq(documentVersions.id, versionId), eq(documentVersions.orgId, ctx.orgId), eq(documentVersions.projectId, ctx.projectId))).limit(1))[0];
+  if (!v || v.contentFidelity !== 'byte_exact' || !v.objectKey) return { state: 'not_byte_exact' };
+
+  // The existing chunk rows are the expected manifest. With no manifest we cannot prove identity → degrade.
+  const manifest = await tx.select({ id: documentChunks.id, chunkIndex: documentChunks.chunkIndex, content: documentChunks.content, contentHash: documentChunks.contentHash, parserVersion: documentChunks.parserVersion }).from(documentChunks).where(eq(documentChunks.documentVersionId, versionId)).orderBy(documentChunks.chunkIndex);
+  if (manifest.length === 0) {
+    await markIndexDegraded(tx, ctx, versionId, 'no chunk manifest available to prove an identical rebuild');
+    return { state: 'no_manifest' };
   }
-  await writeAudit(tx, ctx, { action: 'document.version_chunks_rebuilt', entityType: 'document', entityId: v.documentId, detail: { versionId, chunks: contents.length } });
-  return { rebuilt: true, chunks: contents.length };
+  // The manifest must have been produced by the parser this repair would use.
+  if (manifest.some((m) => (m.parserVersion ?? REPAIR_PARSER) !== REPAIR_PARSER) || (v.parserVersion ?? REPAIR_PARSER) !== REPAIR_PARSER) {
+    await markIndexDegraded(tx, ctx, versionId, 'parser version differs from the historical manifest');
+    return { state: 'parser_mismatch' };
+  }
+  const bytes = await store.get(v.objectKey);
+  if (sha256Hex(bytes) !== v.sha256) return { state: 'source_hash_mismatch' };
+
+  const rebuilt = chunkText(bytes.toString('utf8'));
+  const matchesManifest = rebuilt.length === manifest.length && manifest.every((m, i) => m.contentHash && m.contentHash === sha256Hex(Buffer.from(rebuilt[i]!, 'utf8')));
+  if (!matchesManifest) {
+    await markIndexDegraded(tx, ctx, versionId, 'reparsed output does not match the historical chunk manifest');
+    return { state: 'manifest_mismatch' };
+  }
+  // Provably identical. If the stored content already equals the reproduction, nothing to do.
+  if (manifest.every((m, i) => m.content === rebuilt[i])) return { state: 'no_change_needed', chunks: manifest.length };
+  // Restore the corrupted content in place — indexes, locators, hashes, and count are unchanged.
+  for (let i = 0; i < manifest.length; i += 1) {
+    if (manifest[i]!.content !== rebuilt[i]) await tx.update(documentChunks).set({ content: rebuilt[i]! }).where(eq(documentChunks.id, manifest[i]!.id));
+  }
+  await writeAudit(tx, ctx, { action: 'document.version_chunks_restored', entityType: 'document', entityId: v.documentId, detail: { versionId, chunks: manifest.length } });
+  return { state: 'repaired', chunks: manifest.length };
 }
 
 /**

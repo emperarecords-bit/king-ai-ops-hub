@@ -82,8 +82,9 @@ async function main() {
   // Detach current pointer so the disposable version is purgeable, then purge it.
   await db.update(documents).set({ currentVersionId: null }).where(eq(documents.id, fixtureDoc));
   out.fixturePurgeAssessment = (await tx((t) => assessPurge(t, ctx, fixtureVersion))).decision;
-  const purge = await tx((t) => executePurge(t, ctx, store, fixtureVersion, 'stage-d disposable fixture'));
+  const purge = await executePurge(ctx, store, fixtureVersion, 'stage-d disposable fixture');
   out.fixturePurged = purge.purged;
+  out.fixturePurgeStatus = purge.status;
   out.fixtureTombstone = (await db.select({ id: schema.documentVersionTombstones.id }).from(schema.documentVersionTombstones).where(eq(schema.documentVersionTombstones.versionId, fixtureVersion))).length === 1;
   // Remove the disposable document shell (cascade removes any residue). Not institutional evidence.
   await db.delete(documents).where(eq(documents.id, fixtureDoc));

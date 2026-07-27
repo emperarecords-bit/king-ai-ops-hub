@@ -319,7 +319,7 @@ describe.skipIf(!available)('Stage D — exact historical retrieval, viewer acce
     const other = await reconDoc(ctx, 'other22.md', ['unrelated']); // untouched control
     const a = await tx((t) => assessPurge(t, ctx, v1));
     expect(a.decision).toBe('purge_permitted'); // 22 (categories + counts)
-    const res = await tx((t) => executePurge(t, ctx, store, v1, 'stage-d test'));
+    const res = await executePurge(ctx, store, v1, 'stage-d test');
     expect(res.purged).toBe(true);
     expect(res.objectDeleted).toBe(true); // 24: v1's object was not shared
     // 26: only v1 + its chunks gone; v2 + other intact.
@@ -340,7 +340,7 @@ describe.skipIf(!available)('Stage D — exact historical retrieval, viewer acce
     // Manually create a second retained version pointing at the SAME object key (simulating a share).
     await db().insert(documentVersions).values({ orgId: ctx.orgId, projectId: ctx.projectId, documentId: docId, sha256: shaOf('shared body v2 identity'), sizeBytes: 1, contentFidelity: 'byte_exact', indexStatus: 'indexed', objectKey: versionKey });
     await newVersion(ctx, docId, 'make v1 non-current'); // so v1 is purgeable
-    const res = await tx((t) => executePurge(t, ctx, store, v1, 'shared-object test'));
+    const res = await executePurge(ctx, store, v1, 'shared-object test');
     expect(res.purged).toBe(true);
     expect(res.objectDeleted).toBe(false); // shared → object retained
     expect((await store.get(versionKey)).toString('utf8')).toBe('shared body'); // object survives
@@ -389,18 +389,18 @@ describe.skipIf(!available)('Stage D — exact historical retrieval, viewer acce
     expect(report.byCategory.run_reference_inconsistent).toBeGreaterThanOrEqual(1);
   });
 
-  it('33. rebuilding chunks from exact bytes preserves version identity and hash', async () => {
+  it('33. a manifest-verified rebuild restores corrupted chunk text, preserving identity + hash', async () => {
     const ctx = await makeWorkspace();
-    const { versionId, versionKey } = await byteExactDoc(ctx, 'i33.md', '# Rebuild\n\nfirst para\n\nsecond para');
+    const { versionId } = await byteExactDoc(ctx, 'i33.md', '# Rebuild\n\nfirst para\n\nsecond para');
     const shaBefore = (await db().select({ s: documentVersions.sha256 }).from(documentVersions).where(eq(documentVersions.id, versionId)))[0]!.s;
-    await db().delete(documentChunks).where(eq(documentChunks.documentVersionId, versionId)); // simulate lost chunks
+    const chunk0 = (await db().select({ id: documentChunks.id, contentHash: documentChunks.contentHash }).from(documentChunks).where(and(eq(documentChunks.documentVersionId, versionId), eq(documentChunks.chunkIndex, 0))))[0]!;
+    // Corrupt the CONTENT but keep the manifest hash — the rebuild must restore the exact historical text.
+    await db().update(documentChunks).set({ content: 'CORRUPTED TEXT' }).where(eq(documentChunks.id, chunk0.id));
     const rebuilt = await tx((t) => rebuildVersionChunksFromBytes(t, ctx, store, versionId));
-    expect(rebuilt.rebuilt).toBe(true);
-    expect(rebuilt.chunks).toBeGreaterThan(0);
-    const shaAfter = (await db().select({ s: documentVersions.sha256 }).from(documentVersions).where(eq(documentVersions.id, versionId)))[0]!.s;
-    expect(shaAfter).toBe(shaBefore); // identity + hash unchanged
-    void versionKey;
-    // reverify confirms the object still matches.
+    expect(rebuilt.state).toBe('repaired');
+    const after = (await db().select({ content: documentChunks.content }).from(documentChunks).where(eq(documentChunks.id, chunk0.id)))[0]!;
+    expect(shaOf(after.content)).toBe(chunk0.contentHash); // restored to match the manifest hash
+    expect((await db().select({ s: documentVersions.sha256 }).from(documentVersions).where(eq(documentVersions.id, versionId)))[0]!.s).toBe(shaBefore); // identity+hash unchanged
     expect((await tx((t) => reverifyObject(t, ctx, store, versionId))).state).toBe('verified');
   });
 
@@ -463,7 +463,7 @@ describe.skipIf(!available)('Stage D — exact historical retrieval, viewer acce
     // A new institutional relationship appears AFTER the assessment.
     await makeKnowledgeSourceBound(ctx, 'p39.md', shaOf('v1 body'), v1);
     // Execution re-checks NOW and refuses.
-    const res = await tx((t) => executePurge(t, ctx, store, v1, 'should be blocked'));
+    const res = await executePurge(ctx, store, v1, 'should be blocked');
     expect(res.purged).toBe(false);
     expect(res.decision).toBe('purge_blocked_by_institutional_evidence');
     expect((await db().select({ id: documentVersions.id }).from(documentVersions).where(eq(documentVersions.id, v1))).length).toBe(1); // not deleted

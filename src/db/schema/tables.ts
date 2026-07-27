@@ -691,6 +691,10 @@ export const documentVersions = pgTable(
     parserVersion: text('parser_version'),
     /** The ingestion operation that created this version (audit/provenance). */
     ingestionOperationId: uuid('ingestion_operation_id'),
+    /** The DERIVED index (chunks) is untrustworthy — the source bytes remain inspectable but chunk-level
+     *  evidence cannot be reproduced identically. Set by repair when a faithful rebuild cannot be proven;
+     *  never rewrites historical chunk text. Not part of the immutable content-identity facts. */
+    indexDegraded: boolean('index_degraded').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -726,6 +730,13 @@ export const documentVersionTombstones = pgTable(
     contentFidelity: text('content_fidelity').notNull(),
     objectKey: text('object_key'),
     objectDeleted: boolean('object_deleted').notNull().default(false),
+    /** Two-phase lifecycle: DB revocation is authoritative (phase 1); object cleanup is restartable
+     *  (phase 2). `object_cleanup_pending` → `completed` | `completed_object_retained_shared`. */
+    status: text('status').notNull().default('object_cleanup_pending'),
+    /** The retention assessment snapshot at purge time (decision + blocking categories/counts). */
+    assessment: jsonb('assessment'),
+    cleanupError: text('cleanup_error'),
+    cleanupAttempts: integer('cleanup_attempts').notNull().default(0),
     reason: text('reason'),
     purgedBy: uuid('purged_by').references(() => profiles.id, { onDelete: 'set null' }),
     purgedAt: timestamp('purged_at', { withTimezone: true }).notNull().defaultNow(),

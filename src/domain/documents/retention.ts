@@ -4,6 +4,7 @@ import { and, eq, ne } from 'drizzle-orm';
 import { type RunSourceSnapshot, type TenantContext } from '@/types/domain';
 import { AppError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
+import { withTenant } from '@/db/tenant';
 import { documentChunks, documentVersionTombstones, documentVersions, documents, knowledgeSources, runDocumentVersions, runs } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 import { type ObjectStore } from './object-store';
@@ -82,49 +83,100 @@ export async function assessPurge(tx: DbTx, ctx: TenantContext, versionId: strin
   return { versionId, decision, blockers };
 }
 
+export type PurgeStatus = 'object_cleanup_pending' | 'completed' | 'completed_object_retained_shared';
+
 export interface PurgeResult {
   purged: boolean;
   decision: PurgeDecision;
+  status?: PurgeStatus;
   objectDeleted: boolean;
+  tombstoneId?: string;
   blockers: PurgeAssessment['blockers'];
 }
 
+/** Is the object still referenced by ANOTHER retained version (so it must be preserved)? */
+async function objectShared(tx: DbTx, ctx: TenantContext, objectKey: string, exceptVersionId: string): Promise<boolean> {
+  const other = (await tx.select({ id: documentVersions.id }).from(documentVersions).where(and(eq(documentVersions.objectKey, objectKey), ne(documentVersions.id, exceptVersionId), eq(documentVersions.orgId, ctx.orgId), eq(documentVersions.projectId, ctx.projectId))).limit(1))[0];
+  return !!other;
+}
+
 /**
- * Execute a purge, RE-assessing inside the destructive transaction (a stale assessment can never
- * authorize deletion). Deletes version chunks, the version row, and — only when no other retained version
- * shares it — the immutable object; clears any dangling pointer; writes an immutable tombstone + audit.
+ * PHASE 1 (one DB transaction, authoritative): lock the version + document, RE-assess retention, reject if
+ * any blocking reference exists, then write the tombstone (with the assessment snapshot), delete the
+ * version chunks, and delete the version row. NEVER clears an evidence relationship or a valid
+ * current-version pointer to manufacture eligibility — those BLOCK the purge. After commit, normal
+ * resolution can no longer release the content. The immutable object is NOT touched here.
  */
-export async function executePurge(tx: DbTx, ctx: TenantContext, store: ObjectStore, versionId: string, reason?: string): Promise<PurgeResult> {
-  const assessment = await assessPurge(tx, ctx, versionId); // re-check NOW, inside the transaction
+export async function purgePhase1(tx: DbTx, ctx: TenantContext, versionId: string, reason?: string): Promise<PurgeResult> {
+  // Lock the version row so a concurrent evidence writer cannot race the assessment→delete window.
+  const locked = (await tx.select({ id: documentVersions.id, documentId: documentVersions.documentId, sha256: documentVersions.sha256, contentFidelity: documentVersions.contentFidelity, objectKey: documentVersions.objectKey }).from(documentVersions).where(and(eq(documentVersions.id, versionId), eq(documentVersions.orgId, ctx.orgId), eq(documentVersions.projectId, ctx.projectId))).limit(1).for('update'))[0];
+  if (!locked) {
+    const assessment = await assessPurge(tx, ctx, versionId);
+    return { purged: false, decision: assessment.decision, objectDeleted: false, blockers: assessment.blockers };
+  }
+  // Lock the document too (its current-version pointer participates in the judgment).
+  await tx.select({ id: documents.id }).from(documents).where(eq(documents.id, locked.documentId)).for('update');
+
+  const assessment = await assessPurge(tx, ctx, versionId); // re-check NOW, holding the locks
   if (assessment.decision !== 'purge_permitted') {
     return { purged: false, decision: assessment.decision, objectDeleted: false, blockers: assessment.blockers };
   }
 
-  const v = (await tx.select({ id: documentVersions.id, documentId: documentVersions.documentId, sha256: documentVersions.sha256, contentFidelity: documentVersions.contentFidelity, objectKey: documentVersions.objectKey }).from(documentVersions).where(eq(documentVersions.id, versionId)).limit(1))[0]!;
+  const shared = locked.objectKey ? await objectShared(tx, ctx, locked.objectKey, versionId) : false;
+  const status: PurgeStatus = !locked.objectKey ? 'completed' : shared ? 'completed_object_retained_shared' : 'object_cleanup_pending';
 
-  // Delete version-specific chunks.
   await tx.delete(documentChunks).where(eq(documentChunks.documentVersionId, versionId));
-
-  // Delete the immutable object ONLY if no other retained version references it.
-  let objectDeleted = false;
-  if (v.objectKey) {
-    const shared = (await tx.select({ id: documentVersions.id }).from(documentVersions).where(and(eq(documentVersions.objectKey, v.objectKey), ne(documentVersions.id, versionId), eq(documentVersions.orgId, ctx.orgId), eq(documentVersions.projectId, ctx.projectId))).limit(1))[0];
-    if (!shared) {
-      await store.delete(v.objectKey).catch(() => {}); // idempotent; a missing object is already gone
-      objectDeleted = true;
-    }
-  }
-
-  // Defensive: clear any logical pointer to the purged version (current-use would have blocked, but never
-  // leave a dangling current_version_id behind).
-  await tx.update(documents).set({ currentVersionId: null, updatedAt: new Date() }).where(and(eq(documents.currentVersionId, versionId), eq(documents.orgId, ctx.orgId), eq(documents.projectId, ctx.projectId)));
-
   await tx.delete(documentVersions).where(eq(documentVersions.id, versionId));
 
-  await tx.insert(documentVersionTombstones).values({ orgId: ctx.orgId, projectId: ctx.projectId, versionId, documentId: v.documentId, sha256: v.sha256, contentFidelity: v.contentFidelity, objectKey: v.objectKey, objectDeleted, reason: reason ?? null, purgedBy: ctx.userId });
-  await writeAudit(tx, ctx, { action: 'document.version_purged', entityType: 'document', entityId: v.documentId, detail: { versionId, sha256: v.sha256.slice(0, 12), objectDeleted, reason: reason ?? null } });
+  const tomb = await tx
+    .insert(documentVersionTombstones)
+    .values({ orgId: ctx.orgId, projectId: ctx.projectId, versionId, documentId: locked.documentId, sha256: locked.sha256, contentFidelity: locked.contentFidelity, objectKey: locked.objectKey, objectDeleted: false, status, assessment: assessment as unknown as Record<string, unknown>, reason: reason ?? null, purgedBy: ctx.userId })
+    .returning({ id: documentVersionTombstones.id });
+  await writeAudit(tx, ctx, { action: 'document.version_purged', entityType: 'document', entityId: locked.documentId, detail: { versionId, sha256: locked.sha256.slice(0, 12), status, reason: reason ?? null } });
 
-  return { purged: true, decision: 'purge_permitted', objectDeleted, blockers: [] };
+  return { purged: true, decision: 'purge_permitted', status, objectDeleted: false, tombstoneId: tomb[0]!.id, blockers: [] };
+}
+
+/**
+ * PHASE 2 (after the phase-1 commit): reconfirm the object is unshared, delete it, and mark the tombstone
+ * `completed`. On a deletion failure the tombstone stays `object_cleanup_pending` with the error + an
+ * incremented attempt count — an audited retry can complete it later. If the object became shared it is
+ * preserved (`completed_object_retained_shared`). Restartable; never repeats the DB deletion.
+ */
+export async function purgePhase2(tx: DbTx, ctx: TenantContext, store: ObjectStore, tombstoneId: string): Promise<{ status: PurgeStatus; objectDeleted: boolean }> {
+  const tomb = (await tx.select({ id: documentVersionTombstones.id, versionId: documentVersionTombstones.versionId, objectKey: documentVersionTombstones.objectKey, status: documentVersionTombstones.status, cleanupAttempts: documentVersionTombstones.cleanupAttempts }).from(documentVersionTombstones).where(and(eq(documentVersionTombstones.id, tombstoneId), eq(documentVersionTombstones.orgId, ctx.orgId), eq(documentVersionTombstones.projectId, ctx.projectId))).limit(1))[0];
+  if (!tomb) throw new AppError('not_found', 'Tombstone not found.');
+  if (tomb.status !== 'object_cleanup_pending') return { status: tomb.status as PurgeStatus, objectDeleted: false };
+  if (!tomb.objectKey) {
+    await tx.update(documentVersionTombstones).set({ status: 'completed' }).where(eq(documentVersionTombstones.id, tombstoneId));
+    return { status: 'completed', objectDeleted: false };
+  }
+  // Reconfirm no retained version references the object before deleting it.
+  if (await objectShared(tx, ctx, tomb.objectKey, tomb.versionId)) {
+    await tx.update(documentVersionTombstones).set({ status: 'completed_object_retained_shared' }).where(eq(documentVersionTombstones.id, tombstoneId));
+    return { status: 'completed_object_retained_shared', objectDeleted: false };
+  }
+  try {
+    await store.delete(tomb.objectKey);
+    await tx.update(documentVersionTombstones).set({ status: 'completed', objectDeleted: true, cleanupError: null }).where(eq(documentVersionTombstones.id, tombstoneId));
+    return { status: 'completed', objectDeleted: true };
+  } catch (err) {
+    await tx.update(documentVersionTombstones).set({ cleanupAttempts: tomb.cleanupAttempts + 1, cleanupError: err instanceof Error ? err.message.slice(0, 500) : String(err) }).where(eq(documentVersionTombstones.id, tombstoneId));
+    return { status: 'object_cleanup_pending', objectDeleted: false };
+  }
+}
+
+/**
+ * Orchestrate a full purge: phase 1 in its own transaction (authoritative DB revocation), then phase 2 in
+ * a second transaction (restartable object cleanup). A phase-2 failure leaves a visible, retryable
+ * `object_cleanup_pending` tombstone — it never claims completion. Uses withTenant so each phase commits
+ * independently.
+ */
+export async function executePurge(ctx: TenantContext, store: ObjectStore, versionId: string, reason?: string): Promise<PurgeResult> {
+  const p1 = await withTenant(ctx, (tx) => purgePhase1(tx, ctx, versionId, reason));
+  if (!p1.purged || !p1.tombstoneId) return p1;
+  const p2 = await withTenant(ctx, (tx) => purgePhase2(tx, ctx, store, p1.tombstoneId!));
+  return { ...p1, status: p2.status, objectDeleted: p2.objectDeleted };
 }
 
 // ---- D6: legacy filename-keyed object cleanup assessment (read-only) -----------------------------
