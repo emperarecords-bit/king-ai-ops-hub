@@ -181,7 +181,14 @@ export async function startRun(
     // Retrieval runs under the workspace's server-authoritative mode (Stage C2): legacy or shadow →
     // legacy is authoritative (shadow also compares the versioned path, non-authoritatively); versioned →
     // the current-version path is authoritative and the run writes version-bound evidence below.
-    const docSources = await assembleDocumentSources(tx, ctx, task.input, 5);
+    // Disclosure authorization is derived server-side from the operation (task_run) and its consuming
+    // agents (primary + reviewer) — the same identities that gate restricted Knowledge. Restricted
+    // Documents reach the prompt only when every consumer holds a live matching grant; otherwise the
+    // versioned path withholds them inside retrieval.
+    const docSources = await assembleDocumentSources(tx, ctx, task.input, 5, {
+      consumerType: 'task_run',
+      consumerAgentIds: [primaryRow.id, reviewerRow?.id].filter((id): id is string => !!id),
+    });
     const retrieved = docSources.retrieved;
     const coreRefs = docSources.coreRefs;
     const productionStatus = docSources.productionStatus;

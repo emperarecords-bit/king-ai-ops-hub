@@ -59,6 +59,12 @@ export interface Difference {
   versioned?: Partial<ComparisonRow>;
 }
 
+export interface FnTiming {
+  fn: RetrievalCategory;
+  legacyMs: number;
+  versionedMs: number;
+}
+
 export interface QueryComparison {
   queryHash: string;
   legacyCount: number;
@@ -66,25 +72,42 @@ export interface QueryComparison {
   exactMatches: number;
   byCategory: Record<DiffCategory, number>;
   differences: Difference[];
+  timings: FnTiming[];
+}
+
+function median(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
+}
+function p95(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.ceil(s.length * 0.95) - 1)]!;
+}
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
 }
 
 interface DocMeta {
   status: string;
   currentVersionId: string | null;
   currentIndexed: boolean;
+  disclosure: string;
 }
 
 /** One pass over the workspace's Documents so a legacy-only or versioned-only row can be classified
  *  against the agreed lifecycle contract (which sources are expected to be non-retrievable, and why). */
 export async function buildDocMeta(tx: DbTx, ctx: TenantContext): Promise<Map<string, DocMeta>> {
   const docs = await tx
-    .select({ id: documents.id, status: documents.status, currentVersionId: documents.currentVersionId, curStatus: documentVersions.indexStatus })
+    .select({ id: documents.id, status: documents.status, disclosure: documents.disclosure, currentVersionId: documents.currentVersionId, curStatus: documentVersions.indexStatus })
     .from(documents)
     .leftJoin(documentVersions, eq(documents.currentVersionId, documentVersions.id))
     .where(and(eq(documents.orgId, ctx.orgId), eq(documents.projectId, ctx.projectId)));
   const map = new Map<string, DocMeta>();
   for (const d of docs) {
-    map.set(d.id, { status: d.status, currentVersionId: d.currentVersionId, currentIndexed: d.curStatus === 'indexed' });
+    map.set(d.id, { status: d.status, currentVersionId: d.currentVersionId, currentIndexed: d.curStatus === 'indexed', disclosure: d.disclosure });
   }
   return map;
 }
@@ -96,6 +119,11 @@ function classifyLegacyOnly(meta: DocMeta | undefined): { category: DiffCategory
   if (!meta) return { category: 'unresolved', reason: 'legacy returned a chunk for a Document not found in this workspace' };
   if (EXPECTED_NON_RETRIEVABLE_STATUSES.has(meta.status)) {
     return { category: 'expected_exclusion', reason: `source is ${meta.status} (agreed non-retrievable lifecycle state)` };
+  }
+  if (meta.disclosure === 'restricted') {
+    // Legacy returned restricted content with no consumer authorization; the versioned path withholds it
+    // inside retrieval. A legacy defect the switch corrects (the shadow runs with no-grant access).
+    return { category: 'legacy_defect_corrected', reason: 'legacy returned restricted content without disclosure authorization; versioned withholds it' };
   }
   if (meta.status === 'active' && !meta.currentIndexed) {
     // Legacy served content for an active Document with no valid indexed current version — the versioned
@@ -199,7 +227,7 @@ export function compareAssembled(legacy: ComparisonRow[], versioned: ComparisonR
     differences.push({ category, key: v.key, documentId: v.documentId, relativePath: v.relativePath, chunkIndex: v.chunkIndex, reason: meta ? 'versioned returned a chunk legacy did not' : 'versioned returned a chunk for an unknown Document', versioned: textFree(v) });
   }
 
-  return { queryHash: '', legacyCount: legacy.length, versionedCount: versioned.length, exactMatches, byCategory, differences };
+  return { queryHash: '', legacyCount: legacy.length, versionedCount: versioned.length, exactMatches, byCategory, differences, timings: [] };
 }
 
 /** Strip content text; keep only identifiers, hashes, scores, disclosure. */
@@ -224,39 +252,81 @@ function textFree(r: ComparisonRow): Partial<ComparisonRow> {
  * production set the runner would, on each path independently. No prompt is fed, no evidence is written.
  */
 export async function shadowCompareQuery(tx: DbTx, ctx: TenantContext, queryText: string, docMeta: Map<string, DocMeta>, limit = 5): Promise<QueryComparison> {
-  // Legacy path (authoritative in shadow mode).
-  const lRelevant = await retrieveRelevant(tx, ctx, queryText, limit);
-  const lSeen = new Set(lRelevant.map((r) => r.relativePath));
-  const lCore = await selectCoreReferences(tx, ctx, lSeen, 2);
-  lCore.forEach((c) => lSeen.add(c.relativePath));
-  const lProd = await selectProductionStatus(tx, ctx, lSeen);
+  // Time each retrieval FUNCTION on each path independently. `performance.now()` is fractional-ms.
+  const timed = async <T>(fn: () => Promise<T>): Promise<[T, number]> => {
+    const t0 = performance.now();
+    const r = await fn();
+    return [r, performance.now() - t0];
+  };
 
-  // Versioned path (compared, non-authoritative).
-  const vRelevant = await retrieveRelevantVersioned(tx, ctx, queryText, limit);
+  // Legacy path (authoritative in shadow mode).
+  const [lRelevant, lRelevantMs] = await timed(() => retrieveRelevant(tx, ctx, queryText, limit));
+  const lSeen = new Set(lRelevant.map((r) => r.relativePath));
+  const [lCore, lCoreMs] = await timed(() => selectCoreReferences(tx, ctx, lSeen, 2));
+  lCore.forEach((c) => lSeen.add(c.relativePath));
+  const [lProd, lProdMs] = await timed(() => selectProductionStatus(tx, ctx, lSeen));
+
+  // Versioned path (compared, non-authoritative). Runs with NO restricted-access grant (strictest), so
+  // restricted material legacy leaks shows up as a legacy_defect_corrected rather than a false match.
+  const [vRelevant, vRelevantMs] = await timed(() => retrieveRelevantVersioned(tx, ctx, queryText, limit));
   const vSeen = new Set(vRelevant.map((r) => r.relativePath));
-  const vCore = await selectCoreReferencesVersioned(tx, ctx, vSeen, 2);
+  const [vCore, vCoreMs] = await timed(() => selectCoreReferencesVersioned(tx, ctx, vSeen, 2));
   vCore.forEach((c) => vSeen.add(c.relativePath));
-  const vProd = await selectProductionStatusVersioned(tx, ctx, vSeen);
+  const [vProd, vProdMs] = await timed(() => selectProductionStatusVersioned(tx, ctx, vSeen));
 
   const legacyRows = assembleRows(lRelevant, lCore, lProd, false);
   const versionedRows = assembleRows(vRelevant, vCore, vProd, true);
   const cmp = compareAssembled(legacyRows, versionedRows, docMeta);
   cmp.queryHash = sha256Hex(queryText);
+  cmp.timings = [
+    { fn: 'relevant', legacyMs: lRelevantMs, versionedMs: vRelevantMs },
+    { fn: 'core', legacyMs: lCoreMs, versionedMs: vCoreMs },
+    { fn: 'production_status', legacyMs: lProdMs, versionedMs: vProdMs },
+  ];
   return cmp;
+}
+
+export interface PathTimingStat {
+  legacyMedianMs: number;
+  legacyP95Ms: number;
+  versionedMedianMs: number;
+  versionedP95Ms: number;
+  /** Versioned − legacy at the median, absolute (ms) and relative (%). */
+  overheadMedianMs: number;
+  overheadPct: number;
 }
 
 export interface ShadowCorpusReport {
   projectId: string;
   queries: number;
-  totalComparisons: number;
+  /** Result-position counts, unambiguous denominators. `comparedPositions` = legacy + versioned. */
+  legacyResultPositions: number;
+  versionedResultPositions: number;
+  comparedPositions: number;
   exactMatches: number;
   byCategory: Record<DiffCategory, number>;
   /** Documents the agreed lifecycle marks non-retrievable — reported explicitly, never silently omitted. */
   expectedNonRetrievable: { documentId: string; relativePath: string; status: string }[];
   retrievableDocuments: number;
+  /** Latency median + p95 per retrieval function (and overall), legacy vs versioned. */
+  timing: { byFunction: Record<RetrievalCategory, PathTimingStat>; overall: PathTimingStat };
+  shadowErrors: number;
   /** Only the blocking differences (versioned_defect + unresolved) are surfaced in full. */
   blockingDifferences: Difference[];
   switchClear: boolean;
+}
+
+function timingStat(legacy: number[], versioned: number[]): PathTimingStat {
+  const lMed = median(legacy);
+  const vMed = median(versioned);
+  return {
+    legacyMedianMs: round2(lMed),
+    legacyP95Ms: round2(p95(legacy)),
+    versionedMedianMs: round2(vMed),
+    versionedP95Ms: round2(p95(versioned)),
+    overheadMedianMs: round2(vMed - lMed),
+    overheadPct: lMed > 0 ? round2(((vMed - lMed) / lMed) * 100) : 0,
+  };
 }
 
 /** Run a corpus of queries and aggregate. Also enumerates the workspace's expected-non-retrievable
@@ -265,14 +335,33 @@ export async function runShadowCorpus(tx: DbTx, ctx: TenantContext, queries: str
   const docMeta = await buildDocMeta(tx, ctx);
   const byCategory = emptyByCategory();
   const blocking: Difference[] = [];
-  let totalComparisons = 0;
+  let legacyResultPositions = 0;
+  let versionedResultPositions = 0;
   let exactMatches = 0;
+  let shadowErrors = 0;
+  const legacyByFn: Record<RetrievalCategory, number[]> = { relevant: [], core: [], production_status: [] };
+  const versionedByFn: Record<RetrievalCategory, number[]> = { relevant: [], core: [], production_status: [] };
+  const legacyAll: number[] = [];
+  const versionedAll: number[] = [];
   for (const query of queries) {
-    const cmp = await shadowCompareQuery(tx, ctx, query, docMeta, limit);
-    totalComparisons += cmp.legacyCount + cmp.versionedCount;
+    let cmp;
+    try {
+      cmp = await shadowCompareQuery(tx, ctx, query, docMeta, limit);
+    } catch {
+      shadowErrors += 1; // a shadow failure is counted, never fatal to the acceptance sweep
+      continue;
+    }
+    legacyResultPositions += cmp.legacyCount;
+    versionedResultPositions += cmp.versionedCount;
     exactMatches += cmp.exactMatches;
     for (const k of Object.keys(byCategory) as DiffCategory[]) byCategory[k] += cmp.byCategory[k];
     for (const d of cmp.differences) if (d.category === 'versioned_defect' || d.category === 'unresolved') blocking.push(d);
+    for (const t of cmp.timings) {
+      legacyByFn[t.fn].push(t.legacyMs);
+      versionedByFn[t.fn].push(t.versionedMs);
+      legacyAll.push(t.legacyMs);
+      versionedAll.push(t.versionedMs);
+    }
   }
 
   const expectedNonRetrievable: ShadowCorpusReport['expectedNonRetrievable'] = [];
@@ -291,11 +380,22 @@ export async function runShadowCorpus(tx: DbTx, ctx: TenantContext, queries: str
   return {
     projectId: ctx.projectId,
     queries: queries.length,
-    totalComparisons,
+    legacyResultPositions,
+    versionedResultPositions,
+    comparedPositions: legacyResultPositions + versionedResultPositions,
     exactMatches,
     byCategory,
     expectedNonRetrievable,
     retrievableDocuments: retrievable,
+    timing: {
+      byFunction: {
+        relevant: timingStat(legacyByFn.relevant, versionedByFn.relevant),
+        core: timingStat(legacyByFn.core, versionedByFn.core),
+        production_status: timingStat(legacyByFn.production_status, versionedByFn.production_status),
+      },
+      overall: timingStat(legacyAll, versionedAll),
+    },
+    shadowErrors,
     blockingDifferences: blocking,
     switchClear: byCategory.versioned_defect === 0 && byCategory.unresolved === 0,
   };

@@ -68,11 +68,15 @@ async function main() {
     console.log(`\n=== shadow[${p.key}] ===`);
     console.log(JSON.stringify({
       queries: report.queries,
-      totalComparisons: report.totalComparisons,
+      comparedPositions: report.comparedPositions,
+      legacyResultPositions: report.legacyResultPositions,
+      versionedResultPositions: report.versionedResultPositions,
       exactMatches: report.exactMatches,
       byCategory: report.byCategory,
       retrievableDocuments: report.retrievableDocuments,
       expectedNonRetrievable: report.expectedNonRetrievable,
+      timing: report.timing,
+      shadowErrors: report.shadowErrors,
       blockingDifferences: report.blockingDifferences,
       switchClear: report.switchClear,
     }, null, 2));

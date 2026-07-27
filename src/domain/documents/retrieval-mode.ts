@@ -8,6 +8,7 @@ import { projects } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 import { type RetrievedChunk, retrieveRelevant, selectCoreReferences, selectProductionStatus } from './documents';
 import { retrieveRelevantVersioned, selectCoreReferencesVersioned, selectProductionStatusVersioned } from './retrieval-versioned';
+import { type DocumentAccessDecision, type DocumentConsumerContext, noRestrictedAccess, resolveDocumentAccess } from './disclosure';
 import { buildDocMeta, shadowCompareQuery } from './shadow';
 
 /**
@@ -36,6 +37,8 @@ export interface AssembledDocumentSources {
   retrieved: SuppliedChunk[];
   coreRefs: SuppliedCoreChunk[];
   productionStatus: SuppliedChunk | null;
+  /** The disclosure access decision applied (which restricted Documents this consumer set may receive). */
+  access: DocumentAccessDecision;
 }
 
 /** Read the workspace's authoritative retrieval mode. Trusted (server context), never client-supplied. */
@@ -56,16 +59,19 @@ export async function setRetrievalMode(tx: DbTx, ctx: TenantContext, mode: Retri
  * Assemble the run's document sources under the workspace's authoritative mode, mirroring the runner's
  * relevant(5) → dedup → core(2) → dedup → production-status assembly on whichever path is authoritative.
  */
-export async function assembleDocumentSources(tx: DbTx, ctx: TenantContext, queryText: string, limit = 5): Promise<AssembledDocumentSources> {
+export async function assembleDocumentSources(tx: DbTx, ctx: TenantContext, queryText: string, limit = 5, consumer?: DocumentConsumerContext): Promise<AssembledDocumentSources> {
   const mode = await getRetrievalMode(tx, ctx);
+  // Server-derived disclosure authorization (never client-supplied). No consumer context ⇒ withhold all
+  // restricted (safe default). The runner supplies the operation's consuming agents + type.
+  const access = consumer ? await resolveDocumentAccess(tx, ctx, consumer) : noRestrictedAccess();
 
   if (mode === 'versioned') {
-    const retrieved = await retrieveRelevantVersioned(tx, ctx, queryText, limit);
+    const retrieved = await retrieveRelevantVersioned(tx, ctx, queryText, limit, access);
     const seen = new Set(retrieved.map((r) => r.relativePath));
-    const coreRefs = await selectCoreReferencesVersioned(tx, ctx, seen, 2);
+    const coreRefs = await selectCoreReferencesVersioned(tx, ctx, seen, 2, access);
     coreRefs.forEach((c) => seen.add(c.relativePath));
-    const productionStatus = await selectProductionStatusVersioned(tx, ctx, seen);
-    return { mode, versioned: true, retrieved, coreRefs, productionStatus };
+    const productionStatus = await selectProductionStatusVersioned(tx, ctx, seen, access);
+    return { mode, versioned: true, retrieved, coreRefs, productionStatus, access };
   }
 
   // legacy or shadow: legacy is authoritative.
@@ -95,7 +101,7 @@ export async function assembleDocumentSources(tx: DbTx, ctx: TenantContext, quer
     }
   }
 
-  return { mode, versioned: false, retrieved, coreRefs, productionStatus };
+  return { mode, versioned: false, retrieved, coreRefs, productionStatus, access };
 }
 
 /** Guard for callers that must not proceed under an unexpected mode. */

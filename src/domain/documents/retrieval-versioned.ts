@@ -1,10 +1,11 @@
 import 'server-only';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, ne, or, sql, type SQL } from 'drizzle-orm';
 import { type ContentFidelity, type TenantContext } from '@/types/domain';
 import { TenantViolationError } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { type DbTx } from '@/db/client';
 import { documentChunks, documentVersions, documents } from '@/db/schema';
+import { type DocumentAccessDecision, noRestrictedAccess } from './disclosure';
 import {
   CORE_REFERENCE_POSIX,
   CORE_REFERENCE_TYPES,
@@ -96,6 +97,18 @@ function assertVersionedTenant(rows: ReadonlyArray<VersionedRow>, ctx: TenantCon
   }
 }
 
+/**
+ * SQL disclosure gate applied to the candidate query — restricted Documents are excluded UNLESS this
+ * exact consumer set is authorized to receive them. Unauthorized restricted content is therefore never
+ * fetched: it does not cross the retrieval boundary (no chunk text, snippet, locator, path, object key,
+ * or label). `workspace_internal` Documents pass (the query is already workspace-scoped).
+ */
+function accessCondition(access: DocumentAccessDecision): SQL {
+  const ids = [...access.authorizedRestrictedIds];
+  const notRestricted = ne(documents.disclosure, 'restricted');
+  return ids.length === 0 ? notRestricted : (or(notRestricted, inArray(documents.id, ids)) as SQL);
+}
+
 function toChunk(r: VersionedRow, rank: number): VersionedRetrievedChunk {
   return {
     documentId: r.documentId,
@@ -121,7 +134,7 @@ function toChunk(r: VersionedRow, rank: number): VersionedRetrievedChunk {
  * candidate chunks are exactly the current-version chunks of active documents. Deterministic tie-break by
  * (episode-hit, rank, relativePath, chunkIndex) so ordering is stable across both retrieval paths.
  */
-export async function retrieveRelevantVersioned(tx: DbTx, ctx: TenantContext, queryText: string, limit = 5): Promise<VersionedRetrievedChunk[]> {
+export async function retrieveRelevantVersioned(tx: DbTx, ctx: TenantContext, queryText: string, limit = 5, access: DocumentAccessDecision = noRestrictedAccess()): Promise<VersionedRetrievedChunk[]> {
   const { tsquery, episodePatterns } = expandDocumentQuery(queryText);
   if (tsquery.length === 0) return [];
   const q = sql`to_tsquery('english', ${tsquery})`;
@@ -141,6 +154,7 @@ export async function retrieveRelevantVersioned(tx: DbTx, ctx: TenantContext, qu
         eq(documentVersions.indexStatus, 'indexed'),
         // Version-bound: only chunks OF the document's current version (never a prior/failed/unavailable one).
         eq(documentChunks.documentVersionId, documents.currentVersionId),
+        accessCondition(access), // disclosure authorization — restricted withheld unless granted
         sql`(document_chunks.search @@ ${q} or ${filenameMatch})`,
       ),
     )
@@ -161,7 +175,7 @@ export interface VersionedCoreReferenceChunk extends VersionedRetrievedChunk {
 }
 
 /** Versioned equivalent of `selectCoreReferences`. */
-export async function selectCoreReferencesVersioned(tx: DbTx, ctx: TenantContext, exclude: ReadonlySet<string>, limit = 2): Promise<VersionedCoreReferenceChunk[]> {
+export async function selectCoreReferencesVersioned(tx: DbTx, ctx: TenantContext, exclude: ReadonlySet<string>, limit = 2, access: DocumentAccessDecision = noRestrictedAccess()): Promise<VersionedCoreReferenceChunk[]> {
   const rows = (await tx
     .select(versionedColumns)
     .from(documentChunks)
@@ -175,6 +189,7 @@ export async function selectCoreReferencesVersioned(tx: DbTx, ctx: TenantContext
         eq(documentVersions.indexStatus, 'indexed'),
         eq(documentChunks.documentVersionId, documents.currentVersionId),
         eq(documentChunks.chunkIndex, 0),
+        accessCondition(access),
         sql`${documents.relativePath} ~* ${CORE_REFERENCE_POSIX}`,
       ),
     )) as VersionedRow[];
@@ -192,7 +207,7 @@ export async function selectCoreReferencesVersioned(tx: DbTx, ctx: TenantContext
 }
 
 /** Versioned equivalent of `selectProductionStatus`. */
-export async function selectProductionStatusVersioned(tx: DbTx, ctx: TenantContext, exclude: ReadonlySet<string>): Promise<VersionedRetrievedChunk | null> {
+export async function selectProductionStatusVersioned(tx: DbTx, ctx: TenantContext, exclude: ReadonlySet<string>, access: DocumentAccessDecision = noRestrictedAccess()): Promise<VersionedRetrievedChunk | null> {
   const rows = (await tx
     .select(versionedColumns)
     .from(documentChunks)
@@ -206,6 +221,7 @@ export async function selectProductionStatusVersioned(tx: DbTx, ctx: TenantConte
         eq(documentVersions.indexStatus, 'indexed'),
         eq(documentChunks.documentVersionId, documents.currentVersionId),
         eq(documentChunks.chunkIndex, 0),
+        accessCondition(access),
         sql`${documents.relativePath} ~* ${PRODUCTION_STATUS_POSIX}`,
       ),
     )

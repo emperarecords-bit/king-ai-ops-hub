@@ -2042,3 +2042,35 @@ puts the authoritative choice behind a per-workspace flag — no UI, no purge, n
   rollout).
 tsc + build clean, full suite **615/615** (+22 C2 tests covering all 32 required cases). Retrieval default
 stays `legacy`. No columns dropped, no legacy objects deleted, no purge.
+
+**Stage C2 review corrections (2026-07-27).** Applied before closure:
+- **Disclosure authorization enforced INSIDE versioned retrieval (Blocker 1).** A restricted Document's
+  content now reaches an AI consumer only when every consuming agent holds a live, fingerprint-matched
+  grant for the operation's server-derived purpose. New `document_disclosure_grants` (migration 0040, the
+  document analogue of the Knowledge grants, reusing the same generic grant-resolution primitive);
+  `disclosure.ts` (`resolveDocumentAccess` from a server-derived consumer context — never client-supplied).
+  The versioned SQL excludes unauthorized restricted Documents (`disclosure <> 'restricted' OR id ∈
+  authorized`), so their text/snippets/locators/labels/object keys are **never materialized** — they don't
+  cross the retrieval boundary. The runner derives consumers (primary + reviewer) and purpose (`task_run` →
+  `current_operational_fact`) itself. *Principle: a retrieval operation must not return sensitive content
+  to a consumer unless that consumer is authorized to receive it.* 10 access tests (workspace-internal
+  allowed; cross-workspace empty; restricted withheld without a grant; returned with the exact grant;
+  wrong-purpose / wrong-fingerprint / expired / revoked all denied; no text/snippet/locator on denial;
+  forged consumer id creates no authorization).
+- **Evidence commits before dispatch (Blocker 2).** Confirmed the runner boundary: `preflight` is ONE
+  transaction — freeze context → insert run → immutable snapshot (with `documentVersionId`) → normalized
+  `run_document_versions` → COMMIT — and provider dispatch (`executeRun`) runs only after it returns. A
+  test drives a failing normalized-reference insert and proves the run transaction rolls back and the
+  post-commit dispatch is never reached. *Principle: evidence supplied for an attempted operation stays
+  inspectable even when provider execution fails, but the system must never imply successful use.*
+- **Tie-break reclassified (Correction 1).** Recorded honestly as a *legacy defect corrected*:
+  non-deterministic ordering AND selection at equal-score top-N boundaries. Prior behavior: legacy had no
+  tie-break, so at the result limit equal-ranked candidates could truncate a different top-N. Contract: a
+  stable tie-break by (`relativePath`, `chunkIndex`) after relevance score, applied to BOTH paths, so the
+  selected set + order are identical and repeatable. Regression test 18b covers the top-N boundary.
+- **Shadow statistics completed (Correction 2).** The report now carries per-retrieval-function and
+  overall latency (median + p95, legacy vs versioned, absolute + % overhead), a `shadowErrors` count, and
+  unambiguous denominators (`legacyResultPositions` + `versionedResultPositions` = `comparedPositions`).
+tsc + build clean, full suite **627/627** (+12: 10 access checks, 2 evidence-boundary, 1 tie-break
+regression; C2 test 12 adjusted to the enforced withhold behavior). `empera-international` may remain
+versioned (its access path withholds restricted); `accuratebids-com` stays legacy.

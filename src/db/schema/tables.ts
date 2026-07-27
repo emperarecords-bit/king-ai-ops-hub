@@ -466,6 +466,42 @@ export const knowledgeDisclosureGrants = pgTable(
 );
 
 /**
+ * Enforceable disclosure grants for restricted DOCUMENTS (Documents increment 1, Stage C2). The exact
+ * analogue of `knowledge_disclosure_grants`, keyed by document: a restricted Document's chunks reach an
+ * AI consumer's prompt ONLY when every consuming agent holds a live grant for the operation's derived
+ * purpose AND still matches the execution fingerprint the grant was bound to. Revocation is audited, never
+ * a delete. Without a grant, restricted Document content is withheld inside retrieval — it never crosses
+ * the retrieval boundary.
+ */
+export const documentDisclosureGrants = pgTable(
+  'document_disclosure_grants',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    /** Subject: the restricted Document this grant authorizes. */
+    documentId: uuid('document_id').notNull().references(() => documents.id, { onDelete: 'cascade' }),
+    /** Consumer: the specific agent permitted to receive it. */
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    /** The agent's MATERIAL execution fingerprint at grant time; a reconfiguration invalidates the grant. */
+    agentExecutionFingerprint: text('agent_execution_fingerprint').notNull(),
+    /** Purpose: the intended use granted (a KnowledgeUseIntent). Must match the consumer's derived use. */
+    purpose: text('purpose').notNull(),
+    rationale: text('rationale'),
+    grantedBy: uuid('granted_by').references(() => profiles.id, { onDelete: 'set null' }),
+    grantedAt: timestamp('granted_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedBy: uuid('revoked_by').references(() => profiles.id, { onDelete: 'set null' }),
+    revokeReason: text('revoke_reason'),
+  },
+  (t) => [
+    index('document_disclosure_grants_doc_idx').on(t.documentId),
+    index('document_disclosure_grants_lookup_idx').on(t.projectId, t.purpose, t.documentId, t.agentId),
+  ],
+);
+
+/**
  * AI-proposed Knowledge — the quarantine record for the extraction/promotion path. The AI may only
  * PROPOSE: extraction creates a DRAFT knowledge_item (conservative ACTUAL values) plus one of these
  * rows holding the AI's SUGGESTED values and the extraction provenance. Suggested values live here,

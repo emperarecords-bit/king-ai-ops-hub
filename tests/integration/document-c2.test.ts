@@ -197,13 +197,15 @@ describe.skipIf(!available)('Stage C2 — versioned retrieval, shadow, switch, e
     }
   });
 
-  it('12. restricted disclosure is carried identically by both paths (downstream enforcement unchanged)', async () => {
+  it('12. restricted content is withheld by the versioned path without a grant (legacy leaked it)', async () => {
     const ctx = await makeWorkspace();
     await makeVersionedDoc(ctx, 'restricted.md', ['zzrestrictedterm sensitive content'], 'restricted');
-    const legacy = await L(ctx, 'zzrestrictedterm');
+    // The versioned V() helper passes no access decision ⇒ restricted is withheld inside retrieval.
     const versioned = await V(ctx, 'zzrestrictedterm');
-    expect(versioned[0]?.disclosure).toBe('restricted');
-    expect(legacy[0]?.disclosure).toBe('restricted'); // parity: the versioned switch does not weaken the tag
+    expect(versioned.some((h) => h.relativePath === 'restricted.md')).toBe(false);
+    // Legacy (being retired) still returns it tagged restricted — the divergence the switch corrects.
+    const legacy = await L(ctx, 'zzrestrictedterm');
+    expect(legacy[0]?.disclosure).toBe('restricted');
   });
 
   it('13/14. cross-workspace sources are absent; same terms in another tenant do not affect results', async () => {
@@ -250,6 +252,23 @@ describe.skipIf(!available)('Stage C2 — versioned retrieval, shadow, switch, e
     const v2 = (await V(ctx, 'zztieterm')).map((h) => h.relativePath);
     expect(v1).toEqual(v2); // stable across runs
     expect(v1).toEqual([...v1].sort()); // deterministic by relativePath on ties
+  });
+
+  it('18b. REGRESSION: at the top-N limit, tied scores select the SAME deterministic set on both paths', async () => {
+    const ctx = await makeWorkspace();
+    // Three documents with identical content ⇒ identical ts_rank. With limit 2, a naive nondeterministic
+    // order could truncate a DIFFERENT two. The stable tie-break (relativePath, chunkIndex) on both paths
+    // makes the selected top-2 identical and repeatable.
+    await makeVersionedDoc(ctx, 'boundary_c.md', ['zzboundterm identical tied body text']);
+    await makeVersionedDoc(ctx, 'boundary_a.md', ['zzboundterm identical tied body text']);
+    await makeVersionedDoc(ctx, 'boundary_b.md', ['zzboundterm identical tied body text']);
+    const legacy = (await L(ctx, 'zzboundterm', 2)).map((h) => h.relativePath);
+    const versioned = (await V(ctx, 'zzboundterm', 2)).map((h) => h.relativePath);
+    expect(legacy.length).toBe(2);
+    expect(versioned).toEqual(legacy); // same selected set + order across paths
+    expect(versioned).toEqual(['boundary_a.md', 'boundary_b.md']); // deterministic by stable identity
+    // Repeatable.
+    expect((await L(ctx, 'zzboundterm', 2)).map((h) => h.relativePath)).toEqual(legacy);
   });
 
   it('19/20/21. shadow mode does not change the authoritative result, writes no evidence, and never throws', async () => {
