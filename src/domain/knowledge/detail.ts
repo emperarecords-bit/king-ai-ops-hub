@@ -45,6 +45,8 @@ export async function loadKnowledgeDetail(tx: DbTx, ctx: TenantContext, itemId: 
   const applications = await listInjectionsForKnowledge(tx, ctx, itemId);
   const proposals = ref.proposalReviewStatus === 'pending' ? await listKnowledgeProposals(tx, ctx, 'pending') : [];
   const proposal = proposals.find((p) => p.knowledgeItemId === itemId) ?? null;
-  const sources = item && item.status === 'draft' ? await listKnowledgeSources(tx, ctx, itemId, item.version) : [];
+  // Load cited sources for ANY visible record (not just drafts) so the Detail can show exact version
+  // hashes behind progressive disclosure. Only visible → already gated above, so no restricted leak.
+  const sources = item ? await listKnowledgeSources(tx, ctx, itemId, item.version) : [];
   return { visible: true, ref, item, applications, sources, proposal };
 }

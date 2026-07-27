@@ -169,7 +169,7 @@ async function assembleReference(
 
 /** The specific institutional reason a record is Historical — never flattened to just "historical". */
 function historicalReasonOf(row: PortfolioRow, d: KnowledgeConversationDescriptor, wasSuperseded: boolean): string {
-  if (row.proposalReviewStatus === 'rejected') return 'Rejected proposal';
+  if (row.proposalReviewStatus === 'rejected') return 'Rejected';
   if (row.proposalReviewStatus === 'split') return 'Split into replacement proposals';
   if (wasSuperseded) return 'Superseded by a newer version';
   if (d.freshness.state === 'stale') return 'Expired for current use';

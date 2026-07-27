@@ -85,7 +85,7 @@ export default async function KnowledgeDetailPage({ params }: { params: Promise<
       {/* 3. Formation */}
       <Section n={3} title="Formation">{d.formation.phrase} ({d.formation.epistemicBasis}).</Section>
 
-      {/* 4. Provenance */}
+      {/* 4. Provenance — current resolution up front; exact hashes behind progressive disclosure. */}
       <Section n={4} title="Provenance">
         <p>{d.provenance.phrase}.</p>
         {d.availableEvidence.sources.length > 0 ? (
@@ -94,6 +94,19 @@ export default async function KnowledgeDetailPage({ params }: { params: Promise<
               <li key={i}>{s.label}{s.relied ? ' · relied upon' : ' · supplemental'} — {s.outcome}</li>
             ))}
           </ul>
+        ) : null}
+        {sources.length > 0 ? (
+          <details className="mt-2 text-xs text-[var(--muted)]">
+            <summary className="cursor-pointer">technical provenance (exact versions)</summary>
+            <ul className="mt-1 space-y-1">
+              {sources.map((s, i) => (
+                <li key={i}>
+                  {s.sourceLabel} · {s.transformation} · sha256 {s.sourceVersionHash ?? '—'}
+                  {s.locator ? ` · “${s.locator}”` : ''}
+                </li>
+              ))}
+            </ul>
+          </details>
         ) : null}
       </Section>
 
@@ -112,9 +125,13 @@ export default async function KnowledgeDetailPage({ params }: { params: Promise<
         <p className="mt-1 text-xs text-[var(--muted)]">{d.relevance.reason ? `Selected here because: ${d.relevance.reason}.` : 'Workspace scope means possible applicability — not automatic relevance to every task.'}</p>
       </Section>
 
-      {/* 8. Disclosure */}
+      {/* 8. Disclosure — the INSTITUTIONAL grant state; a live grant here is not per-operation permission. */}
       <Section n={8} title="Disclosure">
-        {d.disclosure.permitted ? 'Workspace-internal — disclosable to workspace consumers.' : `Restricted — ${d.disclosure.reason ?? 'not disclosable in this view'}.`}
+        {ref.restrictedGrantState === null
+          ? 'Workspace-internal — disclosable to workspace consumers.'
+          : ref.restrictedGrantState === 'granted'
+            ? `Restricted · disclosure grant on file — ${d.disclosure.reason ?? 'a bounded agent and purpose are authorized'}. Whether a particular AI operation may receive it still depends on that operation's execution identities.`
+            : `Restricted · ${d.disclosure.reason ?? 'no currently usable disclosure grant is recorded'}.`}
       </Section>
 
       {/* 9. AI applications — a dispatch history, never "influence". Shows the FROZEN snapshot from
@@ -153,8 +170,11 @@ export default async function KnowledgeDetailPage({ params }: { params: Promise<
       {/* 12. Related decisions — never inferred. */}
       <Section n={12} title="Related decisions">{d.decisionRelationship.phrase}</Section>
 
-      {/* 13. Actions — only valid, authorized controls for this record's lifecycle. */}
-      {item ? (
+      {/* 13. Actions — ONLY controls valid for this record's exact lifecycle. A pending proposal gets the
+          review controls; an active record gets revise/archive/confirm-dispute; a manual draft gets
+          activate/discard (+ support judgment when it cites sources). An archived/rejected/split record
+          gets none (a split parent is therefore unpromotable). */}
+      {item && (isPendingProposal || item.status === 'active' || item.status === 'draft') ? (
         <Card title="Actions" className="mb-4">
           <div className="flex flex-wrap items-start gap-2">
             {isPendingProposal && proposal ? (
@@ -165,12 +185,17 @@ export default async function KnowledgeDetailPage({ params }: { params: Promise<
                 <RejectProposalForm projectKey={projectKey} proposalId={proposal.id} />
                 <SupportJudgmentForm projectKey={projectKey} itemId={item.id} sources={sources.map((s) => ({ id: s.id, label: s.sourceLabel }))} />
               </>
-            ) : (
+            ) : item.status === 'active' ? (
               <>
                 <ReviseKnowledgeForm projectKey={projectKey} itemId={item.id} currentBody={item.body} />
                 <KnowledgeStatusButtons projectKey={projectKey} itemId={item.id} status={item.status} />
-                {item.status === 'active' ? <VerificationForm projectKey={projectKey} itemId={item.id} /> : null}
-                {item.status === 'draft' && sources.length > 0 ? <SupportJudgmentForm projectKey={projectKey} itemId={item.id} sources={sources.map((s) => ({ id: s.id, label: s.sourceLabel }))} /> : null}
+                <VerificationForm projectKey={projectKey} itemId={item.id} />
+              </>
+            ) : (
+              /* manual draft (not an AI proposal) */
+              <>
+                <KnowledgeStatusButtons projectKey={projectKey} itemId={item.id} status={item.status} />
+                {sources.length > 0 ? <SupportJudgmentForm projectKey={projectKey} itemId={item.id} sources={sources.map((s) => ({ id: s.id, label: s.sourceLabel }))} /> : null}
               </>
             )}
           </div>
