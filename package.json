@@ -27,6 +27,7 @@
     "shadow:retrieval": "tsx --conditions=react-server scripts/shadow-retrieval.ts",
     "set:retrieval-mode": "tsx --conditions=react-server scripts/set-retrieval-mode.ts",
     "verify:versioned-evidence": "tsx --conditions=react-server scripts/verify-versioned-evidence.ts",
+    "run:task-once": "tsx --conditions=react-server scripts/run-task-once.ts",
     "observe": "tsx scripts/observe.ts",
     "worker": "tsx --conditions=react-server scripts/worker.ts",
     "standing:tick": "tsx --conditions=react-server scripts/run-standing-work.ts",
