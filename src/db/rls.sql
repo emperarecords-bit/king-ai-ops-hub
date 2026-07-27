@@ -155,6 +155,48 @@ create trigger knowledge_verification_events_append_only
   before update or delete on knowledge_verification_events
   for each row execute function app.forbid_mutation();
 
+-- Document VERSIONS are immutable evidence (Documents increment 1). The content-identity facts can
+-- NEVER change after insert; the only permitted mutation is the one-way index transition pending →
+-- indexed | failed (setting indexed_at / error_message). This is the hard backstop under the narrow
+-- version service — ordinary code cannot rewrite an established version, nor return it to pending.
+create or replace function app.document_version_guard()
+returns trigger as $$
+begin
+  if NEW.sha256 is distinct from OLD.sha256
+     or NEW.size_bytes is distinct from OLD.size_bytes
+     or NEW.document_id is distinct from OLD.document_id
+     or NEW.org_id is distinct from OLD.org_id
+     or NEW.project_id is distinct from OLD.project_id
+     or NEW.object_key is distinct from OLD.object_key
+     or NEW.mime_type is distinct from OLD.mime_type
+     or NEW.content_fidelity is distinct from OLD.content_fidelity
+     or NEW.disclosure_snapshot is distinct from OLD.disclosure_snapshot
+     or NEW.source_revision_id is distinct from OLD.source_revision_id
+     or NEW.source_modified_at is distinct from OLD.source_modified_at
+     or NEW.parser_version is distinct from OLD.parser_version
+     or NEW.ingestion_operation_id is distinct from OLD.ingestion_operation_id
+     or NEW.created_at is distinct from OLD.created_at then
+    raise exception 'document_versions: immutable version facts cannot be changed (id=%)', OLD.id;
+  end if;
+  if OLD.index_status <> 'pending' and NEW.index_status is distinct from OLD.index_status then
+    raise exception 'document_versions: index status is terminal once set (id=%)', OLD.id;
+  end if;
+  return NEW;
+end;
+$$ language plpgsql;
+
+drop trigger if exists document_versions_immutable on document_versions;
+create trigger document_versions_immutable
+  before update on document_versions
+  for each row execute function app.document_version_guard();
+
+-- Content-fidelity consistency: byte_exact must have a retained object key. (Hash verification is a
+-- service-level check on the bytes; this guards the simple nullability relationship at the DB.)
+alter table document_versions drop constraint if exists document_versions_byte_exact_has_object;
+alter table document_versions
+  add constraint document_versions_byte_exact_has_object
+  check (content_fidelity <> 'byte_exact' or object_key is not null);
+
 -- Queue-dispatch functions (O-22) --------------------------------------------
 -- The worker must claim/scan run_jobs ACROSS workspaces (it does not yet know
 -- whose job is next). That single cross-tenant step is the only thing that

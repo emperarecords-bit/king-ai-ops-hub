@@ -2,13 +2,18 @@ import 'server-only';
 import { createHash } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { extname, join, relative, sep } from 'node:path';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { type DocumentKind, type DocumentSource, type KnowledgeDisclosure, type TenantContext } from '@/types/domain';
 import { AppError, ConflictError, NotFoundError, TenantViolationError, ValidationError } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { type DbTx } from '@/db/client';
 import { documentChunks, documents, projects } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
+import { getObjectStore } from './object-store';
+import { ingestDocumentVersion } from './versions';
+
+/** MIME for the text kinds supported in slice 1 (used when retaining raw version bytes). */
+const KIND_MIME: Record<string, string> = { markdown: 'text/markdown', text: 'text/plain' };
 
 /**
  * Project Folder ingestion and retrieval (D-020, slice 1).
@@ -141,11 +146,15 @@ export async function refreshIndex(tx: DbTx, ctx: TenantContext): Promise<IndexS
       relativePath: documents.relativePath,
       sha256: documents.sha256,
       status: documents.status,
+      disclosure: documents.disclosure,
     })
     .from(documents)
     .where(and(eq(documents.projectId, ctx.projectId), eq(documents.orgId, ctx.orgId)));
   const byPath = new Map(existing.map((d) => [d.relativePath, d]));
   const seen = new Set<string>();
+  // Stage B dual-write: retain each new version's exact bytes + build version chunks alongside the
+  // legacy write. Retrieval is unchanged (it reads the legacy null-version chunks); versions accumulate.
+  const store = await getObjectStore();
 
   // Storage availability (O-21): if the linked folder is unreachable (e.g. the
   // cloud app cannot see a local machine's disk), REPORT it and stop — never
@@ -199,8 +208,9 @@ export async function refreshIndex(tx: DbTx, ctx: TenantContext): Promise<IndexS
         sizeBytes: s.size,
         chunkCount: chunks.length,
       });
-      // Replace chunks wholesale — simpler and correct vs diffing.
-      await tx.delete(documentChunks).where(eq(documentChunks.documentId, docId));
+      // Legacy retrieval reads the null-version chunk set; replace only THAT set wholesale (never the
+      // version-scoped chunks, which are immutable per version).
+      await tx.delete(documentChunks).where(and(eq(documentChunks.documentId, docId), isNull(documentChunks.documentVersionId)));
       if (chunks.length > 0) {
         await tx.insert(documentChunks).values(
           chunks.map((content, i) => ({
@@ -211,6 +221,20 @@ export async function refreshIndex(tx: DbTx, ctx: TenantContext): Promise<IndexS
             content,
           })),
         );
+      }
+      // Dual-write the immutable version (exact bytes retained + version chunks + current pointer). Never
+      // fails the legacy index — a version-store hiccup is logged, not fatal, during the transition.
+      try {
+        await ingestDocumentVersion(tx, ctx, store, {
+          documentId: docId,
+          bytes: Buffer.from(raw, 'utf8'),
+          text: raw,
+          mimeType: KIND_MIME[kind] ?? 'text/plain',
+          disclosure: prior?.disclosure ?? 'workspace_internal',
+          chunk: chunkText,
+        });
+      } catch (verr) {
+        log.warn('version dual-write failed (legacy index unaffected)', { rel, err: verr instanceof Error ? verr.message : verr });
       }
       summary.indexed += 1;
     } catch (err) {
@@ -223,7 +247,9 @@ export async function refreshIndex(tx: DbTx, ctx: TenantContext): Promise<IndexS
   // chunks removed, so they stop being retrievable immediately).
   for (const d of existing) {
     if (!seen.has(d.relativePath) && d.status === 'active') {
-      await tx.delete(documentChunks).where(eq(documentChunks.documentId, d.id));
+      // Remove only the legacy retrievable (null-version) chunks; the immutable version chunks are
+      // preserved so evidence a Knowledge citation / run relied on survives the source's disappearance.
+      await tx.delete(documentChunks).where(and(eq(documentChunks.documentId, d.id), isNull(documentChunks.documentVersionId)));
       await tx
         .update(documents)
         .set({ status: 'archived', chunkCount: 0, updatedAt: new Date() })
@@ -445,6 +471,9 @@ export async function retrieveRelevant(
         eq(documentChunks.projectId, ctx.projectId),
         eq(documentChunks.orgId, ctx.orgId),
         eq(documents.status, 'active'),
+        // Transition guard: legacy retrieval reads only the null-version chunk set (version-scoped
+        // chunks are the new model; the retrieval switch to current-version joins is Stage C2).
+        isNull(documentChunks.documentVersionId),
         sql`(document_chunks.search @@ ${q} or ${filenameMatch})`,
       ),
     )
@@ -558,6 +587,7 @@ export async function selectCoreReferences(
         eq(documentChunks.projectId, ctx.projectId),
         eq(documentChunks.orgId, ctx.orgId),
         eq(documents.status, 'active'),
+        isNull(documentChunks.documentVersionId), // transition guard — legacy null-version chunk set only
         eq(documentChunks.chunkIndex, 0),
         sql`${documents.relativePath} ~* ${CORE_REFERENCE_POSIX}`,
       ),
@@ -616,6 +646,7 @@ export async function selectProductionStatus(
         eq(documentChunks.projectId, ctx.projectId),
         eq(documentChunks.orgId, ctx.orgId),
         eq(documents.status, 'active'),
+        isNull(documentChunks.documentVersionId), // transition guard — legacy null-version chunk set only
         eq(documentChunks.chunkIndex, 0),
         sql`${documents.relativePath} ~* ${PRODUCTION_STATUS_POSIX}`,
       ),

@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { type TenantContext } from '@/types/domain';
 import { AppError } from '@/lib/errors';
 import { log } from '@/lib/log';
@@ -7,6 +7,7 @@ import { type DbTx } from '@/db/client';
 import { documentChunks, documentJobs, documents } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 import { chunkText } from './documents';
+import { ingestDocumentVersion } from './versions';
 import {
   type ObjectStore,
   ObjectNotFoundError,
@@ -267,7 +268,9 @@ export async function retryDocument(tx: DbTx, ctx: TenantContext, documentId: st
  *  provenance. Never a silent hard-delete. */
 export async function archiveDocument(tx: DbTx, ctx: TenantContext, documentId: string): Promise<void> {
   await requireOwnedCloudDoc(tx, ctx, documentId);
-  await tx.delete(documentChunks).where(eq(documentChunks.documentId, documentId));
+  // Drop only the legacy retrievable (null-version) chunks; immutable version chunks are preserved so a
+  // Knowledge citation / run that relied on a specific version keeps its evidence after archival.
+  await tx.delete(documentChunks).where(and(eq(documentChunks.documentId, documentId), isNull(documentChunks.documentVersionId)));
   await tx
     .update(documents)
     .set({ status: 'archived', chunkCount: 0, updatedAt: new Date() })
@@ -345,6 +348,9 @@ export async function indexCloudDocument(
         sha256: documents.sha256,
         status: documents.status,
         chunkCount: documents.chunkCount,
+        mimeType: documents.mimeType,
+        disclosure: documents.disclosure,
+        sourceModifiedAt: documents.sourceModifiedAt,
       })
       .from(documents)
       .where(and(eq(documents.id, documentId), eq(documents.projectId, ctx.projectId), eq(documents.orgId, ctx.orgId)))
@@ -387,9 +393,10 @@ export async function indexCloudDocument(
   }
 
   const chunks = chunkText(text);
-  // Replace chunks atomically: within this tenant transaction, delete-all then
-  // insert. A retry re-runs the same replacement — never duplicates (Test 5).
-  await tx.delete(documentChunks).where(eq(documentChunks.documentId, documentId));
+  // Replace the legacy (null-version) chunk set atomically: within this tenant transaction, delete-all
+  // then insert. A retry re-runs the same replacement — never duplicates (Test 5). The version-scoped
+  // chunks are immutable and untouched here.
+  await tx.delete(documentChunks).where(and(eq(documentChunks.documentId, documentId), isNull(documentChunks.documentVersionId)));
   if (chunks.length > 0) {
     await tx.insert(documentChunks).values(
       chunks.map((content, i) => ({
@@ -405,6 +412,23 @@ export async function indexCloudDocument(
     .update(documents)
     .set({ status: 'active', chunkCount: chunks.length, errorMessage: null, indexedAt: new Date(), updatedAt: new Date() })
     .where(eq(documents.id, documentId));
+
+  // Stage B dual-write: retain the EXACT bytes just fetched from storage as an immutable version, build
+  // version chunks, and repoint current — using the same byte sequence that produced the legacy chunks.
+  // A version-store hiccup is logged, not fatal, during the transition (retrieval is unchanged).
+  try {
+    await ingestDocumentVersion(tx, ctx, store, {
+      documentId,
+      bytes,
+      text,
+      mimeType: doc.mimeType ?? 'text/plain',
+      disclosure: doc.disclosure,
+      sourceModifiedAt: doc.sourceModifiedAt ?? null,
+      chunk: chunkText,
+    });
+  } catch (verr) {
+    log.warn('version dual-write failed (legacy cloud index unaffected)', { documentId, err: verr instanceof Error ? verr.message : verr });
+  }
 
   await writeAudit(tx, ctx, {
     action: 'document.indexed',

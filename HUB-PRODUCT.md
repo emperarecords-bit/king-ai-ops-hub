@@ -1894,10 +1894,41 @@ ingestion/retrieval keep working:
 Applied locally, build clean, full suite **536/536** (no behavior change yet). *Principle: a Document
 identifies the source; a Document Version identifies the evidence.*
 
-*Stages remaining in sub-area 1: B — object-store content-addressing + ingestion state transitions
-(same/changed/failed/disappeared) writing versions+bytes+chunks; C — current-vs-historical retrieval
-switch + backfill script (with cloud object hash-verification; legacy local → reconstructed_text;
-overwritten citations → version-unavailable) + evidence version-pointers + resolveKnowledgeSource by
-version; D — purge safeguards + viewer access at retrieval + the 35-test set. Then report the full
-increment-1 completion (schema, migration counts, fidelity breakdown, transitions, retrieval, references,
-access, results, legacy limitations).*
+### Sub-area 1 — immutable versions, STAGE B: object storage + dual-write ingestion (built 2026-07-27)
+
+**Stage B** makes versions real WITHOUT switching retrieval or backfilling — every new observed source
+state is now retained as an immutable version alongside the unchanged legacy index:
+- **Version service (`versions.ts`)** — the one narrow path that writes versions: reads the exact bytes
+  once, hashes them, retains them under the content-addressed key `org/{o}/project/{p}/doc/{documentId}/
+  {sha256}`, parses the SAME bytes into version chunks (each with its own content hash + `chunk-v1` parser
+  tag), marks the version `indexed`, and repoints `current_version_id` — atomically, in the caller's
+  tenant transaction. Same content → `reused` (no new version/chunks/object; only `last_seen_at` moves).
+  Changed content → a new immutable version + a new object. A parse failure keeps the version (bytes +
+  error) but never makes it current. `setCurrentVersion` is the only writer of the pointer and refuses a
+  version that is not `indexed`, not the same document, or not the same workspace.
+- **`ensureObject`** — head→get→verify: an existing object with the right hash is reused (idempotent
+  across a crash/retry between the object PUT and the DB commit); an object at the same key holding
+  different bytes is a `conflict` and is never overwritten.
+- **Dual-write wiring** — local `refreshIndex` and the cloud worker `indexCloudDocument` both keep their
+  legacy null-version chunk write (replaced wholesale, scoped so version chunks are untouched) and then
+  dual-write the version from the same bytes. The version write is best-effort during the transition
+  (logged, never fatal to the legacy index). Archival (folder disappearance / `archiveDocument`) now drops
+  only null-version chunks, so evidence a citation/run relied on survives the source vanishing.
+- **Transition guard** — `retrieveRelevant` / `selectCoreReferences` / `selectProductionStatus` filter
+  `document_version_id IS NULL`, so version chunks CANNOT leak into retrieval before the Stage C2 switch.
+- **DB backstops (rls.sql)** — `document_versions_immutable` trigger blocks any change to the content-
+  identity facts and any non-terminal index-status revert; `document_versions_byte_exact_has_object` CHECK
+  forbids `byte_exact` without a retained object.
+Applied locally, tsc + build clean, full suite **558/558** (+22 Stage B: exact-byte retention, chunk-hash
+correspondence, same-hash reuse, changed→new version, earlier-version immutability, current-pointer
+integrity across document/workspace/status, key-collision safety, failed-parse retention, no retrieval
+leak, crash-retry idempotency, folder disappearance/reappearance, trigger + CHECK enforcement). Retrieval
+is byte-for-byte the same as before. *Principle: historical prompt snapshots preserve representation;
+normalized references preserve integrity.*
+
+*Stages remaining in sub-area 1: C1 — backfill existing documents into versions + an audit of fidelity
+(cloud object hash-verification; legacy local → reconstructed_text; overwritten citations →
+version-unavailable); C2 — shadow-read validation then the current-vs-historical retrieval switch +
+evidence version-pointers + resolveKnowledgeSource by version; D — purge safeguards + viewer access at
+retrieval + the full 35-test set. Then report the full increment-1 completion. Backfill and the retrieval
+switch do NOT start until Stage B is reviewed.*

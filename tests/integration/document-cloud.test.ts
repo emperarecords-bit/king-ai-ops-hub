@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
@@ -52,10 +52,12 @@ The King departs the capital at dusk, not dawn. Sigil unchanged: silver falcon.
 Continuity: the falcon banner appears in every court scene; add the dusk lighting note for S01E01.`;
 
 async function chunkCount(documentId: string): Promise<number> {
+  // Count only the LEGACY (null-version) chunk set — the set retrieval reads and `documents.chunkCount`
+  // mirrors. Stage B dual-write also writes version-scoped chunks; those are counted separately.
   const rows = await getSetupDb()
     .select({ n: documentChunks.id })
     .from(documentChunks)
-    .where(eq(documentChunks.documentId, documentId));
+    .where(and(eq(documentChunks.documentId, documentId), isNull(documentChunks.documentVersionId)));
   return rows.length;
 }
 
