@@ -107,25 +107,25 @@ export function UploadForm({ projectKey }: { projectKey: string }) {
   );
 }
 
-/** Per-document actions: Retry (failed/unavailable), Replace (new version),
- *  Archive (active). Rendered only for admins. */
+/** Per-document quick actions, driven by the shared Document assessment (which computed lifecycle
+ *  validity). The server actions re-check authorization + lifecycle — these buttons never bypass gating. */
 export function DocumentRowActions({
   projectKey,
   documentId,
-  status,
   source,
+  actions,
 }: {
   projectKey: string;
   documentId: string;
-  status: string;
   source: string;
+  actions: { retry: boolean; replace: boolean; archive: boolean };
 }) {
   const [retryState, retry, retrying] = useActionState(retryDocumentAction, initial);
   const [archiveState, archive, archiving] = useActionState(archiveDocumentAction, initial);
   const [replaceState, replace, replacing] = useActionState(replaceDocumentAction, initial);
   const isCloud = source === 'cloud_upload';
-  const canRetry = isCloud && (status === 'failed' || status === 'source_unavailable');
-  const canArchive = isCloud && status === 'active';
+  const canRetry = actions.retry;
+  const canArchive = actions.archive;
 
   if (!isCloud) return <span className="text-xs text-[var(--muted)]">local folder</span>;
 
@@ -149,19 +149,21 @@ export function DocumentRowActions({
           </button>
         </form>
       ) : null}
-      <form action={replace} className="flex items-center gap-1">
-        <input type="hidden" name="projectKey" value={projectKey} />
-        <input type="hidden" name="documentId" value={documentId} />
-        <input
-          name="file"
-          type="file"
-          accept=".md,.markdown,.txt,.text"
-          className="w-32 text-xs file:mr-1 file:rounded file:border-0 file:bg-[var(--border)] file:px-1 file:text-xs"
-        />
-        <button type="submit" disabled={replacing} className={smallBtn}>
-          {replacing ? '…' : 'Replace'}
-        </button>
-      </form>
+      {actions.replace ? (
+        <form action={replace} className="flex items-center gap-1">
+          <input type="hidden" name="projectKey" value={projectKey} />
+          <input type="hidden" name="documentId" value={documentId} />
+          <input
+            name="file"
+            type="file"
+            accept=".md,.markdown,.txt,.text"
+            className="w-32 text-xs file:mr-1 file:rounded file:border-0 file:bg-[var(--border)] file:px-1 file:text-xs"
+          />
+          <button type="submit" disabled={replacing} className={smallBtn}>
+            {replacing ? '…' : 'Replace'}
+          </button>
+        </form>
+      ) : null}
       {[retryState, archiveState, replaceState].map((s, i) =>
         s.error ? (
           <span key={i} role="alert" className="text-xs text-[var(--danger)]">

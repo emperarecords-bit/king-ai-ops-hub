@@ -1,7 +1,13 @@
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
-import { getFolderPath, listDocuments } from '@/domain/documents/documents';
-import { Card, EmptyState, PageHeader, StatusBadge } from '@/components/ui';
+import { getFolderPath } from '@/domain/documents/documents';
+import {
+  type CanonicalGroup,
+  type PortfolioLens,
+  type PortfolioRecord,
+  loadDocumentPortfolio,
+} from '@/domain/documents/portfolio';
+import { Card, EmptyState, PageHeader } from '@/components/ui';
 import {
   DocumentRowActions,
   LinkFolderForm,
@@ -9,120 +15,150 @@ import {
   UploadForm,
 } from './document-forms';
 
-function kb(bytes: number): string {
-  return bytes < 1024 ? `${bytes} B` : `${Math.round(bytes / 1024)} KB`;
-}
-
 function whenIndexed(at: Date | null): string {
-  if (!at) return '—';
-  return new Date(at).toISOString().slice(0, 10);
+  return at ? new Date(at).toISOString().slice(0, 10) : '—';
 }
 
-export default async function DocumentsPage({
-  params,
-}: {
-  params: Promise<{ projectKey: string }>;
-}) {
+const GROUP_ORDER: { key: CanonicalGroup; title: string; blurb: string }[] = [
+  { key: 'available', title: 'Available', blurb: 'Active sources with a valid current version, eligible for retrieval now.' },
+  { key: 'processing', title: 'Processing', blurb: 'Uploaded or indexing; not yet retrievable.' },
+  { key: 'unavailable', title: 'Unavailable', blurb: 'No usable current version — disconnected, failed, or unsupported. Identity and evidence are preserved.' },
+  { key: 'historical', title: 'Historical', blurb: 'Archived. Removed from current retrieval; versions and evidence retained.' },
+];
+
+const LENS_LABEL: Record<PortfolioLens, string> = {
+  needs_attention: 'Needs attention',
+  restricted: 'Restricted',
+  referenced_by_knowledge: 'Referenced by Knowledge',
+  supplied_to_ai: 'Supplied to AI operations',
+  multiple_versions: 'Multiple versions',
+  recently_changed: 'Recently changed',
+  integrity_concern: 'Integrity concern',
+};
+
+function DocRow({ projectKey, r, isAdmin }: { projectKey: string; r: PortfolioRecord; isAdmin: boolean }) {
+  return (
+    <tr className="border-b border-[var(--border)] align-top">
+      <td className="py-2 pr-4">
+        <span className="font-mono text-xs">{r.relativePath}</span>
+        {r.classification === 'restricted' ? (
+          <span className="ml-2 rounded bg-[#3a2a1f] px-1.5 py-0.5 text-[10px] font-medium uppercase text-[var(--warning,#e0a458)]">Restricted</span>
+        ) : null}
+        {r.attention.length > 0 ? (
+          <ul className="mt-1 space-y-0.5">
+            {r.attention.map((a) => (
+              <li key={a.code} className="text-[11px] text-[var(--warning,#e0a458)]">⚠ {a.label}</li>
+            ))}
+          </ul>
+        ) : null}
+      </td>
+      <td className="py-2 pr-4 text-xs">{r.source === 'cloud_upload' ? 'Cloud' : 'Local'}</td>
+      <td className="py-2 pr-4 text-xs">{r.stateLabel}</td>
+      <td className="py-2 pr-4 text-xs text-[var(--muted)]">{r.fidelityLabel ?? '—'}</td>
+      <td className="py-2 pr-4 text-xs text-[var(--muted)]">
+        {r.versionCount > 1 ? <span className="mr-2">{r.versionCount} versions</span> : null}
+        {r.knowledgeRefCount > 0 ? <span className="mr-2">{r.knowledgeRefCount} Knowledge</span> : null}
+        {r.aiOperationCount > 0 ? <span>Supplied to {r.aiOperationCount} AI operation{r.aiOperationCount === 1 ? '' : 's'}</span> : null}
+      </td>
+      <td className="py-2 pr-4 text-xs text-[var(--muted)]">{whenIndexed(r.indexedAt)}</td>
+      {isAdmin ? (
+        <td className="py-2">
+          <DocumentRowActions projectKey={projectKey} documentId={r.id} source={r.source} actions={r.actions} />
+        </td>
+      ) : null}
+    </tr>
+  );
+}
+
+function GroupSection({ projectKey, title, blurb, records, isAdmin }: { projectKey: string; title: string; blurb: string; records: PortfolioRecord[]; isAdmin: boolean }) {
+  if (records.length === 0) return null;
+  return (
+    <Card title={`${title} (${records.length})`}>
+      <p className="mb-3 text-xs text-[var(--muted)]">{blurb}</p>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[44rem] text-left text-sm">
+          <thead>
+            <tr className="border-b border-[var(--border)] text-xs uppercase text-[var(--muted)]">
+              <th className="py-2 pr-4">Source</th>
+              <th className="py-2 pr-4">Adapter</th>
+              <th className="py-2 pr-4">State</th>
+              <th className="py-2 pr-4">Fidelity</th>
+              <th className="py-2 pr-4">References</th>
+              <th className="py-2 pr-4">Last indexed</th>
+              {isAdmin ? <th className="py-2">Actions</th> : null}
+            </tr>
+          </thead>
+          <tbody>
+            {records.map((r) => (
+              <DocRow key={r.id} projectKey={projectKey} r={r} isAdmin={isAdmin} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+export default async function DocumentsPage({ params }: { params: Promise<{ projectKey: string }> }) {
   const { projectKey } = await params;
   const ctx = await requireTenant(projectKey);
 
-  const { folderPath, docs } = await withTenant(ctx, async (tx) => ({
+  const { folderPath, view } = await withTenant(ctx, async (tx) => ({
     folderPath: await getFolderPath(tx, ctx),
-    docs: await listDocuments(tx, ctx),
+    view: await loadDocumentPortfolio(tx, ctx),
   }));
-
-  const active = docs.filter((d) => d.status === 'active');
-  const other = docs.filter((d) => d.status !== 'active');
   const isAdmin = ctx.projectRole === 'admin';
+  const activeLenses = (Object.keys(view.lensCounts) as PortfolioLens[]).filter((l) => view.lensCounts[l] > 0);
 
   return (
     <div>
       <PageHeader
-        title="Project Library"
-        subtitle="Business documents your employees retrieve automatically for each task — you never paste the same context twice. Upload files directly (works from a phone, no local machine needed) or link a local folder. Markdown and text today; PDF and Word next. Retrieval stays inside this workspace."
+        title="Documents"
+        subtitle="Source material available to this workspace — including what is current, restricted, unavailable, or retained for history. Active, authorized sources may be selected for relevant AI work. This preserves source material; it does not establish that every claim within a source is true."
       />
 
       <div className="mb-6 grid gap-4 md:grid-cols-3">
-        <Card title="Upload files (cloud)">
-          {isAdmin ? (
-            <UploadForm projectKey={projectKey} />
-          ) : (
-            <p className="text-sm text-[var(--muted)]">Admins can upload documents.</p>
-          )}
+        <Card title="Upload document (cloud)">
+          {isAdmin ? <UploadForm projectKey={projectKey} /> : <p className="text-sm text-[var(--muted)]">Admins can upload documents.</p>}
         </Card>
-        <Card title="Linked folder (local)">
+        <Card title="Link folder (local)">
           {isAdmin ? (
             <LinkFolderForm projectKey={projectKey} currentPath={folderPath} />
           ) : (
-            <p className="text-sm text-[var(--muted)]">
-              {folderPath ?? 'No folder linked.'} (admins can change this)
-            </p>
+            <p className="text-sm text-[var(--muted)]">{folderPath ?? 'No folder linked.'} (admins can change this)</p>
           )}
         </Card>
-        <Card title="Index local folder">
+        <Card title="Refresh linked folder">
           <p className="mb-3 text-sm text-[var(--muted)]">
             {folderPath
-              ? 'Re-read the folder whenever files change. Unchanged files are skipped; removed files stop being retrievable. Uploaded files are indexed automatically.'
-              : 'Link a folder first, then index it. (Uploaded files index automatically.)'}
+              ? 'Re-read the linked folder from a host that can access this path. Unchanged files are skipped; removed files stop being retrievable; uploaded cloud files index automatically. The cloud-hosted app cannot reach a local machine’s folder on its own.'
+              : 'Link a folder first, then refresh it from a host that can access the path. (Uploaded cloud files index automatically.)'}
           </p>
           {isAdmin && folderPath ? <RefreshIndexButton projectKey={projectKey} /> : null}
         </Card>
       </div>
 
-      <Card title={`Indexed documents (${active.length})`}>
-        {docs.length === 0 ? (
-          <EmptyState>
-            {folderPath
-              ? 'Nothing indexed yet — click Refresh index.'
-              : 'No documents. Link a folder to get started.'}
-          </EmptyState>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[40rem] text-left text-sm">
-              <thead>
-                <tr className="border-b border-[var(--border)] text-xs uppercase text-[var(--muted)]">
-                  <th className="py-2 pr-4">File</th>
-                  <th className="py-2 pr-4">Source</th>
-                  <th className="py-2 pr-4">Size</th>
-                  <th className="py-2 pr-4">Last indexed</th>
-                  <th className="py-2 pr-4">Status</th>
-                  {isAdmin ? <th className="py-2">Actions</th> : null}
-                </tr>
-              </thead>
-              <tbody>
-                {[...active, ...other].map((d) => (
-                  <tr key={d.id} className="border-b border-[var(--border)] align-top">
-                    <td className="py-2 pr-4 font-mono text-xs">
-                      {d.relativePath}
-                      {d.errorMessage ? (
-                        <span className="mt-1 block font-sans text-xs text-[var(--danger)]">{d.errorMessage}</span>
-                      ) : null}
-                    </td>
-                    <td className="py-2 pr-4 text-xs">
-                      {d.source === 'cloud_upload' ? 'Cloud' : 'Local'}
-                    </td>
-                    <td className="py-2 pr-4">{kb(d.sizeBytes)}</td>
-                    <td className="py-2 pr-4 text-xs text-[var(--muted)]">{whenIndexed(d.indexedAt)}</td>
-                    <td className="py-2 pr-4">
-                      <StatusBadge status={d.status} />
-                    </td>
-                    {isAdmin ? (
-                      <td className="py-2">
-                        <DocumentRowActions
-                          projectKey={projectKey}
-                          documentId={d.id}
-                          status={d.status}
-                          source={d.source}
-                        />
-                      </td>
-                    ) : null}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
+      {activeLenses.length > 0 ? (
+        <div className="mb-6 flex flex-wrap gap-2">
+          {activeLenses.map((l) => (
+            <span key={l} className="rounded-full border border-[var(--border)] px-3 py-1 text-xs text-[var(--muted)]">
+              {LENS_LABEL[l]} · {view.lensCounts[l]}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      {view.total === 0 ? (
+        <Card title="Documents">
+          <EmptyState>{folderPath ? 'Nothing indexed yet — upload a file or refresh the linked folder.' : 'No documents yet. Upload a file or link a folder to get started.'}</EmptyState>
+        </Card>
+      ) : (
+        <div className="space-y-6">
+          {GROUP_ORDER.map((g) => (
+            <GroupSection key={g.key} projectKey={projectKey} title={g.title} blurb={g.blurb} records={view.groups[g.key]} isAdmin={isAdmin} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

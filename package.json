@@ -29,6 +29,7 @@
     "verify:versioned-evidence": "tsx --conditions=react-server scripts/verify-versioned-evidence.ts",
     "run:task-once": "tsx --conditions=react-server scripts/run-task-once.ts",
     "stage-d:acceptance": "tsx --conditions=react-server scripts/stage-d-acceptance.ts",
+    "seed:portfolio-states": "tsx --conditions=react-server scripts/seed-portfolio-states.ts",
     "observe": "tsx scripts/observe.ts",
     "worker": "tsx --conditions=react-server scripts/worker.ts",
     "standing:tick": "tsx --conditions=react-server scripts/run-standing-work.ts",

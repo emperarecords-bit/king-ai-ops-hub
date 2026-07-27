@@ -2136,3 +2136,27 @@ closure pending review.**
   viewer/workspace/doc/version/access-type/purpose/policy — never the content.
 tsc + build clean, full suite **678/678** (+20 blocks: 10 purge, 8 repair, 10 viewer). No UI, no legacy
 deletion, no auto-purge.
+
+### Documents interface — Portfolio foundation (built 2026-07-27)
+
+Increment 1 of the Documents product surface (no Detail yet). *Primary question: what source material does
+this workspace possess, which sources are usable now, and where does its evidence need attention?*
+- **Shared assessment (`portfolio.ts` `assessDocument`)** — one pure function the Portfolio (and future
+  Detail) consume; retrieval keeps its own contract and never depends on these presentation categories.
+- **Canonical groups** (exactly one per doc): **Available** (active + valid indexed current version — a
+  restricted/reconstructed doc, or one with a *newer failed* version, stays Available) · **Processing** ·
+  **Unavailable** (source-disconnected / initial-indexing-failed / unsupported — distinct reasons) ·
+  **Historical** (archived; versions + evidence retained).
+- **Attention lenses** (cross-cutting, never a lifecycle/retrieval rule): needs-attention, restricted,
+  referenced-by-knowledge, supplied-to-ai, multiple-versions, recently-changed, integrity-concern.
+- **Audience-safe loader (`loadDocumentPortfolio`)** — verifies membership; DROPS restricted docs for a
+  non-owner/admin viewer BEFORE assessment, and every count is computed from the audience-visible set only.
+  Bounded bulk queries (no N+1, no object I/O). Knowledge counts use explicit bound relationships;
+  AI-operation counts dedupe to distinct runs. *Principle: audience-specific inventory is calculated from
+  audience-visible records.*
+- **Honest wording** — operator state labels replace raw enums; fidelity reads "Exact source retained /
+  Reconstructed indexed text / Source content unavailable"; header reframed; "Refresh index" → "Refresh
+  linked folder" with the host caveat; zero counts + hashes/ids omitted from compact rows.
+- **Actions** stay compact + server-gated (upload/link/refresh; per-row retry/replace/archive from the
+  assessment). No purge/repair/historical/classification/Detail in this increment.
+tsc + build clean, full suite **693/693** (+15 Portfolio blocks covering the 26 required cases).
