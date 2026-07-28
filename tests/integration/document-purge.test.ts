@@ -14,6 +14,7 @@ import { ingestDocumentVersion } from '@/domain/documents/versions';
 import { LocalObjectStore } from '@/domain/documents/local-object-store';
 import { type ObjectStore, tenantObjectKey } from '@/domain/documents/object-store';
 import { assessDocumentPurge, authorizeDocumentPurge, cancelDocumentPurge, executeDocumentPurge, proposeDocumentPurge } from '@/domain/documents/purge';
+import { retrieveRelevantVersioned } from '@/domain/documents/retrieval-versioned';
 
 process.env.DATABASE_URL = process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL ?? 'postgresql://king:king@localhost:5433/king_ai_hub';
 
@@ -359,5 +360,19 @@ describe.skipIf(!available)('Documents Purge — staged, admin-authorized, refer
     expect((await db().select({ id: runs.id }).from(runs).where(eq(runs.id, runId))).length).toBe(1);
     const auditAfter = (await db().select({ id: auditLogs.id }).from(auditLogs).where(eq(auditLogs.projectId, ctx.projectId))).length;
     expect(auditAfter).toBeGreaterThan(auditBefore);
+  });
+
+  it('P.18 a quarantined document is EXCLUDED from retrieval, and cancel restores it', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'p18.md', 'the zebraquux marker paragraph for retrieval');
+    const hit = () => tx((t) => retrieveRelevantVersioned(t, ctx, 'zebraquux'));
+    expect((await hit()).length).toBeGreaterThan(0); // retrievable while active
+
+    const p = (await tx((t) => proposeDocumentPurge(t, ctx, docId)))!;
+    await tx((t) => authorizeDocumentPurge(t, ctx, p.operationId!, { retentionMs: 60_000 }));
+    expect(await hit()).toHaveLength(0); // quarantined → retrieval-excluded (new use blocked)
+
+    await tx((t) => cancelDocumentPurge(t, ctx, p.operationId!));
+    expect((await hit()).length).toBeGreaterThan(0); // cancel restores retrievability
   });
 });

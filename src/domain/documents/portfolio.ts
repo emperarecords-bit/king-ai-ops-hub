@@ -27,12 +27,14 @@ export type LifecycleReason =
   | 'initial_indexing_failed'
   | 'unsupported_source'
   | 'no_current_version'
-  | 'archived';
+  | 'archived'
+  | 'pending_purge';
 
 /** Operator-facing state wording — never a raw enum. */
 export const STATE_LABEL: Record<LifecycleReason, string> = {
   available: 'Available',
   available_newer_failed: 'Available — newer version failed',
+  pending_purge: 'Pending purge — in retention window',
   processing_upload: 'Processing upload',
   indexing: 'Indexing',
   source_disconnected: 'Source disconnected',
@@ -165,7 +167,11 @@ export function assessDocument(d: DocumentAssessmentInput, now: Date): Portfolio
 
   let group: CanonicalGroup;
   let lifecycleReason: LifecycleReason;
-  if (d.status === 'archived') {
+  if (d.status === 'purge_quarantined') {
+    // Authorized for purge and inside the retention window — excluded from retrieval, still cancellable.
+    group = 'historical';
+    lifecycleReason = 'pending_purge';
+  } else if (d.status === 'archived') {
     group = 'historical';
     lifecycleReason = 'archived';
   } else if (currentValid) {
