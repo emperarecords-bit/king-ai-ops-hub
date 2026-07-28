@@ -2261,3 +2261,24 @@ restricted → Healthy with NO content exposure and preview still gated; no repa
 distinct from Safe actions). Deployed `a3a5eb3`. Fixtures cleaned to the pre-fixture state (append-only
 audit history preserved). **Next: Repair (bounded, representation-safe), then legacy-object cleanup, then
 purge — each its own gate.**
+
+### ★ Documents Repair — BOUNDED, REPRESENTATION-SAFE (built 2026-07-27, at gate)
+
+The second separately-gated maintenance capability (not integrity, not cleanup/purge). ONE repair type this
+increment — **rebuild_chunks** (`repair.ts`, composing the Stage D `rebuildVersionChunksFromBytes`): restore
+a byte_exact version's corrupted chunk TEXT from its OWN retained, hash-verified bytes, applied ONLY when
+re-parsing reproduces the historical chunk manifest identically (same count + per-chunk content hash);
+otherwise it refuses / marks index-degraded — never a best guess. It never alters source bytes, never
+rewrites the immutable version identity (hash/objectKey/fidelity), never manufactures evidence, and never
+touches chunk indexes/locators/hashes. Two deliberate operator steps: `previewRepair` (read-only — what's
+wrong, exact version, proposed mutation, why safe, what stays unchanged, + a state fingerprint) then
+`executeRepair` (binds to the fingerprint and REFUSES if the state changed since preview; runs the rebuild;
+RE-RUNS the document-scoped audit to verify the targeted finding resolved without a new higher-severity
+finding; records ONE append-only, metadata-only `document.repair_executed` event — the nested chunk-restore
+audit is suppressed so a repair is one logical success record). Admin-only POST server actions; cross-
+workspace/cross-document targets refused; idempotent; disclosure never widened; no content in previews/
+results/events. Detail Integrity findings surface the two-step control; no cleanup/purge/deletion.
+Evidence: 7 repair tests + full suite **794/794**, tsc + build clean; authenticated staging demos of a
+SUCCESSFUL repair (degraded → healthy, targeted finding resolved) AND a safely-REFUSED repair (bytes don't
+match the recorded hash → no Apply). Deployed `5db869c` + `d37f77d`. Fixtures cleaned to the pre-fixture
+state (append-only audit history preserved). **Next: legacy-object cleanup, then purge — each its own gate.**
