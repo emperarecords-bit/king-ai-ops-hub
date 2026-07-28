@@ -2421,4 +2421,19 @@ retained as evidence.
   remains retryable to a clean completion — authorization, re-validation, deletes, tombstones, lifecycle
   transition, and the canonical audit event share ONE transaction.
 Evidence now: **27 purge tests**, full suite **841**, tsc + build clean. Commits add `<least-privilege+atomicity>`.
-**The Documents maintenance sequence (Integrity → Repair → Cleanup → Purge) is complete, pending this gate.**
+
+### ★ Documents Purge — GATE CLOSED (2026-07-28)
+
+Accepted after the two-blocker revision. Least-privilege boundary restored (app_server cannot delete immutable
+version rows; a dedicated NOSUPERUSER/NOBYPASSRLS `purge_agent` on a separate connection is the only deletion
+path) and DB-phase atomicity proven (ATOM.A/B/C — one transaction spanning authorization → revalidation →
+reference closure → explicit deletes → tombstones → lifecycle → canonical audit; a throw anywhere retains
+none of it). Production path verified through the authenticated staging app. **The Documents maintenance
+sequence — Integrity (read-only diagnosis) → Repair (representation-safe correction) → Legacy-object Cleanup
+(proven storage orphans) → Purge (authorized destruction with quarantine, retention, tombstones, restartable
+object cleanup) — is COMPLETE and ACCEPTED.** One document per authorized operation; no bulk purge.
+
+**Operating direction (owner, 2026-07-28): STOP adding destructive Documents capabilities. Product effort
+returns to AccurateBids' active business objective — qualifying, onboarding, and activating the first three
+pilot contractors. The next evidence that matters is a qualified contractor independently sending a real quote
+to a real customer through their own connected Stripe account** — not another maintenance test.
