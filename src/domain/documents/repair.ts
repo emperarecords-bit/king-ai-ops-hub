@@ -49,6 +49,30 @@ export interface RepairPreview {
 
 export type RepairOutcome = 'repaired' | 'no_change_needed' | 'marked_degraded' | 'refused';
 
+/**
+ * The THIRD, separate verification dimension: how far the post-repair document-wide integrity re-audit got.
+ * Kept distinct from "repair applied" and "targeted finding resolved" so a limited or failed broader audit
+ * is NEVER read as "integrity fully restored".
+ *   healthy               — the broader re-audit completed and found nothing wrong;
+ *   other_findings_remain — the re-audit completed but OTHER (untargeted) findings remain;
+ *   limited               — the re-audit could not verify some bytes (e.g. object store unreachable);
+ *   failed                — the re-audit itself could not be produced;
+ *   not_verified          — no post-repair audit was applicable (e.g. the repair was refused).
+ */
+export type BroaderIntegrity = 'healthy' | 'other_findings_remain' | 'limited' | 'failed' | 'not_verified';
+
+/** Maps the raw post-repair audit outcome onto the honest broader-verification dimension. */
+export function broaderIntegrityOf(after: DocumentIntegrityAudit['outcome'] | null): BroaderIntegrity {
+  switch (after) {
+    case 'healthy': return 'healthy';
+    case 'partially_verified': return 'limited';
+    case 'audit_failed': return 'failed';
+    case 'degraded': return 'other_findings_remain';
+    case 'unavailable': return 'other_findings_remain';
+    default: return 'not_verified';
+  }
+}
+
 export interface RepairResult {
   type: RepairType;
   versionId: string;
@@ -58,6 +82,8 @@ export interface RepairResult {
   beforeOutcome: DocumentIntegrityAudit['outcome'] | null;
   afterOutcome: DocumentIntegrityAudit['outcome'] | null;
   targetedFindingResolved: boolean;
+  /** The separate third dimension — the broader re-audit's reach, never conflated with the targeted result. */
+  broaderIntegrity: BroaderIntegrity;
   /** True if the repair introduced a NEW higher-severity finding (a regression). */
   regressed: boolean;
 }
@@ -143,7 +169,7 @@ export async function executeRepair(tx: DbTx, ctx: TenantContext, store: ObjectS
   const nowFingerprint = await versionRepairFingerprint(tx, ctx, target.versionId);
   if (nowFingerprint !== expectedFingerprint) {
     // Concurrency: the observed state changed since preview → refuse (no mutation).
-    return { type: 'rebuild_chunks', versionId: target.versionId, outcome: 'refused', detail: 'The document changed since the repair was previewed. Re-run the audit and preview again.', beforeOutcome: null, afterOutcome: null, targetedFindingResolved: false, regressed: false };
+    return { type: 'rebuild_chunks', versionId: target.versionId, outcome: 'refused', detail: 'The document changed since the repair was previewed. Re-run the audit and preview again.', beforeOutcome: null, afterOutcome: null, targetedFindingResolved: false, broaderIntegrity: 'not_verified', regressed: false };
   }
 
   const before = await auditDocument(tx, ctx, store, documentId);
@@ -159,7 +185,10 @@ export async function executeRepair(tx: DbTx, ctx: TenantContext, store: ObjectS
     : 'refused';
 
   const after = await auditDocument(tx, ctx, store, documentId);
+  // The targeted check (chunk content_hash vs text) is DB-only, so it stays reliable even when the broader
+  // re-audit could not verify bytes. The broader dimension is reported SEPARATELY and never conflated.
   const targetedFindingResolved = !(after?.findings ?? []).some((f) => f.category === 'chunk_content_hash_mismatch' && f.versionId === target.versionId);
+  const broaderIntegrity = (outcome === 'repaired' || outcome === 'no_change_needed') ? broaderIntegrityOf(after?.outcome ?? null) : 'not_verified';
   const regressed = countHigh(after) > highBefore;
 
   await writeAudit(tx, ctx, {
@@ -167,17 +196,29 @@ export async function executeRepair(tx: DbTx, ctx: TenantContext, store: ObjectS
     entityType: 'document',
     entityId: documentId,
     // Metadata-only: identifiers, types, and before/after outcomes — never content, bytes, or raw paths.
-    detail: { type: 'rebuild_chunks', versionId: target.versionId, outcome, rebuildState: rebuild.state, chunks: rebuild.chunks ?? null, beforeOutcome: before?.outcome ?? null, afterOutcome: after?.outcome ?? null, targetedFindingResolved, regressed },
+    detail: { type: 'rebuild_chunks', versionId: target.versionId, outcome, rebuildState: rebuild.state, chunks: rebuild.chunks ?? null, beforeOutcome: before?.outcome ?? null, afterOutcome: after?.outcome ?? null, targetedFindingResolved, broaderIntegrity, regressed },
   });
 
   return {
     type: 'rebuild_chunks', versionId: target.versionId, outcome,
-    detail: outcome === 'repaired' ? 'Chunk text restored from the version’s retained bytes; the manifest was reproduced identically.'
-      : outcome === 'no_change_needed' ? 'The stored chunk text already matched the retained bytes; nothing was changed.'
+    detail: outcome === 'repaired' || outcome === 'no_change_needed'
+      // Three honest, SEPARATE dimensions: what the repair did · the targeted finding · the broader re-audit.
+      ? `${outcome === 'repaired' ? 'Chunk text restored from the version’s retained bytes' : 'The stored chunk text already matched the retained bytes'} and ${targetedFindingResolved ? 'the targeted finding was resolved' : 'the targeted finding was NOT resolved'}. ${broaderVerificationSentence(broaderIntegrity)}`
       : outcome === 'marked_degraded' ? 'A faithful rebuild could not be proven; the version was marked index-degraded rather than guessing.'
       : 'The repair was refused; nothing was changed.',
-    beforeOutcome: before?.outcome ?? null, afterOutcome: after?.outcome ?? null, targetedFindingResolved, regressed,
+    beforeOutcome: before?.outcome ?? null, afterOutcome: after?.outcome ?? null, targetedFindingResolved, broaderIntegrity, regressed,
   };
+}
+
+/** Honest sentence for the broader (document-wide) re-audit dimension — never claims full restoration when limited/failed. */
+export function broaderVerificationSentence(b: BroaderIntegrity): string {
+  switch (b) {
+    case 'healthy': return 'Broader integrity verification was healthy.';
+    case 'other_findings_remain': return 'Broader integrity verification completed, but other unresolved findings remain.';
+    case 'limited': return 'Broader integrity verification was limited.';
+    case 'failed': return 'Broader integrity verification failed.';
+    default: return 'Broader integrity was not verified.';
+  }
 }
 
 function countHigh(a: DocumentIntegrityAudit | null): number {

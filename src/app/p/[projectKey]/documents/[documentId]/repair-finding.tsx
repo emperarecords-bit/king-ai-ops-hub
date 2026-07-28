@@ -13,6 +13,17 @@ import { type RepairActionState, executeRepairAction, previewRepairAction } from
 const initial: RepairActionState = { preview: null, result: null, error: null };
 const btn = 'rounded-md border border-[var(--border)] px-2 py-1 text-xs font-medium hover:border-[var(--accent)] disabled:opacity-50';
 
+/** Reader-facing label for the broader (document-wide) re-audit dimension; kept honest for limited/failed. */
+function broaderLabel(b: 'healthy' | 'other_findings_remain' | 'limited' | 'failed' | 'not_verified'): string {
+  switch (b) {
+    case 'healthy': return 'healthy';
+    case 'other_findings_remain': return 'other findings remain';
+    case 'limited': return 'limited (could not fully verify)';
+    case 'failed': return 'failed';
+    default: return 'not verified';
+  }
+}
+
 export function RepairFinding({ projectKey, documentId, versionId }: { projectKey: string; documentId: string; versionId: string }) {
   const [previewState, preview, previewing] = useActionState(previewRepairAction, initial);
   const [execState, execute, executing] = useActionState(executeRepairAction, initial);
@@ -32,7 +43,14 @@ export function RepairFinding({ projectKey, documentId, versionId }: { projectKe
       <div className="mt-2 rounded border border-[var(--border)] p-2 text-xs">
         <div className="font-medium">Repair {r.outcome === 'repaired' ? 'applied' : r.outcome === 'no_change_needed' ? 'not needed' : r.outcome === 'marked_degraded' ? 'not possible (marked degraded)' : 'refused'}</div>
         <div className="mt-1 text-[var(--muted)]">{r.detail}</div>
-        <div className="mt-1 text-[var(--muted)]">Integrity before: {r.beforeOutcome ?? '—'} → after: {r.afterOutcome ?? '—'} · targeted finding resolved: {String(r.targetedFindingResolved)}{r.regressed ? ' · ⚠ a higher-severity finding appeared' : ''}</div>
+        {r.outcome === 'repaired' || r.outcome === 'no_change_needed' ? (
+          // Three SEPARATE dimensions — a limited/failed broader audit is never shown as full restoration.
+          <ul className="mt-1 space-y-0.5 text-[var(--muted)]">
+            <li>Targeted finding resolved: {r.targetedFindingResolved ? 'yes' : 'no'}</li>
+            <li>Broader integrity verification: {broaderLabel(r.broaderIntegrity)}</li>
+            <li>Integrity before → after: {r.beforeOutcome ?? '—'} → {r.afterOutcome ?? '—'}{r.regressed ? ' · ⚠ a higher-severity finding appeared' : ''}</li>
+          </ul>
+        ) : null}
       </div>
     );
   }

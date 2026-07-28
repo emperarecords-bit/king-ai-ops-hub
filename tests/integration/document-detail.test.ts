@@ -1206,4 +1206,43 @@ describe.skipIf(!available)('Documents Repair — bounded, representation-safe',
     const audit = (await tx((t) => auditDocument(t, ctx, store, docId)))!;
     expect(audit.outcome).toBe('degraded');
   });
+
+  /** A store whose Nth-and-later `get` calls fail with a generic (non-not-found) error — an infra limitation. */
+  function storeUnreachableFromGet(n: number) {
+    let count = 0;
+    return new Proxy(store as object, {
+      get(target, prop, receiver) {
+        if (prop === 'get') {
+          return async (key: string) => {
+            count += 1;
+            if (count >= n) throw new Error('injected: object store unreachable during broader verification');
+            return (target as typeof store).get(key);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as unknown as typeof store;
+  }
+
+  it('R.10 honest verification — a repair whose broader re-audit is LIMITED is never reported as full restoration', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await corruptibleDoc(ctx, 'r-limited.md');
+    const preview = (await tx((t) => previewRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId })))!;
+    // The rebuild's own byte read (2nd get) succeeds; the POST-repair verification read (3rd get) is unreachable.
+    const flaky = storeUnreachableFromGet(3);
+    const r = (await tx((t) => executeRepair(t, ctx, flaky, docId, { type: 'rebuild_chunks', versionId }, preview.fingerprint)))!;
+    expect(r.outcome).toBe('repaired');
+    expect(r.targetedFindingResolved).toBe(true);           // the targeted (DB-only) check stays reliable
+    expect(r.afterOutcome).toBe('partially_verified');       // the broader audit could not verify bytes
+    expect(r.broaderIntegrity).toBe('limited');
+    // The message states the targeted resolution AND the limited broader result — it must NOT claim healthy/full.
+    expect(r.detail).toContain('the targeted finding was resolved');
+    expect(r.detail).toContain('Broader integrity verification was limited');
+    expect(r.detail).not.toContain('healthy');
+    // The append-only event records the same honest broader dimension (metadata-only).
+    const evs = await repairEvents(ctx, docId);
+    expect((evs[0]!.detail as Record<string, unknown>).broaderIntegrity).toBe('limited');
+    expect((evs[0]!.detail as Record<string, unknown>).targetedFindingResolved).toBe(true);
+  });
 });
