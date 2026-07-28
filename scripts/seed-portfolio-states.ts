@@ -163,6 +163,20 @@ async function main() {
     const vk = (await db.select({ k: documentVersions.objectKey }).from(documentVersions).where(eq(documentVersions.id, mo.versionId)))[0]?.k;
     if (vk) await store.delete(vk);
   }
+  { // repairable: a corrupted chunk with an intact, hash-verified object → the Repair increment can restore
+    // it from the retained bytes (a SUCCESSFUL-repair demo fixture).
+    const rp = await byteExact(`${PREFIX}repairable.md`, '# Repairable\n\nfirst paragraph of the source.\n\nsecond paragraph of the source.');
+    const ch = (await db.select({ id: documentChunks.id }).from(documentChunks).where(eq(documentChunks.documentVersionId, rp.versionId)).limit(1))[0];
+    if (ch) await db.update(documentChunks).set({ content: 'CORRUPTED DEMO CHUNK' }).where(eq(documentChunks.id, ch.id));
+  }
+  { // repair-unprovable: a corrupted chunk AND a corrupted object → a faithful rebuild cannot be proven, so
+    // repair must safely REFUSE (a refused-repair demo fixture).
+    const ru = await byteExact(`${PREFIX}repair-unprovable.md`, '# Unprovable\n\nfirst paragraph body.\n\nsecond paragraph body.');
+    const ch = (await db.select({ id: documentChunks.id }).from(documentChunks).where(eq(documentChunks.documentVersionId, ru.versionId)).limit(1))[0];
+    if (ch) await db.update(documentChunks).set({ content: 'CORRUPTED DEMO CHUNK' }).where(eq(documentChunks.id, ch.id));
+    const vk = (await db.select({ k: documentVersions.objectKey }).from(documentVersions).where(eq(documentVersions.id, ru.versionId)))[0]?.k;
+    if (vk) await store.put(vk, Buffer.from('object bytes that no longer match the recorded hash', 'utf8'), 'text/markdown');
+  }
   { // lifecycle — document-scoped (archive → restore) AND version-scoped (index degraded) history
     const lc = await byteExact(`${PREFIX}lifecycle-events.md`, '# Lifecycle\n\ndocument with a lifecycle trail');
     await tx((t) => writeAudit(t, ctx, { action: 'document.archived', entityType: 'document', entityId: lc.docId, detail: { source: 'cloud_upload' } }));

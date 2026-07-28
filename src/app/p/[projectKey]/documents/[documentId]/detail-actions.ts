@@ -7,6 +7,8 @@ import { withTenant } from '@/db/tenant';
 import { getObjectStore } from '@/domain/documents/object-store';
 import { loadDetailWithInspection } from '@/domain/documents/detail';
 import { type DocumentIntegrityAudit, auditDocument } from '@/domain/documents/integrity';
+import { type RepairPreview, type RepairResult, executeRepair, previewRepair } from '@/domain/documents/repair';
+import { revalidatePath } from 'next/cache';
 import { writeAudit } from '@/domain/audit/audit';
 
 /**
@@ -97,5 +99,51 @@ export async function runIntegrityAuditAction(_prev: IntegrityAuditState, formDa
     if (!(err instanceof AppError)) log.error('runIntegrityAudit failed', { err });
     // The audit operation itself could not complete — never present this as a completed/degraded result.
     return { audit: { documentId, outcome: 'audit_failed', findings: [], limitations: [], versions: [], versionsScanned: 0, checksApplied: [], currentVersionId: null, currentVersionState: 'none', archived: false }, error: toPublicMessage(err) };
+  }
+}
+
+export interface RepairActionState {
+  preview: RepairPreview | null;
+  result: RepairResult | null;
+  error: string | null;
+}
+
+/** PREVIEW a repair (read-only): admin-only, tenant-scoped, no mutation. Returns the proposal + fingerprint. */
+export async function previewRepairAction(_prev: RepairActionState, formData: FormData): Promise<RepairActionState> {
+  const projectKey = String(formData.get('projectKey') ?? '');
+  const documentId = String(formData.get('documentId') ?? '');
+  const versionId = String(formData.get('versionId') ?? '');
+  try {
+    const ctx = await requireTenant(projectKey);
+    if (ctx.projectRole !== 'admin') return { preview: null, result: null, error: 'Only admins can repair documents.' };
+    const store = await getObjectStore();
+    const preview = await withTenant(ctx, (tx) => previewRepair(tx, ctx, store, documentId, { type: 'rebuild_chunks', versionId }));
+    if (!preview) return { preview: null, result: null, error: 'This source is not available to your account.' };
+    return { preview, result: null, error: null };
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('previewRepair failed', { err });
+    return { preview: null, result: null, error: toPublicMessage(err) };
+  }
+}
+
+/** EXECUTE a previewed repair: admin-only, tenant-scoped, bound to the preview fingerprint (refuses if the
+ *  state changed), representation-safe, verified afterward, and recorded append-only. */
+export async function executeRepairAction(_prev: RepairActionState, formData: FormData): Promise<RepairActionState> {
+  const projectKey = String(formData.get('projectKey') ?? '');
+  const documentId = String(formData.get('documentId') ?? '');
+  const versionId = String(formData.get('versionId') ?? '');
+  const fingerprint = String(formData.get('fingerprint') ?? '');
+  try {
+    const ctx = await requireTenant(projectKey);
+    if (ctx.projectRole !== 'admin') return { preview: null, result: null, error: 'Only admins can repair documents.' };
+    if (!fingerprint) return { preview: null, result: null, error: 'Preview the repair before applying it.' };
+    const store = await getObjectStore();
+    const result = await withTenant(ctx, (tx) => executeRepair(tx, ctx, store, documentId, { type: 'rebuild_chunks', versionId }, fingerprint));
+    if (!result) return { preview: null, result: null, error: 'This source is not available to your account.' };
+    revalidatePath(`/p/${projectKey}/documents/${documentId}`);
+    return { preview: null, result, error: null };
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('executeRepair failed', { err });
+    return { preview: null, result: null, error: toPublicMessage(err) };
   }
 }

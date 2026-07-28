@@ -2,7 +2,14 @@
 
 import { useActionState } from 'react';
 import { type IntegrityAuditState, runIntegrityAuditAction } from './detail-actions';
+import { RepairFinding } from './repair-finding';
 import type { DocIntegrityFinding, DocIntegrityLimitation, DocumentIntegrityAudit } from '@/domain/documents/integrity';
+
+/** The only finding category this increment can repair (mirrors repair.ts repairTypeForFinding; inlined so
+ *  the server-only repair module is never pulled into this client bundle). */
+function repairableVersion(f: DocIntegrityFinding): string | null {
+  return f.category === 'chunk_content_hash_mismatch' && f.versionId ? f.versionId : null;
+}
 
 /**
  * Read-only integrity audit control + result. Running it is a deliberate POST (server action) that mutates
@@ -40,20 +47,24 @@ const LIMIT_LABEL: Record<DocIntegrityLimitation['reason'], string> = {
   always_unavailable_version: 'A version was recorded as having no retained evidence; its bytes cannot be verified.',
 };
 
-function Findings({ findings }: { findings: DocIntegrityFinding[] }) {
+function Findings({ findings, projectKey, documentId }: { findings: DocIntegrityFinding[]; projectKey: string; documentId: string }) {
   if (findings.length === 0) return null;
   return (
     <ul className="mt-2 space-y-2">
-      {findings.map((f, i) => (
-        <li key={i} className="rounded border border-[var(--border)] p-2 text-sm">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium uppercase ${f.severity === 'high' ? 'bg-[#3a2026] text-[var(--danger)]' : f.severity === 'medium' ? 'bg-[#3a2a1f] text-[var(--warning,#e0a458)]' : 'border border-[var(--border)] text-[var(--muted)]'}`}>{f.severity}</span>
-            <span>{f.explanation}</span>
-          </div>
-          <div className="mt-1 text-xs text-[var(--muted)]">{AFFECTS_LABEL[f.affects]}{f.repairPossibleLater ? ' · repair may be possible in a later increment' : ''}</div>
-          <details className="mt-1"><summary className="cursor-pointer text-xs text-[var(--muted)]">Technical evidence</summary><div className="mt-1 font-mono text-xs text-[var(--muted)]">{f.category}{f.versionId ? ` · version ${f.versionId.slice(0, 8)}…` : ''} — {f.technicalDetail}</div></details>
-        </li>
-      ))}
+      {findings.map((f, i) => {
+        const repairVersion = repairableVersion(f);
+        return (
+          <li key={i} className="rounded border border-[var(--border)] p-2 text-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium uppercase ${f.severity === 'high' ? 'bg-[#3a2026] text-[var(--danger)]' : f.severity === 'medium' ? 'bg-[#3a2a1f] text-[var(--warning,#e0a458)]' : 'border border-[var(--border)] text-[var(--muted)]'}`}>{f.severity}</span>
+              <span>{f.explanation}</span>
+            </div>
+            <div className="mt-1 text-xs text-[var(--muted)]">{AFFECTS_LABEL[f.affects]}{f.repairPossibleLater ? ' · repair may be possible' : ''}</div>
+            <details className="mt-1"><summary className="cursor-pointer text-xs text-[var(--muted)]">Technical evidence</summary><div className="mt-1 font-mono text-xs text-[var(--muted)]">{f.category}{f.versionId ? ` · version ${f.versionId.slice(0, 8)}…` : ''} — {f.technicalDetail}</div></details>
+            {repairVersion ? <RepairFinding projectKey={projectKey} documentId={documentId} versionId={repairVersion} /> : null}
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -90,7 +101,7 @@ export function IntegrityAudit({ projectKey, documentId }: { projectKey: string;
           {a.findings.length > 0 ? (
             <>
               <div className="mt-3 text-xs uppercase text-[var(--muted)]">Findings ({a.findings.length})</div>
-              <Findings findings={a.findings} />
+              <Findings findings={a.findings} projectKey={projectKey} documentId={documentId} />
             </>
           ) : null}
 

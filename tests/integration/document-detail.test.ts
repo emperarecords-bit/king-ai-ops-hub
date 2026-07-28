@@ -12,6 +12,7 @@ import { archiveDocument, chunkText, declassifyDocument, restoreDocument, restri
 import { indexCloudDocument, replaceDocument, retryDocument } from '@/domain/documents/cloud';
 import { backfillProject } from '@/domain/documents/backfill';
 import { auditDocument, markIndexDegraded } from '@/domain/documents/integrity';
+import { executeRepair, previewRepair } from '@/domain/documents/repair';
 import { ingestDocumentVersion } from '@/domain/documents/versions';
 import { type DocumentAssessmentInput, assessDocument } from '@/domain/documents/portfolio';
 import { LocalObjectStore } from '@/domain/documents/local-object-store';
@@ -963,5 +964,133 @@ describe.skipIf(!available)('Documents Integrity — read-only audit', () => {
       if (r) await writeAudit(t, ctx, { action: 'document.integrity_audited', entityType: 'document', entityId: docId, detail: {} });
     });
     expect(await auditEvents(ctx, docId)).toBe(1); // unchanged
+  });
+});
+
+describe.skipIf(!available)('Documents Repair — bounded, representation-safe', () => {
+  const tx = <T,>(fn: (t: DbTx) => Promise<T>) => db().transaction((t) => fn(t as unknown as DbTx));
+  const versionRow = async (versionId: string) => (await db().select().from(documentVersions).where(eq(documentVersions.id, versionId)))[0]!;
+  const chunkRows = (versionId: string) => db().select().from(documentChunks).where(eq(documentChunks.documentVersionId, versionId)).orderBy(documentChunks.chunkIndex);
+  const repairEvents = async (ctx: TenantContext, docId: string) => {
+    const { auditLogs } = await import('@/db/schema');
+    return db().select({ detail: auditLogs.detail }).from(auditLogs).where(and(eq(auditLogs.projectId, ctx.projectId), eq(auditLogs.entityId, docId), eq(auditLogs.action, 'document.repair_executed')));
+  };
+  /** A byte-exact doc with one chunk's TEXT corrupted (manifest hash intact) → a repairable finding. */
+  async function corruptibleDoc(ctx: TenantContext, rel: string) {
+    const body = '# Title\n\nfirst paragraph here.\n\nsecond paragraph body.';
+    const { docId, versionId } = await byteExactDoc(ctx, rel, body);
+    const cs = await chunkRows(versionId);
+    const target = cs[0]!;
+    await db().update(documentChunks).set({ content: 'CORRUPTED TEXT' }).where(eq(documentChunks.id, target.id)); // hash stays original
+    return { docId, versionId, originalContent: target.content };
+  }
+
+  it('R.1 a chunk-hash-mismatch is repaired from retained bytes; before degraded → after healthy; identity untouched', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId, originalContent } = await corruptibleDoc(ctx, 'r-fix.md');
+    const v0 = await versionRow(versionId);
+    expect((await tx((t) => auditDocument(t, ctx, store, docId)))!.outcome).toBe('degraded');
+    const preview = (await tx((t) => previewRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId })))!;
+    expect(preview.applicable).toBe(true);
+    expect(preview.expectation).toBe('would_repair');
+    const r = (await tx((t) => executeRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId }, preview.fingerprint)))!;
+    expect(r.outcome).toBe('repaired');
+    expect(r.beforeOutcome).toBe('degraded');
+    expect(r.afterOutcome).toBe('healthy');
+    expect(r.targetedFindingResolved).toBe(true);
+    expect(r.regressed).toBe(false);
+    // The corrupted chunk text was restored to the original.
+    expect((await chunkRows(versionId))[0]!.content).toBe(originalContent);
+    // The IMMUTABLE version identity was NOT rewritten (only chunk text changed).
+    const v1 = await versionRow(versionId);
+    expect({ sha: v1.sha256, key: v1.objectKey, fid: v1.contentFidelity, size: v1.sizeBytes }).toEqual({ sha: v0.sha256, key: v0.objectKey, fid: v0.contentFidelity, size: v0.sizeBytes });
+    // No version/object deletion (cleanup/purge is out of scope).
+    expect((await db().select().from(documentVersions).where(eq(documentVersions.documentId, docId))).length).toBe(1);
+  });
+
+  it('R.2 idempotency — repeating a completed repair makes no further change', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await corruptibleDoc(ctx, 'r-idem.md');
+    const p1 = (await tx((t) => previewRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId })))!;
+    await tx((t) => executeRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId }, p1.fingerprint));
+    const after1 = await chunkRows(versionId);
+    // A fresh preview now expects "already consistent"; executing again changes nothing.
+    const p2 = (await tx((t) => previewRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId })))!;
+    expect(p2.expectation).toBe('already_consistent');
+    const r2 = (await tx((t) => executeRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId }, p2.fingerprint)))!;
+    expect(r2.outcome).toBe('no_change_needed');
+    expect(await chunkRows(versionId)).toEqual(after1);
+  });
+
+  it('R.3 a STALE preview (state changed since preview) is refused — no mutation', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await corruptibleDoc(ctx, 'r-stale.md');
+    const preview = (await tx((t) => previewRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId })))!;
+    // The document changes after preview (the corrupted chunk changes again) → the fingerprint no longer matches.
+    const cs = await chunkRows(versionId);
+    await db().update(documentChunks).set({ content: 'CHANGED AGAIN' }).where(eq(documentChunks.id, cs[0]!.id));
+    const before = await chunkRows(versionId);
+    const r = (await tx((t) => executeRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId }, preview.fingerprint)))!;
+    expect(r.outcome).toBe('refused');
+    expect(await chunkRows(versionId)).toEqual(before); // nothing mutated
+  });
+
+  it('R.4 a cross-workspace / cross-document target is refused (existence-neutral, no mutation)', async () => {
+    const a = await makeWorkspace();
+    const b = await makeWorkspace();
+    const mine = await corruptibleDoc(a, 'r-mine.md');
+    const foreign = await corruptibleDoc(b, 'r-foreign.md');
+    // foreign version id under my ctx → null.
+    expect(await tx((t) => previewRepair(t, a, store, mine.docId, { type: 'rebuild_chunks', versionId: foreign.versionId }))).toBeNull();
+    // a version that belongs to another document in my workspace → null (wrong document).
+    const other = await corruptibleDoc(a, 'r-other.md');
+    expect(await tx((t) => previewRepair(t, a, store, mine.docId, { type: 'rebuild_chunks', versionId: other.versionId }))).toBeNull();
+  });
+
+  it('R.5 repair never exposes content or widens disclosure; the audit event is metadata-only', async () => {
+    const ctx = await makeWorkspace();
+    const body = '# Secret\n\nSENSITIVE PARAGRAPH ONE.\n\nSENSITIVE PARAGRAPH TWO.';
+    const { docId } = await byteExactDoc(ctx, 'r-restricted.md', body, 'restricted');
+    const versionId = (await db().select({ id: documentVersions.id }).from(documentVersions).where(and(eq(documentVersions.documentId, docId), eq(documentVersions.contentFidelity, 'byte_exact'))))[0]!.id;
+    const c0 = await chunkRows(versionId);
+    await db().update(documentChunks).set({ content: 'CORRUPTED' }).where(eq(documentChunks.id, c0[0]!.id));
+    const p = (await tx((t) => previewRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId })))!;
+    const r = (await tx((t) => executeRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId }, p.fingerprint)))!;
+    expect(r.outcome).toBe('repaired');
+    // Neither the preview, the result, nor the append-only event carry source content.
+    expect(JSON.stringify(p) + JSON.stringify(r)).not.toContain('SENSITIVE PARAGRAPH');
+    const evs = await repairEvents(ctx, docId);
+    expect(JSON.stringify(evs)).not.toContain('SENSITIVE PARAGRAPH');
+    // Disclosure was not widened.
+    expect((await db().select({ d: documents.disclosure }).from(documents).where(eq(documents.id, docId)))[0]!.d).toBe('restricted');
+  });
+
+  it('R.6 fail closed — when a faithful rebuild cannot be proven, no source bytes or version identity change', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await corruptibleDoc(ctx, 'r-unprovable.md');
+    const v0 = await versionRow(versionId);
+    // Corrupt the retained OBJECT bytes so the source can no longer be trusted (hash no longer matches).
+    await store.put(v0.objectKey!, Buffer.from('totally different content that will not hash-match', 'utf8'), 'text/markdown');
+    const p = (await tx((t) => previewRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId })))!;
+    expect(p.applicable).toBe(false); // preview refuses — never a best guess
+    // Even a direct execute refuses; the immutable version identity is untouched.
+    const r = (await tx((t) => executeRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId }, p.fingerprint)))!;
+    expect(r.outcome).toBe('refused');
+    const v1 = await versionRow(versionId);
+    expect({ sha: v1.sha256, key: v1.objectKey, fid: v1.contentFidelity }).toEqual({ sha: v0.sha256, key: v0.objectKey, fid: v0.contentFidelity });
+  });
+
+  it('R.7 a completed repair records exactly one append-only evidence event with before/after outcomes', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await corruptibleDoc(ctx, 'r-evidence.md');
+    const p = (await tx((t) => previewRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId })))!;
+    await tx((t) => executeRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId }, p.fingerprint));
+    const evs = await repairEvents(ctx, docId);
+    expect(evs).toHaveLength(1);
+    const d = evs[0]!.detail as Record<string, unknown>;
+    expect(d.type).toBe('rebuild_chunks');
+    expect(d.beforeOutcome).toBe('degraded');
+    expect(d.afterOutcome).toBe('healthy');
+    expect(d.targetedFindingResolved).toBe(true);
   });
 });
