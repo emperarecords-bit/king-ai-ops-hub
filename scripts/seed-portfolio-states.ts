@@ -177,6 +177,14 @@ async function main() {
     const vk = (await db.select({ k: documentVersions.objectKey }).from(documentVersions).where(eq(documentVersions.id, ru.versionId)))[0]?.k;
     if (vk) await store.put(vk, Buffer.from('object bytes that no longer match the recorded hash', 'utf8'), 'text/markdown');
   }
+  { // cleanup-orphan: a HEALTHY document with an extra orphaned storage object under its own key prefix
+    // (a failed-upload leftover referenced by no version/document/tombstone) → the integrity audit surfaces
+    // an orphan_object finding a legacy-object cleanup can safely delete (successful + refused demo fixture).
+    const rel = `${PREFIX}cleanup-orphan.md`;
+    await byteExact(rel, '# Cleanup orphan\n\na healthy source that also has a leftover orphan object');
+    const orphanKey = tenantObjectKey({ orgId: ctx.orgId, projectId: ctx.projectId, sourceId: rel, versionHash: shaOf('__pf-demo orphan leftover from a failed upload') });
+    await store.put(orphanKey, Buffer.from('orphaned bytes left by a failed upload — referenced by nothing', 'utf8'), 'text/markdown');
+  }
   { // lifecycle — document-scoped (archive → restore) AND version-scoped (index degraded) history
     const lc = await byteExact(`${PREFIX}lifecycle-events.md`, '# Lifecycle\n\ndocument with a lifecycle trail');
     await tx((t) => writeAudit(t, ctx, { action: 'document.archived', entityType: 'document', entityId: lc.docId, detail: { source: 'cloud_upload' } }));

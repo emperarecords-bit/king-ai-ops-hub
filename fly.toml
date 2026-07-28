@@ -18,6 +18,10 @@ primary_region = 'iad'
   # Cloud Project Library (O-23). Credentials come from the Tigris attachment
   # (AWS_* secrets); the S3 reader accepts those as a fallback for S3_*.
   STORAGE_DRIVER = 's3'
+  # Legacy-object cleanup quiet period. Shortened on STAGING so the acceptance
+  # demo can exercise both the pre-quiet refusal and the post-quiet deletion
+  # without a long wait; production uses the 15-minute default.
+  CLEANUP_QUIET_MS = '60000'
 
 [processes]
   web = 'node server.js'
