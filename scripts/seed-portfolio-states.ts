@@ -55,6 +55,17 @@ async function main() {
         await db.delete(runDocumentVersions).where(inArray(runDocumentVersions.documentVersionId, verIds));
         await db.delete(knowledgeSources).where(inArray(knowledgeSources.documentVersionId, verIds));
       }
+      // Remove the demo objects from storage too, so `clean` leaves no orphaned storage objects behind. Also
+      // sweep the whole demo key prefix (catches any leftover orphan fixture that no row points at).
+      const objKeys = new Set<string>();
+      for (const d of await db.select({ k: documents.objectKey }).from(documents).where(inArray(documents.id, demoDocIds))) if (d.k) objKeys.add(d.k);
+      if (verIds.length > 0) for (const v of await db.select({ k: documentVersions.objectKey }).from(documentVersions).where(inArray(documentVersions.id, verIds))) if (v.k) objKeys.add(v.k);
+      if (typeof store.list === 'function') {
+        try {
+          for (const key of await store.list(`org/${ctx.orgId}/project/${ctx.projectId}/doc/${PREFIX}`)) objKeys.add(key);
+        } catch { /* listing best-effort */ }
+      }
+      for (const k of objKeys) { try { await store.delete(k); } catch { /* best-effort object cleanup */ } }
     }
     const demoTaskIds = (await db.select({ id: tasks.id }).from(tasks).where(and(eq(tasks.orgId, ctx.orgId), eq(tasks.projectId, ctx.projectId), like(tasks.title, '[pf-demo]%')))).map((t) => t.id);
     if (demoTaskIds.length > 0) {
