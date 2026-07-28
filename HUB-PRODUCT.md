@@ -2239,3 +2239,25 @@ no-silent-restore guarantee by the automated refresh test. Deployed commits: `dd
 operational state (append-only audit history preserved). **Documents Detail increment complete through the
 read-only + safe-lifecycle surface; purge / integrity execution / legacy-object cleanup remain a later
 increment.**
+
+### ★ Documents Integrity — READ-ONLY AUDIT (built 2026-07-27, at gate)
+
+The first of four SEPARATE, independently-gated maintenance capabilities (order: **integrity audit → repair
+→ legacy-object cleanup → purge** — never one general maintenance console). A per-document, READ-ONLY
+structural audit surfaced on Detail. `auditDocument` (`integrity.ts`) mirrors the canonical workspace
+checks scoped to one document (object existence/hash/size, immutable version identity, current-pointer
+validity/ownership/cross-tenant, chunk-manifest agreement, missing/orphaned chunks, duplicate versions,
+unavailable-honesty, knowledge/run reference validity) and returns an HONEST result vocabulary —
+**healthy / degraded / unavailable / partially_verified / audit_failed** — that never collapses "not
+verified" (store unreachable → a limitation) into "failed", never labels an honestly-unavailable,
+reconstructed, or intentionally-archived version as degraded, and keeps current-version health, historical
+inspectability, and reference integrity as SEPARATE dimensions with exact-version attribution. It mutates
+nothing. `runIntegrityAuditAction` (server action, POST/CSRF, admin-only, tenant-scoped) records ONE
+append-only `document.integrity_audited` event on successful completion only. A distinct Detail "Integrity"
+section shows recorded state + Run-audit + findings/limitations/per-version behind progressive disclosure;
+**no repair control appears.** Evidence: 10 audit tests + full suite **787/787**, tsc + build clean;
+authenticated staging acceptance (healthy → Healthy; missing-object → Degraded naming the exact version;
+restricted → Healthy with NO content exposure and preview still gated; no repair control; Integrity section
+distinct from Safe actions). Deployed `a3a5eb3`. Fixtures cleaned to the pre-fixture state (append-only
+audit history preserved). **Next: Repair (bounded, representation-safe), then legacy-object cleanup, then
+purge — each its own gate.**
