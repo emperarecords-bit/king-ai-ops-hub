@@ -4,6 +4,7 @@ import { withTenant } from '@/db/tenant';
 import { getObjectStore } from '@/domain/documents/object-store';
 import { loadDocumentDetail } from '@/domain/documents/detail';
 import { loadInspectableVersion } from '@/domain/documents/viewer-access';
+import { loadLivePurgeOperation } from '@/domain/documents/purge';
 import { Card, PageHeader } from '@/components/ui';
 import {
   AiOperationsSection,
@@ -18,6 +19,7 @@ import {
 import { RevealRestricted } from './reveal-restricted';
 import { DetailLifecycleActions } from './detail-lifecycle-actions';
 import { IntegrityAudit } from './integrity-audit';
+import { PurgeControl } from './purge-control';
 
 // Sensitive per-viewer content: always render fresh + per request, never statically or cross-user cached.
 export const dynamic = 'force-dynamic';
@@ -40,14 +42,17 @@ export default async function DocumentDetailPage({
   // records nothing). Restricted content is NEVER released on GET — not on render, refresh, prefetch, or a
   // shared/replayed URL. Its release is a deliberate POST server action (see RevealRestricted), so a page
   // view can never forge a restricted-inspection record.
-  const { detail, inspection } = await withTenant(ctx, async (tx) => {
+  const { detail, inspection, livePurge } = await withTenant(ctx, async (tx) => {
     const detail = await loadDocumentDetail(tx, ctx, documentId, version);
+    // Admins see any live purge operation (quarantine window / in-progress) for this document.
+    const livePurge = ctx.projectRole === 'admin' ? await loadLivePurgeOperation(tx, ctx, documentId) : null;
     if (!detail.found || detail.restricted || detail.selected.resolution !== 'selected' || !detail.selected.versionId) {
-      return { detail, inspection: null };
+      return { detail, inspection: null, livePurge };
     }
     const inspection = await loadInspectableVersion(tx, ctx, store, { kind: 'versionId', versionId: detail.selected.versionId }, { accessType: 'preview', purpose: 'documents detail preview' });
-    return { detail, inspection };
+    return { detail, inspection, livePurge };
   });
+  const purgeRetentionElapsed = !!livePurge?.retentionUntil && Date.parse(livePurge.retentionUntil) <= Date.now();
 
   const back = (
     <div className="mb-3">
@@ -160,6 +165,13 @@ export default async function DocumentDetailPage({
           <Card title="Safe actions">
             <p className="mb-3 text-xs text-[var(--muted)]">Lifecycle and classification actions. Each is re-checked and audited on the server. Purge, integrity repair, and evidence deletion are not available here.</p>
             <DetailLifecycleActions projectKey={projectKey} documentId={documentId} actions={detail.actions} />
+          </Card>
+        ) : null}
+
+        {ctx.projectRole === 'admin' ? (
+          <Card title="Purge">
+            <p className="mb-3 text-xs text-[var(--muted)]">A deliberate, irreversible removal of this document and its retained representations — separate from the safe actions above. Admin-authorized, one document at a time, with a retention window and a hard block while any evidence relies on it.</p>
+            <PurgeControl projectKey={projectKey} documentId={documentId} live={livePurge} retentionElapsed={purgeRetentionElapsed} />
           </Card>
         ) : null}
       </div>

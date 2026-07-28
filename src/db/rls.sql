@@ -102,9 +102,15 @@ to app_server;
 
 -- Re-index replaces a document's chunks wholesale, so chunks and documents
 -- both need DELETE. The `search` tsvector is generated, never written directly.
+-- document_versions + document_disclosure_grants DELETE is granted for the
+-- admin-authorized document PURGE only (the sole code path that deletes them):
+-- RLS still scopes every delete to the tenant, the run_document_versions RESTRICT
+-- FK blocks deleting a still-referenced version, and the version immutability
+-- trigger still forbids any UPDATE — so content stays immutable; only a fully
+-- reference-cleared, retention-elapsed version can be removed.
 grant delete on
   rate_limit_buckets, integration_secrets, project_context_items,
-  documents, document_chunks, task_dependencies, run_jobs, document_jobs
+  documents, document_chunks, document_versions, document_disclosure_grants, task_dependencies, run_jobs, document_jobs
 to app_server;
 
 -- Append-only tables: INSERT and SELECT only. No UPDATE grant at all.

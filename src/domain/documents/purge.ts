@@ -164,6 +164,34 @@ export async function assessDocumentPurge(tx: DbTx, ctx: TenantContext, document
   return { documentId, decision, blockers, scope, fingerprint: purgeFingerprint(scope) };
 }
 
+export interface LivePurgeOperation {
+  operationId: string;
+  status: PurgeOpStatus;
+  retentionUntil: string | null;
+  reason: string | null;
+  scope: { versions: number; chunks: number; disclosureGrants: number; jobs: number; objects: number };
+}
+
+/** The current non-terminal purge operation for a document (for the detail UI), or null. Read-only. */
+export async function loadLivePurgeOperation(tx: DbTx, ctx: TenantContext, documentId: string): Promise<LivePurgeOperation | null> {
+  const op = (
+    await tx
+      .select({ id: documentPurgeOperations.id, status: documentPurgeOperations.status, retentionUntil: documentPurgeOperations.retentionUntil, reason: documentPurgeOperations.reason, scope: documentPurgeOperations.scope })
+      .from(documentPurgeOperations)
+      .where(and(eq(documentPurgeOperations.orgId, ctx.orgId), eq(documentPurgeOperations.projectId, ctx.projectId), eq(documentPurgeOperations.documentId, documentId), inArray(documentPurgeOperations.status, ['proposed', 'quarantined', 'database_purged', 'object_cleanup_pending'])))
+      .limit(1)
+  )[0];
+  if (!op) return null;
+  const s = (op.scope as unknown as PurgeScope | null);
+  return {
+    operationId: op.id,
+    status: op.status as PurgeOpStatus,
+    retentionUntil: op.retentionUntil ? op.retentionUntil.toISOString() : null,
+    reason: op.reason,
+    scope: { versions: s?.versions.length ?? 0, chunks: s?.chunkCount ?? 0, disclosureGrants: s?.disclosureGrantCount ?? 0, jobs: s?.jobCount ?? 0, objects: s?.objectKeys.length ?? 0 },
+  };
+}
+
 export interface PurgeProposalResult {
   assessment: DocumentPurgeAssessment;
   operationId: string | null;
