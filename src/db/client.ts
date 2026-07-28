@@ -45,6 +45,36 @@ export function getDb(): Db {
   return cachedDb;
 }
 
+declare global {
+  var __kingPurgePool: ReturnType<typeof postgres> | undefined;
+}
+let cachedPurgeDb: Db | null = null;
+
+/** Connection string for the least-privilege `purge_agent` role — the ONLY role that may delete immutable
+ *  version rows, and only through the document-purge lifecycle. Uses PURGE_DATABASE_URL if set, otherwise
+ *  derives from DATABASE_URL by swapping the role/credentials (same host/database, different role). */
+function purgeConnectionString(): string {
+  if (process.env.PURGE_DATABASE_URL) return process.env.PURGE_DATABASE_URL;
+  const base = process.env.DATABASE_URL;
+  if (!base) throw new Error('DATABASE_URL is not set.');
+  const url = new URL(base);
+  url.username = 'purge_agent';
+  url.password = process.env.PURGE_AGENT_PASSWORD ?? 'purge_agent_dev_only';
+  return url.toString();
+}
+
+/** A handle bound to the `purge_agent` role, for the document-purge execution path ONLY. Kept separate from
+ *  getDb() (app_server) so ordinary application code can never delete an immutable version. Still RLS-scoped. */
+export function getPurgeDb(): Db {
+  if (!cachedPurgeDb) {
+    if (!globalThis.__kingPurgePool) {
+      globalThis.__kingPurgePool = postgres(purgeConnectionString(), { max: 3, idle_timeout: 30, connect_timeout: 10, prepare: false });
+    }
+    cachedPurgeDb = drizzle(globalThis.__kingPurgePool, { schema });
+  }
+  return cachedPurgeDb;
+}
+
 /**
  * A MIGRATION-role handle, for tests and deploy scripts ONLY (O-22). The
  * running app must never call this — it exists so test FIXTURES and admin peeks

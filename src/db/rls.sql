@@ -102,21 +102,57 @@ to app_server;
 
 -- Re-index replaces a document's chunks wholesale, so chunks and documents
 -- both need DELETE. The `search` tsvector is generated, never written directly.
--- document_versions + document_disclosure_grants DELETE is granted for the
--- admin-authorized document PURGE only (the sole code path that deletes them):
--- RLS still scopes every delete to the tenant, the run_document_versions RESTRICT
--- FK blocks deleting a still-referenced version, and the version immutability
--- trigger still forbids any UPDATE — so content stays immutable; only a fully
--- reference-cleared, retention-elapsed version can be removed.
+-- app_server deliberately has NO delete on document_versions or
+-- document_disclosure_grants: immutable version rows (and their disclosure grants)
+-- may be removed ONLY through the admin-authorized document PURGE, which runs as a
+-- dedicated least-privilege `purge_agent` role on a separate connection (below).
 grant delete on
   rate_limit_buckets, integration_secrets, project_context_items,
-  documents, document_chunks, document_versions, document_disclosure_grants, task_dependencies, run_jobs, document_jobs
+  documents, document_chunks, task_dependencies, run_jobs, document_jobs
 to app_server;
+-- Belt: revoke any previously-granted delete on immutable version rows from app_server. Purge is the ONLY
+-- deletion path for these, and it runs as purge_agent (below) — app_server must never delete them directly.
+revoke delete on document_versions, document_disclosure_grants from app_server;
 
 -- Append-only tables: INSERT and SELECT only. No UPDATE grant at all.
 grant select, insert on messages, audit_logs to app_server;
 
 grant usage on all sequences in schema public to app_server;
+
+-- purge_agent (O-23 document purge) -----------------------------------------
+-- A dedicated least-privilege role for the DATABASE-authoritative document purge
+-- ONLY. It is NOSUPERUSER + NOBYPASSRLS (every statement is still tenant-scoped by
+-- the same RLS policies), has NO schema/role/DDL rights, and — critically — is
+-- NOT granted to app_server, so ordinary application code (which connects as
+-- app_server) can never assume it. The purge execution path uses a SEPARATE
+-- connection as this role; app_server has no delete on immutable version rows, so
+-- a version can only be deleted through the admin-authorized, quarantined,
+-- retention-elapsed, exact-state-verified purge lifecycle that runs here.
+do $$
+begin
+  if not exists (select 1 from pg_roles where rolname = 'purge_agent') then
+    create role purge_agent login password 'purge_agent_dev_only' nosuperuser nobypassrls;
+  end if;
+  alter role purge_agent nosuperuser nobypassrls nocreatedb nocreaterole;
+end
+$$;
+
+grant usage on schema public to purge_agent;
+grant usage on schema app to purge_agent;
+grant execute on function app.current_user_id(), app.current_org_id(), app.current_project_id() to purge_agent;
+-- Reads for the final reference-closure + exact-state re-checks inside the purge txn.
+grant select on
+  documents, document_versions, document_chunks, document_disclosure_grants, document_jobs,
+  document_version_tombstones, document_purge_operations, knowledge_sources, run_document_versions, runs, object_cleanup_operations
+to purge_agent;
+-- The exact writes the purge lifecycle performs — and nothing else.
+grant insert on document_version_tombstones to purge_agent;
+grant select, insert on audit_logs to purge_agent; -- append-only (trigger forbids update/delete for every role); SELECT for the hash-chain head
+grant update on document_purge_operations, document_version_tombstones to purge_agent;
+grant delete on
+  document_chunks, document_jobs, document_disclosure_grants, document_versions, documents
+to purge_agent;
+grant usage on all sequences in schema public to purge_agent;
 
 -- app_system owns the dispatch functions and touches only the queue + the
 -- identity columns those functions read. It has BYPASSRLS, so it still needs

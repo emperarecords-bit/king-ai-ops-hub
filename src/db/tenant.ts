@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { type TenantContext } from '@/types/domain';
-import { getDb, type DbTx } from './client';
+import { getDb, getPurgeDb, type DbTx } from './client';
 import {
   invalidTenantFields,
   isRlsViolation,
@@ -47,6 +47,34 @@ export async function withTenant<T>(
   try {
     return await db.transaction(async (tx) => {
       // Parameterized; set_config is SQL-injection-safe with bound values.
+      await tx.execute(sql`
+        select
+          set_config('app.user_id', ${ctx.userId}, true),
+          set_config('app.org_id', ${ctx.orgId}, true),
+          set_config('app.project_id', ${ctx.projectId}, true)
+      `);
+      return fn(tx);
+    });
+  } catch (err) {
+    if (isRlsViolation(err)) logRlsRejection('withTenant', ctx, err);
+    throw err;
+  }
+}
+
+/**
+ * The tenant boundary for the DOCUMENT PURGE execution path — identical to withTenant (same transaction-local
+ * GUCs, same RLS enforcement) except it runs on the dedicated least-privilege `purge_agent` connection, the
+ * only role permitted to delete immutable version rows. Used ONLY by the purge execute action; ordinary
+ * application code uses withTenant (app_server), which cannot delete versions.
+ */
+export async function withPurgeTenant<T>(
+  ctx: TenantContext,
+  fn: (tx: DbTx) => Promise<T>,
+): Promise<T> {
+  assertIdentifiers('withTenant', { userId: ctx.userId, orgId: ctx.orgId, projectId: ctx.projectId });
+  const db = getPurgeDb();
+  try {
+    return await db.transaction(async (tx) => {
       await tx.execute(sql`
         select
           set_config('app.user_id', ${ctx.userId}, true),

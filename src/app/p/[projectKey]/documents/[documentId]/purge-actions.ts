@@ -3,7 +3,7 @@
 import { AppError, toPublicMessage } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { requireTenant } from '@/domain/auth/guard';
-import { withTenant } from '@/db/tenant';
+import { withPurgeTenant, withTenant } from '@/db/tenant';
 import { getObjectStore } from '@/domain/documents/object-store';
 import { type DocumentPurgeAssessment, type DocumentPurgeResult, assessDocumentPurge, authorizeDocumentPurge, cancelDocumentPurge, executeDocumentPurge, proposeDocumentPurge } from '@/domain/documents/purge';
 import { revalidatePath } from 'next/cache';
@@ -114,7 +114,9 @@ export async function executeDocumentPurgeAction(_prev: PurgeActionState, formDa
     const ctx = await admin(projectKey);
     if (!operationId) return { assessment: null, operationId: null, result: null, message: null, error: 'Authorize the purge before executing it.' };
     const store = await getObjectStore();
-    const result = await executeDocumentPurge((fn) => withTenant(ctx, fn), ctx, store, operationId);
+    // The DB-authoritative purge runs on the least-privilege purge_agent connection (the only role that may
+    // delete immutable version rows); still RLS-scoped, still one transaction per phase.
+    const result = await executeDocumentPurge((fn) => withPurgeTenant(ctx, fn), ctx, store, operationId);
     revalidatePath(`/p/${projectKey}/documents/${documentId}`);
     return { assessment: null, operationId, result, message: null, error: null };
   } catch (err) {

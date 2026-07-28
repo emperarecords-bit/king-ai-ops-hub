@@ -3,6 +3,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { and, eq, sql } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
+import * as schema from '@/db/schema';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
 import { type RunSourceSnapshot, type TenantContext } from '@/types/domain';
@@ -31,6 +34,46 @@ let store: LocalObjectStore;
 let orgId = '';
 let userId = '';
 const db = () => getSetupDb();
+
+// Role-scoped connections for the privilege-boundary tests (least-privilege purge_agent vs. app_server).
+function urlAs(role: string, password: string): string {
+  const u = new URL(process.env.DATABASE_URL!);
+  u.username = role;
+  u.password = password;
+  return u.toString();
+}
+let purgePool: ReturnType<typeof postgres> | null = null;
+let appPool: ReturnType<typeof postgres> | null = null;
+let purgeDrizzle: ReturnType<typeof drizzle<typeof schema>> | null = null;
+let appDrizzle: ReturnType<typeof drizzle<typeof schema>> | null = null;
+const setGucs = (t: DbTx, ctx: TenantContext) => t.execute(sql`select set_config('app.user_id', ${ctx.userId}, true), set_config('app.org_id', ${ctx.orgId}, true), set_config('app.project_id', ${ctx.projectId}, true)`);
+/** A purge-execution runner on the real purge_agent connection (the production path), with optional
+ *  fault injection at a specific table/operation to prove atomic rollback of the DB-authoritative phase. */
+function purgeRun(ctx: TenantContext, inject?: { table: unknown; op: 'insert' | 'delete' | 'update'; occ?: number }) {
+  let first = true;
+  return <T>(fn: (t: DbTx) => Promise<T>): Promise<T> => purgeDrizzle!.transaction(async (t) => {
+    await setGucs(t as unknown as DbTx, ctx);
+    let tx = t as unknown as DbTx;
+    if (inject && first) {
+      first = false;
+      let count = 0;
+      tx = new Proxy(t as object, {
+        get(target, prop, recv) {
+          if (prop === inject.op) {
+            const method = Reflect.get(target, inject.op) as (t: unknown) => unknown;
+            return (tbl: unknown) => {
+              if (tbl === inject.table) { count += 1; if (count >= (inject.occ ?? 1)) throw new Error('injected DB-phase fault'); }
+              return method.call(target, tbl);
+            };
+          }
+          const v = Reflect.get(target, prop, recv);
+          return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        },
+      }) as unknown as DbTx;
+    }
+    return fn(tx);
+  });
+}
 const shaOf = (s: string) => createHash('sha256').update(Buffer.from(s, 'utf8')).digest('hex');
 const tx = <T>(fn: (t: DbTx) => Promise<T>): Promise<T> => db().transaction((t) => fn(t as unknown as DbTx));
 const runTx = <T>(fn: (t: DbTx) => Promise<T>): Promise<T> => db().transaction((t) => fn(t as unknown as DbTx));
@@ -125,8 +168,15 @@ beforeAll(async () => {
   const org = await db().insert(organizations).values({ name: 'PG Org', slug: `pg-${randomUUID().slice(0, 8)}` }).returning({ id: organizations.id });
   orgId = org[0]!.id;
   await db().insert(memberships).values({ orgId, userId, role: 'owner' });
+  // Connect as the two runtime roles for the privilege-boundary tests.
+  purgePool = postgres(urlAs('purge_agent', process.env.PURGE_AGENT_PASSWORD ?? 'purge_agent_dev_only'), { max: 3, prepare: false });
+  appPool = postgres(urlAs('app_server', process.env.APP_SERVER_PASSWORD ?? 'app_server_dev_only'), { max: 3, prepare: false });
+  purgeDrizzle = drizzle(purgePool, { schema });
+  appDrizzle = drizzle(appPool, { schema });
 });
 afterAll(async () => {
+  if (purgePool) await purgePool.end();
+  if (appPool) await appPool.end();
   if (available && orgId) {
     await db().execute(sql`alter table audit_logs disable trigger audit_logs_append_only`);
     await db().execute(sql`delete from audit_logs where org_id = ${orgId}`);
@@ -416,5 +466,103 @@ describe.skipIf(!available)('Documents Purge — staged, admin-authorized, refer
     expect(JSON.stringify(events)).not.toContain('SENSITIVE');
     expect(JSON.stringify(tombs)).not.toContain('SENSITIVE');
     expect(tombs.length).toBe(1);
+  });
+});
+
+describe.skipIf(!available)('Documents Purge — privilege boundary + DB-phase atomicity', () => {
+  const versionsOf = (docId: string) => db().select({ id: documentVersions.id }).from(documentVersions).where(eq(documentVersions.documentId, docId));
+  const chunksOf = (docId: string) => db().select({ id: documentChunks.id }).from(documentChunks).where(eq(documentChunks.documentId, docId));
+  const grantsOf = (docId: string) => db().select({ id: documentDisclosureGrants.id }).from(documentDisclosureGrants).where(eq(documentDisclosureGrants.documentId, docId));
+  const tombsOf = (docId: string) => db().select({ id: documentVersionTombstones.id }).from(documentVersionTombstones).where(eq(documentVersionTombstones.documentId, docId));
+  const purgeSuccessEvents = (ctx: TenantContext, docId: string) =>
+    db().select({ action: auditLogs.action }).from(auditLogs).where(and(eq(auditLogs.projectId, ctx.projectId), eq(auditLogs.entityId, docId), eq(auditLogs.action, 'document.purged')));
+
+  it('PR.1 app_server is DENIED a direct DELETE of an immutable version (ordinary code cannot delete one)', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await byteExactDoc(ctx, 'pr1.md', 'immutable body');
+    let err: unknown;
+    try {
+      await appDrizzle!.transaction(async (t) => {
+        await setGucs(t as unknown as DbTx, ctx);
+        return (t as unknown as DbTx).delete(documentVersions).where(eq(documentVersions.id, versionId));
+      });
+    } catch (e) {
+      err = e;
+    }
+    // Postgres refuses the delete for lack of privilege (drizzle wraps the pg error on `.cause`).
+    const message = `${(err as { cause?: { message?: string } })?.cause?.message ?? ''} ${(err as Error)?.message ?? ''}`;
+    expect(message).toMatch(/permission denied/i);
+    expect((await versionsOf(docId)).length).toBe(1); // the version is untouched
+  });
+
+  it('PR.2 the purge_agent path executes an authorized purge end-to-end (production execution path)', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionKey } = await byteExactDoc(ctx, 'pr2.md', 'purge via purge_agent');
+    const p = (await tx((t) => proposeDocumentPurge(t, ctx, docId)))!;
+    await tx((t) => authorizeDocumentPurge(t, ctx, p.operationId!, { retentionMs: 0 }));
+    const r = await executeDocumentPurge(purgeRun(ctx), ctx, store, p.operationId!);
+    expect(r.outcome).toBe('completed');
+    expect(await docRow(docId)).toBeUndefined();
+    expect((await versionsOf(docId)).length).toBe(0);
+    expect(await store.head(versionKey)).toBeNull();
+  });
+
+  it('PR.3 the purge_agent path still enforces the domain boundary — a not-retention-elapsed op is refused', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'pr3.md', 'body');
+    const p = (await tx((t) => proposeDocumentPurge(t, ctx, docId)))!;
+    await tx((t) => authorizeDocumentPurge(t, ctx, p.operationId!, { retentionMs: 60_000 }));
+    const r = await executeDocumentPurge(purgeRun(ctx), ctx, store, p.operationId!);
+    expect(r.outcome).toBe('refused_retention_not_elapsed');
+    expect(await docRow(docId)).toBeDefined();
+  });
+
+  it('PR.4 purge_agent cannot mutate rows outside the tenant — a cross-workspace version delete affects nothing', async () => {
+    const a = await makeWorkspace();
+    const b = await makeWorkspace();
+    const other = await byteExactDoc(b, 'pr4.md', "b's body");
+    // As purge_agent scoped to workspace A, deleting B's version is filtered out by RLS (0 rows), never an error.
+    const res = await purgeDrizzle!.transaction(async (t) => {
+      await setGucs(t as unknown as DbTx, a);
+      return (t as unknown as DbTx).delete(documentVersions).where(eq(documentVersions.id, other.versionId)).returning({ id: documentVersions.id });
+    });
+    expect(res.length).toBe(0);
+    expect((await versionsOf(other.docId)).length).toBe(1); // B's version is intact
+  });
+
+  // ---- DB-authoritative phase atomicity: a throw at ANY point before commit retains NONE of the mutations. ----
+  async function atomicityCase(rel: string, inject: { table: unknown; op: 'insert' | 'delete' }) {
+    const ctx = await makeWorkspace();
+    const { docId, versionKey } = await byteExactDoc(ctx, rel, 'atomic purge body');
+    await addDisclosureGrant(ctx, docId);
+    const before = { versions: (await versionsOf(docId)).length, chunks: (await chunksOf(docId)).length, grants: (await grantsOf(docId)).length };
+    const p = (await tx((t) => proposeDocumentPurge(t, ctx, docId)))!;
+    await tx((t) => authorizeDocumentPurge(t, ctx, p.operationId!, { retentionMs: 0 }));
+    // Inject a fault inside the privileged DB-phase transaction.
+    await expect(executeDocumentPurge(purgeRun(ctx, inject), ctx, store, p.operationId!)).rejects.toThrow('injected DB-phase fault');
+    // NOTHING was deleted; NO tombstone, NO database_purged/success event; the document stays quarantined + recoverable.
+    expect(await docRow(docId)).toBeDefined();
+    expect((await versionsOf(docId)).length).toBe(before.versions);
+    expect((await chunksOf(docId)).length).toBe(before.chunks);
+    expect((await grantsOf(docId)).length).toBe(before.grants);
+    expect((await tombsOf(docId)).length).toBe(0);
+    expect((await purgeSuccessEvents(ctx, docId)).length).toBe(0);
+    expect((await opRow(p.operationId!)).status).toBe('quarantined');
+    expect(await store.head(versionKey)).not.toBeNull();
+    // The operation remains retryable — a clean re-execute completes normally.
+    const retry = await executeDocumentPurge(purgeRun(ctx), ctx, store, p.operationId!);
+    expect(retry.outcome).toBe('completed');
+    expect(await docRow(docId)).toBeUndefined();
+    expect(await store.head(versionKey)).toBeNull();
+  }
+
+  it('ATOM.A DB-phase failure BEFORE the first destructive mutation → full rollback, retryable', async () => {
+    await atomicityCase('atom-a.md', { table: documentVersionTombstones, op: 'insert' }); // throws at the first tombstone insert
+  });
+  it('ATOM.B DB-phase failure PART-WAY through table removal → every earlier deletion rolls back', async () => {
+    await atomicityCase('atom-b.md', { table: documentVersions, op: 'delete' }); // after chunks/jobs/grants deleted
+  });
+  it('ATOM.C DB-phase failure AFTER tombstone insertion, before document deletion → tombstones roll back too', async () => {
+    await atomicityCase('atom-c.md', { table: documents, op: 'delete' }); // tombstones + version deletes all revert
   });
 });
