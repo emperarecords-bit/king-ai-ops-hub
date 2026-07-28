@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
 import { type KnowledgeDisclosure, type TenantContext } from '@/types/domain';
 import { type DbTx, getSetupDb } from '@/db/client';
-import { agents, documentChunks, documentVersionTombstones, documentVersions, documents, knowledgeItems, knowledgeSources, knowledgeVerificationEvents, memberships, organizations, profiles, projectMembers, projects, runDocumentVersions, runSteps, runs, tasks } from '@/db/schema';
+import { agents, auditLogs, documentChunks, documentVersionTombstones, documentVersions, documents, knowledgeItems, knowledgeSources, knowledgeVerificationEvents, memberships, organizations, profiles, projectMembers, projects, runDocumentVersions, runSteps, runs, tasks } from '@/db/schema';
 import { archiveDocument, chunkText, declassifyDocument, restoreDocument, restrictDocument } from '@/domain/documents/documents';
 import { indexCloudDocument, replaceDocument, retryDocument } from '@/domain/documents/cloud';
 import { backfillProject } from '@/domain/documents/backfill';
@@ -971,10 +971,8 @@ describe.skipIf(!available)('Documents Repair — bounded, representation-safe',
   const tx = <T,>(fn: (t: DbTx) => Promise<T>) => db().transaction((t) => fn(t as unknown as DbTx));
   const versionRow = async (versionId: string) => (await db().select().from(documentVersions).where(eq(documentVersions.id, versionId)))[0]!;
   const chunkRows = (versionId: string) => db().select().from(documentChunks).where(eq(documentChunks.documentVersionId, versionId)).orderBy(documentChunks.chunkIndex);
-  const repairEvents = async (ctx: TenantContext, docId: string) => {
-    const { auditLogs } = await import('@/db/schema');
-    return db().select({ detail: auditLogs.detail }).from(auditLogs).where(and(eq(auditLogs.projectId, ctx.projectId), eq(auditLogs.entityId, docId), eq(auditLogs.action, 'document.repair_executed')));
-  };
+  const repairEvents = (ctx: TenantContext, docId: string) =>
+    db().select({ detail: auditLogs.detail }).from(auditLogs).where(and(eq(auditLogs.projectId, ctx.projectId), eq(auditLogs.entityId, docId), eq(auditLogs.action, 'document.repair_executed')));
   /** A byte-exact doc with one chunk's TEXT corrupted (manifest hash intact) → a repairable finding. */
   async function corruptibleDoc(ctx: TenantContext, rel: string) {
     const body = '# Title\n\nfirst paragraph here.\n\nsecond paragraph body.';
@@ -1093,8 +1091,119 @@ describe.skipIf(!available)('Documents Repair — bounded, representation-safe',
     expect(d.afterOutcome).toBe('healthy');
     expect(d.targetedFindingResolved).toBe(true);
     // ONE logical success record — the nested chunk-restore audit is suppressed (no duplicate event).
-    const { auditLogs } = await import('@/db/schema');
     const nested = await db().select({ id: auditLogs.id }).from(auditLogs).where(and(eq(auditLogs.projectId, ctx.projectId), eq(auditLogs.entityId, docId), eq(auditLogs.action, 'document.version_chunks_restored')));
     expect(nested).toHaveLength(0);
+  });
+
+  // --- Atomicity / partial-failure fault injection -------------------------------------------------
+  // executeRepair applies every chunk mutation AND writes the single canonical repair event on the
+  // caller's transaction (`tx`). The server action wraps that call in one `withTenant` transaction, so
+  // a throw at any point after the mutation begins rolls back the whole unit — no partial chunk state,
+  // and no success event, can survive. These two tests inject a real failure to prove that.
+
+  /** Wraps a tx so the canonical repair-event insert (writeAudit → insert(auditLogs)) throws — i.e. a
+   *  failure AFTER the chunk mutation has been applied in-tx but before the repair completes/commits. */
+  function failOnRepairEventInsert(t: DbTx): DbTx {
+    return new Proxy(t as object, {
+      get(target, prop, receiver) {
+        if (prop === 'insert') {
+          return (table: unknown) => {
+            if (table === auditLogs) return { values: () => Promise.reject(new Error('injected failure: canonical repair-event insert')) };
+            return (target as DbTx).insert(table as never);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as unknown as DbTx;
+  }
+
+  /** Wraps a tx so the Nth chunk-content UPDATE throws — i.e. a failure part-way through applying the
+   *  multi-chunk mutation, after at least one chunk update has already run in-tx. */
+  function failOnNthChunkUpdate(t: DbTx, n: number): DbTx {
+    let count = 0;
+    return new Proxy(t as object, {
+      get(target, prop, receiver) {
+        if (prop === 'update') {
+          return (table: unknown) => {
+            if (table === documentChunks) {
+              count += 1;
+              if (count === n) {
+                const bad = { set: () => bad, where: () => Promise.reject(new Error('injected failure: mid chunk-update loop')) };
+                return bad;
+              }
+            }
+            return (target as DbTx).update(table as never);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as unknown as DbTx;
+  }
+
+  /** A byte-exact doc whose version holds MULTIPLE chunks, all of them TEXT-corrupted (hashes intact). */
+  async function multiChunkCorruptibleDoc(ctx: TenantContext, rel: string) {
+    const para = (c: string) => c.repeat(1_200); // each paragraph > CHUNK_TARGET_CHARS/… packs 1-per-chunk
+    const body = `${para('a')}\n\n${para('b')}\n\n${para('c')}`;
+    const { docId, versionId } = await byteExactDoc(ctx, rel, body);
+    const cs = await chunkRows(versionId);
+    expect(cs.length).toBeGreaterThanOrEqual(3); // guard: the fixture really is multi-chunk
+    for (let i = 0; i < cs.length; i += 1) {
+      await db().update(documentChunks).set({ content: `CORRUPTED-${i}` }).where(eq(documentChunks.id, cs[i]!.id));
+    }
+    return { docId, versionId, corrupted: await chunkRows(versionId) };
+  }
+
+  it('R.8 fault AFTER chunk mutation, before completion → chunk mutation rolls back; NO success event; a later audit reports the original finding honestly', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId, originalContent } = await corruptibleDoc(ctx, 'r-atomic-1.md');
+    const corruptedBaseline = await chunkRows(versionId);
+    const preview = (await tx((t) => previewRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId })))!;
+    expect(preview.expectation).toBe('would_repair'); // absent the fault, this WOULD have repaired
+
+    // Inject a failure at the canonical repair-event insert — the chunk mutation has already been applied
+    // in the same transaction at this point. The transaction must roll everything back on the throw.
+    await expect(
+      tx((t) => executeRepair(failOnRepairEventInsert(t), ctx, store, docId, { type: 'rebuild_chunks', versionId }, preview.fingerprint)),
+    ).rejects.toThrow('injected failure: canonical repair-event insert');
+
+    // (a) The chunk mutation was rolled back — the document/version retain their original (corrupted) state.
+    const afterChunks = await chunkRows(versionId);
+    expect(afterChunks).toEqual(corruptedBaseline);
+    expect(afterChunks[0]!.content).toBe('CORRUPTED TEXT');
+    expect(afterChunks[0]!.content).not.toBe(originalContent); // the repair did NOT partially land
+    // (b) NO successful repair event survived the rollback — and no nested chunk-restore event either.
+    expect(await repairEvents(ctx, docId)).toHaveLength(0);
+    const restored = await db().select({ id: auditLogs.id }).from(auditLogs).where(and(eq(auditLogs.projectId, ctx.projectId), eq(auditLogs.entityId, docId), eq(auditLogs.action, 'document.version_chunks_restored')));
+    expect(restored).toHaveLength(0);
+    // (c) A subsequent integrity audit still reports the ORIGINAL finding honestly (degraded, hash mismatch).
+    const audit = (await tx((t) => auditDocument(t, ctx, store, docId)))!;
+    expect(audit.outcome).toBe('degraded');
+    expect(audit.findings.some((f) => f.category === 'chunk_content_hash_mismatch')).toBe(true);
+  });
+
+  it('R.9 fault PART-WAY through a multi-chunk mutation → all-or-none; no mixed partial chunk state; NO success event', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId, corrupted } = await multiChunkCorruptibleDoc(ctx, 'r-atomic-2.md');
+    const preview = (await tx((t) => previewRepair(t, ctx, store, docId, { type: 'rebuild_chunks', versionId })))!;
+    expect(preview.expectation).toBe('would_repair');
+
+    // Inject a failure on the SECOND chunk update — the first chunk update has already run in-tx by then.
+    await expect(
+      tx((t) => executeRepair(failOnNthChunkUpdate(t, 2), ctx, store, docId, { type: 'rebuild_chunks', versionId }, preview.fingerprint)),
+    ).rejects.toThrow('injected failure: mid chunk-update loop');
+
+    // All-or-none: not one of the chunks changed — no mixed/partially-repaired state is ever visible.
+    const afterChunks = await chunkRows(versionId);
+    expect(afterChunks).toEqual(corrupted);
+    for (let i = 0; i < afterChunks.length; i += 1) expect(afterChunks[i]!.content).toBe(`CORRUPTED-${i}`);
+    // Version identity is untouched and no success event was recorded.
+    expect(await repairEvents(ctx, docId)).toHaveLength(0);
+    const restored = await db().select({ id: auditLogs.id }).from(auditLogs).where(and(eq(auditLogs.projectId, ctx.projectId), eq(auditLogs.entityId, docId), eq(auditLogs.action, 'document.version_chunks_restored')));
+    expect(restored).toHaveLength(0);
+    // The finding is still reported honestly after the rolled-back attempt.
+    const audit = (await tx((t) => auditDocument(t, ctx, store, docId)))!;
+    expect(audit.outcome).toBe('degraded');
   });
 });
