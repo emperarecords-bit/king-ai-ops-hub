@@ -157,6 +157,12 @@ async function main() {
     const g = await byteExact(`${PREFIX}integrity-degraded.md`, '# Degraded\n\ndegraded index body');
     await tx((t) => markIndexDegraded(t, ctx, g.versionId, 'demo: faithful rebuild could not be proven'));
   }
+  { // integrity: a genuinely MISSING retained object → the read-only audit reports "degraded" for this
+    // exact version (a deliberate corruption fixture for Integrity acceptance; content is intact elsewhere).
+    const mo = await byteExact(`${PREFIX}integrity-missing-object.md`, '# Missing object\n\nbody whose retained object is removed');
+    const vk = (await db.select({ k: documentVersions.objectKey }).from(documentVersions).where(eq(documentVersions.id, mo.versionId)))[0]?.k;
+    if (vk) await store.delete(vk);
+  }
   { // lifecycle — document-scoped (archive → restore) AND version-scoped (index degraded) history
     const lc = await byteExact(`${PREFIX}lifecycle-events.md`, '# Lifecycle\n\ndocument with a lifecycle trail');
     await tx((t) => writeAudit(t, ctx, { action: 'document.archived', entityType: 'document', entityId: lc.docId, detail: { source: 'cloud_upload' } }));

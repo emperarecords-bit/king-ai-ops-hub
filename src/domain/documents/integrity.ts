@@ -6,7 +6,7 @@ import { AppError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { documentChunks, documentVersions, documents, knowledgeSources, runDocumentVersions, runs } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
-import { type ObjectStore, keyBelongsToTenant } from './object-store';
+import { type ObjectStore, ObjectNotFoundError, keyBelongsToTenant } from './object-store';
 import { chunkText } from './documents';
 
 /**
@@ -200,6 +200,235 @@ export async function auditDocumentIntegrity(tx: DbTx, ctx: TenantContext, store
   }
 
   return { projectId: ctx.projectId, byCategory, findings, versionsScanned: versions.length, objectsScanned };
+}
+
+// ---- Document-scoped, READ-ONLY integrity audit (Integrity increment) ---------------------------
+//
+// A per-document observational audit that answers "is THIS source structurally healthy, and can its
+// current + historical versions still be trusted/inspected?" WITHOUT changing the answer. It runs the same
+// canonical checks as the workspace audit above, scoped to one document, and adds honest result vocabulary:
+//   - "not verified" (store unreachable) is NEVER collapsed into "failed integrity";
+//   - a version honestly recorded `unavailable`, a `reconstructed_text` version, or an intentionally
+//     archived document is NEVER labelled degraded merely for being what it is;
+//   - current-version health, historical-version inspectability, and reference integrity stay separate.
+// This function mutates NOTHING (no repair, no rechunk, no pointer/fidelity/disclosure change).
+
+export type DocIntegrityOutcome = 'healthy' | 'degraded' | 'unavailable' | 'partially_verified' | 'audit_failed';
+export type FindingSeverity = 'high' | 'medium' | 'low' | 'info';
+export type FindingAffects = 'current' | 'historical' | 'both' | 'reference' | 'none';
+
+export interface DocIntegrityFinding {
+  category: IntegrityCategory;
+  severity: FindingSeverity;
+  documentId?: string;
+  versionId?: string;
+  /** Operator-readable explanation. */
+  explanation: string;
+  /** Progressive-disclosure technical detail. */
+  technicalDetail: string;
+  affects: FindingAffects;
+  /** Whether a later Repair increment could address this (never performed here). */
+  repairPossibleLater: boolean;
+}
+
+export type LimitationReason = 'object_store_inaccessible' | 'source_bytes_unavailable' | 'unsupported_adapter' | 'missing_historical_evidence' | 'always_unavailable_version';
+
+export interface DocIntegrityLimitation {
+  reason: LimitationReason;
+  versionId?: string;
+  detail: string;
+}
+
+/** Per-version verification state — kept distinct so honest states are never mistaken for corruption. */
+export type VersionIntegrityState = 'verified' | 'hash_mismatch' | 'object_missing' | 'unverifiable' | 'reconstructed' | 'unavailable' | 'not_indexed';
+
+export interface DocVersionIntegrity {
+  versionId: string;
+  isCurrent: boolean;
+  fidelity: string;
+  indexStatus: string;
+  state: VersionIntegrityState;
+}
+
+export interface DocumentIntegrityAudit {
+  documentId: string;
+  outcome: DocIntegrityOutcome;
+  findings: DocIntegrityFinding[];
+  limitations: DocIntegrityLimitation[];
+  versions: DocVersionIntegrity[];
+  versionsScanned: number;
+  checksApplied: string[];
+  /** Separated health dimensions (never one badge). */
+  currentVersionId: string | null;
+  currentVersionState: VersionIntegrityState | 'none';
+  /** True when the source is intentionally archived (structural health is reported, retrieval exclusion is not a defect). */
+  archived: boolean;
+}
+
+const CHECKS_APPLIED = [
+  'object_existence', 'object_hash_agreement', 'stored_size_agreement', 'immutable_version_identity',
+  'current_pointer_validity', 'version_to_document_ownership', 'chunk_manifest_agreement', 'missing_chunks',
+  'orphaned_version_chunks', 'duplicate_current_version_state', 'version_reference_validity',
+  'unavailable_version_honesty', 'source_ingestion_lineage',
+];
+
+/**
+ * Run the read-only integrity audit for ONE document. Returns null when the document is not in this
+ * workspace (existence-neutral for the caller). Never mutates anything.
+ */
+export async function auditDocument(tx: DbTx, ctx: TenantContext, store: ObjectStore, documentId: string): Promise<DocumentIntegrityAudit | null> {
+  const doc = (
+    await tx
+      .select({ id: documents.id, status: documents.status, currentVersionId: documents.currentVersionId, source: documents.source })
+      .from(documents)
+      .where(and(eq(documents.id, documentId), eq(documents.orgId, ctx.orgId), eq(documents.projectId, ctx.projectId)))
+      .limit(1)
+  )[0];
+  if (!doc) return null;
+
+  const findings: DocIntegrityFinding[] = [];
+  const limitations: DocIntegrityLimitation[] = [];
+  const add = (f: DocIntegrityFinding) => findings.push(f);
+  const limit = (l: DocIntegrityLimitation) => limitations.push(l);
+
+  const versions = await tx
+    .select({ id: documentVersions.id, documentId: documentVersions.documentId, orgId: documentVersions.orgId, projectId: documentVersions.projectId, sha256: documentVersions.sha256, sizeBytes: documentVersions.sizeBytes, contentFidelity: documentVersions.contentFidelity, indexStatus: documentVersions.indexStatus, objectKey: documentVersions.objectKey, parserVersion: documentVersions.parserVersion })
+    .from(documentVersions)
+    .where(and(eq(documentVersions.orgId, ctx.orgId), eq(documentVersions.projectId, ctx.projectId), eq(documentVersions.documentId, documentId)));
+  const versionIds = new Set(versions.map((v) => v.id));
+
+  const chunks = versionIds.size > 0
+    ? await tx.select({ id: documentChunks.id, versionId: documentChunks.documentVersionId, documentId: documentChunks.documentId, orgId: documentChunks.orgId, projectId: documentChunks.projectId, content: documentChunks.content, contentHash: documentChunks.contentHash }).from(documentChunks).where(and(eq(documentChunks.orgId, ctx.orgId), eq(documentChunks.projectId, ctx.projectId)))
+    : [];
+  const chunkCountByVersion = new Map<string, number>();
+  for (const c of chunks) {
+    if (!c.versionId || !versionIds.has(c.versionId)) continue; // only THIS document's version chunks
+    chunkCountByVersion.set(c.versionId, (chunkCountByVersion.get(c.versionId) ?? 0) + 1);
+    if (c.contentHash && c.contentHash !== sha256Hex(Buffer.from(c.content, 'utf8'))) {
+      add({ category: 'chunk_content_hash_mismatch', severity: 'medium', versionId: c.versionId, explanation: 'A stored text chunk no longer matches its recorded manifest hash.', technicalDetail: 'chunk content_hash != sha256(content)', affects: c.versionId === doc.currentVersionId ? 'both' : 'historical', repairPossibleLater: true });
+    }
+    const v = versions.find((x) => x.id === c.versionId);
+    if (v && (v.documentId !== c.documentId || v.orgId !== c.orgId || v.projectId !== c.projectId)) {
+      add({ category: 'chunk_wrong_version_or_workspace', severity: 'high', versionId: c.versionId, explanation: 'A chunk is linked to a version of a different document or workspace.', technicalDetail: 'chunk (document/workspace) != version (document/workspace)', affects: 'both', repairPossibleLater: false });
+    }
+  }
+
+  const shaSeen = new Map<string, { unavailable: number; other: number }>();
+  const perVersion: DocVersionIntegrity[] = [];
+
+  for (const v of versions) {
+    const isCurrent = v.id === doc.currentVersionId;
+    const k = v.sha256;
+    const c = shaSeen.get(k) ?? { unavailable: 0, other: 0 };
+    if (v.contentFidelity === 'unavailable') c.unavailable += 1; else c.other += 1;
+    shaSeen.set(k, c);
+    const chunkN = chunkCountByVersion.get(v.id) ?? 0;
+    let state: VersionIntegrityState;
+
+    if (v.contentFidelity === 'unavailable') {
+      // An honestly-recorded unavailable version is NOT corruption; content-bearing state IS an inconsistency.
+      state = 'unavailable';
+      if (chunkN > 0 || v.objectKey) add({ category: 'unavailable_with_content', severity: 'medium', versionId: v.id, explanation: 'A version recorded as having no retained content unexpectedly has chunks or an object.', technicalDetail: 'unavailable version has chunks or objectKey', affects: isCurrent ? 'both' : 'historical', repairPossibleLater: false });
+      else limit({ reason: 'always_unavailable_version', versionId: v.id, detail: 'This version was recorded as having no retained evidence; its bytes cannot be verified.' });
+    } else if (v.contentFidelity === 'reconstructed_text') {
+      state = 'reconstructed';
+      if (chunkN === 0) { add({ category: 'reconstructed_without_chunks', severity: 'medium', versionId: v.id, explanation: 'A reconstructed-text version has no indexed text to inspect.', technicalDetail: 'reconstructed_text version has 0 chunks', affects: isCurrent ? 'both' : 'historical', repairPossibleLater: false }); state = 'not_indexed'; }
+      // Reconstructed is honest (indexed text, not byte-exact) — never a hash-verification failure.
+    } else { // byte_exact
+      if (v.indexStatus === 'indexed' && chunkN === 0) add({ category: 'indexed_without_chunks', severity: 'medium', versionId: v.id, explanation: 'An indexed exact-bytes version has no chunk manifest, so a faithful rebuild could not be proven.', technicalDetail: 'indexed byte_exact version has 0 chunks (no manifest)', affects: isCurrent ? 'both' : 'historical', repairPossibleLater: false });
+      if (!v.objectKey) {
+        state = 'object_missing';
+        add({ category: 'byte_exact_object_missing', severity: isCurrent ? 'high' : 'medium', versionId: v.id, explanation: 'An exact-bytes version has no retained source object.', technicalDetail: 'byte_exact version has null objectKey', affects: isCurrent ? 'both' : 'historical', repairPossibleLater: true });
+      } else {
+        try {
+          const bytes = await store.get(v.objectKey);
+          if (bytes.length !== v.sizeBytes) add({ category: 'byte_exact_hash_mismatch', severity: 'medium', versionId: v.id, explanation: 'The retained object size differs from the recorded size.', technicalDetail: `stored ${bytes.length}B != recorded ${v.sizeBytes}B`, affects: isCurrent ? 'both' : 'historical', repairPossibleLater: true });
+          if (sha256Hex(bytes) !== v.sha256) {
+            state = 'hash_mismatch';
+            add({ category: 'byte_exact_hash_mismatch', severity: isCurrent ? 'high' : 'medium', versionId: v.id, explanation: 'The retained source bytes no longer match the recorded content hash.', technicalDetail: 'sha256(object) != recorded sha256', affects: isCurrent ? 'both' : 'historical', repairPossibleLater: true });
+          } else {
+            state = 'verified';
+          }
+        } catch (err) {
+          if (err instanceof ObjectNotFoundError) {
+            state = 'object_missing';
+            add({ category: 'byte_exact_object_missing', severity: isCurrent ? 'high' : 'medium', versionId: v.id, explanation: 'The retained source object is missing from storage.', technicalDetail: `object ${v.objectKey.slice(0, 24)}… not found`, affects: isCurrent ? 'both' : 'historical', repairPossibleLater: true });
+          } else {
+            // Could NOT verify (infrastructure) — a limitation, never a corruption finding.
+            state = 'unverifiable';
+            limit({ reason: 'object_store_inaccessible', versionId: v.id, detail: 'Object storage was not reachable to verify this version’s bytes.' });
+          }
+        }
+      }
+      if (v.indexStatus !== 'indexed' && (state! === undefined)) state = 'not_indexed';
+    }
+    if (state! === undefined) state = v.indexStatus === 'indexed' ? 'verified' : 'not_indexed';
+    perVersion.push({ versionId: v.id, isCurrent, fidelity: v.contentFidelity, indexStatus: v.indexStatus, state: state! });
+  }
+  for (const [sha, c] of shaSeen) {
+    if (c.unavailable > 1) add({ category: 'duplicate_unavailable_placeholder', severity: 'low', explanation: 'More than one unavailable placeholder exists for the same content hash.', technicalDetail: `>1 unavailable placeholder for ${sha.slice(0, 12)}`, affects: 'none', repairPossibleLater: false });
+    if (c.other > 1) add({ category: 'duplicate_non_unavailable_version', severity: 'medium', explanation: 'More than one retained version exists for the same content hash.', technicalDetail: `>1 retained version for ${sha.slice(0, 12)}`, affects: 'both', repairPossibleLater: false });
+  }
+
+  // Current-pointer invariants (scoped to this document).
+  if (doc.currentVersionId) {
+    const cv = versions.find((v) => v.id === doc.currentVersionId);
+    if (!cv) {
+      const foreign = (await tx.select({ orgId: documentVersions.orgId, projectId: documentVersions.projectId, documentId: documentVersions.documentId }).from(documentVersions).where(eq(documentVersions.id, doc.currentVersionId)).limit(1))[0];
+      if (foreign && (foreign.orgId !== ctx.orgId || foreign.projectId !== ctx.projectId)) add({ category: 'current_pointer_cross_tenant', severity: 'high', documentId: doc.id, explanation: 'The current-version pointer references another workspace.', technicalDetail: 'current pointer org/project != this workspace', affects: 'current', repairPossibleLater: false });
+      else if (foreign && foreign.documentId !== doc.id) add({ category: 'current_pointer_other_document', severity: 'high', documentId: doc.id, explanation: 'The current-version pointer references a version of another document.', technicalDetail: 'current pointer document != this document', affects: 'current', repairPossibleLater: false });
+      else add({ category: 'current_pointer_non_indexed', severity: 'high', documentId: doc.id, explanation: 'The current-version pointer references a missing version.', technicalDetail: 'current pointer resolves to no version', affects: 'current', repairPossibleLater: false });
+    } else if (cv.indexStatus !== 'indexed') {
+      add({ category: 'current_pointer_non_indexed', severity: 'high', documentId: doc.id, versionId: cv.id, explanation: 'The current-version pointer references a version that is not successfully indexed.', technicalDetail: `current version indexStatus=${cv.indexStatus}`, affects: 'current', repairPossibleLater: false });
+    }
+  }
+
+  // Knowledge reference consistency for THIS document's versions.
+  if (versionIds.size > 0) {
+    const ks = await tx.select({ documentVersionId: knowledgeSources.documentVersionId, sourceVersionHash: knowledgeSources.sourceVersionHash }).from(knowledgeSources).where(and(eq(knowledgeSources.orgId, ctx.orgId), eq(knowledgeSources.projectId, ctx.projectId), isNotNull(knowledgeSources.documentVersionId)));
+    for (const s of ks) {
+      if (!s.documentVersionId || !versionIds.has(s.documentVersionId)) continue;
+      const v = versions.find((x) => x.id === s.documentVersionId);
+      if (v && s.sourceVersionHash && v.sha256 !== s.sourceVersionHash) add({ category: 'knowledge_pointer_inconsistent', severity: 'medium', versionId: v.id, explanation: 'A Knowledge citation’s recorded version hash disagrees with the bound version.', technicalDetail: 'knowledge sourceVersionHash != version sha256', affects: 'reference', repairPossibleLater: false });
+    }
+    // Run reference consistency for this document's versions.
+    const runRefs = await tx.select({ runId: runDocumentVersions.runId, versionId: runDocumentVersions.documentVersionId }).from(runDocumentVersions).where(and(eq(runDocumentVersions.orgId, ctx.orgId), eq(runDocumentVersions.projectId, ctx.projectId)));
+    const snapCache = new Map<string, Set<string>>();
+    for (const r of runRefs) {
+      if (!versionIds.has(r.versionId)) continue;
+      let snap = snapCache.get(r.runId);
+      if (!snap) {
+        const run = (await tx.select({ retrievedSources: runs.retrievedSources }).from(runs).where(eq(runs.id, r.runId)).limit(1))[0];
+        snap = new Set(((run?.retrievedSources as RunSourceSnapshot[] | null) ?? []).map((s) => s.documentVersionId).filter((x): x is string => !!x));
+        snapCache.set(r.runId, snap);
+      }
+      if (snap.size > 0 && !snap.has(r.versionId)) add({ category: 'run_reference_inconsistent', severity: 'medium', versionId: r.versionId, explanation: 'A recorded AI-operation reference is not reflected in that run’s immutable snapshot.', technicalDetail: 'normalized run reference absent from run snapshot', affects: 'reference', repairPossibleLater: true });
+    }
+  }
+
+  // ---- Aggregate a single honest outcome from separated dimensions -------------------------------
+  const degradedCats = findings.some((f) => f.severity === 'high' || f.severity === 'medium');
+  const currentVersionState: VersionIntegrityState | 'none' = doc.currentVersionId ? perVersion.find((p) => p.isCurrent)?.state ?? 'none' : 'none';
+  const anyUnverifiable = perVersion.some((p) => p.state === 'unverifiable');
+
+  let outcome: DocIntegrityOutcome;
+  if (degradedCats) outcome = 'degraded';
+  else if (anyUnverifiable) outcome = 'partially_verified';
+  else if (doc.status === 'source_unavailable' || currentVersionState === 'unavailable' || (!doc.currentVersionId && perVersion.every((p) => p.state === 'unavailable' || p.state === 'not_indexed'))) outcome = 'unavailable';
+  else outcome = 'healthy';
+
+  return {
+    documentId: doc.id,
+    outcome,
+    findings,
+    limitations,
+    versions: perVersion,
+    versionsScanned: versions.length,
+    checksApplied: CHECKS_APPLIED,
+    currentVersionId: doc.currentVersionId,
+    currentVersionState,
+    archived: doc.status === 'archived',
+  };
 }
 
 // ---- Bounded, audited repair operations ---------------------------------------------------------

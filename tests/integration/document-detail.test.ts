@@ -11,7 +11,7 @@ import { agents, documentChunks, documentVersionTombstones, documentVersions, do
 import { archiveDocument, chunkText, declassifyDocument, restoreDocument, restrictDocument } from '@/domain/documents/documents';
 import { indexCloudDocument, replaceDocument, retryDocument } from '@/domain/documents/cloud';
 import { backfillProject } from '@/domain/documents/backfill';
-import { markIndexDegraded } from '@/domain/documents/integrity';
+import { auditDocument, markIndexDegraded } from '@/domain/documents/integrity';
 import { ingestDocumentVersion } from '@/domain/documents/versions';
 import { type DocumentAssessmentInput, assessDocument } from '@/domain/documents/portfolio';
 import { LocalObjectStore } from '@/domain/documents/local-object-store';
@@ -829,5 +829,139 @@ describe.skipIf(!available)('Documents Detail — P3: safe lifecycle actions', (
     expect(a.archive).toBe(false);
     expect(a.replace).toBe(false); // replace is cloud-only anyway, and archived doubly forbids it
     expect(a.retry).toBe(false); // no local retry path
+  });
+});
+
+describe.skipIf(!available)('Documents Integrity — read-only audit', () => {
+  const tx = <T,>(fn: (t: DbTx) => Promise<T>) => db().transaction((t) => fn(t as unknown as DbTx));
+  const audit = (ctx: TenantContext, docId: string) => tx((t) => auditDocument(t, ctx, store, docId));
+  const versionsFull = (docId: string) => db().select().from(documentVersions).where(eq(documentVersions.documentId, docId));
+  const chunksFull = (docId: string) => db().select().from(documentChunks).where(eq(documentChunks.documentId, docId));
+  const docRow = (docId: string) => db().select().from(documents).where(eq(documents.id, docId));
+  const auditEvents = async (ctx: TenantContext, docId: string) => {
+    const { auditLogs } = await import('@/db/schema');
+    return (await db().select({ id: auditLogs.id }).from(auditLogs).where(and(eq(auditLogs.projectId, ctx.projectId), eq(auditLogs.entityId, docId), eq(auditLogs.action, 'document.integrity_audited')))).length;
+  };
+
+  it('I.1 a healthy byte-exact document reports healthy; the audit MUTATES NOTHING', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'i-healthy.md', '# Healthy\n\nexact body retained');
+    const [d0, v0, c0] = [await docRow(docId), await versionsFull(docId), await chunksFull(docId)];
+    const r = (await audit(ctx, docId))!;
+    expect(r.outcome).toBe('healthy');
+    expect(r.findings).toHaveLength(0);
+    expect(r.versions.find((v) => v.isCurrent)!.state).toBe('verified');
+    // read-only: rows unchanged, and auditDocument itself writes no audit event.
+    expect(await docRow(docId)).toEqual(d0);
+    expect(await versionsFull(docId)).toEqual(v0);
+    expect(await chunksFull(docId)).toEqual(c0);
+    expect(await auditEvents(ctx, docId)).toBe(0);
+  });
+
+  it('I.2 a missing retained object → degraded, naming the exact affected version', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId } = await byteExactDoc(ctx, 'i-missing.md', 'body');
+    const key = (await db().select({ k: documentVersions.objectKey }).from(documentVersions).where(eq(documentVersions.id, versionId)))[0]!.k!;
+    await store.delete(key); // object disappears
+    const r = (await audit(ctx, docId))!;
+    expect(r.outcome).toBe('degraded');
+    const f = r.findings.find((x) => x.category === 'byte_exact_object_missing')!;
+    expect(f.versionId).toBe(versionId);
+    expect(f.affects).toBe('both'); // current version
+  });
+
+  it('I.3 a hash mismatch → degraded; a same-size corruption is NOT reported as a size mismatch', async () => {
+    const ctx = await makeWorkspace();
+    const body = 'abcd body';
+    const { docId, versionId } = await byteExactDoc(ctx, 'i-hash.md', body);
+    const key = (await db().select({ k: documentVersions.objectKey }).from(documentVersions).where(eq(documentVersions.id, versionId)))[0]!.k!;
+    await store.put(key, Buffer.from('x'.repeat(Buffer.byteLength(body, 'utf8')), 'utf8'), 'text/markdown'); // same length, different content
+    const r = (await audit(ctx, docId))!;
+    expect(r.outcome).toBe('degraded');
+    expect(r.findings.some((x) => x.category === 'byte_exact_hash_mismatch')).toBe(true);
+    // Same size → the size-mismatch text must NOT appear.
+    expect(r.findings.every((x) => !x.technicalDetail.includes('!= recorded') || x.technicalDetail.includes('sha256'))).toBe(true);
+    expect(r.versions.find((v) => v.isCurrent)!.state).toBe('hash_mismatch');
+  });
+
+  it('I.4 a source-unavailable version is honest, NOT corrupt; a reconstructed version is not hash-verified', async () => {
+    const ctx = await makeWorkspace();
+    await db().insert(documents).values({ orgId: ctx.orgId, projectId: ctx.projectId, source: 'local_folder', sourceId: 'i-unav.md', relativePath: 'i-unav.md', kind: 'markdown', sha256: shaOf('u'), sizeBytes: 1, status: 'active' });
+    await runBackfill(ctx);
+    const unav = (await db().select({ id: documents.id }).from(documents).where(and(eq(documents.projectId, ctx.projectId), eq(documents.relativePath, 'i-unav.md'))))[0]!;
+    const ru = (await audit(ctx, unav.id))!;
+    expect(ru.outcome).toBe('unavailable');
+    expect(ru.findings.filter((f) => f.severity === 'high' || f.severity === 'medium')).toHaveLength(0);
+
+    const rc = await reconstructedDoc(ctx, 'i-recon.md', ['reconstructed text only']);
+    const rr = (await audit(ctx, rc.docId))!;
+    expect(rr.findings.some((f) => f.category === 'byte_exact_hash_mismatch')).toBe(false);
+    expect(rr.versions.find((v) => v.isCurrent)!.state).toBe('reconstructed');
+  });
+
+  it('I.5 an archived healthy document is not labelled degraded merely for being archived', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'i-arch.md', 'body');
+    await tx((t) => archiveDocument(t, ctx, docId));
+    const r = (await audit(ctx, docId))!;
+    expect(r.archived).toBe(true);
+    expect(r.outcome).toBe('healthy');
+  });
+
+  it('I.6 an invalid current-version pointer is reported', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'i-ptr.md', 'body');
+    await db().update(documents).set({ currentVersionId: randomUUID() }).where(eq(documents.id, docId));
+    const r = (await audit(ctx, docId))!;
+    expect(r.findings.some((f) => f.category === 'current_pointer_non_indexed' && f.affects === 'current')).toBe(true);
+  });
+
+  it('I.7 damaged HISTORY is separated from a healthy CURRENT version', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionId: v1 } = await byteExactDoc(ctx, 'i-hist.md', '# V1\n\noriginal');
+    await newVersion(ctx, docId, '# V2\n\ncurrent good'); // v2 becomes current
+    const v1Key = (await db().select({ k: documentVersions.objectKey }).from(documentVersions).where(eq(documentVersions.id, v1)))[0]!.k!;
+    await store.delete(v1Key); // corrupt the HISTORICAL version's object
+    const r = (await audit(ctx, docId))!;
+    expect(r.currentVersionState).toBe('verified'); // current stays healthy
+    const f = r.findings.find((x) => x.category === 'byte_exact_object_missing')!;
+    expect(f.versionId).toBe(v1);
+    expect(f.affects).toBe('historical'); // attributed to the exact historical version
+  });
+
+  it('I.8 could-not-verify (store unreachable) is a limitation → partially verified, never fabricated findings', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'i-partial.md', 'body');
+    const failing = new Proxy(store, { get(t, p, r) { if (p === 'get') return async () => { throw new Error('storage timeout'); }; return Reflect.get(t, p, r); } }) as typeof store;
+    const r = (await tx((t) => auditDocument(t, ctx, failing, docId)))!;
+    expect(r.outcome).toBe('partially_verified');
+    expect(r.limitations.some((l) => l.reason === 'object_store_inaccessible')).toBe(true);
+    expect(r.findings.some((f) => f.category === 'byte_exact_hash_mismatch' || f.category === 'byte_exact_object_missing')).toBe(false); // no fabricated corruption
+  });
+
+  it('I.9 a cross-workspace document returns no audit result (existence-neutral)', async () => {
+    const a = await makeWorkspace();
+    const b = await makeWorkspace();
+    const foreign = await byteExactDoc(b, 'i-foreign.md', 'body');
+    expect(await audit(a, foreign.docId)).toBeNull();
+  });
+
+  it('I.10 audit recording: a completed audit records exactly one event; a null (refused) result records none', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'i-record.md', 'body');
+    // Mirror the server action: audit (read-only) then record ONE completion event on success only.
+    const { writeAudit } = await import('@/domain/audit/audit');
+    await tx(async (t) => {
+      const r = await auditDocument(t, ctx, store, docId);
+      if (r) await writeAudit(t, ctx, { action: 'document.integrity_audited', entityType: 'document', entityId: docId, detail: { outcome: r.outcome } });
+    });
+    expect(await auditEvents(ctx, docId)).toBe(1);
+    // A refused (cross-workspace) audit writes nothing.
+    const other = await makeWorkspace();
+    await tx(async (t) => {
+      const r = await auditDocument(t, ctx, store, (await byteExactDoc(other, 'i-x.md', 'b')).docId);
+      if (r) await writeAudit(t, ctx, { action: 'document.integrity_audited', entityType: 'document', entityId: docId, detail: {} });
+    });
+    expect(await auditEvents(ctx, docId)).toBe(1); // unchanged
   });
 });

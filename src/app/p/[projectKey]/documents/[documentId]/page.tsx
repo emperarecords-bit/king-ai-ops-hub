@@ -17,6 +17,7 @@ import {
 } from './detail-view';
 import { RevealRestricted } from './reveal-restricted';
 import { DetailLifecycleActions } from './detail-lifecycle-actions';
+import { IntegrityAudit } from './integrity-audit';
 
 // Sensitive per-viewer content: always render fresh + per request, never statically or cross-user cached.
 export const dynamic = 'force-dynamic';
@@ -135,6 +136,25 @@ export default async function DocumentDetailPage({
         <Card title="6. Knowledge relationships"><KnowledgeSection refs={detail.knowledge} /></Card>
         <Card title={`7. AI operations (${detail.aiOperationCount})`}><AiOperationsSection ops={detail.aiOperations} /></Card>
         <Card title="9. Lifecycle history"><HistorySection events={detail.history} /></Card>
+
+        {ctx.projectRole === 'admin' ? (
+          <Card title="Integrity">
+            <p className="mb-3 text-xs text-[var(--muted)]">A deliberate, read-only structural audit — it observes and reports, and changes nothing. Repair, cleanup, and purge are separate capabilities, not offered here.</p>
+            <div className="mb-3 rounded border border-[var(--border)] p-3">
+              <div className="mb-1 text-xs font-medium uppercase text-[var(--muted)]">Recorded state</div>
+              <ul className="space-y-0.5 text-xs">
+                {detail.versions.map((v) => (
+                  <li key={v.id}>
+                    version {shortId(v.id)}{v.isCurrent ? ' (current)' : ''} · {v.fidelityLabel} · index {v.indexStatus}
+                    {v.integrity.degraded ? <span className="text-[var(--warning,#e0a458)]"> · index degraded</span> : null}
+                    {v.integrity.byteExactMissingObject ? <span className="text-[var(--warning,#e0a458)]"> · retained object missing</span> : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <IntegrityAudit projectKey={projectKey} documentId={documentId} />
+          </Card>
+        ) : null}
 
         {detail.actions.restrict || detail.actions.declassify || detail.actions.archive || detail.actions.restore || detail.actions.retry || detail.actions.replace ? (
           <Card title="Safe actions">

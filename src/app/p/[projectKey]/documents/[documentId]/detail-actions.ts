@@ -6,6 +6,8 @@ import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { getObjectStore } from '@/domain/documents/object-store';
 import { loadDetailWithInspection } from '@/domain/documents/detail';
+import { type DocumentIntegrityAudit, auditDocument } from '@/domain/documents/integrity';
+import { writeAudit } from '@/domain/audit/audit';
 
 /**
  * Explicit restricted-content RELEASE — a Next.js server action (POST, origin/CSRF-validated by the
@@ -54,5 +56,46 @@ export async function revealRestrictedVersionAction(_prev: RevealState, formData
   } catch (err) {
     if (!(err instanceof AppError)) log.error('revealRestrictedVersion failed', { err });
     return { ...DENIED, message: toPublicMessage(err) };
+  }
+}
+
+const AUDIT_VERSION = 'integrity-v1';
+
+export interface IntegrityAuditState {
+  audit: DocumentIntegrityAudit | null;
+  error: string | null;
+}
+
+/**
+ * Run the READ-ONLY integrity audit for one document — a deliberate Next.js server action (POST,
+ * origin/CSRF-validated), admin-only, re-authorized + tenant-scoped at execution time. It mutates NOTHING
+ * about the document; on successful completion it records ONE append-only audit event (never on a refused
+ * or failed attempt). A cross-workspace / non-member / non-admin request releases no result.
+ */
+export async function runIntegrityAuditAction(_prev: IntegrityAuditState, formData: FormData): Promise<IntegrityAuditState> {
+  const projectKey = String(formData.get('projectKey') ?? '');
+  const documentId = String(formData.get('documentId') ?? '');
+  try {
+    const ctx = await requireTenant(projectKey);
+    if (ctx.projectRole !== 'admin') return { audit: null, error: 'Only admins can run an integrity audit.' };
+    const store = await getObjectStore();
+    const audit = await withTenant(ctx, async (tx) => {
+      const result = await auditDocument(tx, ctx, store, documentId);
+      if (!result) return null; // not in this workspace → no result, no success audit
+      // Record ONLY a completed audit (append-only), after the read-only assessment succeeded.
+      await writeAudit(tx, ctx, {
+        action: 'document.integrity_audited',
+        entityType: 'document',
+        entityId: documentId,
+        detail: { auditVersion: AUDIT_VERSION, outcome: result.outcome, findings: result.findings.length, limitations: result.limitations.length, versionsScanned: result.versionsScanned, inspectedVersionIds: result.versions.map((v) => v.versionId) },
+      });
+      return result;
+    });
+    if (!audit) return { audit: null, error: 'This source is not available to your account.' };
+    return { audit, error: null };
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('runIntegrityAudit failed', { err });
+    // The audit operation itself could not complete — never present this as a completed/degraded result.
+    return { audit: { documentId, outcome: 'audit_failed', findings: [], limitations: [], versions: [], versionsScanned: 0, checksApplied: [], currentVersionId: null, currentVersionState: 'none', archived: false }, error: toPublicMessage(err) };
   }
 }
