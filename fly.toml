@@ -22,6 +22,10 @@ primary_region = 'iad'
   # demo can exercise both the pre-quiet refusal and the post-quiet deletion
   # without a long wait; production uses the 15-minute default.
   CLEANUP_QUIET_MS = '60000'
+  # Document-purge retention/quarantine window. Shortened on STAGING so the
+  # acceptance demo can exercise cancel + a post-retention completed purge
+  # without a 7-day wait; production uses the 7-day default.
+  PURGE_RETENTION_MS = '60000'
 
 [processes]
   web = 'node server.js'

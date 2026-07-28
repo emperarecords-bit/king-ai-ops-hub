@@ -196,6 +196,10 @@ async function main() {
     const orphanKey = tenantObjectKey({ orgId: ctx.orgId, projectId: ctx.projectId, sourceId: rel, versionHash: shaOf('__pf-demo orphan leftover from a failed upload') });
     await store.put(orphanKey, Buffer.from('orphaned bytes left by a failed upload — referenced by nothing', 'utf8'), 'text/markdown');
   }
+  // Disposable, UNREFERENCED sources for the document-purge acceptance demo (cancel + complete). No Knowledge
+  // or run evidence relies on them, so purge is permitted; re-seeding recreates them.
+  await byteExact(`${PREFIX}purge-cancel-demo.md`, '# Purge cancel demo\n\nan unreferenced source used to demonstrate cancelling a purge');
+  await byteExact(`${PREFIX}purge-complete-demo.md`, '# Purge complete demo\n\nan unreferenced source used to demonstrate a completed purge');
   { // lifecycle — document-scoped (archive → restore) AND version-scoped (index degraded) history
     const lc = await byteExact(`${PREFIX}lifecycle-events.md`, '# Lifecycle\n\ndocument with a lifecycle trail');
     await tx((t) => writeAudit(t, ctx, { action: 'document.archived', entityType: 'document', entityId: lc.docId, detail: { source: 'cloud_upload' } }));
