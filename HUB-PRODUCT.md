@@ -2325,5 +2325,19 @@ Evidence: **17 cleanup tests** (reference-closure completeness, every refusal, q
 binding, all three partial-failure modes incl. crash-after-delete → reconcile, idempotency, cross-workspace
 neutrality, doc-audit surfacing, and proof NO document/version/tombstone row is ever deleted) + full suite
 **813/813**, tsc + build clean. Commits `ec1728d` (domain+table+tests) + `ceec12d` (surface) + `e9d6e79`
-(staging seed + quiet-period config). Deployed to staging (migration `0045` auto-applied). Staging demos:
-_pending authenticated pass_.
+(staging seed + quiet-period config). Deployed to staging (migration `0045` auto-applied). **Authenticated
+staging demos passed** on `__pf-demo-cleanup-orphan.md` (a Healthy doc whose audit surfaces one LOW orphan
+finding; all 7 reference checks = 0; object 64 B, sha `48e330a433a0…`; operation
+`2cd38dc2-2cef-4e20-9ebb-2be76addb704`):
+- **Safely refused** — authorizing before the quiet period elapsed returned *Refused · "The proposal has not
+  yet aged past the quiet period that protects in-flight uploads" · deletion performed: no · committed: no ·
+  storage-confirmed: no*; the operation stayed `proposed`, object present.
+- **Successful** — after the quiet period, re-proposing was idempotent (same operation + clock) and authorize
+  returned *Object deleted · "removal was confirmed against storage" · deletion performed: yes · committed:
+  yes · storage-confirmed: yes*; operation → `deleted` / `object_deleted:true` (recorded only after
+  confirmation); the post-cleanup integrity audit reports **Healthy with the orphan finding GONE** (storage
+  scan no longer sees it); document remains Healthy/Available.
+- **Zero destructive collateral** — document/version/tombstone counts identical before & after (100/98/4);
+  the two append-only events are metadata-only (key handle, size, sha-prefix, reference counts — never the
+  raw path or bytes).
+**Legacy-object cleanup is at gate; Purge remains the LAST capability and has not begun.**
