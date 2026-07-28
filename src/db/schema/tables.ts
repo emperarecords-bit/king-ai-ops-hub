@@ -764,6 +764,52 @@ export const documentVersionTombstones = pgTable(
 );
 
 /**
+ * Legacy-object cleanup operations — the persisted lifecycle for deleting a storage object that is proven
+ * obsolete and unreferenced (an orphan left by a failed/rolled-back upload). Deletion of an external object
+ * cannot be rolled back through a DB transaction, so the lifecycle is explicit and restartable:
+ *   proposed → authorized → deleted | failed
+ * A proposal records the exact object identity (size + content hash) and starts a QUIET period; authorization
+ * re-checks that the key stayed continuously orphaned (closing the upload put-before-commit window), that
+ * ingestion is quiescent, and that the object identity still matches, before the external delete. This table
+ * NEVER deletes a document/version/tombstone row — cleanup is strictly separate from purge.
+ */
+export const objectCleanupOperations = pgTable(
+  'object_cleanup_operations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    /** The exact tenant-scoped storage key proposed for cleanup. */
+    objectKey: text('object_key').notNull(),
+    /** Identity binding captured at proposal — never object bytes. */
+    objectSize: integer('object_size'),
+    objectSha256: text('object_sha256'),
+    /** sha256(objectKey|size|sha256) — the exact state a later authorize/delete rebinds to (constraint #5). */
+    fingerprint: text('fingerprint').notNull(),
+    /** proposed → authorized → deleted | failed | aborted. */
+    status: text('status').notNull().default('proposed'),
+    objectDeleted: boolean('object_deleted').notNull().default(false),
+    /** Snapshot of the reference checks performed (categories + counts; never restricted content or bytes). */
+    referencesChecked: jsonb('references_checked'),
+    attempts: integer('attempts').notNull().default(0),
+    lastError: text('last_error'),
+    reason: text('reason'),
+    proposedBy: uuid('proposed_by').references(() => profiles.id, { onDelete: 'set null' }),
+    authorizedBy: uuid('authorized_by').references(() => profiles.id, { onDelete: 'set null' }),
+    proposedAt: timestamp('proposed_at', { withTimezone: true }).notNull().defaultNow(),
+    authorizedAt: timestamp('authorized_at', { withTimezone: true }),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    // At most one LIVE (proposed|authorized) operation per key — idempotent proposal, no double-delete race.
+    uniqueIndex('object_cleanup_operations_live_key_uq').on(t.orgId, t.projectId, t.objectKey).where(sql`status in ('proposed','authorized')`),
+    index('object_cleanup_operations_org_project_idx').on(t.orgId, t.projectId),
+    index('object_cleanup_operations_status_idx').on(t.status),
+  ],
+);
+
+/**
  * Normalized run→version references — the referentially-safe complement to the immutable JSON
  * `runs.retrieved_sources` snapshot. "Historical prompt snapshots preserve representation; normalized
  * references preserve integrity." Used for reverse trails, retention/purge checks, and usage queries.
