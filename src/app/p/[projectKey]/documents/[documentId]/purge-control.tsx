@@ -32,13 +32,15 @@ export function PurgeControl({ projectKey, documentId, live, retentionElapsed }:
   const [cancelState, cancel, cancelling] = useActionState(cancelDocumentPurgeAction, initial);
   const [execState, execute, executing] = useActionState(executeDocumentPurgeAction, initial);
 
-  // A live quarantined / in-progress operation → show its state, cancel, and (once eligible) execute.
+  // A live operation (proposed / quarantined / in-progress) → show its state + the eligible next steps.
   if (live) {
+    const proposed = live.status === 'proposed';
     const inWindow = live.status === 'quarantined';
     const purging = live.status === 'database_purged' || live.status === 'object_cleanup_pending';
+    const header = proposed ? 'Purge proposed — awaiting authorization' : inWindow ? 'Purge authorized — retention window' : 'Purge in progress';
     return (
       <div className="rounded border border-[var(--danger)] p-3 text-xs">
-        <div className="font-medium text-[var(--danger)]">Purge {inWindow ? 'authorized — retention window' : 'in progress'}</div>
+        <div className="font-medium text-[var(--danger)]">{header}</div>
         <div className="mt-1 text-[var(--muted)]">
           Scope: {live.scope.versions} version(s), {live.scope.chunks} chunk(s), {live.scope.disclosureGrants} disclosure grant(s), {live.scope.jobs} job(s), {live.scope.objects} object(s).
         </div>
@@ -51,7 +53,13 @@ export function PurgeControl({ projectKey, documentId, live, retentionElapsed }:
         {purging ? <div className="mt-1 text-[var(--muted)]">The database purge is committed; object cleanup is finishing.</div> : null}
 
         <div className="mt-2 flex flex-wrap gap-2">
-          {inWindow ? (
+          {proposed ? (
+            <form action={authorize}>
+              <Hidden projectKey={projectKey} documentId={documentId} operationId={live.operationId} />
+              <button type="submit" disabled={authorizing} className={danger}>{authorizing ? 'Authorizing…' : 'Authorize purge (start retention window)'}</button>
+            </form>
+          ) : null}
+          {proposed || inWindow ? (
             <form action={cancel}>
               <Hidden projectKey={projectKey} documentId={documentId} operationId={live.operationId} />
               <button type="submit" disabled={cancelling} className={btn}>{cancelling ? 'Cancelling…' : 'Cancel purge (restore)'}</button>
@@ -64,6 +72,7 @@ export function PurgeControl({ projectKey, documentId, live, retentionElapsed }:
             </form>
           ) : null}
         </div>
+        {authState.message ? <p className="mt-2 text-[var(--muted)]">{authState.message}</p> : null}
         {execState.result ? <ExecResult r={execState.result} /> : null}
         {(cancelState.message || execState.error || cancelState.error) ? <p className="mt-2 text-[var(--muted)]">{cancelState.message ?? execState.error ?? cancelState.error}</p> : null}
       </div>
