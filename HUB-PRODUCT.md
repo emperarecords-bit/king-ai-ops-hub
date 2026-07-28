@@ -2341,3 +2341,11 @@ finding; all 7 reference checks = 0; object 64 B, sha `48e330a433a0…`; operati
   the two append-only events are metadata-only (key handle, size, sha-prefix, reference counts — never the
   raw path or bytes).
 **Legacy-object cleanup is at gate; Purge remains the LAST capability and has not begun.**
+
+### ★ Documents Legacy-Object Cleanup — GATE CLOSED (2026-07-27)
+
+Accepted. Closeout done: `SEED_MODE=clean` (now also deletes demo storage objects + sweeps the demo key
+prefix — commit `473e9b8`) removed every `__pf-demo-` fixture across projects (DEMO_DOCS_ALL=0, no live
+cleanup ops, staging health 200, 438 append-only audit rows preserved, no operator data touched). Retained
+requirement satisfied. **Next: Documents Purge — proposal + execution, separately gated (the LAST maintenance
+capability). Do not add bulk purge; one document per authorized operation.**
