@@ -2282,3 +2282,48 @@ Evidence: 7 repair tests + full suite **794/794**, tsc + build clean; authentica
 SUCCESSFUL repair (degraded → healthy, targeted finding resolved) AND a safely-REFUSED repair (bytes don't
 match the recorded hash → no Apply). Deployed `5db869c` + `d37f77d`. Fixtures cleaned to the pre-fixture
 state (append-only audit history preserved). **Next: legacy-object cleanup, then purge — each its own gate.**
+
+### ★ Documents Repair — GATE CLOSED (2026-07-27)
+
+Accepted after one revision (atomicity proof). `executeRepair`'s chunk mutation, DB-backed post-repair
+verification, and single canonical `document.repair_executed` event all run on the caller's transaction —
+the server action wraps that in ONE `withTenant` transaction, so a failure anywhere after the mutation rolls
+everything back. Proven by fault-injection tests **R.8** (throw at the canonical-event insert → chunk
+mutation rolled back, no success/nested event survives, a later audit still reports the original finding
+honestly) and **R.9** (throw mid multi-chunk update → all-or-none, no mixed partial state). Retained
+requirement implemented: the result/event now report THREE separate dimensions — *repair applied* ·
+*targeted finding resolved* · *broader integrity {healthy | limited | failed}* (`broaderIntegrity`) — so a
+`partially_verified`/`audit_failed` re-audit is never shown as full restoration (**R.10**). Suite **797/797**,
+tsc + build clean. Commits `45469b4` (atomicity tests) + `3077e38` (verification wording).
+
+### ★ Documents Legacy-Object Cleanup — BOUNDED, UNREFERENCED-ONLY (built 2026-07-27, at gate)
+
+The third separately-gated maintenance capability — deletion of a storage object PROVEN obsolete and
+unreferenced (an orphan left by a failed/rolled-back upload: the object PUTs, then the row commit is lost).
+Strictly separate from purge: it deletes NO document/version/tombstone/chunk row and refuses any object a
+purge tombstone owns. New `object_cleanup_operations` table (migration `0045`, RLS grants select/insert/
+update + tenant policy). `cleanup.ts`:
+- **`assessObjectCleanup`** (read-only preview): the full reference closure over EVERY authoritative
+  location (documents.object_key, document_versions.object_key, document_version_tombstones.object_key, +
+  the current-pointer / knowledge / normalized-run / run-snapshot reachability of any version holding the
+  key), tenant-ownership, store presence, and ingestion quiescence; captures the exact identity (size +
+  content hash) and a binding fingerprint. Mutates nothing.
+- **`proposeObjectCleanup`**: records a `proposed` operation (idempotent per key) and starts a QUIET period
+  — which closes the one legitimate "object without a committed reference" window (a concurrent upload
+  whose object landed but whose row hasn't committed commits within seconds, so it stops looking orphaned
+  long before the interval).
+- **`executeObjectCleanup`** (three phases, each its own commit): (A) lock the op and RE-check quiet-period
+  elapsed + ingestion quiescent + full reference closure + tombstone-absent + object identity == proposal
+  fingerprint, then mark `authorized`; (B) the irreversible external `store.delete`; (C) record the honest
+  terminal state — `deleted` written ONLY after storage confirms removal; ambiguous/failed stay `authorized`
+  for a reconciling retry with the error + attempt count; an object already gone reconciles WITHOUT inventing
+  success. Owner/admin authority; cross-tenant existence-neutral; metadata-only audit (a non-reversible key
+  handle, never the raw path/bytes). The doc-scoped integrity audit now surfaces a LOW-severity
+  `orphan_object` finding (carries the exact key; never degrades the document); a 3-step admin/POST control
+  (Assess → Propose → Authorize & delete) drives it, showing honest committed/verified signals.
+Evidence: **17 cleanup tests** (reference-closure completeness, every refusal, quiet-period gate, exact-state
+binding, all three partial-failure modes incl. crash-after-delete → reconcile, idempotency, cross-workspace
+neutrality, doc-audit surfacing, and proof NO document/version/tombstone row is ever deleted) + full suite
+**813/813**, tsc + build clean. Commits `ec1728d` (domain+table+tests) + `ceec12d` (surface) + `e9d6e79`
+(staging seed + quiet-period config). Deployed to staging (migration `0045` auto-applied). Staging demos:
+_pending authenticated pass_.
