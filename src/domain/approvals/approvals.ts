@@ -65,6 +65,25 @@ export async function reconcileTaskAuthorization(
 }
 
 /**
+ * Repair sweep (HUB-001): reconcile EVERY task left stranded in `awaiting_approval` with no proposal
+ * still pending — the signature of a task whose authorizations were all decided before the forward-path
+ * reconcile existed (or by any path that skipped it). Reuses the idempotent, audited per-task reconcile,
+ * so a healthy workspace is a no-op and a stranded one self-heals the moment any surface that calls this
+ * (approvals queue, morning briefing, Work) is loaded. Returns how many tasks it moved out of awaiting.
+ */
+export async function reconcileStrandedApprovalTasks(tx: DbTx, ctx: TenantContext): Promise<number> {
+  const awaiting = await tx
+    .select({ id: tasks.id })
+    .from(tasks)
+    .where(and(eq(tasks.orgId, ctx.orgId), eq(tasks.projectId, ctx.projectId), eq(tasks.status, 'awaiting_approval')));
+  let reconciled = 0;
+  for (const t of awaiting) {
+    if (await reconcileTaskAuthorization(tx, ctx, t.id)) reconciled += 1;
+  }
+  return reconciled;
+}
+
+/**
  * Withdraw a task's still-pending authorizations because the task itself was cancelled (or the
  * proposals were otherwise superseded). `withdrawn` is distinct from a reviewer's `rejected` and
  * from `expired`: no one refused it and it did not lapse — the thing it would authorize no longer

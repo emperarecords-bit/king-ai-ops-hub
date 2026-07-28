@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
-import { expireStaleApprovals, listApprovalsForQueue, type QueueApprovalRow } from '@/domain/approvals/approvals';
+import { expireStaleApprovals, listApprovalsForQueue, reconcileStrandedApprovalTasks, type QueueApprovalRow } from '@/domain/approvals/approvals';
 import { assessConsequence, isInlineAuthorizable, readConsequence } from '@/domain/approvals/consequence';
 import { Card, EmptyState, PageHeader } from '@/components/ui';
 import { DecisionForm } from './decision-form';
@@ -42,6 +42,7 @@ export default async function ApprovalsPage({
 
   const rows = await withTenant(ctx, async (tx) => {
     await expireStaleApprovals(tx, ctx); // the queue never lies
+    await reconcileStrandedApprovalTasks(tx, ctx); // no task stays "awaiting" once every proposal is decided
     return listApprovalsForQueue(tx, ctx);
   });
 

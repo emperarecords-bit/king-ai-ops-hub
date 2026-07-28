@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
+import { reconcileStrandedApprovalTasks } from '@/domain/approvals/approvals';
 import { listAutomations, listExecution } from '@/domain/execution/execution';
 import {
   assessTask,
@@ -31,12 +32,17 @@ export default async function ExecutionPage({
   const ctx = await requireTenant(projectKey);
   const canEdit = ctx.projectRole !== 'viewer';
 
-  const { rows, automations, employees, objectives } = await withTenant(ctx, async (tx) => ({
-    rows: await listExecution(tx, ctx),
-    automations: await listAutomations(tx, ctx),
-    employees: await listEmployees(tx, ctx),
-    objectives: await listObjectives(tx, ctx),
-  }));
+  const { rows, automations, employees, objectives } = await withTenant(ctx, async (tx) => {
+    // Self-heal any task stranded in awaiting_approval with no pending proposal, so "Requires you"
+    // never asks for a decision already made (HUB-001).
+    await reconcileStrandedApprovalTasks(tx, ctx);
+    return {
+      rows: await listExecution(tx, ctx),
+      automations: await listAutomations(tx, ctx),
+      employees: await listEmployees(tx, ctx),
+      objectives: await listObjectives(tx, ctx),
+    };
+  });
 
   const assessedAutomations = automations.map((x) => ({
     x,

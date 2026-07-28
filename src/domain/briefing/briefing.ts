@@ -3,7 +3,7 @@ import { type TenantContext } from '@/types/domain';
 import { withTenant } from '@/db/tenant';
 import { approvals, objectives, runs, runSteps, tasks } from '@/db/schema';
 import { type ProjectAccessRecord } from '@/db/system';
-import { expireStaleApprovals } from '@/domain/approvals/approvals';
+import { expireStaleApprovals, reconcileStrandedApprovalTasks } from '@/domain/approvals/approvals';
 import { computeInsights, type Insight } from '@/domain/insights/insights';
 import { projectSpendLimit, spentThisPeriodMicros } from '@/domain/usage/usage';
 
@@ -72,6 +72,7 @@ async function briefWorkspace(
 ): Promise<WorkspaceBriefing> {
   return withTenant(ctx, async (tx) => {
     await expireStaleApprovals(tx, ctx); // the briefing never reports ghosts
+    await reconcileStrandedApprovalTasks(tx, ctx); // a fully-decided task is never reported as a blocker
 
     const now = new Date();
     const since = new Date(now.getTime() - OVERNIGHT_HOURS * 60 * 60 * 1000);

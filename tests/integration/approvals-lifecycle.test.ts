@@ -5,8 +5,9 @@ import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
-import { approvals, memberships, organizations, profiles, projectMembers, projects, tasks } from '@/db/schema';
-import { decideApproval, expireStaleApprovals, getApprovalDetail, listApprovalsForQueue, pendingDuplicateExists } from '@/domain/approvals/approvals';
+import { and, eq as eqOp } from 'drizzle-orm';
+import { approvals, auditLogs, memberships, organizations, profiles, projectMembers, projects, tasks } from '@/db/schema';
+import { decideApproval, expireStaleApprovals, getApprovalDetail, listApprovalsForQueue, pendingDuplicateExists, reconcileStrandedApprovalTasks } from '@/domain/approvals/approvals';
 import { cancelTask } from '@/domain/tasks/tasks';
 import { listExecution } from '@/domain/execution/execution';
 import { assessTask } from '@/domain/execution/assess';
@@ -189,6 +190,44 @@ describe.skipIf(!available)('authorization reconciles the task lifecycle', () =>
     const row = rows.find((r) => r.id === approvalIds[0]!)!;
     expect(row.taskTitle).toBe('Draft the launch email');
     expect(row.status).toBe('pending');
+  });
+
+  // HUB-001 repair: tasks stranded in awaiting_approval before the forward-path reconcile existed.
+  it('the stranded-task sweep reconciles a task whose proposals were all decided out-of-band', async () => {
+    const { taskId, approvalIds } = await taskAwaitingApproval(4);
+    // Simulate pre-reconcile-era data: mark every proposal approved WITHOUT decideApproval (so no
+    // reconcile fired) — the exact signature seen in the accuratebids-com "Pilot launch" task.
+    for (const id of approvalIds) {
+      await getSetupDb().update(approvals).set({ status: 'approved', decidedAt: new Date() }).where(eqOp(approvals.id, id));
+    }
+    expect(await taskStatus(taskId)).toBe('awaiting_approval'); // still stranded
+    const moved = await withTenant(ctx, (tx) => reconcileStrandedApprovalTasks(tx, ctx));
+    expect(moved).toBeGreaterThanOrEqual(1);
+    expect(await taskStatus(taskId)).toBe('completed'); // freed
+    // Truthful: every surface that reads assessTask now stops asking, without implying execution.
+    const rows = await withTenant(ctx, (tx) => listExecution(tx, ctx));
+    const row = rows.find((r) => r.kind === 'ai_task' && r.id === taskId)!;
+    expect(assessTask({ status: row.status!, ownerAgentId: row.ownerAgentId, authorizedUnexecuted: row.authorizedUnexecuted }).intervention).toBe('none');
+    expect(row.authorizedUnexecuted).toBe(true);
+    // The repair is audited.
+    const events = await getSetupDb().select({ id: auditLogs.id }).from(auditLogs).where(and(eqOp(auditLogs.entityId, taskId), eqOp(auditLogs.action, 'task.authorization_reconciled')));
+    expect(events.length).toBe(1);
+  });
+
+  it('the sweep is idempotent and a no-op on a healthy workspace', async () => {
+    const { taskId, approvalIds } = await taskAwaitingApproval(2);
+    for (const id of approvalIds) {
+      await getSetupDb().update(approvals).set({ status: 'approved', decidedAt: new Date() }).where(eqOp(approvals.id, id));
+    }
+    expect(await withTenant(ctx, (tx) => reconcileStrandedApprovalTasks(tx, ctx))).toBeGreaterThanOrEqual(1);
+    // Second run finds nothing to do — the freed task is no longer awaiting.
+    const again = await withTenant(ctx, (tx) => reconcileStrandedApprovalTasks(tx, ctx));
+    expect(again).toBe(0);
+    expect(await taskStatus(taskId)).toBe('completed');
+    // A task that legitimately still has a pending proposal is left untouched by the sweep.
+    const healthy = await taskAwaitingApproval(1);
+    await withTenant(ctx, (tx) => reconcileStrandedApprovalTasks(tx, ctx));
+    expect(await taskStatus(healthy.taskId)).toBe('awaiting_approval');
   });
 
   it('detects an exact pending duplicate by action type and canonical payload hash', async () => {
