@@ -384,30 +384,36 @@ export async function executeDocumentPurge(runTx: PurgeExecRunner, ctx: TenantCo
   const documentId = a.documentId;
   await runTx((tx) => tx.update(documentPurgeOperations).set({ status: 'object_cleanup_pending' }).where(and(eq(documentPurgeOperations.id, operationId), eq(documentPurgeOperations.status, 'database_purged'))));
 
-  // Re-read the pending tombstones (their objects are the source of truth for what remains to delete).
-  const pending = await runTx((tx) => tx
-    .select({ id: documentVersionTombstones.id, objectKey: documentVersionTombstones.objectKey, status: documentVersionTombstones.status, objectDeleted: documentVersionTombstones.objectDeleted })
-    .from(documentVersionTombstones)
-    .where(and(eq(documentVersionTombstones.orgId, ctx.orgId), eq(documentVersionTombstones.projectId, ctx.projectId), eq(documentVersionTombstones.documentId, documentId))));
+  // Delete EVERY object key enumerated in the frozen scope (the legacy document object AND each version
+  // object), not just version-tombstone objects — otherwise a legacy object distinct from the version object
+  // would be left orphaned while the purge reported completion. Re-read the scope from the operation row.
+  const scopeRow = await runTx((tx) => tx.select({ scope: documentPurgeOperations.scope }).from(documentPurgeOperations).where(eq(documentPurgeOperations.id, operationId)).limit(1));
+  const objectKeys = ((scopeRow[0]?.scope as unknown as PurgeScope | null)?.objectKeys ?? []).filter((k): k is string => !!k);
 
   let confirmedAbsent = 0;
   let total = 0;
-  for (const t of pending) {
-    if (!t.objectKey) continue;
+  for (const key of objectKeys) {
     total += 1;
-    if (t.objectDeleted) { confirmedAbsent += 1; continue; }
-    // An object shared by a retained version of ANOTHER document must be preserved.
-    const shared = await runTx((tx) => objectSharedOutsideDocument(tx, ctx, t.objectKey!, documentId));
-    if (shared) { await runTx((tx) => tx.update(documentVersionTombstones).set({ status: 'completed_object_retained_shared' }).where(eq(documentVersionTombstones.id, t.id))); confirmedAbsent += 1; continue; }
+    // An object still referenced by a retained version of ANOTHER document must be preserved.
+    const shared = await runTx((tx) => objectSharedOutsideDocument(tx, ctx, key, documentId));
+    if (shared) {
+      await runTx((tx) => tx.update(documentVersionTombstones).set({ status: 'completed_object_retained_shared' }).where(and(eq(documentVersionTombstones.orgId, ctx.orgId), eq(documentVersionTombstones.projectId, ctx.projectId), eq(documentVersionTombstones.documentId, documentId), eq(documentVersionTombstones.objectKey, key))));
+      confirmedAbsent += 1;
+      continue;
+    }
     let absent = false;
     try {
-      await store.delete(t.objectKey);
-      absent = (await store.head(t.objectKey)) === null; // confirm removal; never assume
+      await store.delete(key);
+      absent = (await store.head(key)) === null; // confirm removal; never assume
     } catch (err) {
-      try { absent = (await store.head(t.objectKey)) === null; } catch { absent = false; }
+      try { absent = (await store.head(key)) === null; } catch { absent = false; }
       if (!absent) await runTx((tx) => tx.update(documentPurgeOperations).set({ attempts: sql`${documentPurgeOperations.attempts} + 1`, lastError: err instanceof Error ? err.message.slice(0, 300) : String(err) }).where(eq(documentPurgeOperations.id, operationId)));
     }
-    if (absent) { await runTx((tx) => tx.update(documentVersionTombstones).set({ status: 'completed', objectDeleted: true, cleanupError: null }).where(eq(documentVersionTombstones.id, t.id))); confirmedAbsent += 1; }
+    if (absent) {
+      confirmedAbsent += 1;
+      // Mark any version tombstone that named this object as cleaned (the legacy object has no tombstone).
+      await runTx((tx) => tx.update(documentVersionTombstones).set({ status: 'completed', objectDeleted: true, cleanupError: null }).where(and(eq(documentVersionTombstones.orgId, ctx.orgId), eq(documentVersionTombstones.projectId, ctx.projectId), eq(documentVersionTombstones.documentId, documentId), eq(documentVersionTombstones.objectKey, key))));
+    }
   }
 
   const allAbsent = total > 0 ? confirmedAbsent === total : true;

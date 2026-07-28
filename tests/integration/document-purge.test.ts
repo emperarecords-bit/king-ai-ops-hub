@@ -375,4 +375,24 @@ describe.skipIf(!available)('Documents Purge — staged, admin-authorized, refer
     await tx((t) => cancelDocumentPurge(t, ctx, p.operationId!));
     expect((await hit()).length).toBeGreaterThan(0); // cancel restores retrievability
   });
+
+  it('P.19 a completed purge deletes EVERY enumerated object — the legacy document object AND the version object', async () => {
+    const ctx = await makeWorkspace();
+    const { docId, versionKey } = await byteExactDoc(ctx, 'p19.md', 'purge every object');
+    const legacyKey = (await db().select({ k: documents.objectKey }).from(documents).where(eq(documents.id, docId)))[0]!.k!;
+    const a = (await tx((t) => assessDocumentPurge(t, ctx, docId)))!;
+    const distinctObjects = new Set(a.scope.objectKeys).size;
+    // Both objects exist before purge.
+    expect(await store.head(legacyKey)).not.toBeNull();
+    expect(await store.head(versionKey)).not.toBeNull();
+    const p = (await tx((t) => proposeDocumentPurge(t, ctx, docId)))!;
+    await tx((t) => authorizeDocumentPurge(t, ctx, p.operationId!, { retentionMs: 0 }));
+    const r = await executeDocumentPurge(runTx, ctx, store, p.operationId!);
+    expect(r.outcome).toBe('completed');
+    expect(r.objectsTotal).toBe(distinctObjects); // every enumerated object was accounted for
+    expect(r.objectsAllConfirmedAbsent).toBe(true);
+    // BOTH the legacy document object and the version object are confirmed absent — nothing orphaned.
+    expect(await store.head(legacyKey)).toBeNull();
+    expect(await store.head(versionKey)).toBeNull();
+  });
 });
