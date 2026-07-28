@@ -2401,5 +2401,24 @@ A demo-caught defect was fixed + regression-tested: the reconciler had deleted o
 leaving a legacy `documents.object_key` (distinct from the version object) orphaned while reporting completion
 — it now deletes every enumerated scope object (P.19). Closeout: all `__pf-demo-` fixtures removed
 (DEMO_DOCS=0, no live purge ops, health 200, 459 audit rows preserved); purge tombstones intentionally
-retained as evidence. **The Documents maintenance sequence (Integrity → Repair → Cleanup → Purge) is
-complete, pending this gate.**
+retained as evidence.
+
+**Purge gate — revision (two safety blockers, both closed).**
+- **Blocker 1 (least-privilege version-deletion).** Revoked the broad `app_server` DELETE on
+  `document_versions` + `document_disclosure_grants`. Introduced a dedicated `purge_agent` DB role — LOGIN,
+  NOSUPERUSER, NOBYPASSRLS, no DDL/role rights, **not granted to app_server** — with only the exact privileges
+  the purge lifecycle needs; every statement is still RLS-tenant-scoped. The purge execute runs on a SEPARATE
+  `purge_agent` connection (`getPurgeDb`/`withPurgeTenant`) that ordinary app_server code cannot reach. Tests
+  **PR.1–PR.4**: a direct `DELETE FROM document_versions` as app_server is denied; the purge_agent path
+  executes an authorized purge; the domain boundary still refuses a not-retention-elapsed op on the privileged
+  path; a cross-workspace delete is RLS-filtered to zero rows. Verified on staging (app_server delete-versions
+  = denied, purge_agent connects + privileged) AND a full completed purge via the real app path
+  (`getPurgeDb`→purge_agent): op completed, objects 2/2, doc 95→94 · versions 93→92 · +1 tombstone.
+- **Blocker 2 (atomic DB-phase rollback).** Tests **ATOM.A/B/C** inject a real fault inside the privileged
+  purge transaction at three points (before the first mutation; part-way through the table deletes; after
+  tombstone insertion, before document deletion). Each proves full rollback (no rows deleted, no tombstone, no
+  `database_purged`/success event, doc stays quarantined, exact inventory unchanged) and that the operation
+  remains retryable to a clean completion — authorization, re-validation, deletes, tombstones, lifecycle
+  transition, and the canonical audit event share ONE transaction.
+Evidence now: **27 purge tests**, full suite **841**, tsc + build clean. Commits add `<least-privilege+atomicity>`.
+**The Documents maintenance sequence (Integrity → Repair → Cleanup → Purge) is complete, pending this gate.**
