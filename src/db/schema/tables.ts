@@ -810,6 +810,56 @@ export const objectCleanupOperations = pgTable(
 );
 
 /**
+ * Document purge operations — the persisted, staged lifecycle for the deliberate, IRREVERSIBLE removal of a
+ * document and its retained representations. Purge is admin-authorized, one document at a time, and always
+ * passes through a visible retention/quarantine window during which it can be cancelled and the bytes are
+ * still restorable. Database removal (authoritative) and external-object deletion are separate, independently
+ * observable phases. `document_id` is a PLAIN uuid (not an FK) so this operation row — the evidence trail —
+ * survives the document's own deletion.
+ *   proposed → authorized → quarantined → retention_elapsed → database_purged → object_cleanup_pending →
+ *   completed | failed ; cancelled is terminal from any pre-database_purged state.
+ */
+export const documentPurgeOperations = pgTable(
+  'document_purge_operations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    /** The target document — plain uuid so the operation outlives the purge of its own document row. */
+    documentId: uuid('document_id').notNull(),
+    status: text('status').notNull().default('proposed'),
+    /** Frozen enumerated purge scope + blocker snapshot captured at proposal (ids/counts/hashes — never content). */
+    scope: jsonb('scope'),
+    /** sha256 over the exact document + version-set + reference-closure + disclosure + object identity. */
+    fingerprint: text('fingerprint').notNull(),
+    /** Retention/quarantine window: configurable duration + the exact deadline before execution is permitted. */
+    retentionMs: integer('retention_ms'),
+    retentionUntil: timestamp('retention_until', { withTimezone: true }),
+    /** External-object deletion progress (the DB purge is authoritative and committed before any of this). */
+    objectsTotal: integer('objects_total').notNull().default(0),
+    objectsDeleted: integer('objects_deleted').notNull().default(0),
+    attempts: integer('attempts').notNull().default(0),
+    lastError: text('last_error'),
+    reason: text('reason'),
+    proposedBy: uuid('proposed_by').references(() => profiles.id, { onDelete: 'set null' }),
+    authorizedBy: uuid('authorized_by').references(() => profiles.id, { onDelete: 'set null' }),
+    cancelledBy: uuid('cancelled_by').references(() => profiles.id, { onDelete: 'set null' }),
+    proposedAt: timestamp('proposed_at', { withTimezone: true }).notNull().defaultNow(),
+    authorizedAt: timestamp('authorized_at', { withTimezone: true }),
+    databasePurgedAt: timestamp('database_purged_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    // At most one LIVE purge operation per document (anything not yet terminal).
+    uniqueIndex('document_purge_operations_live_doc_uq').on(t.orgId, t.projectId, t.documentId).where(sql`status not in ('completed','failed','cancelled')`),
+    index('document_purge_operations_org_project_idx').on(t.orgId, t.projectId),
+    index('document_purge_operations_status_idx').on(t.status),
+  ],
+);
+
+/**
  * Normalized run→version references — the referentially-safe complement to the immutable JSON
  * `runs.retrieved_sources` snapshot. "Historical prompt snapshots preserve representation; normalized
  * references preserve integrity." Used for reverse trails, retention/purge checks, and usage queries.

@@ -120,6 +120,10 @@ export type DocumentSource = (typeof DOCUMENT_SOURCES)[number];
 export const DOCUMENT_STATUSES = [
   'active', 'archived', 'failed',
   'uploaded', 'queued', 'indexing', 'unsupported', 'source_unavailable',
+  // Authorized for purge and inside its retention/quarantine window: excluded from retrieval and new use,
+  // still restorable (bytes retained) until the window elapses and the purge executes. Distinct from
+  // 'archived' (an intentional, indefinitely-reversible retirement) — this is a pending irreversible delete.
+  'purge_quarantined',
 ] as const;
 export type DocumentStatus = (typeof DOCUMENT_STATUSES)[number];
 
