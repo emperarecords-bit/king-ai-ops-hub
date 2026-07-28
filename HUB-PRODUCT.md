@@ -2349,3 +2349,57 @@ prefix — commit `473e9b8`) removed every `__pf-demo-` fixture across projects 
 cleanup ops, staging health 200, 438 append-only audit rows preserved, no operator data touched). Retained
 requirement satisfied. **Next: Documents Purge — proposal + execution, separately gated (the LAST maintenance
 capability). Do not add bulk purge; one document per authorized operation.**
+
+### ★ Documents Purge — STAGED, ADMIN-AUTHORIZED, REFERENCE-BLOCKED (built 2026-07-27, at gate)
+
+The LAST maintenance capability — the deliberate, IRREVERSIBLE removal of a document and its retained
+representations, one document per admin-authorized operation, separate from cleanup. New `purge_quarantined`
+document status + `document_purge_operations` table (migration `0046`; `document_id` is a plain uuid so the
+operation outlives its own document). Staged lifecycle: **proposed → quarantined (authorized + retention
+window) → database_purged → object_cleanup_pending → completed** (cancelled is terminal from proposed/
+quarantined). Domain `purge.ts`:
+- **Complete dependency graph, explicit deletes.** Every FK to documents/versions inventoried; the DB phase
+  deletes each dependent EXPLICITLY in order (chunks → jobs → disclosure grants → versions → document) with
+  per-table counts — never relying on silent cascade. The `run_document_versions` RESTRICT FK is the DB
+  backstop; the version-immutability trigger still forbids UPDATE.
+- **Reference closure fails closed.** Any surviving Knowledge citation, normalized run reference, immutable
+  run snapshot, or live object-cleanup operation BLOCKS purge — never silently nulled/erased to enable it.
+  (No decision/objective/work/approval → document edges exist; those are mediated by Knowledge, so the
+  knowledge/run blocks cover them.) Immutable run snapshots + all audit history are RETAINED; a metadata-only
+  tombstone is created per version.
+- **Retention/quarantine window** (7 days, env-overridable): the document goes `purge_quarantined` — excluded
+  from retrieval (retrieval filters `status='active'`) and new use, still cancellable and restorable, scope
+  inspectable. Cancel restores the exact prior status; nothing was deleted.
+- **Exact-state binding.** A fingerprint over the document + complete version set (ids/hashes/object keys/
+  fidelity) + object keys; re-checked at authorize AND immediately before the irreversible delete. A new
+  version or any identity change re-binds → refuses.
+- **Transaction + external boundary.** The DB purge commits FIRST (authoritative) as one privileged,
+  tenant-scoped transaction; then a restartable reconciler deletes EVERY enumerated object (legacy document
+  object + each version object), `HEAD`-confirms absence, retains shared objects, and marks `completed` only
+  once all are confirmed gone. A crash after the DB commit leaves `database_purged`; a retry reconciles the
+  objects — DB content is never restored on object failure.
+- **Privileged execute.** app_server was granted DELETE on `document_versions` + `document_disclosure_grants`
+  for the admin-gated purge only (RLS still scopes every delete to the tenant; RESTRICT FK + immutability
+  trigger remain) — a deliberate, documented relaxation replacing a superuser-in-request connection.
+
+Admin/POST actions + a deliberate multi-step Detail Purge card (Assess → Propose → Authorize → Cancel/Execute),
+separate from the safe actions; restricted content never exposed (metadata-only previews/events/tombstones).
+Evidence: **19 purge tests** (exact scope, all four reference blockers, quarantine, cancel/restore, retention
+gate, exact-state binding, reference-appeared-after-auth, crash-after-commit reconcile, ambiguous-delete
+retryable, idempotency, cross-workspace + non-admin refusal, no-hidden-cascade with run snapshots + audit
+retained, metadata-only tombstones, retrieval-exclusion + restore, and **P.19: every enumerated object
+deleted**) + full suite **833/833**, tsc + build clean. Commits `14de5a1` + `e5ff35c` + `d512dba` + fixes.
+Deployed to staging (migration `0046` + grant). **Authenticated staging demos passed:**
+- **Cancelled purge** (`__pf-demo-purge-cancel-demo.md`) — Assess → Propose → Authorize (doc →
+  `purge_quarantined`, retrieval-excluded) → **Cancel** → doc restored to `active`, op `cancelled`, inventory
+  unchanged (docs 95 / versions 93); lifecycle events all retained.
+- **Completed purge** (`__pf-demo-purge-complete-demo.md`) — Assess → Propose → Authorize → 60s retention →
+  **Execute** → op `completed`, **objects_total=2 / objects_deleted=2** (legacy + version object both
+  `HEAD`-confirmed absent), document/version/chunks deleted, 1 metadata-only tombstone retained, inventory
+  docs 95→94 · versions 93→92 · tombstones +1; audit history preserved.
+A demo-caught defect was fixed + regression-tested: the reconciler had deleted only version-tombstone objects,
+leaving a legacy `documents.object_key` (distinct from the version object) orphaned while reporting completion
+— it now deletes every enumerated scope object (P.19). Closeout: all `__pf-demo-` fixtures removed
+(DEMO_DOCS=0, no live purge ops, health 200, 459 audit rows preserved); purge tombstones intentionally
+retained as evidence. **The Documents maintenance sequence (Integrity → Repair → Cleanup → Purge) is
+complete, pending this gate.**
