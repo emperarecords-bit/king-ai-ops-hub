@@ -149,7 +149,8 @@ export async function executeRepair(tx: DbTx, ctx: TenantContext, store: ObjectS
   const before = await auditDocument(tx, ctx, store, documentId);
   const highBefore = countHigh(before);
 
-  const rebuild = await rebuildVersionChunksFromBytes(tx, ctx, store, target.versionId); // representation-safe, audited internally
+  // Representation-safe rebuild; suppress its nested audit so this repair produces ONE canonical event.
+  const rebuild = await rebuildVersionChunksFromBytes(tx, ctx, store, target.versionId, { recordAudit: false });
 
   const outcome: RepairOutcome =
     rebuild.state === 'repaired' ? 'repaired'

@@ -1092,5 +1092,9 @@ describe.skipIf(!available)('Documents Repair — bounded, representation-safe',
     expect(d.beforeOutcome).toBe('degraded');
     expect(d.afterOutcome).toBe('healthy');
     expect(d.targetedFindingResolved).toBe(true);
+    // ONE logical success record — the nested chunk-restore audit is suppressed (no duplicate event).
+    const { auditLogs } = await import('@/db/schema');
+    const nested = await db().select({ id: auditLogs.id }).from(auditLogs).where(and(eq(auditLogs.projectId, ctx.projectId), eq(auditLogs.entityId, docId), eq(auditLogs.action, 'document.version_chunks_restored')));
+    expect(nested).toHaveLength(0);
   });
 });

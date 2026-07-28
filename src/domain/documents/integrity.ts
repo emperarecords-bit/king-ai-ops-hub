@@ -455,9 +455,11 @@ const REPAIR_PARSER = 'chunk-v1';
 
 /** Mark a version's DERIVED index as degraded — the source bytes stay inspectable, but chunk-level
  *  evidence cannot be reproduced identically and must not be silently rechunked. Never rewrites history. */
-export async function markIndexDegraded(tx: DbTx, ctx: TenantContext, versionId: string, why: string): Promise<void> {
+export async function markIndexDegraded(tx: DbTx, ctx: TenantContext, versionId: string, why: string, opts?: { recordAudit?: boolean }): Promise<void> {
   await tx.update(documentVersions).set({ indexDegraded: true }).where(and(eq(documentVersions.id, versionId), eq(documentVersions.orgId, ctx.orgId), eq(documentVersions.projectId, ctx.projectId)));
-  await writeAudit(tx, ctx, { action: 'document.version_index_degraded', entityType: 'document_version', entityId: versionId, detail: { why } });
+  // The Repair orchestrator records ONE canonical `document.repair_executed` event; suppress this nested
+  // one so a single repair never produces duplicate success records.
+  if (opts?.recordAudit !== false) await writeAudit(tx, ctx, { action: 'document.version_index_degraded', entityType: 'document_version', entityId: versionId, detail: { why } });
 }
 
 /**
@@ -470,19 +472,20 @@ export async function markIndexDegraded(tx: DbTx, ctx: TenantContext, versionId:
  * interpretation. Chunk indexes, locators, and hashes are never changed; historical snapshots are never
  * touched.
  */
-export async function rebuildVersionChunksFromBytes(tx: DbTx, ctx: TenantContext, store: ObjectStore, versionId: string): Promise<ChunkRepairResult> {
+export async function rebuildVersionChunksFromBytes(tx: DbTx, ctx: TenantContext, store: ObjectStore, versionId: string, opts?: { recordAudit?: boolean }): Promise<ChunkRepairResult> {
+  const recordAudit = opts?.recordAudit !== false;
   const v = (await tx.select({ id: documentVersions.id, documentId: documentVersions.documentId, sha256: documentVersions.sha256, objectKey: documentVersions.objectKey, contentFidelity: documentVersions.contentFidelity, parserVersion: documentVersions.parserVersion }).from(documentVersions).where(and(eq(documentVersions.id, versionId), eq(documentVersions.orgId, ctx.orgId), eq(documentVersions.projectId, ctx.projectId))).limit(1))[0];
   if (!v || v.contentFidelity !== 'byte_exact' || !v.objectKey) return { state: 'not_byte_exact' };
 
   // The existing chunk rows are the expected manifest. With no manifest we cannot prove identity → degrade.
   const manifest = await tx.select({ id: documentChunks.id, chunkIndex: documentChunks.chunkIndex, content: documentChunks.content, contentHash: documentChunks.contentHash, parserVersion: documentChunks.parserVersion }).from(documentChunks).where(eq(documentChunks.documentVersionId, versionId)).orderBy(documentChunks.chunkIndex);
   if (manifest.length === 0) {
-    await markIndexDegraded(tx, ctx, versionId, 'no chunk manifest available to prove an identical rebuild');
+    await markIndexDegraded(tx, ctx, versionId, 'no chunk manifest available to prove an identical rebuild', { recordAudit });
     return { state: 'no_manifest' };
   }
   // The manifest must have been produced by the parser this repair would use.
   if (manifest.some((m) => (m.parserVersion ?? REPAIR_PARSER) !== REPAIR_PARSER) || (v.parserVersion ?? REPAIR_PARSER) !== REPAIR_PARSER) {
-    await markIndexDegraded(tx, ctx, versionId, 'parser version differs from the historical manifest');
+    await markIndexDegraded(tx, ctx, versionId, 'parser version differs from the historical manifest', { recordAudit });
     return { state: 'parser_mismatch' };
   }
   const bytes = await store.get(v.objectKey);
@@ -491,7 +494,7 @@ export async function rebuildVersionChunksFromBytes(tx: DbTx, ctx: TenantContext
   const rebuilt = chunkText(bytes.toString('utf8'));
   const matchesManifest = rebuilt.length === manifest.length && manifest.every((m, i) => m.contentHash && m.contentHash === sha256Hex(Buffer.from(rebuilt[i]!, 'utf8')));
   if (!matchesManifest) {
-    await markIndexDegraded(tx, ctx, versionId, 'reparsed output does not match the historical chunk manifest');
+    await markIndexDegraded(tx, ctx, versionId, 'reparsed output does not match the historical chunk manifest', { recordAudit });
     return { state: 'manifest_mismatch' };
   }
   // Provably identical. If the stored content already equals the reproduction, nothing to do.
@@ -500,7 +503,7 @@ export async function rebuildVersionChunksFromBytes(tx: DbTx, ctx: TenantContext
   for (let i = 0; i < manifest.length; i += 1) {
     if (manifest[i]!.content !== rebuilt[i]) await tx.update(documentChunks).set({ content: rebuilt[i]! }).where(eq(documentChunks.id, manifest[i]!.id));
   }
-  await writeAudit(tx, ctx, { action: 'document.version_chunks_restored', entityType: 'document', entityId: v.documentId, detail: { versionId, chunks: manifest.length } });
+  if (recordAudit) await writeAudit(tx, ctx, { action: 'document.version_chunks_restored', entityType: 'document', entityId: v.documentId, detail: { versionId, chunks: manifest.length } });
   return { state: 'repaired', chunks: manifest.length };
 }
 

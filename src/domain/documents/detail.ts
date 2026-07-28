@@ -161,7 +161,7 @@ export type LifecycleEventKind =
   | 'restricted' | 'declassified' | 'disclosure_revoked'
   | 'archived' | 'restored' | 'restore_requested'
   | 'restricted_inspected' | 'index_degraded' | 'chunks_restored' | 'run_reference_restored'
-  | 'integrity_audited' | 'purged' | 'other';
+  | 'integrity_audited' | 'repaired' | 'purged' | 'other';
 
 /** One normalized lifecycle event over the logical source AND its retained versions. Sensitive source
  *  content is never included; technical facts stay behind progressive disclosure. */
@@ -572,6 +572,7 @@ function eventKindOf(action: string): LifecycleEventKind {
     case 'document.restricted_inspected': return 'restricted_inspected';
     case 'document.version_index_degraded': return 'index_degraded';
     case 'document.integrity_audited': return 'integrity_audited';
+    case 'document.repair_executed': return 'repaired';
     case 'document.version_chunks_restored': return 'chunks_restored';
     case 'document.run_reference_restored': return 'run_reference_restored';
     case 'document.version_purged': return 'purged';
