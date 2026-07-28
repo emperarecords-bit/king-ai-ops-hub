@@ -395,4 +395,26 @@ describe.skipIf(!available)('Documents Purge — staged, admin-authorized, refer
     expect(await store.head(legacyKey)).toBeNull();
     expect(await store.head(versionKey)).toBeNull();
   });
+
+  it('P.20 restricted document — purge previews, events, and tombstones are metadata-only (no restricted content)', async () => {
+    const ctx = await makeWorkspace();
+    const secret = '# Secret\n\nSENSITIVE RESTRICTED BODY that must never leak into purge evidence';
+    const { docId } = await byteExactDoc(ctx, 'p20-secret.md', secret, 'restricted');
+    await addDisclosureGrant(ctx, docId);
+    const a = (await tx((t) => assessDocumentPurge(t, ctx, docId)))!;
+    expect(a.decision).toBe('purge_permitted');
+    expect(a.scope.disclosureGrantCount).toBe(1);
+    expect(JSON.stringify(a)).not.toContain('SENSITIVE'); // the assessment/scope carries no content
+    const p = (await tx((t) => proposeDocumentPurge(t, ctx, docId)))!;
+    await tx((t) => authorizeDocumentPurge(t, ctx, p.operationId!, { retentionMs: 0 }));
+    const r = await executeDocumentPurge(runTx, ctx, store, p.operationId!);
+    expect(r.outcome).toBe('completed');
+    expect(r.deleted!.disclosureGrants).toBe(1); // the restricted disclosure grant was removed
+    // Neither the append-only events nor the retained tombstones carry the restricted content.
+    const events = await purgeEvents(ctx, docId);
+    const tombs = await db().select().from(documentVersionTombstones).where(eq(documentVersionTombstones.documentId, docId));
+    expect(JSON.stringify(events)).not.toContain('SENSITIVE');
+    expect(JSON.stringify(tombs)).not.toContain('SENSITIVE');
+    expect(tombs.length).toBe(1);
+  });
 });
