@@ -8,6 +8,7 @@ import { getObjectStore } from '@/domain/documents/object-store';
 import { loadDetailWithInspection } from '@/domain/documents/detail';
 import { type DocumentIntegrityAudit, auditDocument } from '@/domain/documents/integrity';
 import { type RepairPreview, type RepairResult, executeRepair, previewRepair } from '@/domain/documents/repair';
+import { type ObjectCleanupAssessment, type ObjectCleanupResult, assessObjectCleanup, executeObjectCleanup, proposeObjectCleanup } from '@/domain/documents/cleanup';
 import { revalidatePath } from 'next/cache';
 import { writeAudit } from '@/domain/audit/audit';
 
@@ -145,5 +146,72 @@ export async function executeRepairAction(_prev: RepairActionState, formData: Fo
   } catch (err) {
     if (!(err instanceof AppError)) log.error('executeRepair failed', { err });
     return { preview: null, result: null, error: toPublicMessage(err) };
+  }
+}
+
+// ---- Legacy-object cleanup — a bounded, unreferenced-only, one-object-at-a-time destructive capability ----
+// Three deliberate admin-only POST steps: ASSESS (read-only) → PROPOSE (records the proposal + starts the
+// quiet period that protects in-flight uploads) → AUTHORIZE + DELETE (after the quiet period, re-checking
+// every guard before the irreversible external delete). It NEVER deletes a document/version/tombstone row.
+
+/** Quiet period an orphan proposal must age past before it may be deleted (env-overridable; default 15 min). */
+const CLEANUP_QUIET_MS = Number.isFinite(Number(process.env.CLEANUP_QUIET_MS)) ? Number(process.env.CLEANUP_QUIET_MS) : 15 * 60 * 1000;
+
+export interface CleanupActionState {
+  assessment: ObjectCleanupAssessment | null;
+  proposal: { operationId: string; quietUntilMs: number | null } | null;
+  result: ObjectCleanupResult | null;
+  error: string | null;
+}
+
+/** ASSESS one storage object (read-only): admin-only, tenant-scoped. Mutates nothing; returns eligibility. */
+export async function assessObjectCleanupAction(_prev: CleanupActionState, formData: FormData): Promise<CleanupActionState> {
+  const projectKey = String(formData.get('projectKey') ?? '');
+  const objectKey = String(formData.get('objectKey') ?? '');
+  try {
+    const ctx = await requireTenant(projectKey);
+    if (ctx.projectRole !== 'admin') return { assessment: null, proposal: null, result: null, error: 'Only admins can clean up storage objects.' };
+    const store = await getObjectStore();
+    const assessment = await withTenant(ctx, (tx) => assessObjectCleanup(tx, ctx, store, objectKey));
+    return { assessment, proposal: null, result: null, error: null };
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('assessObjectCleanup failed', { err });
+    return { assessment: null, proposal: null, result: null, error: toPublicMessage(err) };
+  }
+}
+
+/** PROPOSE cleanup of an eligible orphan: admin-only. Records the proposal + starts the quiet period. */
+export async function proposeObjectCleanupAction(_prev: CleanupActionState, formData: FormData): Promise<CleanupActionState> {
+  const projectKey = String(formData.get('projectKey') ?? '');
+  const objectKey = String(formData.get('objectKey') ?? '');
+  try {
+    const ctx = await requireTenant(projectKey);
+    if (ctx.projectRole !== 'admin') return { assessment: null, proposal: null, result: null, error: 'Only admins can clean up storage objects.' };
+    const store = await getObjectStore();
+    const { assessment, operationId, quietUntilMs } = await withTenant(ctx, (tx) => proposeObjectCleanup(tx, ctx, store, objectKey, { quietMs: CLEANUP_QUIET_MS }));
+    return { assessment, proposal: operationId ? { operationId, quietUntilMs } : null, result: null, error: null };
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('proposeObjectCleanup failed', { err });
+    return { assessment: null, proposal: null, result: null, error: toPublicMessage(err) };
+  }
+}
+
+/** AUTHORIZE + DELETE a proposed cleanup: admin-only. Each lifecycle phase commits in its own transaction so
+ *  the external delete sits between two DB commits; 'deleted' is recorded only after storage confirms removal. */
+export async function executeObjectCleanupAction(_prev: CleanupActionState, formData: FormData): Promise<CleanupActionState> {
+  const projectKey = String(formData.get('projectKey') ?? '');
+  const documentId = String(formData.get('documentId') ?? '');
+  const operationId = String(formData.get('operationId') ?? '');
+  try {
+    const ctx = await requireTenant(projectKey);
+    if (ctx.projectRole !== 'admin') return { assessment: null, proposal: null, result: null, error: 'Only admins can clean up storage objects.' };
+    if (!operationId) return { assessment: null, proposal: null, result: null, error: 'Propose the cleanup before authorizing it.' };
+    const store = await getObjectStore();
+    const result = await executeObjectCleanup((fn) => withTenant(ctx, fn), ctx, store, operationId, { quietMs: CLEANUP_QUIET_MS });
+    if (documentId) revalidatePath(`/p/${projectKey}/documents/${documentId}`);
+    return { assessment: null, proposal: null, result, error: null };
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('executeObjectCleanup failed', { err });
+    return { assessment: null, proposal: null, result: null, error: toPublicMessage(err) };
   }
 }

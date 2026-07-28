@@ -13,6 +13,7 @@ import { backfillProject } from '@/domain/documents/backfill';
 import { LocalObjectStore } from '@/domain/documents/local-object-store';
 import { type ObjectStore, tenantObjectKey } from '@/domain/documents/object-store';
 import { assertObjectCleanupAuthority, assessObjectCleanup, executeObjectCleanup, proposeObjectCleanup } from '@/domain/documents/cleanup';
+import { auditDocument } from '@/domain/documents/integrity';
 
 process.env.DATABASE_URL = process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL ?? 'postgresql://king:king@localhost:5433/king_ai_hub';
 
@@ -307,5 +308,21 @@ describe.skipIf(!available)('Documents Legacy-Object Cleanup — bounded, unrefe
     expect(r.refusal).toBe('not_proposed');
     expect(await store.head(key)).not.toBeNull(); // B's object is untouched
     expect((await opRow(pB.operationId!)).status).toBe('proposed');
+  });
+
+  it('C.17 the doc-scoped integrity audit SURFACES an orphan under the source (carrying its key) without degrading the document', async () => {
+    const ctx = await makeWorkspace();
+    const { docId } = await byteExactDoc(ctx, 'c17.md', 'a healthy document');
+    // Put an orphan object under THIS source's key prefix (a different version hash, referenced by nothing).
+    const orphanKey = tenantObjectKey({ orgId: ctx.orgId, projectId: ctx.projectId, sourceId: 'c17.md', versionHash: shaOf('orphan-leftover') });
+    await store.put(orphanKey, Buffer.from('leftover from a failed upload', 'utf8'), 'text/markdown');
+    const audit = (await tx((t) => auditDocument(t, ctx, store, docId)))!;
+    const orphan = audit.findings.find((f) => f.category === 'orphan_object');
+    expect(orphan).toBeDefined();
+    expect(orphan!.objectKey).toBe(orphanKey);
+    expect(orphan!.severity).toBe('low');
+    expect(audit.outcome).toBe('healthy'); // an orphan is a hygiene note, never a document-integrity defect
+    // And that surfaced key is exactly what cleanup acts on.
+    expect((await tx((t) => assessObjectCleanup(t, ctx, store, orphan!.objectKey!))).eligibility).toBe('eligible');
   });
 });

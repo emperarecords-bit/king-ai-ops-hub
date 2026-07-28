@@ -4,7 +4,7 @@ import { and, eq, isNotNull } from 'drizzle-orm';
 import { type RunSourceSnapshot, type TenantContext } from '@/types/domain';
 import { AppError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
-import { documentChunks, documentVersions, documents, knowledgeSources, runDocumentVersions, runs } from '@/db/schema';
+import { documentChunks, documentVersionTombstones, documentVersions, documents, knowledgeSources, runDocumentVersions, runs } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 import { type ObjectStore, ObjectNotFoundError, keyBelongsToTenant } from './object-store';
 import { chunkText } from './documents';
@@ -229,6 +229,8 @@ export interface DocIntegrityFinding {
   affects: FindingAffects;
   /** Whether a later Repair increment could address this (never performed here). */
   repairPossibleLater: boolean;
+  /** For an orphan_object finding: the exact storage key a legacy-object cleanup could target. */
+  objectKey?: string;
 }
 
 export type LimitationReason = 'object_store_inaccessible' | 'source_bytes_unavailable' | 'unsupported_adapter' | 'missing_historical_evidence' | 'always_unavailable_version';
@@ -269,7 +271,7 @@ const CHECKS_APPLIED = [
   'object_existence', 'object_hash_agreement', 'stored_size_agreement', 'immutable_version_identity',
   'current_pointer_validity', 'version_to_document_ownership', 'chunk_manifest_agreement', 'missing_chunks',
   'orphaned_version_chunks', 'duplicate_current_version_state', 'version_reference_validity',
-  'unavailable_version_honesty', 'source_ingestion_lineage',
+  'unavailable_version_honesty', 'source_ingestion_lineage', 'orphan_object_scan',
 ];
 
 /**
@@ -279,7 +281,7 @@ const CHECKS_APPLIED = [
 export async function auditDocument(tx: DbTx, ctx: TenantContext, store: ObjectStore, documentId: string): Promise<DocumentIntegrityAudit | null> {
   const doc = (
     await tx
-      .select({ id: documents.id, status: documents.status, currentVersionId: documents.currentVersionId, source: documents.source })
+      .select({ id: documents.id, status: documents.status, currentVersionId: documents.currentVersionId, source: documents.source, sourceId: documents.sourceId, objectKey: documents.objectKey })
       .from(documents)
       .where(and(eq(documents.id, documentId), eq(documents.orgId, ctx.orgId), eq(documents.projectId, ctx.projectId)))
       .limit(1)
@@ -403,6 +405,25 @@ export async function auditDocument(tx: DbTx, ctx: TenantContext, store: ObjectS
         snapCache.set(r.runId, snap);
       }
       if (snap.size > 0 && !snap.has(r.versionId)) add({ category: 'run_reference_inconsistent', severity: 'medium', versionId: r.versionId, explanation: 'A recorded AI-operation reference is not reflected in that run’s immutable snapshot.', technicalDetail: 'normalized run reference absent from run snapshot', affects: 'reference', repairPossibleLater: true });
+    }
+  }
+
+  // Orphaned storage objects attributable to THIS source (leftovers from a failed/rolled-back upload):
+  // present under the source's key prefix but referenced by no version, document, or tombstone. Reported as
+  // a LOW-severity hygiene note (never degrades the document) that a bounded legacy-object cleanup can act on.
+  if (doc.source === 'cloud_upload' && doc.sourceId && typeof store.list === 'function') {
+    const known = new Set<string>();
+    if (doc.objectKey) known.add(doc.objectKey);
+    for (const v of versions) if (v.objectKey) known.add(v.objectKey);
+    const tombs = await tx.select({ objectKey: documentVersionTombstones.objectKey }).from(documentVersionTombstones).where(and(eq(documentVersionTombstones.orgId, ctx.orgId), eq(documentVersionTombstones.projectId, ctx.projectId), eq(documentVersionTombstones.documentId, documentId)));
+    for (const t of tombs) if (t.objectKey) known.add(t.objectKey); // a purge tombstone owns its object — never an orphan
+    try {
+      const prefix = `org/${ctx.orgId}/project/${ctx.projectId}/doc/${doc.sourceId}/`;
+      for (const key of await store.list(prefix)) {
+        if (!known.has(key)) add({ category: 'orphan_object', severity: 'low', documentId, explanation: 'A storage object under this source is referenced by no version, document, or tombstone — an orphan left by a failed upload.', technicalDetail: `orphan object ${key.slice(0, 32)}…`, affects: 'none', repairPossibleLater: false, objectKey: key });
+      }
+    } catch {
+      limit({ reason: 'object_store_inaccessible', detail: 'Object storage could not be listed to scan this source for orphaned objects.' });
     }
   }
 

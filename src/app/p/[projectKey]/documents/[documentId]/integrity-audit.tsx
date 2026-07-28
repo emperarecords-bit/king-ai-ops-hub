@@ -3,6 +3,7 @@
 import { useActionState } from 'react';
 import { type IntegrityAuditState, runIntegrityAuditAction } from './detail-actions';
 import { RepairFinding } from './repair-finding';
+import { CleanupFinding } from './cleanup-finding';
 import type { DocIntegrityFinding, DocIntegrityLimitation, DocumentIntegrityAudit } from '@/domain/documents/integrity';
 
 /** The only finding category this increment can repair (mirrors repair.ts repairTypeForFinding; inlined so
@@ -62,6 +63,7 @@ function Findings({ findings, projectKey, documentId }: { findings: DocIntegrity
             <div className="mt-1 text-xs text-[var(--muted)]">{AFFECTS_LABEL[f.affects]}{f.repairPossibleLater ? ' · repair may be possible' : ''}</div>
             <details className="mt-1"><summary className="cursor-pointer text-xs text-[var(--muted)]">Technical evidence</summary><div className="mt-1 font-mono text-xs text-[var(--muted)]">{f.category}{f.versionId ? ` · version ${f.versionId.slice(0, 8)}…` : ''} — {f.technicalDetail}</div></details>
             {repairVersion ? <RepairFinding projectKey={projectKey} documentId={documentId} versionId={repairVersion} /> : null}
+            {f.category === 'orphan_object' && f.objectKey ? <CleanupFinding projectKey={projectKey} documentId={documentId} objectKey={f.objectKey} /> : null}
           </li>
         );
       })}
