@@ -15,9 +15,10 @@ import { listEmployees } from '@/domain/agents/org';
 import { listObjectives } from '@/domain/objectives/objectives';
 import { Card, EmptyState, PageHeader } from '@/components/ui';
 import { visibilityFromParam } from '@/domain/classification/classification';
+import { type DataClassification } from '@/types/domain';
 import { CreateWorkItemForm } from './work-item-form';
 import { WorkItemRow } from './work-item-row';
-import { NonLiveControls } from '../non-live-controls';
+import { ClassificationChip, NonLiveControls } from '../non-live-controls';
 
 /**
  * Execution — the complete state of the work, in one operational language over two engines
@@ -129,6 +130,7 @@ export default async function ExecutionPage({
                 {requiresYou.map(({ r, a }) => (
                   <li key={`req-${r.kind}-${r.id}`} className="flex flex-wrap items-baseline gap-x-2 text-sm">
                     <Kind kind={r.kind} />
+                    <ClassificationChip classification={r.classification} />
                     {r.kind === 'ai_task' ? (
                       <Link href={`/p/${projectKey}/tasks/${r.id}`} className="text-[var(--foreground)] hover:text-[var(--accent)]">
                         {r.title}
@@ -159,6 +161,7 @@ export default async function ExecutionPage({
                       <AssessLine a={a} />
                       <WorkItemRow
                         projectKey={projectKey}
+                        classification={r.classification}
                         item={{
                           id: r.id,
                           title: r.title,
@@ -175,7 +178,7 @@ export default async function ExecutionPage({
                       />
                     </div>
                   ) : (
-                    <TaskRow key={r.id} projectKey={projectKey} title={r.title} id={r.id} a={a} owner={r.ownerName} objective={r.objectiveTitle} />
+                    <TaskRow key={r.id} projectKey={projectKey} classification={r.classification} title={r.title} id={r.id} a={a} owner={r.ownerName} objective={r.objectiveTitle} />
                   ),
                 )}
               </div>
@@ -224,6 +227,7 @@ export default async function ExecutionPage({
                   <div key={`rec-${r.id}`} className="py-2 text-sm">
                     <div className="flex flex-wrap items-baseline gap-x-2">
                       <Kind kind={r.kind} />
+                      <ClassificationChip classification={r.classification} />
                       {r.kind === 'ai_task' ? (
                         <Link href={`/p/${projectKey}/tasks/${r.id}`} className="text-[var(--foreground)] hover:text-[var(--accent)]">
                           {r.title}
@@ -285,6 +289,7 @@ function TaskRow({
   a,
   owner,
   objective,
+  classification,
 }: {
   projectKey: string;
   id: string;
@@ -292,11 +297,13 @@ function TaskRow({
   a: ExecutionAssessment;
   owner: string | null;
   objective: string | null;
+  classification: DataClassification;
 }) {
   return (
     <div className="rounded-md border border-[var(--border)] p-3">
       <div className="flex flex-wrap items-center gap-2">
         <Kind kind="ai_task" />
+        <ClassificationChip classification={classification} />
         <Link href={`/p/${projectKey}/tasks/${id}`} className="text-sm font-medium hover:text-[var(--accent)]">
           {title}
         </Link>

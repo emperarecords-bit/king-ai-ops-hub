@@ -123,7 +123,7 @@ async function build() {
   await classify(liveCtx, 'decision', ids.decDemo, 'demo');
 
   // Dependency candidates (guard tested in `deps`). Establish one valid live→live edge now.
-  await withTenant(liveCtx, (tx) => addDependency(tx, liveCtx, { dependentTaskId: ids.taskLive1, prerequisiteTaskId: ids.taskLivePrereq }));
+  await withTenant(liveCtx, (tx) => addDependency(tx, liveCtx, { dependentTaskId: ids.taskLive1!, prerequisiteTaskId: ids.taskLivePrereq! }));
 
   // ---- DEMO project: project-level inheritance (records stay 'live' but are effectively demo) ----
   const demoPid = await seedProject(sql, orgId, userId, KEYS.demo, 'HUB009 Demo (synthetic)');
@@ -266,6 +266,7 @@ async function surfaces() {
   }
 
   // 6. BRIEFING (briefWorkspace) for the LIVE project — headline live-only vs nonLive demo/seed separated.
+  void morningBriefing;
   const { briefWorkspace } = await import('@/domain/briefing/briefing');
   const projectRecord = { projectId: live, orgId, key: KEYS.live, name: 'HUB009 Live (synthetic)', description: '', projectRole: 'admin' as const };
   try {
@@ -336,13 +337,13 @@ async function cleanup() {
         (select count(*)::int from agents where project_id=${p.id}) as agents,
         (select count(*)::int from decisions where project_id=${p.id}) as decisions,
         (select count(*)::int from milestones where project_id=${p.id}) as milestones,
-        (select count(*)::int from audit_logs where project_id=${p.id}) as audit`)[0];
+        (select count(*)::int from audit_logs where project_id=${p.id}) as audit`)[0]!;
     await sql`update projects set archived = true where id=${p.id}`;
     const after = (await sql`select
         (select count(*)::int from tasks where project_id=${p.id}) as tasks,
         (select count(*)::int from runs where project_id=${p.id}) as runs,
         (select count(*)::int from usage_events where project_id=${p.id}) as usage,
-        (select count(*)::int from audit_logs where project_id=${p.id}) as audit`)[0];
+        (select count(*)::int from audit_logs where project_id=${p.id}) as audit`)[0]!;
     const archived = (await sql`select archived from projects where id=${p.id}`)[0]!.archived;
     report.push({ key, archived, before, after, dataPreserved: before.tasks === after.tasks && before.runs === after.runs && before.usage === after.usage && before.audit === after.audit });
   }

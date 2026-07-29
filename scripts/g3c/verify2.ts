@@ -53,7 +53,7 @@ async function setArchived(value: boolean) {
 
 // ---- synthetic legacy-null run + usage fixture (replica role bypasses the insert guard) ----
 async function legacyfix() {
-  const sql = admin(); const { orgId, userId } = await parts(sql);
+  const sql = admin(); const { orgId } = await parts(sql);
   const live = await pid(sql, orgId, KEYS.live); if (!live) throw new Error('run synth build first');
   const taskLive2 = (await sql`select id from tasks where project_id=${live} and title='Implement onboarding step 2' limit 1`)[0]!.id as string;
   // remove any prior fixture
@@ -86,7 +86,7 @@ async function usagetrig() {
   const rec = (name: string, expected: string, outcome: string, detail?: string) => results.push({ name, expected, outcome, pass: expected === outcome, detail: detail ?? null });
   try {
     await sql.begin(async (tx) => {
-      const attempt = async (name: string, expected: string, fn: (sp: typeof tx) => Promise<void>) => {
+      const attempt = async (name: string, expected: string, fn: (sp: typeof tx) => unknown) => {
         try { await tx.savepoint(async (sp) => { await fn(sp); }); rec(name, expected, 'ALLOWED'); }
         catch (e) { rec(name, expected, 'REJECTED', String((e as Error).message).slice(0, 120)); }
       };
@@ -270,7 +270,7 @@ async function audit2() {
   const chainRows = await sql`select seq, prev_hash, row_hash from audit_logs where org_id=${orgId} order by seq desc limit 400`;
   const asc = [...chainRows].reverse();
   let breaks = 0; let checked = 0;
-  for (let i = 1; i < asc.length; i++) { checked++; if (asc[i].prev_hash !== asc[i - 1].row_hash) breaks++; }
+  for (let i = 1; i < asc.length; i++) { checked++; if (asc[i]!.prev_hash !== asc[i - 1]!.row_hash) breaks++; }
 
   console.log(JSON.stringify({
     reversal: {
@@ -285,10 +285,22 @@ async function audit2() {
   await sql.end();
 }
 
+// ---- fixture: a DEMO task contributing to the LIVE objective (for objective-detail non-live contribution) ----
+async function linkdemo() {
+  const sql = admin(); const { orgId, userId } = await parts(sql);
+  const live = await pid(sql, orgId, KEYS.live); const ctx = ctxFor(orgId, userId, live!);
+  const objLive = (await sql`select id from objectives where project_id=${live} and title='Ship the onboarding flow' limit 1`)[0]!.id as string;
+  const existing = (await sql`select id from tasks where project_id=${live} and title='Demo contribution to onboarding' limit 1`)[0];
+  const taskId = existing ? (existing.id as string) : await withTenant(ctx, (tx) => createTask(tx, ctx, { title: 'Demo contribution to onboarding', input: 'demo contribution', providerSelection: 'openai', reviewEnabled: false, objectiveId: objLive }));
+  if (!existing) await classify(ctx, 'task', taskId, 'demo');
+  console.log(JSON.stringify({ objLive, demoContributionTask: taskId }, null, 2));
+  await sql.end();
+}
+
 const cmd = process.argv[2];
 const map: Record<string, () => Promise<void>> = {
   unarchive: () => setArchived(false), rearchive: () => setArchived(true),
-  legacyfix, usagetrig, buildAgents, snappath, deps2, audit2,
+  legacyfix, usagetrig, buildAgents, snappath, deps2, audit2, linkdemo,
 };
 const fn = map[cmd ?? ''];
 if (!fn) { console.error('unknown command', cmd); process.exit(2); }

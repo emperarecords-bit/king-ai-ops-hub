@@ -86,6 +86,7 @@ export default async function WorkItemDetailPage({
         <ul>
           <WorkItemRow
             projectKey={projectKey}
+            classification={w.classification}
             item={{
               id: w.id,
               title: w.title,

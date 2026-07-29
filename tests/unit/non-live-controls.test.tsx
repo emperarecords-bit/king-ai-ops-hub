@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { ClassificationChip, NonLiveControls } from '@/app/p/[projectKey]/non-live-controls';
+import { WorkItemRow } from '@/app/p/[projectKey]/work/work-item-row';
 
 /**
  * HUB-009 Gate 3B — real component render tests for the shared visibility control + classification chip.
@@ -12,6 +13,26 @@ describe('ClassificationChip', () => {
     expect(renderToStaticMarkup(<ClassificationChip classification="demo" />)).toContain('Demo');
     expect(renderToStaticMarkup(<ClassificationChip classification="seed" />)).toContain('Seed');
     expect(renderToStaticMarkup(<ClassificationChip classification="live" />)).toBe('');
+  });
+});
+
+describe('WorkItemRow — execution rows carry the classification label (HUB-009 Gate 3C fix)', () => {
+  const item = {
+    id: 'w1', title: 'A work item', condition: 'planned' as const, waitingOn: null,
+    stage: '', notes: '', ownerAgentId: null, ownerName: null, objectiveTitle: null,
+  };
+  it('renders a Demo chip on a demo work item', () => {
+    const html = renderToStaticMarkup(<WorkItemRow projectKey="x" item={item} employees={[]} canEdit={false} classification="demo" />);
+    expect(html).toContain('Demo');
+    expect(html).toContain('class-chip-demo');
+  });
+  it('renders a Seed chip on a seed work item', () => {
+    const html = renderToStaticMarkup(<WorkItemRow projectKey="x" item={item} employees={[]} canEdit={false} classification="seed" />);
+    expect(html).toContain('class-chip-seed');
+  });
+  it('renders NO chip on a live work item', () => {
+    const html = renderToStaticMarkup(<WorkItemRow projectKey="x" item={item} employees={[]} canEdit={false} classification="live" />);
+    expect(html).not.toContain('class-chip-');
   });
 });
 
