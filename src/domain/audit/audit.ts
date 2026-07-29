@@ -24,13 +24,16 @@ export interface AuditEventInput {
 const SYSTEM_ACTOR_ID = '00000000-0000-0000-0000-000000000000';
 
 /**
- * Advisory-lock CLASS for the per-organization audit chain (first key of the two-int
- * `pg_advisory_xact_lock(class, org)`). A fixed, distinctive namespace so audit-chain locks can never
- * collide with other advisory locks in the app; the second key `hashtext(org_id)` keys it per organization
- * so unrelated orgs never serialize against each other. Transaction-scoped: released automatically on
- * commit/rollback, and re-entrant within one transaction (many writeAudit calls in a placement batch are fine).
+ * Fixed seed for the per-organization audit-chain advisory lock. The lock key is the 64-bit
+ * `hashtextextended('audit-chain:' || org_id, AUDIT_CHAIN_LOCK_SEED)` — namespaced by the string prefix
+ * (so it can never collide with any other advisory-lock use in the app) and keyed per organization (so
+ * unrelated orgs never serialize against each other). It is transaction-scoped (released automatically on
+ * commit/rollback), re-entrant within one transaction (many writeAudit calls in a placement batch are fine),
+ * deterministic, and computed entirely in Postgres (no JavaScript hashing). Hash collisions are theoretically
+ * possible with ANY finite hash, but the 64-bit namespaced key makes unintended cross-org contention
+ * negligible — and a collision would only serialize two orgs briefly, never corrupt a chain.
  */
-const AUDIT_CHAIN_LOCK_CLASS = 41434143; // "ACAC" — audit-chain advisory-lock class
+const AUDIT_CHAIN_LOCK_SEED = 1094929985; // fixed, stable seed for the 'audit-chain' namespace
 
 /**
  * Recognized PRE-EXISTING audit-chain concurrency forks on staging (documented 2026-07, from the O-23
@@ -52,8 +55,11 @@ export async function writeAudit(
 ): Promise<void> {
   // Concurrency-safe chain head: serialize audit writes PER ORG with a transaction-level advisory lock so
   // two concurrent writers cannot read the same head and fork the chain. Acquired BEFORE reading the head;
-  // released automatically at commit/rollback. Keyed by org (not global) so unrelated orgs never contend.
-  await tx.execute(sql`select pg_advisory_xact_lock(${AUDIT_CHAIN_LOCK_CLASS}, hashtext(${ctx.orgId}))`);
+  // released automatically at commit/rollback. The 64-bit key is namespaced ('audit-chain:') and keyed per
+  // org, so unrelated orgs never contend (see AUDIT_CHAIN_LOCK_SEED).
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended('audit-chain:' || ${ctx.orgId}, ${AUDIT_CHAIN_LOCK_SEED}::bigint))`,
+  );
 
   // Chain head for this org. The org-scoped chain means cross-project events
   // (org settings changes) still chain; project attribution lives in its column.
@@ -146,10 +152,16 @@ export function assertCanViewAudit(ctx: TenantContext): void {
 
 export type AuditLinkStatus = 'linear' | 'recognized_historical_fork' | 'missing_predecessor' | 'unknown_divergence';
 
+/**
+ * `clean` — no linkage failures of any kind (a fully linear chain).
+ * `recognized_historical_forks` — ONLY the approved pre-existing historical concurrency forks exist; the
+ *   history is understood but is not perfectly linear (never represented as tampering).
+ * `anomalies` — any missing predecessor, unknown divergence, or other unrecognized failure exists.
+ */
+export type AuditChainOverallStatus = 'clean' | 'recognized_historical_forks' | 'anomalies';
+
 export interface AuditChainVerification {
-  /** 'ok' iff there are NO missing predecessors and NO unknown (new) divergences — recognized historical
-   *  forks alone do not degrade the status. */
-  overallStatus: 'ok' | 'anomalies';
+  overallStatus: AuditChainOverallStatus;
   totalRows: number;
   /** Total seq-linkage failures (recognized forks + missing predecessors + unknown divergences). */
   linearLinkFailures: number;
@@ -192,8 +204,14 @@ export async function verifyAuditChain(tx: DbTx, ctx: TenantContext): Promise<Au
     else if (KNOWN_HISTORICAL_AUDIT_FORKS.has(id)) recognizedHistoricalForks.push(id);
     else unknownDivergences.push(id);
   }
+  const overallStatus: AuditChainOverallStatus =
+    missingPredecessors.length > 0 || unknownDivergences.length > 0
+      ? 'anomalies'
+      : recognizedHistoricalForks.length > 0
+        ? 'recognized_historical_forks'
+        : 'clean';
   return {
-    overallStatus: missingPredecessors.length === 0 && unknownDivergences.length === 0 ? 'ok' : 'anomalies',
+    overallStatus,
     totalRows: rows.length,
     linearLinkFailures: recognizedHistoricalForks.length + missingPredecessors.length + unknownDivergences.length,
     recognizedHistoricalForks: recognizedHistoricalForks.length,

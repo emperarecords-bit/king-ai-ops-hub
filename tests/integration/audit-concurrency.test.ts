@@ -75,7 +75,7 @@ describe('per-org advisory lock serializes audit writes', () => {
     expect(breaks).toBe(0);
     expect(shared).toBe(0); // no two rows share a predecessor
     const v = await db.transaction((tx) => verifyAuditChain(tx, ctx));
-    expect(v.overallStatus).toBe('ok');
+    expect(v.overallStatus).toBe('clean');
     expect(v.unknownDivergences).toBe(0);
   });
 
@@ -84,8 +84,8 @@ describe('per-org advisory lock serializes audit writes', () => {
     const db = getSetupDb();
     const [a, b] = [ctxs[0]!, ctxs[1]!];
     await Promise.all([db.transaction((tx) => wa(a, tx)), db.transaction((tx) => wa(b, tx))]);
-    expect((await db.transaction((tx) => verifyAuditChain(tx, a))).overallStatus).toBe('ok');
-    expect((await db.transaction((tx) => verifyAuditChain(tx, b))).overallStatus).toBe('ok');
+    expect((await db.transaction((tx) => verifyAuditChain(tx, a))).overallStatus).toBe('clean');
+    expect((await db.transaction((tx) => verifyAuditChain(tx, b))).overallStatus).toBe('clean');
   });
 
   it('a failed transaction releases the advisory lock (a later write succeeds)', async () => {
@@ -105,42 +105,68 @@ describe('per-org advisory lock serializes audit writes', () => {
     const ctx = ctxs[0]!;
     await db.transaction(async (tx) => { await wa(ctx, tx); await wa(ctx, tx); await wa(ctx, tx); });
     const v = await db.transaction((tx) => verifyAuditChain(tx, ctx));
-    expect(v.overallStatus).toBe('ok');
+    expect(v.overallStatus).toBe('clean');
     expect(v.linearLinkFailures).toBe(0);
   });
 });
 
-describe('verifyAuditChain classification (crafted rows; historical rows untouched)', () => {
-  const KNOWN = '6b48a209-229c-4b75-ab6f-638e9fcb8345';
-
-  it('distinguishes recognized historical fork, unknown divergence, and missing predecessor', async () => {
-    if (!available) return;
-    const db = getSetupDb();
-    const ctx = await seedOrg(); ctxs.push(ctx);
-    const proj = ctx.projectId;
-    const ins = (id: string | undefined, prev: string, row: string) => db.insert(auditLogs).values({
-      ...(id ? { id } : {}), orgId: ctx.orgId, projectId: proj, actorId: userId, action: 'crafted', entityType: 'x', entityId: null, detail: {}, prevHash: prev, rowHash: row,
+describe('verifyAuditChain overall status (crafted rows; the 4 historical rows are never touched)', () => {
+  // Distinct KNOWN fork ids per test — the audit_logs PK is a globally-unique uuid, so each id inserts once.
+  const KNOWN = ['6b48a209-229c-4b75-ab6f-638e9fcb8345', '8cfcd362-971f-47a9-ad7a-92974826ded1'];
+  const insFn = (ctx: TenantContext) => (id: string | undefined, prev: string, row: string) =>
+    getSetupDb().insert(auditLogs).values({
+      ...(id ? { id } : {}), orgId: ctx.orgId, projectId: ctx.projectId, actorId: userId, action: 'crafted', entityType: 'x', entityId: null, detail: {}, prevHash: prev, rowHash: row,
     } as never);
-    // linear H1 → H2
-    await ins(undefined, 'GENESIS', 'H1');
-    await ins(undefined, 'H1', 'H2');
-    // recognized historical fork: id ∈ KNOWN, prevHash 'H1' (a real earlier row, not H2)
-    await ins(KNOWN, 'H1', 'H3');
-    const v1 = await db.transaction((tx) => verifyAuditChain(tx, ctx));
-    expect(v1.recognizedHistoricalForks).toBe(1);
-    expect(v1.affectedRowIds.recognizedHistoricalForks).toContain(KNOWN);
-    expect(v1.overallStatus).toBe('ok'); // recognized fork alone does not degrade
+  const verify = (ctx: TenantContext) => getSetupDb().transaction((tx) => verifyAuditChain(tx, ctx));
 
-    // unknown divergence: random id, prevHash 'H2' (a real earlier row) — a NEW fork
-    await ins(undefined, 'H2', 'H4');
-    const v2 = await db.transaction((tx) => verifyAuditChain(tx, ctx));
-    expect(v2.unknownDivergences).toBe(1);
-    expect(v2.overallStatus).toBe('anomalies'); // NEW forks are flagged, never hidden
+  it('a fully linear chain → clean', async () => {
+    if (!available) return;
+    const ctx = await seedOrg(); ctxs.push(ctx); const ins = insFn(ctx);
+    await ins(undefined, 'G', 'H1'); await ins(undefined, 'H1', 'H2');
+    const v = await verify(ctx);
+    expect(v.overallStatus).toBe('clean');
+    expect(v.linearLinkFailures).toBe(0);
+  });
 
-    // missing predecessor: prevHash matches no row
-    await ins(undefined, 'NO-SUCH-HASH', 'H5');
-    const v3 = await db.transaction((tx) => verifyAuditChain(tx, ctx));
-    expect(v3.missingPredecessors).toBe(1);
-    expect(v3.hashVerification).toBe('not_performed_jsonb_key_order');
+  it('ONLY approved historical forks → recognized_historical_forks (not clean, not tampering)', async () => {
+    if (!available) return;
+    const ctx = await seedOrg(); ctxs.push(ctx); const ins = insFn(ctx);
+    await ins(undefined, 'G', 'H1'); await ins(undefined, 'H1', 'H2'); await ins(KNOWN[0], 'H1', 'H3');
+    const v = await verify(ctx);
+    expect(v.overallStatus).toBe('recognized_historical_forks');
+    expect(v.recognizedHistoricalForks).toBe(1);
+    expect(v.affectedRowIds.recognizedHistoricalForks).toContain(KNOWN[0]);
+    expect(v.missingPredecessors).toBe(0);
+    expect(v.unknownDivergences).toBe(0);
+  });
+
+  it('a new (unknown) fork → anomalies', async () => {
+    if (!available) return;
+    const ctx = await seedOrg(); ctxs.push(ctx); const ins = insFn(ctx);
+    await ins(undefined, 'G', 'H1'); await ins(undefined, 'H1', 'H2'); await ins(undefined, 'H1', 'H3');
+    const v = await verify(ctx);
+    expect(v.overallStatus).toBe('anomalies');
+    expect(v.unknownDivergences).toBe(1);
+    expect(v.recognizedHistoricalForks).toBe(0);
+  });
+
+  it('a missing predecessor → anomalies', async () => {
+    if (!available) return;
+    const ctx = await seedOrg(); ctxs.push(ctx); const ins = insFn(ctx);
+    await ins(undefined, 'G', 'H1'); await ins(undefined, 'NO-SUCH-HASH', 'H2');
+    const v = await verify(ctx);
+    expect(v.overallStatus).toBe('anomalies');
+    expect(v.missingPredecessors).toBe(1);
+    expect(v.hashVerification).toBe('not_performed_jsonb_key_order');
+  });
+
+  it('recognized + unknown together → anomalies', async () => {
+    if (!available) return;
+    const ctx = await seedOrg(); ctxs.push(ctx); const ins = insFn(ctx);
+    await ins(undefined, 'G', 'H1'); await ins(undefined, 'H1', 'H2'); await ins(KNOWN[1], 'H1', 'H3'); await ins(undefined, 'H2', 'H4');
+    const v = await verify(ctx);
+    expect(v.overallStatus).toBe('anomalies');
+    expect(v.recognizedHistoricalForks).toBe(1);
+    expect(v.unknownDivergences).toBe(1);
   });
 });
