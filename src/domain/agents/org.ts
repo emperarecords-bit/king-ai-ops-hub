@@ -1,9 +1,18 @@
 import 'server-only';
 import { and, asc, eq } from 'drizzle-orm';
-import { type AgentRole, type TenantContext } from '@/types/domain';
+import {
+  AGENT_ROLES,
+  DATA_CLASSIFICATIONS,
+  type AgentRole,
+  type DataClassification,
+  type TenantContext,
+} from '@/types/domain';
+import { type ProviderId } from '@/types/provider';
 import { AppError, NotFoundError, ValidationError } from '@/lib/errors';
+import { sha256Hex } from '@/lib/crypto';
 import { type DbTx } from '@/db/client';
 import { agents, decisions, departments, objectives, projects, tasks, workItems } from '@/db/schema';
+import { knownModel, providerSupportsModel } from '@/providers/pricing';
 import { writeAudit } from '@/domain/audit/audit';
 import { setObjectiveOwner } from '@/domain/objectives/objectives';
 
@@ -147,6 +156,178 @@ export async function createEmployee(
     detail: { name, title: input.title ?? null },
   });
   return id;
+}
+
+export interface CreateEmployeeWithConfigInput {
+  name: string;
+  title?: string | null;
+  role: AgentRole;
+  departmentId?: string | null;
+  reportsToAgentId?: string | null;
+  provider: ProviderId;
+  model: string;
+  systemPrompt: string;
+  temperatureMilli?: number;
+  maxOutputTokens?: number;
+  enabled?: boolean;
+  classification?: DataClassification;
+  reason: string;
+}
+
+/**
+ * Audited full-config employee provisioning. Unlike `createEmployee` (which copies the AI config from a
+ * template agent so the UI form need not pick a model), this creates an employee with an EXPLICIT
+ * provider/model/role/mission in one typed, admin-gated, transactional operation.
+ *
+ * - The full prompt is stored ONLY on the agent row; the audit detail carries a prompt HASH, never the text.
+ * - Deterministic duplicate handling: `INSERT … ON CONFLICT (project,name) DO NOTHING RETURNING` — never an
+ *   exception-driven retry inside an aborted transaction. A byte-identical retry is an idempotent no-op
+ *   (`created:false`, no second audit); a same-name-different-config request is rejected.
+ * - The audit event is written ONLY when a new row was actually inserted; row + audit commit or roll back
+ *   together in the caller's `withTenant` transaction.
+ *
+ * NOTE on name uniqueness: `agents_project_name_uq` is (project_id, name), which is CASE-SENSITIVE — so
+ * "Jane Smith" and "jane smith" are technically distinct employees. Names are trimmed (not case-folded);
+ * normalized-case uniqueness would require a separate, separately-approved migration and is out of scope here.
+ */
+export async function createEmployeeWithConfig(
+  tx: DbTx,
+  ctx: TenantContext,
+  input: CreateEmployeeWithConfigInput,
+): Promise<{ employeeId: string; created: boolean }> {
+  if (ctx.projectRole !== 'admin') {
+    throw new AppError('forbidden', 'Only a workspace admin can provision an employee.');
+  }
+
+  // ---- normalize + validate (everything before any write) -----------------
+  const name = input.name.trim();
+  if (name.length === 0) throw new ValidationError(['Employee name is required.']);
+  if (name.length > 120) throw new ValidationError(['Employee name is too long (max 120).']);
+
+  const reason = (input.reason ?? '').trim();
+  if (!reason) throw new ValidationError(['A reason is required to provision an employee.']);
+
+  // Trim ONLY for the empty check; store the prompt exactly as supplied (formatting preserved).
+  if (input.systemPrompt.trim().length === 0) {
+    throw new ValidationError(['A mission/system prompt is required.']);
+  }
+  const systemPrompt = input.systemPrompt;
+
+  if (!(AGENT_ROLES as readonly string[]).includes(input.role)) {
+    throw new ValidationError([`Invalid role: ${input.role}`]);
+  }
+  if (!knownModel(input.model)) throw new ValidationError([`Unknown model '${input.model}'.`]);
+  if (!providerSupportsModel(input.provider, input.model)) {
+    throw new ValidationError([`Model '${input.model}' is not available for provider '${input.provider}'.`]);
+  }
+
+  const temperatureMilli = input.temperatureMilli ?? 700;
+  if (temperatureMilli < 0 || temperatureMilli > 1000) {
+    throw new ValidationError(['temperatureMilli must be between 0 and 1000.']);
+  }
+  const maxOutputTokens = input.maxOutputTokens ?? 4096;
+  if (maxOutputTokens < 1 || maxOutputTokens > 65_536) {
+    throw new ValidationError(['maxOutputTokens must be between 1 and 65536.']);
+  }
+  const classification: DataClassification = input.classification ?? 'live';
+  if (!(DATA_CLASSIFICATIONS as readonly string[]).includes(classification)) {
+    throw new ValidationError([`Invalid classification: ${classification}`]);
+  }
+  const enabled = input.enabled ?? true;
+  const title = input.title?.trim() || null;
+  const departmentId = input.departmentId ?? null;
+  const reportsToAgentId = input.reportsToAgentId ?? null;
+
+  await assertDepartmentInWorkspace(tx, ctx, departmentId);
+  await assertManagerInWorkspace(tx, ctx, reportsToAgentId, null);
+
+  const promptHash = sha256Hex(systemPrompt);
+
+  // ---- deterministic insert-or-detect (no exception-driven retry) ---------
+  const inserted = await tx
+    .insert(agents)
+    .values({
+      orgId: ctx.orgId,
+      projectId: ctx.projectId,
+      name,
+      title,
+      role: input.role,
+      departmentId,
+      reportsToId: reportsToAgentId,
+      provider: input.provider,
+      model: input.model,
+      systemPrompt,
+      temperatureMilli,
+      maxOutputTokens,
+      enabled,
+      classification,
+    })
+    .onConflictDoNothing({ target: [agents.projectId, agents.name] })
+    .returning({ id: agents.id });
+
+  if (inserted.length > 0) {
+    const employeeId = inserted[0]!.id;
+    await writeAudit(tx, ctx, {
+      action: 'employee.created',
+      entityType: 'agent',
+      entityId: employeeId,
+      detail: {
+        name,
+        title,
+        role: input.role,
+        departmentId,
+        reportsToAgentId,
+        provider: input.provider,
+        model: input.model,
+        temperatureMilli,
+        maxOutputTokens,
+        enabled,
+        classification,
+        promptHash,
+        reason,
+      },
+    });
+    return { employeeId, created: true };
+  }
+
+  // Name conflict within the workspace: compare the FULL creation-controlled config.
+  const existing = (
+    await tx
+      .select({
+        id: agents.id,
+        title: agents.title,
+        role: agents.role,
+        departmentId: agents.departmentId,
+        reportsToId: agents.reportsToId,
+        provider: agents.provider,
+        model: agents.model,
+        systemPrompt: agents.systemPrompt,
+        temperatureMilli: agents.temperatureMilli,
+        maxOutputTokens: agents.maxOutputTokens,
+        enabled: agents.enabled,
+        classification: agents.classification,
+      })
+      .from(agents)
+      .where(and(eq(agents.projectId, ctx.projectId), eq(agents.orgId, ctx.orgId), eq(agents.name, name)))
+      .limit(1)
+  )[0];
+  if (!existing) throw new ValidationError([`An employee named "${name}" already exists.`]);
+
+  const identical =
+    existing.title === title &&
+    existing.role === input.role &&
+    existing.departmentId === departmentId &&
+    existing.reportsToId === reportsToAgentId &&
+    existing.provider === input.provider &&
+    existing.model === input.model &&
+    sha256Hex(existing.systemPrompt) === promptHash &&
+    existing.temperatureMilli === temperatureMilli &&
+    existing.maxOutputTokens === maxOutputTokens &&
+    existing.enabled === enabled &&
+    existing.classification === classification;
+
+  if (identical) return { employeeId: existing.id, created: false };
+  throw new ValidationError([`An employee named "${name}" already exists with a different configuration.`]);
 }
 
 export interface UpdateEmployeeInput {

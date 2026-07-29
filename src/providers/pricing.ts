@@ -88,6 +88,14 @@ export function knownModel(model: string): boolean {
   return model in MODEL_PRICING;
 }
 
+/**
+ * True iff `model` is a known model AND belongs to `provider`. The guard for audited employee
+ * provisioning — rejects unsupported pairs (e.g. anthropic + a gpt-* model, or an unknown model).
+ */
+export function providerSupportsModel(provider: ProviderId, model: string): boolean {
+  return knownModel(model) && MODEL_PRICING[model]!.provider === provider;
+}
+
 export function modelsForProvider(provider: ProviderId): ReadonlyArray<{
   id: string;
   displayName: string;
