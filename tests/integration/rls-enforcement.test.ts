@@ -75,10 +75,10 @@ beforeAll(async () => {
     (${ids.taskA1b}, ${ids.orgA}, ${ids.A1}, 'A1 task b', 'secret-A1b', 'openai', ${ids.userA}, 'pending'),
     (${ids.taskA2}, ${ids.orgA}, ${ids.A2}, 'A2 task', 'secret-A2', 'openai', ${ids.userA}, 'completed'),
     (${ids.taskB1}, ${ids.orgB}, ${ids.B1}, 'B1 task', 'secret-B1', 'openai', ${ids.userB}, 'completed')`;
-  await admin`insert into runs (id, org_id, project_id, task_id, primary_agent_id) values
-    (${ids.runA1}, ${ids.orgA}, ${ids.A1}, ${ids.taskA1}, ${ids.agentA1}),
-    (${ids.runA2}, ${ids.orgA}, ${ids.A2}, ${ids.taskA2}, ${ids.agentA2}),
-    (${ids.runB1}, ${ids.orgB}, ${ids.B1}, ${ids.taskB1}, ${ids.agentB1})`;
+  await admin`insert into runs (id, org_id, project_id, task_id, primary_agent_id, classification) values
+    (${ids.runA1}, ${ids.orgA}, ${ids.A1}, ${ids.taskA1}, ${ids.agentA1}, 'live'),
+    (${ids.runA2}, ${ids.orgA}, ${ids.A2}, ${ids.taskA2}, ${ids.agentA2}, 'live'),
+    (${ids.runB1}, ${ids.orgB}, ${ids.B1}, ${ids.taskB1}, ${ids.agentB1}, 'live')`;
   await admin`insert into documents (id, org_id, project_id, relative_path, kind, sha256, size_bytes) values
     (${ids.docA1}, ${ids.orgA}, ${ids.A1}, 'a1.md', 'markdown', 'h-a1', 10),
     (${ids.docA2}, ${ids.orgA}, ${ids.A2}, 'a2.md', 'markdown', 'h-a2', 10),

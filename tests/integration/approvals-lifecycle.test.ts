@@ -7,10 +7,11 @@ import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { and, eq as eqOp } from 'drizzle-orm';
 import { approvals, auditLogs, memberships, organizations, profiles, projectMembers, projects, tasks } from '@/db/schema';
-import { decideApproval, expireStaleApprovals, getApprovalDetail, listApprovalsForQueue, pendingDuplicateExists, reconcileStrandedApprovalTasks } from '@/domain/approvals/approvals';
-import { cancelTask } from '@/domain/tasks/tasks';
+import { decideApproval, expireStaleApprovals, getApprovalDetail, listApprovalsForQueue, manuallyReconcileTask, pendingDuplicateExists, reconcileStrandedApprovalTasks, withdrawAuthorizedAction } from '@/domain/approvals/approvals';
+import { cancelTask, supersedeTask } from '@/domain/tasks/tasks';
 import { listExecution } from '@/domain/execution/execution';
 import { assessTask } from '@/domain/execution/assess';
+import { noEligibleExecutor } from '@/domain/execution/executors';
 
 /**
  * Authorization lifecycle vs. task-execution lifecycle (Approvals integrity pass). A task holds
@@ -33,6 +34,8 @@ try {
 let orgId = '';
 let userId = '';
 let ctx: TenantContext;
+// A second workspace in the same org (same admin user) for cross-workspace rejection tests.
+let ctx2: TenantContext;
 
 beforeAll(async () => {
   if (!available) return;
@@ -45,6 +48,9 @@ beforeAll(async () => {
   const p = await db.insert(projects).values({ orgId, key: fixtureKey('ap'), name: 'A' }).returning({ id: projects.id });
   await db.insert(projectMembers).values({ orgId, projectId: p[0]!.id, userId, role: 'admin' });
   ctx = { userId, orgId, projectId: p[0]!.id, orgRole: 'owner', projectRole: 'admin' };
+  const p2 = await db.insert(projects).values({ orgId, key: fixtureKey('ap2'), name: 'B' }).returning({ id: projects.id });
+  await db.insert(projectMembers).values({ orgId, projectId: p2[0]!.id, userId, role: 'admin' });
+  ctx2 = { userId, orgId, projectId: p2[0]!.id, orgRole: 'owner', projectRole: 'admin' };
 });
 
 afterAll(async () => {
@@ -89,6 +95,34 @@ async function taskStatus(taskId: string): Promise<string> {
 async function approvalStatus(id: string): Promise<string> {
   const r = await getSetupDb().select({ s: approvals.status }).from(approvals).where(eq(approvals.id, id));
   return r[0]!.s;
+}
+
+/** A plain task not yet run (for cancel/supersede recovery). Optionally in a given project. */
+async function pendingTask(projectId = ctx.projectId): Promise<string> {
+  const t = await getSetupDb()
+    .insert(tasks)
+    .values({ orgId, projectId, title: 'Provision the staging box', input: 'x', providerSelection: 'openai', status: 'pending', createdBy: userId })
+    .returning({ id: tasks.id });
+  return t[0]!.id;
+}
+
+/**
+ * A task that finished, whose single proposed action was AUTHORIZED but never executed — the exact
+ * state HUB-002 recovery targets. Decided through decideApproval so the task reconciles to completed
+ * and the approval sits at `approved`.
+ */
+async function authorizedUnexecutedTask(): Promise<{ taskId: string; approvalId: string }> {
+  const { taskId, approvalIds } = await taskAwaitingApproval(1);
+  await withTenant(ctx, (tx) => decideApproval(tx, ctx, approvalIds[0]!, 'approved'));
+  return { taskId, approvalId: approvalIds[0]! };
+}
+
+async function auditCount(entityId: string, action: string): Promise<number> {
+  const rows = await getSetupDb()
+    .select({ id: auditLogs.id })
+    .from(auditLogs)
+    .where(and(eqOp(auditLogs.entityId, entityId), eqOp(auditLogs.action, action)));
+  return rows.length;
 }
 
 describe.skipIf(!available)('authorization reconciles the task lifecycle', () => {
@@ -163,7 +197,7 @@ describe.skipIf(!available)('authorization reconciles the task lifecycle', () =>
     const { taskId, approvalIds } = await taskAwaitingApproval(1);
     await withTenant(ctx, (tx) => decideApproval(tx, ctx, approvalIds[0]!, 'approved'));
     // Task reconciled to completed, but the approval is authorized-and-unexecuted.
-    const rows = await withTenant(ctx, (tx) => listExecution(tx, ctx));
+    const { rows } = await withTenant(ctx, (tx) => listExecution(tx, ctx));
     const row = rows.find((r) => r.kind === 'ai_task' && r.id === taskId)!;
     expect(row.authorizedUnexecuted).toBe(true);
     const a = assessTask({ status: row.status!, ownerAgentId: row.ownerAgentId, authorizedUnexecuted: row.authorizedUnexecuted });
@@ -205,7 +239,7 @@ describe.skipIf(!available)('authorization reconciles the task lifecycle', () =>
     expect(moved).toBeGreaterThanOrEqual(1);
     expect(await taskStatus(taskId)).toBe('completed'); // freed
     // Truthful: every surface that reads assessTask now stops asking, without implying execution.
-    const rows = await withTenant(ctx, (tx) => listExecution(tx, ctx));
+    const { rows } = await withTenant(ctx, (tx) => listExecution(tx, ctx));
     const row = rows.find((r) => r.kind === 'ai_task' && r.id === taskId)!;
     expect(assessTask({ status: row.status!, ownerAgentId: row.ownerAgentId, authorizedUnexecuted: row.authorizedUnexecuted }).intervention).toBe('none');
     expect(row.authorizedUnexecuted).toBe(true);
@@ -240,5 +274,149 @@ describe.skipIf(!available)('authorization reconciles the task lifecycle', () =>
     // Once decided, it is no longer a *pending* duplicate.
     await withTenant(ctx, (tx) => decideApproval(tx, ctx, approvalIds[0]!, 'approved'));
     expect(await withTenant(ctx, (tx) => pendingDuplicateExists(tx, ctx, 'email_send', sha))).toBe(false);
+  });
+});
+
+/**
+ * HUB-002 — recovery controls for stale, obsolete, or unexecutable tasks and authorizations.
+ * Each recovery verb has clear, distinct domain semantics; none is ever represented as execution;
+ * every one preserves prior history and writes an append-only audit event.
+ */
+describe.skipIf(!available)('HUB-002 recovery controls', () => {
+  it('cancels a pending task — stops it, preserves history, audits task.cancelled', async () => {
+    const taskId = await pendingTask();
+    await withTenant(ctx, (tx) => cancelTask(tx, ctx, taskId, 'no longer needed'));
+    expect(await taskStatus(taskId)).toBe('cancelled');
+    const row = await getSetupDb().select({ r: tasks.cancelReason }).from(tasks).where(eq(tasks.id, taskId));
+    expect(row[0]!.r).toBe('no longer needed');
+    expect(await auditCount(taskId, 'task.cancelled')).toBe(1);
+    // Cancellation is never execution: no surface reads it as needing intervention.
+    expect(assessTask({ status: 'cancelled', ownerAgentId: null }).intervention).toBe('none');
+  });
+
+  it('cancels a fully-authorized-but-unexecuted task WITHOUT rewriting the authorization history', async () => {
+    const { taskId, approvalId } = await authorizedUnexecutedTask();
+    expect(await approvalStatus(approvalId)).toBe('approved'); // authorized, unexecuted
+    await withTenant(ctx, (tx) => cancelTask(tx, ctx, taskId, 'superseded plan'));
+    expect(await taskStatus(taskId)).toBe('cancelled');
+    // The original authorization record is preserved exactly — cancellation is not withdrawal and is
+    // not execution. The approved approval stays approved (it was already decided, not pending).
+    expect(await approvalStatus(approvalId)).toBe('approved');
+  });
+
+  it('withdraws an authorized-but-unexecuted action — approval → withdrawn, reason kept, audited', async () => {
+    const { taskId, approvalId } = await authorizedUnexecutedTask();
+    await withTenant(ctx, (tx) => withdrawAuthorizedAction(tx, ctx, approvalId, 'policy changed before send'));
+    expect(await approvalStatus(approvalId)).toBe('withdrawn');
+    const row = await getSetupDb().select({ n: approvals.decisionNote }).from(approvals).where(eq(approvals.id, approvalId));
+    expect(row[0]!.n).toBe('policy changed before send');
+    expect(await auditCount(approvalId, 'approval.withdrawn')).toBe(1);
+    // Task itself is untouched (still completed); it simply no longer holds an authorized action.
+    expect(await taskStatus(taskId)).toBe('completed');
+    const { rows } = await withTenant(ctx, (tx) => listExecution(tx, ctx));
+    const r = rows.find((x) => x.kind === 'ai_task' && x.id === taskId)!;
+    expect(r.authorizedUnexecuted).toBe(false);
+  });
+
+  it('refuses to withdraw an action that is still pending — it must be refused instead', async () => {
+    const { approvalIds } = await taskAwaitingApproval(1); // pending, not yet authorized
+    await expect(
+      withTenant(ctx, (tx) => withdrawAuthorizedAction(tx, ctx, approvalIds[0]!, 'stop it')),
+    ).rejects.toThrow(/awaiting authorization|refuse/i);
+    expect(await approvalStatus(approvalIds[0]!)).toBe('pending'); // unchanged
+  });
+
+  it('forbids double-withdrawal — an already-withdrawn authorization cannot be withdrawn again', async () => {
+    const { approvalId } = await authorizedUnexecutedTask();
+    await withTenant(ctx, (tx) => withdrawAuthorizedAction(tx, ctx, approvalId, 'first'));
+    await expect(
+      withTenant(ctx, (tx) => withdrawAuthorizedAction(tx, ctx, approvalId, 'second')),
+    ).rejects.toThrow(/already withdrawn/i);
+    // Exactly one withdrawal audit event — the repeat produced nothing.
+    expect(await auditCount(approvalId, 'approval.withdrawn')).toBe(1);
+  });
+
+  it('withdrawal requires a non-empty reason and admin authority', async () => {
+    const { approvalId } = await authorizedUnexecutedTask();
+    await expect(withTenant(ctx, (tx) => withdrawAuthorizedAction(tx, ctx, approvalId, '   '))).rejects.toThrow(/reason is required/i);
+    // A non-admin cannot withdraw (authority check).
+    const member = { ...ctx, projectRole: 'member' as const };
+    await expect(withTenant(member, (tx) => withdrawAuthorizedAction(tx, member, approvalId, 'nope'))).rejects.toThrow(/admin/i);
+    expect(await approvalStatus(approvalId)).toBe('approved'); // still intact
+  });
+
+  it('supersedes a task with an existing replacement — links them, cancels the old, audits task.superseded', async () => {
+    const oldId = await pendingTask();
+    const newId = await pendingTask();
+    await withTenant(ctx, (tx) => supersedeTask(tx, ctx, oldId, newId, 'rescoped the work'));
+    const row = await getSetupDb().select({ s: tasks.status, by: tasks.supersededByTaskId, r: tasks.cancelReason }).from(tasks).where(eq(tasks.id, oldId));
+    expect(row[0]!.s).toBe('cancelled');
+    expect(row[0]!.by).toBe(newId); // relationship preserved
+    expect(row[0]!.r).toContain('Superseded by');
+    expect(await auditCount(oldId, 'task.superseded')).toBe(1);
+    // The replacement is untouched.
+    expect(await taskStatus(newId)).toBe('pending');
+    // Never represented as execution.
+    expect(assessTask({ status: 'cancelled', ownerAgentId: null }).intervention).toBe('none');
+  });
+
+  it('rejects self-supersession and an already-terminal task', async () => {
+    const id = await pendingTask();
+    await expect(withTenant(ctx, (tx) => supersedeTask(tx, ctx, id, id, 'x'))).rejects.toThrow(/itself/i);
+    await withTenant(ctx, (tx) => cancelTask(tx, ctx, id, 'done'));
+    const other = await pendingTask();
+    await expect(withTenant(ctx, (tx) => supersedeTask(tx, ctx, id, other, 'x'))).rejects.toThrow(/already cancelled/i);
+  });
+
+  it('supersede requires a reason', async () => {
+    const a = await pendingTask();
+    const b = await pendingTask();
+    await expect(withTenant(ctx, (tx) => supersedeTask(tx, ctx, a, b, '  '))).rejects.toThrow(/reason is required/i);
+  });
+
+  it('rejects a cross-workspace replacement task (no reaching into another project)', async () => {
+    const oldId = await pendingTask(ctx.projectId);
+    const foreignReplacement = await pendingTask(ctx2.projectId);
+    await expect(
+      withTenant(ctx, (tx) => supersedeTask(tx, ctx, oldId, foreignReplacement, 'x')),
+    ).rejects.toThrow(); // getTask scopes by project → NotFound
+    expect(await taskStatus(oldId)).toBe('pending'); // untouched
+  });
+
+  it('manual reconcile repairs a stranded task, records trigger:manual, and is idempotent', async () => {
+    const { taskId, approvalIds } = await taskAwaitingApproval(2);
+    // Strand it: approve out-of-band so no forward reconcile fired.
+    for (const id of approvalIds) {
+      await getSetupDb().update(approvals).set({ status: 'approved', decidedAt: new Date() }).where(eqOp(approvals.id, id));
+    }
+    expect(await taskStatus(taskId)).toBe('awaiting_approval');
+    const changed = await withTenant(ctx, (tx) => manuallyReconcileTask(tx, ctx, taskId, 'operator forced the check'));
+    expect(changed).toBe(true);
+    expect(await taskStatus(taskId)).toBe('completed');
+    // The manual trigger + reason are captured in the reconcile audit detail.
+    const evs = await getSetupDb()
+      .select({ d: auditLogs.detail })
+      .from(auditLogs)
+      .where(and(eqOp(auditLogs.entityId, taskId), eqOp(auditLogs.action, 'task.authorization_reconciled')));
+    expect(evs.length).toBe(1);
+    expect((evs[0]!.d as Record<string, unknown>).trigger).toBe('manual');
+    expect((evs[0]!.d as Record<string, unknown>).reason).toBe('operator forced the check');
+    // Idempotent: a second manual reconcile changes nothing (already completed).
+    expect(await withTenant(ctx, (tx) => manuallyReconcileTask(tx, ctx, taskId, 'again'))).toBe(false);
+  });
+
+  it('manual reconcile enforces admin authority and a non-empty reason', async () => {
+    const { taskId } = await taskAwaitingApproval(1);
+    await expect(withTenant(ctx, (tx) => manuallyReconcileTask(tx, ctx, taskId, ''))).rejects.toThrow(/reason is required/i);
+    const member = { ...ctx, projectRole: 'member' as const };
+    await expect(withTenant(member, (tx) => manuallyReconcileTask(tx, member, taskId, 'x'))).rejects.toThrow(/admin/i);
+  });
+
+  it('"execution unavailable" is a positive determination, never a mere absence', () => {
+    // No executor exists for any real action type yet (Phase 3 unbuilt) → true for a non-empty set.
+    expect(noEligibleExecutor(['email_send'])).toBe(true);
+    expect(noEligibleExecutor(['email_send', 'git_push'])).toBe(true);
+    // An empty set is NOT "unavailable" — there is simply no authorized action to speak about.
+    expect(noEligibleExecutor([])).toBe(false);
   });
 });

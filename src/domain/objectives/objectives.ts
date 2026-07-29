@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
+  type DataClassification,
   MILESTONE_STATUSES,
   type MilestoneStatus,
   OBJECTIVE_STATUSES,
@@ -10,11 +11,12 @@ import {
   type TenantContext,
   type WorkItemCondition,
 } from '@/types/domain';
-import { ConflictError, NotFoundError, ValidationError } from '@/lib/errors';
+import { AppError, ConflictError, NotFoundError, ValidationError } from '@/lib/errors';
 import { METRIC_PATTERN, slugifyMetric } from '@/lib/slug';
 import { type DbTx } from '@/db/client';
 import { agents, departments, milestones, objectives, profiles, tasks, workItems } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
+import { type ClassificationVisibility, type ExclusionSummary, LIVE_ONLY, exclusionSummary, loadProjectClassification, resolveRecordClassification } from '@/domain/classification/classification';
 
 /**
  * Objectives: the unit of business intent (D-010, OBJECTIVES.md).
@@ -132,6 +134,8 @@ export interface ObjectiveListRow {
   /** Human Work Items attached to this objective (effort, not progress). */
   workItemTotal: number;
   createdAt: Date;
+  /** HUB-009 — effective classification of the objective itself (project inheritance applied). */
+  classification: DataClassification;
 }
 
 function computePercent(p: Omit<ObjectiveProgress, 'percent'>): number {
@@ -149,6 +153,7 @@ export async function listObjectives(tx: DbTx, ctx: TenantContext): Promise<Obje
       priority: objectives.priority,
       successCriteria: objectives.successCriteria,
       createdAt: objectives.createdAt,
+      classification: objectives.classification,
       departmentName: departments.name,
       agentName: agents.name,
     })
@@ -160,7 +165,11 @@ export async function listObjectives(tx: DbTx, ctx: TenantContext): Promise<Obje
 
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
+  const projectClassification = await loadProjectClassification(tx, ctx.projectId);
 
+  // HUB-009 — objective CONTRIBUTION counts are live-only: demo/seed tasks/work items never inflate a
+  // live objective's headline progress or health. (Milestones carry no own classification; a live
+  // objective's milestones are inherently live.)
   const taskCounts = await tx
     .select({
       objectiveId: tasks.objectiveId,
@@ -168,7 +177,7 @@ export async function listObjectives(tx: DbTx, ctx: TenantContext): Promise<Obje
       completed: sql<string>`count(*) filter (where ${tasks.status} = 'completed')`,
     })
     .from(tasks)
-    .where(and(eq(tasks.projectId, ctx.projectId), inArray(tasks.objectiveId, ids)))
+    .where(and(eq(tasks.projectId, ctx.projectId), inArray(tasks.objectiveId, ids), eq(tasks.classification, 'live')))
     .groupBy(tasks.objectiveId);
 
   const milestoneCounts = await tx
@@ -184,7 +193,7 @@ export async function listObjectives(tx: DbTx, ctx: TenantContext): Promise<Obje
   const workItemCounts = await tx
     .select({ objectiveId: workItems.objectiveId, total: sql<string>`count(*)` })
     .from(workItems)
-    .where(and(eq(workItems.projectId, ctx.projectId), inArray(workItems.objectiveId, ids)))
+    .where(and(eq(workItems.projectId, ctx.projectId), inArray(workItems.objectiveId, ids), eq(workItems.classification, 'live')))
     .groupBy(workItems.objectiveId);
 
   const taskMap = new Map(taskCounts.map((t) => [t.objectiveId, t]));
@@ -214,6 +223,7 @@ export async function listObjectives(tx: DbTx, ctx: TenantContext): Promise<Obje
       successCriteria: criteria,
       workItemTotal: Number(workItemMap.get(r.id)?.total ?? 0),
       createdAt: r.createdAt,
+      classification: resolveRecordClassification(r.classification, projectClassification).classification,
     };
   });
 }
@@ -233,6 +243,8 @@ export interface ObjectiveTaskRow {
   /** Carried so the objective page can read this task in the shared execution language. */
   ownerAgentId: string | null;
   createdAt: Date;
+  /** HUB-009 — effective classification (for labelling when non-live contribution is shown). */
+  classification: DataClassification;
 }
 
 /** Human Work Items attached to an objective, with the fields the shared execution translator needs. */
@@ -244,6 +256,8 @@ export interface ObjectiveWorkItemRow {
   stage: string;
   ownerAgentId: string | null;
   updatedAt: Date;
+  /** HUB-009 — effective classification (for labelling when non-live contribution is shown). */
+  classification: DataClassification;
 }
 
 /**
@@ -304,6 +318,8 @@ export interface ObjectiveDetail {
   tasks: ObjectiveTaskRow[];
   /** Human Work Items attached to this objective — effort, shown alongside AI tasks. */
   workItems: ObjectiveWorkItemRow[];
+  /** HUB-009 — demo/seed contribution hidden from a live-only view (0 when includeNonLive or none). */
+  contributionExcluded: ExclusionSummary;
   progress: ObjectiveProgress;
   /** Frozen closure record (completed/cancelled only). */
   closedByName: string | null;
@@ -318,6 +334,7 @@ export async function getObjective(
   tx: DbTx,
   ctx: TenantContext,
   objectiveId: string,
+  visibility: ClassificationVisibility = LIVE_ONLY,
 ): Promise<ObjectiveDetail> {
   const rows = await tx
     .select({
@@ -362,19 +379,27 @@ export async function getObjective(
     .where(and(eq(milestones.objectiveId, objectiveId), eq(milestones.projectId, ctx.projectId)))
     .orderBy(asc(milestones.position), asc(milestones.createdAt));
 
-  const attachedTasks = await tx
+  // HUB-009 — the objective's HEADLINE progress/health is computed from LIVE contribution only (non-live
+  // evidence never silently changes it). The displayed list follows the page's visibility (labelled when
+  // non-live is shown), but the assessment `base` below always uses the live-only lists.
+  const projectClassification = await loadProjectClassification(tx, ctx.projectId);
+
+  const attachedTasksAll = (await tx
     .select({
       id: tasks.id,
       title: tasks.title,
       status: tasks.status,
       ownerAgentId: tasks.ownerAgentId,
       createdAt: tasks.createdAt,
+      classification: tasks.classification,
     })
     .from(tasks)
     .where(and(eq(tasks.objectiveId, objectiveId), eq(tasks.projectId, ctx.projectId)))
-    .orderBy(desc(tasks.createdAt));
+    .orderBy(desc(tasks.createdAt))).map((t) => ({ ...t, classification: resolveRecordClassification(t.classification, projectClassification).classification }));
+  const liveTasks = attachedTasksAll.filter((t) => t.classification === 'live');
+  const attachedTasks = visibility.includeNonLive ? attachedTasksAll : liveTasks;
 
-  const attachedWorkItems = await tx
+  const attachedWorkItemsAll = (await tx
     .select({
       id: workItems.id,
       title: workItems.title,
@@ -383,10 +408,17 @@ export async function getObjective(
       stage: workItems.stage,
       ownerAgentId: workItems.ownerAgentId,
       updatedAt: workItems.updatedAt,
+      classification: workItems.classification,
     })
     .from(workItems)
     .where(and(eq(workItems.objectiveId, objectiveId), eq(workItems.projectId, ctx.projectId)))
-    .orderBy(desc(workItems.createdAt));
+    .orderBy(desc(workItems.createdAt))).map((w) => ({ ...w, classification: resolveRecordClassification(w.classification, projectClassification).classification }));
+  const liveWorkItems = attachedWorkItemsAll.filter((w) => w.classification === 'live');
+  const attachedWorkItems = visibility.includeNonLive ? attachedWorkItemsAll : liveWorkItems;
+  const contributionExcluded: ExclusionSummary = exclusionSummary({
+    excludedDemo: attachedTasksAll.filter((t) => t.classification === 'demo').length + attachedWorkItemsAll.filter((w) => w.classification === 'demo').length,
+    excludedSeed: attachedTasksAll.filter((t) => t.classification === 'seed').length + attachedWorkItemsAll.filter((w) => w.classification === 'seed').length,
+  });
 
   // Resolve the people behind criterion evidence and the closure, for provenance wording.
   const personIds = [
@@ -399,8 +431,9 @@ export async function getObjective(
   const nameById = new Map(people.map((p) => [p.id, p.name]));
 
   const base = {
-    tasksTotal: attachedTasks.length,
-    tasksCompleted: attachedTasks.filter((t) => t.status === 'completed').length,
+    // Headline progress is LIVE-only regardless of the display toggle.
+    tasksTotal: liveTasks.length,
+    tasksCompleted: liveTasks.filter((t) => t.status === 'completed').length,
     criteriaTotal: row.successCriteria.length,
     criteriaSatisfied: row.successCriteria.filter((c) => c.status !== 'unmet').length,
     milestonesTotal: ms.length,
@@ -421,6 +454,7 @@ export async function getObjective(
     milestones: ms,
     tasks: attachedTasks,
     workItems: attachedWorkItems,
+    contributionExcluded,
     progress: { ...base, percent: computePercent(base) },
     closedByName: row.closedBy ? (nameById.get(row.closedBy) ?? null) : null,
     closedAt: row.closedAt,
@@ -785,6 +819,69 @@ export async function setMilestoneStatus(
     entityType: 'milestone',
     entityId: milestoneId,
     detail: { objectiveId: updated[0]!.objectiveId, to: status },
+  });
+}
+
+/**
+ * Assign, change, or clear an objective's accountable owner (HUB-005). The canonical field is the single
+ * `objectives.accountable_agent_id` — this is the one sanctioned way to write it, so UI code never touches
+ * the FK directly. Descriptive only: setting an owner triggers no routing, delegation, or permission change.
+ *
+ * Rules: admin authority; objective and employee both in this workspace; a DISABLED employee cannot RECEIVE
+ * new ownership (an already-assigned owner who is later disabled is kept — history stays visible); idempotent
+ * (re-assigning the same owner is a no-op). Emits a distinct, append-only audit event per transition.
+ */
+export async function setObjectiveOwner(
+  tx: DbTx,
+  ctx: TenantContext,
+  objectiveId: string,
+  ownerAgentId: string | null,
+): Promise<void> {
+  if (ctx.projectRole !== 'admin') {
+    throw new AppError('forbidden', 'Only a project admin can change objective ownership.');
+  }
+
+  const objRows = await tx
+    .select({ id: objectives.id, accountableAgentId: objectives.accountableAgentId })
+    .from(objectives)
+    .where(and(eq(objectives.id, objectiveId), eq(objectives.projectId, ctx.projectId), eq(objectives.orgId, ctx.orgId)))
+    .limit(1);
+  const objective = objRows[0];
+  if (!objective) throw new NotFoundError('Objective');
+
+  const previous = objective.accountableAgentId;
+  if (previous === ownerAgentId) return; // idempotent — no change, no event
+
+  if (ownerAgentId) {
+    const emp = await tx
+      .select({ id: agents.id, enabled: agents.enabled })
+      .from(agents)
+      .where(and(eq(agents.id, ownerAgentId), eq(agents.projectId, ctx.projectId), eq(agents.orgId, ctx.orgId)))
+      .limit(1);
+    if (emp.length === 0) throw new ValidationError(['That owner is not an employee in this workspace.']);
+    // A disabled employee may not RECEIVE new ownership. (Keeping an owner disabled later is fine — that
+    // history stays visible; only a fresh assignment to a disabled person is refused.)
+    if (!emp[0]!.enabled) {
+      throw new ValidationError(['That employee is disabled and cannot be assigned as an objective owner.']);
+    }
+  }
+
+  await tx
+    .update(objectives)
+    .set({ accountableAgentId: ownerAgentId, updatedAt: new Date() })
+    .where(and(eq(objectives.id, objectiveId), eq(objectives.projectId, ctx.projectId), eq(objectives.orgId, ctx.orgId)));
+
+  const action =
+    ownerAgentId === null
+      ? 'objective.owner_cleared'
+      : previous === null
+        ? 'objective.owner_assigned'
+        : 'objective.owner_changed';
+  await writeAudit(tx, ctx, {
+    action,
+    entityType: 'objective',
+    entityId: objectiveId,
+    detail: { from: previous, to: ownerAgentId },
   });
 }
 

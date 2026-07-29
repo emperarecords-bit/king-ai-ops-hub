@@ -14,8 +14,10 @@ import { assessAutomation, AUTOMATION_STATE_LABEL } from '@/domain/execution/aut
 import { listEmployees } from '@/domain/agents/org';
 import { listObjectives } from '@/domain/objectives/objectives';
 import { Card, EmptyState, PageHeader } from '@/components/ui';
+import { visibilityFromParam } from '@/domain/classification/classification';
 import { CreateWorkItemForm } from './work-item-form';
 import { WorkItemRow } from './work-item-row';
+import { NonLiveControls } from '../non-live-controls';
 
 /**
  * Execution — the complete state of the work, in one operational language over two engines
@@ -25,24 +27,29 @@ import { WorkItemRow } from './work-item-row';
  */
 export default async function ExecutionPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ projectKey: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { projectKey } = await params;
+  const sp = await searchParams;
+  const visibility = visibilityFromParam(sp.includeNonLive);
   const ctx = await requireTenant(projectKey);
   const canEdit = ctx.projectRole !== 'viewer';
 
-  const { rows, automations, employees, objectives } = await withTenant(ctx, async (tx) => {
+  const { feed, automations, employees, objectives } = await withTenant(ctx, async (tx) => {
     // Self-heal any task stranded in awaiting_approval with no pending proposal, so "Requires you"
     // never asks for a decision already made (HUB-001).
     await reconcileStrandedApprovalTasks(tx, ctx);
     return {
-      rows: await listExecution(tx, ctx),
+      feed: await listExecution(tx, ctx, visibility),
       automations: await listAutomations(tx, ctx),
       employees: await listEmployees(tx, ctx),
       objectives: await listObjectives(tx, ctx),
     };
   });
+  const rows = feed.rows;
 
   const assessedAutomations = automations.map((x) => ({
     x,
@@ -75,6 +82,13 @@ export default async function ExecutionPage({
       <PageHeader
         title="Execution"
         subtitle="The complete state of the work — human and AI, in one language. Organized by what it's doing; the lens above shows only what needs you."
+      />
+
+      <NonLiveControls
+        pathname={`/p/${projectKey}/work`}
+        searchParams={sp}
+        includeNonLive={visibility.includeNonLive}
+        excluded={feed.excluded}
       />
 
       {canEdit ? (

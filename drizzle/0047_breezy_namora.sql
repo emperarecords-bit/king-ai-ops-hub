@@ -1,0 +1,2 @@
+ALTER TABLE "tasks" ADD COLUMN "superseded_by_task_id" uuid;--> statement-breakpoint
+ALTER TABLE "tasks" ADD CONSTRAINT "tasks_superseded_by_task_id_tasks_id_fk" FOREIGN KEY ("superseded_by_task_id") REFERENCES "public"."tasks"("id") ON DELETE set null ON UPDATE no action;

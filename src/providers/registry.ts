@@ -12,7 +12,24 @@ import { OpenAIProvider } from './openai';
 
 let registry: Map<ProviderId, AIProvider> | null = null;
 
+/**
+ * Test-only injection seam. Lets an integration test drive the REAL production dispatch path
+ * (`startRun` → `getProvider`) with a fake provider so no external model call or spend occurs. Returns a
+ * provider to use for `id`, or `undefined` to fall through to the real registry. Never set in production
+ * code paths — only from tests, which must clear it (`setProviderOverrideForTests(null)`) afterward.
+ */
+let providerOverride: ((id: ProviderId) => AIProvider | undefined) | null = null;
+export function setProviderOverrideForTests(
+  fn: ((id: ProviderId) => AIProvider | undefined) | null,
+): void {
+  providerOverride = fn;
+}
+
 export function getProvider(id: ProviderId): AIProvider {
+  if (providerOverride) {
+    const injected = providerOverride(id);
+    if (injected) return injected;
+  }
   if (!registry) {
     const env = serverEnv();
     registry = new Map<ProviderId, AIProvider>([

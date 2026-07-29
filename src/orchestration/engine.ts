@@ -12,10 +12,7 @@ import {
   type Turn,
 } from '@/types/provider';
 import {
-  buildPrimarySystem,
-  buildPrimaryUserTurn,
-  buildReviewSystem,
-  buildReviewUserTurn,
+  assembleEffectivePrompt,
   buildRevisionUserTurn,
   type ContextItemForPrompt,
   type ObjectiveForPrompt,
@@ -23,6 +20,7 @@ import {
   stripIssuesBlock,
 } from './prompts';
 import { extractProposedActions, type ProposedAction, stripActionBlock } from './actions';
+import { sha256Hex } from '@/lib/crypto';
 
 /**
  * The run state machine (ARCHITECTURE.md §6, DECISIONS.md D-006).
@@ -52,6 +50,8 @@ export interface EngineAgent {
 export interface EngineInput {
   readonly taskInput: string;
   readonly contextItems: readonly ContextItemForPrompt[];
+  /** HUB-008 — the trusted Current Operating Priorities block (active objectives/criteria/milestones). */
+  readonly operatingPriorities?: string | null;
   readonly objective?: ObjectiveForPrompt | null;
   /** Precomputed Hub-vs-document freshness relation (O-17), when applicable. */
   readonly freshnessComparison?: FreshnessComparison | null;
@@ -72,6 +72,20 @@ export interface StepRecord {
   readonly verdictDetail: ReviewDetail | null;
   readonly succeeded: boolean;
   readonly errorMessage: string | null;
+  /**
+   * HUB-008 — sha256 of THIS step's exact dispatched request (system + ordered turns), so each step
+   * (including the revision, whose request carries reviewer feedback + the prior response) has its own
+   * verifiable identity. Null for the deterministic consolidate step (no model call).
+   */
+  readonly effectivePromptHash: string | null;
+}
+
+/**
+ * Canonical, deterministic hash of one model request (system + ordered turns). Distinct from the
+ * run-level effective-prompt hash: this pins the EXACT per-step dispatch, revision turns included.
+ */
+export function stepEffectivePromptHash(system: string, turns: readonly Turn[]): string {
+  return sha256Hex([system, ...turns.map((t) => `[${t.role}]\n${t.content}`)].join('\n\n'));
 }
 
 /** The engine reports each step as it completes; the caller persists. */
@@ -230,14 +244,20 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
   };
 
   // --- Step 1: PRIMARY ------------------------------------------------------
-  const primarySystem = buildPrimarySystem(input.primary.systemPrompt);
-  const primaryUserTurn = buildPrimaryUserTurn(
-    input.taskInput,
-    input.contextItems,
-    input.objective,
-    input.freshnessComparison,
-  );
+  // ONE canonical assembler (HUB-008) — no flat concatenation path in the engine.
+  const primaryAssembled = assembleEffectivePrompt({
+    variant: 'primary',
+    agentSystemPrompt: input.primary.systemPrompt,
+    taskInput: input.taskInput,
+    contextItems: input.contextItems,
+    objective: input.objective,
+    freshnessComparison: input.freshnessComparison,
+    operatingPriorities: input.operatingPriorities,
+  });
+  const primarySystem = primaryAssembled.system;
+  const primaryUserTurn = primaryAssembled.userTurn;
   const primaryTurns: Turn[] = [{ role: 'user', content: primaryUserTurn }];
+  const primaryStepHash = stepEffectivePromptHash(primarySystem, primaryTurns);
 
   let primaryResponse: AgentResponse;
   try {
@@ -259,6 +279,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
       verdictDetail: null,
       succeeded: false,
       errorMessage: message,
+      effectivePromptHash: primaryStepHash,
     });
     return {
       ok: false,
@@ -276,6 +297,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
     verdictDetail: null,
     succeeded: true,
     errorMessage: null,
+    effectivePromptHash: primaryStepHash,
   });
 
   let reviewResponse: AgentResponse | null = null;
@@ -284,18 +306,21 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
 
   // --- Step 2: REVIEW (optional) -------------------------------------------
   if (input.reviewer) {
-    const reviewSystem = buildReviewSystem(input.reviewer.systemPrompt);
     // Context parity (EV-009): give the reviewer the same approved organizational
     // policy the primary saw (the accepted-decision context items, labelled
-    // 'Decision memory' by the runner). Presented as authoritative policy, never
-    // by its internal name, so correct policy-grounding is not mis-flagged.
+    // 'Decision memory' by the runner) AND the same Current Operating Priorities.
     const approvedPolicies = input.contextItems.filter((i) => i.kind === 'Decision memory');
-    const reviewTurns: Turn[] = [
-      {
-        role: 'user',
-        content: buildReviewUserTurn(input.taskInput, primaryResponse.text, approvedPolicies),
-      },
-    ];
+    const reviewAssembled = assembleEffectivePrompt({
+      variant: 'review',
+      agentSystemPrompt: input.reviewer.systemPrompt,
+      taskInput: input.taskInput,
+      primaryResponse: primaryResponse.text,
+      approvedPolicies,
+      operatingPriorities: input.operatingPriorities,
+    });
+    const reviewSystem = reviewAssembled.system;
+    const reviewTurns: Turn[] = [{ role: 'user', content: reviewAssembled.userTurn }];
+    const reviewStepHash = stepEffectivePromptHash(reviewSystem, reviewTurns);
     try {
       reviewResponse = await callWithRetry(
         input.reviewer,
@@ -319,6 +344,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
         verdictDetail: parsedReview.detail,
         succeeded: true,
         errorMessage: null,
+        effectivePromptHash: reviewStepHash,
       });
     } catch (err) {
       // A failed review degrades the run, it does not destroy the primary work.
@@ -331,6 +357,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
         verdictDetail: null,
         succeeded: false,
         errorMessage: message,
+        effectivePromptHash: reviewStepHash,
       });
       reviewResponse = null;
       verdict = null;
@@ -343,6 +370,9 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
         { role: 'assistant', content: primaryResponse.text },
         { role: 'user', content: buildRevisionUserTurn(reviewResponse.text) },
       ];
+      // The revision's identity is NOT the initial primary request — it includes the reviewer feedback
+      // and the prior primary response, so it gets its own per-step hash over the full three-turn request.
+      const revisionStepHash = stepEffectivePromptHash(primarySystem, revisionTurns);
       try {
         revisionResponse = await callWithRetry(
           input.primary,
@@ -360,6 +390,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
           verdictDetail: null,
           succeeded: true,
           errorMessage: null,
+          effectivePromptHash: revisionStepHash,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Revision call failed.';
@@ -371,6 +402,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
           verdictDetail: null,
           succeeded: false,
           errorMessage: message,
+          effectivePromptHash: revisionStepHash,
         });
         revisionResponse = null; // fall back to the primary response
       }
@@ -392,6 +424,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
     verdictDetail: null,
     succeeded: true,
     errorMessage: null,
+    effectivePromptHash: null, // deterministic string assembly, no model request
   });
 
   // --- Action extraction (TB-4) --------------------------------------------

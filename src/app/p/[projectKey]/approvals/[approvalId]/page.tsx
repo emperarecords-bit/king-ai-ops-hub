@@ -9,6 +9,7 @@ import { Card, PageHeader } from '@/components/ui';
 import { Breadcrumb } from '../../breadcrumb';
 import { ConsequenceReadPanel, ConsequenceLevelChip } from '../consequence-view';
 import { AuthorizeForm } from '../authorize-form';
+import { WithdrawForm } from '../withdraw-form';
 
 const AUTHORIZATION_LABEL: Record<string, string> = {
   pending: 'Proposed — awaiting your decision',
@@ -207,6 +208,9 @@ export default async function ApprovalDetailPage({
             </Link>
             .
           </p>
+          {a.status === 'approved' && isAdmin ? (
+            <WithdrawForm projectKey={projectKey} approvalId={a.id} />
+          ) : null}
         </Card>
       )}
     </div>

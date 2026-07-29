@@ -217,7 +217,7 @@ describe.skipIf(!available)('knowledge retrieval is relevance-gated (not wholesa
     // A run to attach the application record to.
     const a = await getSetupDb().insert(agents).values({ orgId, projectId: ctx.projectId, name: `A-${randomUUID().slice(0, 6)}`, role: 'primary', provider: 'openai', model: 'gpt-5.4-mini', systemPrompt: 'x' }).returning({ id: agents.id });
     const t = await getSetupDb().insert(tasks).values({ orgId, projectId: ctx.projectId, title: 'Vendor task', input: 'x', providerSelection: 'openai', status: 'completed', createdBy: userId }).returning({ id: tasks.id });
-    const r = await getSetupDb().insert(runs).values({ orgId, projectId: ctx.projectId, taskId: t[0]!.id, status: 'completed', primaryAgentId: a[0]!.id }).returning({ id: runs.id });
+    const r = await getSetupDb().insert(runs).values({ classification: 'live', orgId, projectId: ctx.projectId, taskId: t[0]!.id, status: 'completed', primaryAgentId: a[0]!.id }).returning({ id: runs.id });
     const selected = [{ id, version: 1, title: 'Vendor onboarding steps', body: 'original', reason: 'subject: vendor, onboarding', memoryText: 'EXACT vendor text v1', trustSnapshot: fakeSnapshot }];
     await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'task_run', consumerId: r[0]!.id, runId: r[0]!.id, taskId: t[0]!.id, injected: selected }));
     await withTenant(ctx, (tx) => logKnowledgeApplications(tx, ctx, { consumerType: 'task_run', consumerId: r[0]!.id, runId: r[0]!.id, taskId: t[0]!.id, injected: [{ ...selected[0]!, memoryText: 'DIFFERENT (ignored)' }] }));

@@ -3,8 +3,10 @@ import { z } from 'zod';
 import {
   FLAGSHIP_CATEGORIES,
   MODEL_TIERS,
+  type DataClassification,
   type MessageRole,
   type ContextManifestEntry,
+  type ObjectiveStatus,
   type RetrievedDocRef,
   type ReviewDetail,
   type ReviewVerdict,
@@ -15,9 +17,37 @@ import {
 import { PROVIDER_SELECTIONS, type ProviderId, type ProviderSelection } from '@/types/provider';
 import { ConflictError, NotFoundError, ValidationError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
-import { messages, runs, runSteps, tasks } from '@/db/schema';
+import { messages, objectives, runs, runSteps, tasks } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 import { withdrawPendingApprovalsForTask } from '@/domain/approvals/approvals';
+
+/**
+ * Resolve an objective that a task is being tied to, scoped to this workspace (HUB-003, req #4).
+ * The canonical objective↔task association is the single FK `tasks.objective_id`; before persisting
+ * one we confirm the objective actually lives in the caller's org+project, so a crafted request can
+ * never point a task at a cross-workspace objective. Returns the objective's status for callers that
+ * also refuse to tie work to a closed goal. Throws NotFound when it isn't in this workspace.
+ */
+async function resolveObjectiveInWorkspace(
+  tx: DbTx,
+  ctx: TenantContext,
+  objectiveId: string,
+): Promise<{ id: string; title: string; status: string }> {
+  const rows = await tx
+    .select({ id: objectives.id, title: objectives.title, status: objectives.status })
+    .from(objectives)
+    .where(
+      and(
+        eq(objectives.id, objectiveId),
+        eq(objectives.projectId, ctx.projectId),
+        eq(objectives.orgId, ctx.orgId),
+      ),
+    )
+    .limit(1);
+  const row = rows[0];
+  if (!row) throw new NotFoundError('Objective');
+  return row;
+}
 
 /**
  * Task CRUD and history reads. Run EXECUTION lives in runner.ts — this module
@@ -60,6 +90,12 @@ export async function createTask(
   // normalize instead of erroring: both ⇒ review on.
   const reviewEnabled =
     parsed.data.providerSelection === 'both' ? true : parsed.data.reviewEnabled;
+
+  // The canonical objective link is persisted here — so it is validated here (HUB-003, req #4).
+  // A task may only be tied to an objective in its own workspace; the FK alone would accept any uuid.
+  if (parsed.data.objectiveId) {
+    await resolveObjectiveInWorkspace(tx, ctx, parsed.data.objectiveId);
+  }
 
   const inserted = await tx
     .insert(tasks)
@@ -107,6 +143,20 @@ export interface TaskListRow {
   providerSelection: ProviderSelection;
   reviewEnabled: boolean;
   createdAt: Date;
+  /** HUB-009 — the task's own stored classification (effective class resolved by the caller vs. project). */
+  classification: DataClassification;
+}
+
+/**
+ * HUB-009 — the selectable dependency/supersede candidates for a task. Pure so the page's picker logic is
+ * unit-testable. A live task's picker only offers LIVE candidates (demo/seed are never selectable, even with
+ * `?includeNonLive=1`); the server-side `addDependency`/supersede guards enforce this regardless of the UI.
+ */
+export function selectableTaskCandidates<T extends { id: string; classification: DataClassification }>(
+  all: readonly T[],
+  opts: { excludeId: string; excludeIds?: ReadonlySet<string> },
+): T[] {
+  return all.filter((t) => t.id !== opts.excludeId && !opts.excludeIds?.has(t.id) && t.classification === 'live');
 }
 
 export async function listTasks(tx: DbTx, ctx: TenantContext, limit = 50): Promise<TaskListRow[]> {
@@ -119,6 +169,7 @@ export async function listTasks(tx: DbTx, ctx: TenantContext, limit = 50): Promi
       providerSelection: tasks.providerSelection,
       reviewEnabled: tasks.reviewEnabled,
       createdAt: tasks.createdAt,
+      classification: tasks.classification,
     })
     .from(tasks)
     .where(and(eq(tasks.projectId, ctx.projectId), eq(tasks.orgId, ctx.orgId)))
@@ -135,6 +186,12 @@ export interface TaskDetail {
   reviewEnabled: boolean;
   ownerAgentId: string | null;
   cancelReason: string | null;
+  /** The canonical objective association (HUB-003) — read by EVERY surface, including this task's own
+   *  header. Null when the task is not tied to an objective. Title/status are joined for display so a
+   *  cancelled goal reads truthfully rather than silently. */
+  objectiveId: string | null;
+  objectiveTitle: string | null;
+  objectiveStatus: ObjectiveStatus | null;
   createdAt: Date;
 }
 
@@ -149,9 +206,15 @@ export async function getTask(tx: DbTx, ctx: TenantContext, taskId: string): Pro
       reviewEnabled: tasks.reviewEnabled,
       ownerAgentId: tasks.ownerAgentId,
       cancelReason: tasks.cancelReason,
+      objectiveId: tasks.objectiveId,
+      objectiveTitle: objectives.title,
+      objectiveStatus: objectives.status,
       createdAt: tasks.createdAt,
     })
     .from(tasks)
+    // Same direct FK every other surface reads (getApprovalDetail, listExecution, getObjective) — the
+    // task header must not be the one place that ignores it (the HUB-003 root cause).
+    .leftJoin(objectives, eq(tasks.objectiveId, objectives.id))
     .where(
       and(eq(tasks.id, taskId), eq(tasks.projectId, ctx.projectId), eq(tasks.orgId, ctx.orgId)),
     )
@@ -230,6 +293,54 @@ export async function cancelTask(
   });
 }
 
+/**
+ * Supersede a task with a newer one (HUB-002 recovery). Like cancel, this ENDS the old task's life
+ * without deleting anything — but it also records the replacement, preserving the relationship. The old
+ * task becomes terminal (`cancelled`) with `superseded_by_task_id` pointing at the replacement; its
+ * still-pending proposals are withdrawn (the work they'd act on is being replaced). Never touches the
+ * replacement task's own state. A running task must finish first; an already-terminal task cannot be
+ * superseded. A non-empty reason is required and preserved.
+ */
+export async function supersedeTask(
+  tx: DbTx,
+  ctx: TenantContext,
+  taskId: string,
+  replacementTaskId: string,
+  reason: string,
+): Promise<void> {
+  const r = (reason ?? '').trim();
+  if (!r) throw new ValidationError(['A reason is required to supersede a task.']);
+  if (taskId === replacementTaskId) throw new ValidationError(['A task cannot supersede itself.']);
+
+  const task = await getTask(tx, ctx, taskId); // NotFound if outside this workspace
+  if (task.status === 'running') {
+    throw new ConflictError('This task is running. Wait for the run to finish, then supersede it.');
+  }
+  if (task.status === 'cancelled') throw new ConflictError('This task is already cancelled or superseded.');
+
+  const replacement = await getTask(tx, ctx, replacementTaskId); // NotFound → clear cross-workspace/absent error
+
+  await tx
+    .update(tasks)
+    .set({
+      status: 'cancelled',
+      supersededByTaskId: replacementTaskId,
+      cancelReason: `Superseded by "${replacement.title}": ${r}`,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(tasks.id, taskId), eq(tasks.projectId, ctx.projectId), eq(tasks.orgId, ctx.orgId)));
+
+  // The old task's proposals are no longer valid — the work is being replaced. Withdraw the pending ones.
+  await withdrawPendingApprovalsForTask(tx, ctx, taskId, `Task superseded: ${r}`);
+
+  await writeAudit(tx, ctx, {
+    action: 'task.superseded',
+    entityType: 'task',
+    entityId: taskId,
+    detail: { title: task.title, from: task.status, supersededBy: replacementTaskId, replacementTitle: replacement.title, reason: r },
+  });
+}
+
 export interface MessageRow {
   id: string;
   role: MessageRole;
@@ -273,6 +384,16 @@ export interface RunRow {
   contextManifest: ContextManifestEntry[] | null;
   startedAt: Date;
   finishedAt: Date | null;
+  // HUB-008 reproducibility identity (nullable for runs predating the feature). These are HASHES and a
+  // content manifest only — never the private system-prompt text.
+  primaryPromptHash: string | null;
+  reviewerPromptHash: string | null;
+  primaryConfigHash: string | null;
+  reviewerConfigHash: string | null;
+  primaryEffectivePromptHash: string | null;
+  reviewerEffectivePromptHash: string | null;
+  assemblerVersion: string | null;
+  sourceManifest: { kind: string; id?: string | null; scope?: string | null; hash: string }[] | null;
 }
 
 export async function listRuns(tx: DbTx, ctx: TenantContext, taskId: string): Promise<RunRow[]> {
@@ -286,6 +407,14 @@ export async function listRuns(tx: DbTx, ctx: TenantContext, taskId: string): Pr
       contextManifest: runs.contextManifest,
       startedAt: runs.startedAt,
       finishedAt: runs.finishedAt,
+      primaryPromptHash: runs.primaryPromptHash,
+      reviewerPromptHash: runs.reviewerPromptHash,
+      primaryConfigHash: runs.primaryConfigHash,
+      reviewerConfigHash: runs.reviewerConfigHash,
+      primaryEffectivePromptHash: runs.primaryEffectivePromptHash,
+      reviewerEffectivePromptHash: runs.reviewerEffectivePromptHash,
+      assemblerVersion: runs.assemblerVersion,
+      sourceManifest: runs.sourceManifest,
     })
     .from(runs)
     .where(
@@ -305,6 +434,8 @@ export interface RunStepRow {
   succeeded: boolean;
   errorMessage: string | null;
   latencyMs: number | null;
+  /** HUB-008 — per-step effective-prompt hash (null for consolidate + pre-feature steps). */
+  effectivePromptHash: string | null;
 }
 
 export async function listRunSteps(tx: DbTx, ctx: TenantContext, runId: string): Promise<RunStepRow[]> {
@@ -320,6 +451,7 @@ export async function listRunSteps(tx: DbTx, ctx: TenantContext, runId: string):
       succeeded: runSteps.succeeded,
       errorMessage: runSteps.errorMessage,
       latencyMs: runSteps.latencyMs,
+      effectivePromptHash: runSteps.effectivePromptHash,
     })
     .from(runSteps)
     .where(

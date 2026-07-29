@@ -97,7 +97,7 @@ async function supplyToRun(
 ) {
   const a = await db().insert(agents).values({ orgId: ctx.orgId, projectId: ctx.projectId, name: 'a', role: 'primary', provider: 'openai', model: 'agent-current-model', systemPrompt: 'x' }).returning({ id: agents.id });
   const t = await db().insert(tasks).values({ orgId: ctx.orgId, projectId: ctx.projectId, title: 't', input: 'x', providerSelection: 'openai', status: 'completed', createdBy: ctx.userId }).returning({ id: tasks.id });
-  const r = await db().insert(runs).values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId: t[0]!.id, status: exec.status ?? 'completed', primaryAgentId: a[0]!.id }).returning({ id: runs.id });
+  const r = await db().insert(runs).values({ classification: 'live', orgId: ctx.orgId, projectId: ctx.projectId, taskId: t[0]!.id, status: exec.status ?? 'completed', primaryAgentId: a[0]!.id }).returning({ id: runs.id });
   // The IMMUTABLE dispatch record: the primary execution step froze the provider/model actually used.
   if (exec.provider !== null) {
     await db().insert(runSteps).values({ orgId: ctx.orgId, projectId: ctx.projectId, runId: r[0]!.id, stepNumber: 1, kind: 'primary', agentId: a[0]!.id, provider: exec.provider ?? 'openai', model: exec.model ?? 'gpt-dispatch', succeeded: exec.status !== 'failed' });

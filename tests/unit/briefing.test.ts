@@ -12,6 +12,7 @@ function obj(over: Partial<ObjectiveListRow> & { tasksTotal: number; tasksComple
   return {
     id: rest.id ?? 'o1',
     title: rest.title ?? 'Objective',
+    classification: rest.classification ?? 'live',
     status: rest.status ?? 'active',
     priority: rest.priority ?? 1,
     sponsoringDepartment: rest.sponsoringDepartment ?? null,

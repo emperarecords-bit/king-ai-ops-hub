@@ -58,9 +58,9 @@ async function main() {
 
     // Synthetic run (cleaned up below).
     const agent = (await t.select({ id: agents.id }).from(agents).where(and(eq(agents.projectId, ctx.projectId), eq(agents.role, 'primary'))).limit(1))[0]
-      ?? (await t.insert(agents).values({ orgId: ctx.orgId, projectId: ctx.projectId, name: '[verify] agent', role: 'primary', provider: 'openai', model: 'm', systemPrompt: 'x' }).returning({ id: agents.id }))[0]!;
-    const task = (await t.insert(tasks).values({ orgId: ctx.orgId, projectId: ctx.projectId, title: '[verify] c2 evidence', input: query, providerSelection: 'openai', status: 'completed', createdBy: ctx.userId }).returning({ id: tasks.id }))[0]!;
-    const run = (await t.insert(runs).values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId: task.id, status: 'completed', primaryAgentId: agent.id, retrievedSources: snapshot.length > 0 ? snapshot : null }).returning({ id: runs.id }))[0]!;
+      ?? (await t.insert(agents).values({ orgId: ctx.orgId, projectId: ctx.projectId, name: '[verify] agent', role: 'primary', provider: 'openai', model: 'm', systemPrompt: 'x', classification: 'seed' }).returning({ id: agents.id }))[0]!;
+    const task = (await t.insert(tasks).values({ orgId: ctx.orgId, projectId: ctx.projectId, title: '[verify] c2 evidence', input: query, providerSelection: 'openai', status: 'completed', createdBy: ctx.userId, classification: 'seed' }).returning({ id: tasks.id }))[0]!;
+    const run = (await t.insert(runs).values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId: task.id, status: 'completed', primaryAgentId: agent.id, retrievedSources: snapshot.length > 0 ? snapshot : null, classification: 'seed' }).returning({ id: runs.id }))[0]!;
 
     const written = asm.versioned
       ? await writeRunVersionEvidence(t, ctx, run.id, supplied.filter((r) => r.documentVersionId).map((r) => ({ documentVersionId: r.documentVersionId!, chunkIndex: r.chunkIndex, rank: r.rank, disclosure: r.disclosure, retrievalReason: 'run_context' })))

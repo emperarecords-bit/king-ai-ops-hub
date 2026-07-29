@@ -7,6 +7,7 @@ import {
   CADENCES,
   CONTENT_FIDELITIES,
   CONTEXT_ITEM_STATUSES,
+  DATA_CLASSIFICATIONS,
   DOCUMENT_INDEX_STATUSES,
   DECISION_APPLICABILITY,
   DECISION_CONFIDENCE,
@@ -93,3 +94,4 @@ export const decisionScopeEnum = pgEnum('decision_scope', DECISION_SCOPES);
 export const decisionConfidenceEnum = pgEnum('decision_confidence', DECISION_CONFIDENCE);
 export const extractionStatusEnum = pgEnum('extraction_status', EXTRACTION_STATUSES);
 export const runJobStatusEnum = pgEnum('run_job_status', RUN_JOB_STATUSES);
+export const dataClassificationEnum = pgEnum('data_classification', DATA_CLASSIFICATIONS);

@@ -132,7 +132,7 @@ beforeAll(async () => {
       systemPrompt: 'x',
     })
     .returning({ id: agents.id });
-  await db.insert(runs).values({
+  await db.insert(runs).values({ classification: 'live',
     orgId,
     projectId: ctxA.projectId,
     taskId: doneId,

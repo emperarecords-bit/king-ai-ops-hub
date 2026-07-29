@@ -74,7 +74,7 @@ async function mkRun(ctx: TenantContext, taskId: string): Promise<string> {
     .returning({ id: agents.id });
   const r = await getSetupDb()
     .insert(runs)
-    .values({ orgId, projectId: ctx.projectId, taskId, status: 'completed', primaryAgentId: a[0]!.id })
+    .values({ classification: 'live', orgId, projectId: ctx.projectId, taskId, status: 'completed', primaryAgentId: a[0]!.id })
     .returning({ id: runs.id });
   return r[0]!.id;
 }

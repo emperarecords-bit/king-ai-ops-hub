@@ -180,6 +180,39 @@ begin
 end
 $$;
 
+-- HUB-006 correction 1: a redacted, searchable representation of an audit detail payload. Free-text audit
+-- search matches over THIS, never the raw detail, so a stored secret VALUE can never influence a match,
+-- a count, or the empty-result signal. Secret-bearing KEYS (case-insensitive, at any nesting depth) have
+-- their values replaced with '[redacted]' before matching; key NAMES and non-sensitive values remain
+-- searchable. The deny-list mirrors the app-layer redactAuditDetail() so display and search agree.
+create or replace function app.redact_audit_detail(v jsonb) returns jsonb
+language plpgsql immutable parallel safe as $$
+declare
+  result jsonb;
+  k text;
+  val jsonb;
+begin
+  if v is null then return v; end if;
+  if jsonb_typeof(v) = 'object' then
+    result := '{}'::jsonb;
+    for k, val in select * from jsonb_each(v) loop
+      if k ~* '(secret|token|password|passwd|api[_-]?key|authorization|credential|private[_-]?key|access[_-]?key|client[_-]?secret|bearer)' then
+        result := result || jsonb_build_object(k, '[redacted]');
+      else
+        result := result || jsonb_build_object(k, app.redact_audit_detail(val));
+      end if;
+    end loop;
+    return result;
+  elsif jsonb_typeof(v) = 'array' then
+    select coalesce(jsonb_agg(app.redact_audit_detail(e)), '[]'::jsonb) into result from jsonb_array_elements(v) e;
+    return result;
+  else
+    return v;
+  end if;
+end
+$$;
+grant execute on function app.redact_audit_detail(jsonb) to app_server, purge_agent;
+
 drop trigger if exists messages_append_only on messages;
 create trigger messages_append_only
   before update or delete on messages

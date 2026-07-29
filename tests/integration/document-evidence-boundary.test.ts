@@ -69,7 +69,7 @@ describe.skipIf(!available)('Stage C2 — evidence commits before dispatch', () 
     // Model the runner: preflight (run + snapshot + normalized refs) in ONE transaction, THEN dispatch.
     const runOne = async () =>
       withTenant(ctx, async (tx) => {
-        const run = (await tx.insert(runs).values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId, status: 'running', primaryAgentId: agentId, retrievedSources: [{ relativePath: 'd.md', sha256: 'h', disclosure: 'workspace_internal', chunkIndex: 0, rank: 1, excerpt: 'x', documentVersionId: randomUUID() }] }).returning({ id: runs.id }))[0]!;
+        const run = (await tx.insert(runs).values({ classification: 'live', orgId: ctx.orgId, projectId: ctx.projectId, taskId, status: 'running', primaryAgentId: agentId, retrievedSources: [{ relativePath: 'd.md', sha256: 'h', disclosure: 'workspace_internal', chunkIndex: 0, rank: 1, excerpt: 'x', documentVersionId: randomUUID() }] }).returning({ id: runs.id }))[0]!;
         // Normalized-reference insertion fails: the documentVersionId does not exist (FK restrict), so the
         // whole preflight transaction aborts before any provider dispatch.
         await writeRunVersionEvidence(tx, ctx, run.id, [{ documentVersionId: randomUUID(), chunkIndex: 0, rank: null, disclosure: 'workspace_internal' }]);
@@ -103,7 +103,7 @@ describe.skipIf(!available)('Stage C2 — evidence commits before dispatch', () 
 
     let dispatched = false;
     const runId = await withTenant(ctx, async (tx) => {
-      const run = (await tx.insert(runs).values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId, status: 'running', primaryAgentId: agentId }).returning({ id: runs.id }))[0]!;
+      const run = (await tx.insert(runs).values({ classification: 'live', orgId: ctx.orgId, projectId: ctx.projectId, taskId, status: 'running', primaryAgentId: agentId }).returning({ id: runs.id }))[0]!;
       await writeRunVersionEvidence(tx, ctx, run.id, [{ documentVersionId: versionId, chunkIndex: 0, rank: null, disclosure: 'workspace_internal' }]);
       return run.id;
     }).then((id) => {

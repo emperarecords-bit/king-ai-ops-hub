@@ -6,7 +6,7 @@ import { AppError } from '@/lib/errors';
 import { serverEnv } from '@/lib/env.server';
 import { log } from '@/lib/log';
 import { withTenant } from '@/db/tenant';
-import { approvals, messages, runs, runSteps, tasks } from '@/db/schema';
+import { approvals, messages, projects, runs, runSteps, tasks } from '@/db/schema';
 import { getProvider, otherProvider } from '@/providers/registry';
 import {
   executeRun,
@@ -23,7 +23,11 @@ import {
   type RunSourceSnapshot,
   type StepKind,
 } from '@/types/domain';
-import { findAgentForRole, type AgentRow } from '@/domain/agents/agents';
+import { agentExecutionFingerprint, findAgentForRole, type AgentRow } from '@/domain/agents/agents';
+import { assembleCurrentOperatingPriorities } from '@/domain/prompts/effective-prompt';
+import { computeActivityClassification } from '@/domain/classification/classification';
+import { ASSEMBLER_VERSION, assembleEffectivePrompt } from '@/orchestration/prompts';
+import { sha256Hex } from '@/lib/crypto';
 import { selectRelevantKnowledge, logKnowledgeApplications } from '@/domain/knowledge/knowledge';
 import { loadObjectiveForRun } from '@/domain/objectives/objectives';
 import { assembleDocumentSources } from '@/domain/documents/retrieval-mode';
@@ -370,6 +374,56 @@ export async function startRun(
       ...decisionMemory.manifest,
     ];
 
+    // HUB-008 — the trusted Current Operating Priorities block (active objectives/criteria/milestones), and
+    // the immutable reproducibility identity of the effective prompts. Built with the SAME canonical
+    // assembler the engine uses, so the persisted effective-prompt hash equals what is dispatched.
+    const priorities = await assembleCurrentOperatingPriorities(tx, ctx, taskId);
+    const operatingPriorities = priorities.text;
+    const primaryAssembled = assembleEffectivePrompt({
+      variant: 'primary', agentSystemPrompt: primaryRow.systemPrompt, taskInput: task.input,
+      contextItems, objective, freshnessComparison, operatingPriorities,
+    });
+    const approvedPolicies = contextItems.filter((i) => i.kind === 'Decision memory');
+    const reviewerAssembled = reviewerRow
+      ? assembleEffectivePrompt({ variant: 'review', agentSystemPrompt: reviewerRow.systemPrompt, taskInput: task.input, primaryResponse: '', approvedPolicies, operatingPriorities })
+      : null;
+    // Manifest objective snapshot: hash an IMMUTABLE content snapshot that includes the title AND each
+    // criterion's label, target, and unit. `loadObjectiveForRun` intentionally strips targets from the
+    // rendered prompt (it lists unmet criterion labels), so we source the full criteria from the active
+    // objective in the operating priorities when this run's objective is one of them; otherwise (e.g. a
+    // task tied to a now-closed objective) we hash the loaded objective title/description/criteria labels.
+    const linkedActiveObjective = task.objectiveId
+      ? priorities.objectives.find((o) => o.id === task.objectiveId)
+      : null;
+    const objectiveSnapshot = linkedActiveObjective
+      ? {
+          title: linkedActiveObjective.title,
+          criteria: linkedActiveObjective.criteria.map((c) => ({ label: c.label, target: c.target, unit: c.unit })),
+        }
+      : objective
+        ? { title: objective.title, description: objective.description, openCriteria: objective.openCriteria }
+        : null;
+    const sourceManifest: { kind: string; id?: string | null; scope?: string | null; hash: string }[] = [
+      ...(objectiveSnapshot && task.objectiveId
+        ? [{ kind: 'objective', id: task.objectiveId, hash: sha256Hex(JSON.stringify(objectiveSnapshot)) }]
+        : []),
+      ...priorities.decisions.map((d) => ({ kind: 'decision', id: d.id, scope: d.scope, hash: d.contentHash })),
+      { kind: 'task', hash: sha256Hex(task.input) },
+      ...retrievedSources.map((s) => ({ kind: 'context', id: s.documentVersionId ?? s.relativePath, hash: s.sha256 })),
+    ];
+
+    // HUB-009 — resolve the run's data classification BEFORE dispatch from the effective classification of
+    // {project, task, performing agents} (seed > demo > live) and snapshot it immutably on the run. A later
+    // reclassification of any parent never rewrites this. run_steps/messages inherit this run snapshot.
+    const projectRow = (
+      await tx.select({ classification: projects.classification }).from(projects).where(eq(projects.id, ctx.projectId)).limit(1)
+    )[0];
+    const runClassification = computeActivityClassification({
+      projectClassification: projectRow?.classification,
+      taskClassification: task.classification,
+      performerClassifications: [primaryRow.classification, reviewerRow?.classification ?? null],
+    }).classification;
+
     const runInserted = await tx
       .insert(runs)
       .values({
@@ -382,6 +436,16 @@ export async function startRun(
         retrievedDocuments: retrievedRefs.length > 0 ? retrievedRefs : null,
         contextManifest: contextManifest.length > 0 ? contextManifest : null,
         retrievedSources: retrievedSources.length > 0 ? retrievedSources : null,
+        // HUB-008 reproducibility — captured immutably at dispatch (a later prompt edit can't rewrite it).
+        primaryConfigHash: agentExecutionFingerprint(primaryRow),
+        reviewerConfigHash: reviewerRow ? agentExecutionFingerprint(reviewerRow) : null,
+        primaryPromptHash: sha256Hex(primaryRow.systemPrompt),
+        reviewerPromptHash: reviewerRow ? sha256Hex(reviewerRow.systemPrompt) : null,
+        primaryEffectivePromptHash: sha256Hex(`${primaryAssembled.system}\n${primaryAssembled.userTurn}`),
+        reviewerEffectivePromptHash: reviewerAssembled ? sha256Hex(`${reviewerAssembled.system}\n${reviewerAssembled.userTurn}`) : null,
+        assemblerVersion: ASSEMBLER_VERSION,
+        sourceManifest,
+        classification: runClassification,
       })
       .returning({ id: runs.id });
     const runId = runInserted[0]!.id;
@@ -435,10 +499,10 @@ export async function startRun(
       },
     });
 
-    return { task, runId, primaryRow, reviewerRow, contextItems, objective, freshnessComparison };
+    return { task, runId, primaryRow, reviewerRow, contextItems, objective, freshnessComparison, operatingPriorities };
   });
 
-  const { task, runId, primaryRow, reviewerRow, contextItems, objective, freshnessComparison } =
+  const { task, runId, primaryRow, reviewerRow, contextItems, objective, freshnessComparison, operatingPriorities } =
     preflight;
 
   // ---- Engine execution ----------------------------------------------------
@@ -469,6 +533,7 @@ export async function startRun(
           succeeded: record.succeeded,
           errorMessage: record.errorMessage,
           latencyMs: record.response?.latencyMs ?? null,
+          effectivePromptHash: record.effectivePromptHash,
         })
         .returning({ id: runSteps.id });
       const runStepId = stepInserted[0]!.id;
@@ -522,6 +587,7 @@ export async function startRun(
     {
       taskInput: task.input,
       contextItems,
+      operatingPriorities,
       objective,
       freshnessComparison,
       primary: toEngineAgent(primaryRow, task.modelTier),

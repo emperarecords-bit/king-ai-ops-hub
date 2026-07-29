@@ -9,7 +9,13 @@ import { log } from '@/lib/log';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { listAssignableEmployees } from '@/domain/agents/agents';
-import { cancelTask, createTask } from '@/domain/tasks/tasks';
+import { cancelTask, createTask, supersedeTask } from '@/domain/tasks/tasks';
+import { manuallyReconcileTask } from '@/domain/approvals/approvals';
+import {
+  attachTaskToObjective,
+  detachTaskFromObjective,
+  moveTaskToObjective,
+} from '@/domain/objectives/task-link';
 import { claimJobForTask, enqueueRun, runClaimedJob } from '@/domain/jobs/jobs';
 
 export interface TaskFormState {
@@ -134,5 +140,234 @@ export async function cancelTaskAction(
 
   revalidatePath(`/p/${projectKey}/tasks/${taskId}`);
   revalidatePath(`/p/${projectKey}`);
+  return { error: null };
+}
+
+// ---------------------------------------------------------------------------
+// HUB-002 — recovery controls for stale / obsolete / unexecutable tasks.
+//
+// These are admin-only, reason-required paths that reuse audited domain
+// functions. They deliberately do NOT reimplement state transitions in the UI;
+// each delegates to a single domain call that owns the guard rails and audit.
+// ---------------------------------------------------------------------------
+
+const recoverSchema = z.object({
+  projectKey: z.string().min(1),
+  taskId: z.string().uuid(),
+  reason: z.string().trim().min(1, 'A reason is required.').max(1000),
+});
+
+/**
+ * Cancel a stale task as a recovery action — stops it without deleting history.
+ * Unlike the quick cancel on the run panel, recovery requires a written reason
+ * (admin authority is enforced downstream). Reuses the same audited cancelTask.
+ */
+export async function cancelTaskRecoveryAction(
+  _prev: RunActionState,
+  formData: FormData,
+): Promise<RunActionState> {
+  const parsed = recoverSchema.safeParse({
+    projectKey: formData.get('projectKey'),
+    taskId: formData.get('taskId'),
+    reason: formData.get('reason'),
+  });
+  if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid request.' };
+
+  try {
+    const ctx = await requireTenant(parsed.data.projectKey);
+    if (ctx.projectRole !== 'admin') {
+      throw new AppError('forbidden', 'Only an admin can run recovery actions.');
+    }
+    await withTenant(ctx, (tx) => cancelTask(tx, ctx, parsed.data.taskId, parsed.data.reason));
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('cancelTaskRecovery failed', { err });
+    return { error: toPublicMessage(err) };
+  }
+
+  revalidatePath(`/p/${parsed.data.projectKey}/tasks/${parsed.data.taskId}`);
+  revalidatePath(`/p/${parsed.data.projectKey}`);
+  return { error: null };
+}
+
+// ---------------------------------------------------------------------------
+// HUB-003 — the canonical objective↔task relationship. These change the single
+// FK through audited domain functions (never a raw UI update), enforcing
+// workspace + admin authority and a reason when re-attributing completed work.
+// ---------------------------------------------------------------------------
+
+/** Revalidate every surface that reads the objective relationship, so it can never go stale (req #7). */
+function revalidateObjectiveSurfaces(projectKey: string, taskId: string, objectiveId?: string | null): void {
+  revalidatePath(`/p/${projectKey}/tasks/${taskId}`);
+  revalidatePath(`/p/${projectKey}/work`);
+  revalidatePath(`/p/${projectKey}/objectives`);
+  revalidatePath(`/p/${projectKey}`);
+  if (objectiveId) revalidatePath(`/p/${projectKey}/objectives/${objectiveId}`);
+}
+
+const attachSchema = z.object({
+  projectKey: z.string().min(1),
+  taskId: z.string().uuid(),
+  objectiveId: z.string().uuid(),
+  reason: z.string().trim().max(1000).optional(),
+});
+
+export async function attachTaskObjectiveAction(
+  _prev: RunActionState,
+  formData: FormData,
+): Promise<RunActionState> {
+  const parsed = attachSchema.safeParse({
+    projectKey: formData.get('projectKey'),
+    taskId: formData.get('taskId'),
+    objectiveId: formData.get('objectiveId'),
+    reason: formData.get('reason') || undefined,
+  });
+  if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid request.' };
+
+  try {
+    const ctx = await requireTenant(parsed.data.projectKey);
+    await withTenant(ctx, (tx) =>
+      attachTaskToObjective(tx, ctx, parsed.data.taskId, parsed.data.objectiveId, parsed.data.reason),
+    );
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('attachTaskObjective failed', { err });
+    return { error: toPublicMessage(err) };
+  }
+
+  revalidateObjectiveSurfaces(parsed.data.projectKey, parsed.data.taskId, parsed.data.objectiveId);
+  return { error: null };
+}
+
+const moveSchema = z.object({
+  projectKey: z.string().min(1),
+  taskId: z.string().uuid(),
+  objectiveId: z.string().uuid(),
+  reason: z.string().trim().max(1000).optional(),
+});
+
+export async function moveTaskObjectiveAction(
+  _prev: RunActionState,
+  formData: FormData,
+): Promise<RunActionState> {
+  const parsed = moveSchema.safeParse({
+    projectKey: formData.get('projectKey'),
+    taskId: formData.get('taskId'),
+    objectiveId: formData.get('objectiveId'),
+    reason: formData.get('reason') || undefined,
+  });
+  if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid request.' };
+
+  try {
+    const ctx = await requireTenant(parsed.data.projectKey);
+    await withTenant(ctx, (tx) =>
+      moveTaskToObjective(tx, ctx, parsed.data.taskId, parsed.data.objectiveId, parsed.data.reason ?? ''),
+    );
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('moveTaskObjective failed', { err });
+    return { error: toPublicMessage(err) };
+  }
+
+  revalidateObjectiveSurfaces(parsed.data.projectKey, parsed.data.taskId, parsed.data.objectiveId);
+  return { error: null };
+}
+
+const detachSchema = z.object({
+  projectKey: z.string().min(1),
+  taskId: z.string().uuid(),
+  reason: z.string().trim().max(1000).optional(),
+});
+
+export async function detachTaskObjectiveAction(
+  _prev: RunActionState,
+  formData: FormData,
+): Promise<RunActionState> {
+  const parsed = detachSchema.safeParse({
+    projectKey: formData.get('projectKey'),
+    taskId: formData.get('taskId'),
+    reason: formData.get('reason') || undefined,
+  });
+  if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid request.' };
+
+  try {
+    const ctx = await requireTenant(parsed.data.projectKey);
+    await withTenant(ctx, (tx) =>
+      detachTaskFromObjective(tx, ctx, parsed.data.taskId, parsed.data.reason ?? ''),
+    );
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('detachTaskObjective failed', { err });
+    return { error: toPublicMessage(err) };
+  }
+
+  revalidateObjectiveSurfaces(parsed.data.projectKey, parsed.data.taskId);
+  return { error: null };
+}
+
+const supersedeSchema = recoverSchema.extend({
+  replacementTaskId: z.string().uuid(),
+});
+
+/**
+ * Supersede a task with an existing replacement — cancels the old task while
+ * recording the link to the newer one, so the relationship survives (HUB-002).
+ * Never represented as execution.
+ */
+export async function supersedeTaskAction(
+  _prev: RunActionState,
+  formData: FormData,
+): Promise<RunActionState> {
+  const parsed = supersedeSchema.safeParse({
+    projectKey: formData.get('projectKey'),
+    taskId: formData.get('taskId'),
+    replacementTaskId: formData.get('replacementTaskId'),
+    reason: formData.get('reason'),
+  });
+  if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid request.' };
+
+  try {
+    const ctx = await requireTenant(parsed.data.projectKey);
+    if (ctx.projectRole !== 'admin') {
+      throw new AppError('forbidden', 'Only an admin can run recovery actions.');
+    }
+    await withTenant(ctx, (tx) =>
+      supersedeTask(tx, ctx, parsed.data.taskId, parsed.data.replacementTaskId, parsed.data.reason),
+    );
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('supersedeTask failed', { err });
+    return { error: toPublicMessage(err) };
+  }
+
+  revalidatePath(`/p/${parsed.data.projectKey}/tasks/${parsed.data.taskId}`);
+  revalidatePath(`/p/${parsed.data.projectKey}`);
+  return { error: null };
+}
+
+/**
+ * Manually reconcile a task's derived authorization state from the authoritative
+ * approval records (HUB-002, admin-only). Repairs tasks whose status drifted out
+ * of step with their approvals; the domain function is idempotent.
+ */
+export async function reconcileTaskAction(
+  _prev: RunActionState,
+  formData: FormData,
+): Promise<RunActionState> {
+  const parsed = recoverSchema.safeParse({
+    projectKey: formData.get('projectKey'),
+    taskId: formData.get('taskId'),
+    reason: formData.get('reason'),
+  });
+  if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid request.' };
+
+  try {
+    const ctx = await requireTenant(parsed.data.projectKey);
+    // manuallyReconcileTask enforces admin authority + non-empty reason itself.
+    await withTenant(ctx, (tx) =>
+      manuallyReconcileTask(tx, ctx, parsed.data.taskId, parsed.data.reason),
+    );
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('reconcileTask failed', { err });
+    return { error: toPublicMessage(err) };
+  }
+
+  revalidatePath(`/p/${parsed.data.projectKey}/tasks/${parsed.data.taskId}`);
+  revalidatePath(`/p/${parsed.data.projectKey}`);
   return { error: null };
 }
