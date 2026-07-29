@@ -13,6 +13,7 @@ import { sha256Hex } from '@/lib/crypto';
 import { type DbTx } from '@/db/client';
 import { agents, decisions, departments, objectives, projects, tasks, workItems } from '@/db/schema';
 import { knownModel, providerSupportsModel } from '@/providers/pricing';
+import { MAX_EMPLOYEE_PROMPT_CHARS } from '@/domain/agents/agents';
 import { writeAudit } from '@/domain/audit/audit';
 import { setObjectiveOwner } from '@/domain/objectives/objectives';
 
@@ -211,6 +212,9 @@ export async function createEmployeeWithConfig(
   if (input.systemPrompt.trim().length === 0) {
     throw new ValidationError(['A mission/system prompt is required.']);
   }
+  if (input.systemPrompt.length > MAX_EMPLOYEE_PROMPT_CHARS) {
+    throw new ValidationError([`System prompt is too long (max ${MAX_EMPLOYEE_PROMPT_CHARS} characters).`]);
+  }
   const systemPrompt = input.systemPrompt;
 
   if (!(AGENT_ROLES as readonly string[]).includes(input.role)) {
@@ -272,6 +276,7 @@ export async function createEmployeeWithConfig(
       entityType: 'agent',
       entityId: employeeId,
       detail: {
+        employeeId,
         name,
         title,
         role: input.role,

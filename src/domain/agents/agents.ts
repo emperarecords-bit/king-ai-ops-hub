@@ -8,6 +8,13 @@ import { agents, departments } from '@/db/schema';
 import { knownModel } from '@/providers/pricing';
 import { writeAudit } from '@/domain/audit/audit';
 
+/**
+ * The one shared maximum length for an employee's system prompt, enforced identically by BOTH the
+ * prompt-update path (`updateEmployeePrompt`) and the full-config creation path
+ * (`createEmployeeWithConfig`). A single constant prevents the two paths from drifting apart.
+ */
+export const MAX_EMPLOYEE_PROMPT_CHARS = 20_000;
+
 export interface AgentRow {
   id: string;
   name: string;
@@ -236,6 +243,9 @@ export async function updateEmployeePrompt(
   }
   const r = (reason ?? '').trim();
   if (!r) throw new ValidationError(['A reason is required to change an employee prompt or configuration.']);
+  if (patch.systemPrompt !== undefined && patch.systemPrompt.length > MAX_EMPLOYEE_PROMPT_CHARS) {
+    throw new ValidationError([`System prompt is too long (max ${MAX_EMPLOYEE_PROMPT_CHARS} characters).`]);
+  }
   if (patch.model !== undefined && !knownModel(patch.model)) throw new ValidationError([`Unknown model '${patch.model}'.`]);
   if (patch.temperatureMilli !== undefined && (patch.temperatureMilli < 0 || patch.temperatureMilli > 1000)) {
     throw new ValidationError(['temperatureMilli must be between 0 and 1000.']);

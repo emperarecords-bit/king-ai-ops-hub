@@ -8,6 +8,7 @@ import { withTenant } from '@/db/tenant';
 import { sha256Hex } from '@/lib/crypto';
 import { agents, auditLogs, departments, memberships, organizations, profiles, projectMembers, projects } from '@/db/schema';
 import { createEmployeeWithConfig, type CreateEmployeeWithConfigInput } from '@/domain/agents/org';
+import { MAX_EMPLOYEE_PROMPT_CHARS } from '@/domain/agents/agents';
 
 /**
  * Audited full-config employee provisioning (createEmployeeWithConfig). Typed, admin-gated, transactional,
@@ -178,6 +179,42 @@ describe('createEmployeeWithConfig', () => {
     expect(a.created).toBe(true);
     expect(b.created).toBe(true);
     expect(a.employeeId).not.toBe(b.employeeId);
+  });
+
+  it("audit detail employeeId equals the returned and stored employee id", async () => {
+    if (!available) return;
+    const db = getSetupDb();
+    const res = await withTenant(ctx, (tx) => createEmployeeWithConfig(tx, ctx, base({ name: 'IdMatch1' })));
+    const ev = (await db.select().from(auditLogs).where(and(eq(auditLogs.entityId, res.employeeId), eq(auditLogs.action, 'employee.created'))))[0]!;
+    const detail = ev.detail as Record<string, unknown>;
+    expect(detail.employeeId).toBe(res.employeeId);
+    expect(ev.entityId).toBe(res.employeeId);
+    const stored = (await db.select({ id: agents.id }).from(agents).where(eq(agents.id, res.employeeId)))[0]!;
+    expect(stored.id).toBe(res.employeeId);
+  });
+
+  it('enforces the shared prompt-length limit; stores the full prompt unchanged; audit carries only the hash', async () => {
+    if (!available) return;
+    const db = getSetupDb();
+    const atLimit = 'X'.repeat(MAX_EMPLOYEE_PROMPT_CHARS);
+    const over = 'X'.repeat(MAX_EMPLOYEE_PROMPT_CHARS + 1);
+    // at-limit accepted
+    const ok = await withTenant(ctx, (tx) => createEmployeeWithConfig(tx, ctx, base({ name: 'LenOk', systemPrompt: atLimit })));
+    expect(ok.created).toBe(true);
+    const stored = (await db.select({ p: agents.systemPrompt }).from(agents).where(eq(agents.id, ok.employeeId)))[0]!;
+    expect(stored.p).toBe(atLimit);
+    expect(stored.p.length).toBe(MAX_EMPLOYEE_PROMPT_CHARS);
+    const ev = (await db.select().from(auditLogs).where(and(eq(auditLogs.entityId, ok.employeeId), eq(auditLogs.action, 'employee.created'))))[0]!;
+    const detail = ev.detail as Record<string, unknown>;
+    expect(detail.promptHash).toBe(sha256Hex(atLimit));
+    expect(JSON.stringify(detail).length).toBeLessThan(2000); // the 20k prompt is NOT embedded in the audit
+    // over-limit rejected (no prompt text in the error)
+    await expect(withTenant(ctx, (tx) => createEmployeeWithConfig(tx, ctx, base({ name: 'LenOver', systemPrompt: over })))).rejects.toThrow(/too long/i);
+    // meaningful formatting preserved exactly
+    const formatted = '  Line1\n\n  Indented line2  \n';
+    const f = await withTenant(ctx, (tx) => createEmployeeWithConfig(tx, ctx, base({ name: 'Fmt1', systemPrompt: formatted })));
+    const s2 = (await db.select({ p: agents.systemPrompt }).from(agents).where(eq(agents.id, f.employeeId)))[0]!;
+    expect(s2.p).toBe(formatted);
   });
 
   it('the org audit chain remains valid (prev_hash linkage) after provisioning', async () => {
