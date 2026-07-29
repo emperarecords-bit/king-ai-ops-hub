@@ -5,6 +5,7 @@ import { AppError, NotFoundError, ValidationError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { agents, decisions, departments, objectives, projects, tasks, workItems } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
+import { setObjectiveOwner } from '@/domain/objectives/objectives';
 
 /**
  * Organizational model (Slice 1). Employees are `agents` rows — an employee IS
@@ -250,6 +251,14 @@ export async function setOwner(
   objectId: string,
   ownerAgentId: string | null,
 ): Promise<void> {
+  // Objective ownership has its own canonical function (HUB-005): admin authority, a disabled-employee
+  // guard, idempotency, and distinct owner_assigned/_changed/_cleared audit events. Route to it so there
+  // is ONE write path for the objective owner FK — never a second, weaker one here.
+  if (object === 'objective') {
+    await setObjectiveOwner(tx, ctx, objectId, ownerAgentId);
+    return;
+  }
+
   if (ownerAgentId) {
     const owner = await tx
       .select({ id: agents.id })
@@ -266,9 +275,6 @@ export async function setOwner(
   } else if (object === 'decision') {
     updated = await tx.update(decisions).set({ ownerAgentId, updatedAt: new Date() })
       .where(and(eq(decisions.id, objectId), eq(decisions.orgId, ctx.orgId), eq(decisions.projectId, ctx.projectId))).returning({ id: decisions.id });
-  } else if (object === 'objective') {
-    updated = await tx.update(objectives).set({ accountableAgentId: ownerAgentId, updatedAt: new Date() })
-      .where(and(eq(objectives.id, objectId), eq(objectives.orgId, ctx.orgId), eq(objectives.projectId, ctx.projectId))).returning({ id: objectives.id });
   } else if (object === 'work_item') {
     updated = await tx.update(workItems).set({ ownerAgentId, updatedAt: new Date() })
       .where(and(eq(workItems.id, objectId), eq(workItems.orgId, ctx.orgId), eq(workItems.projectId, ctx.projectId))).returning({ id: workItems.id });

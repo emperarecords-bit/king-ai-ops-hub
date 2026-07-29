@@ -1,8 +1,11 @@
 import Link from 'next/link';
 import { listMyProjectsWithOrgRoles } from '@/domain/auth/guard';
 import { morningBriefing } from '@/domain/briefing/briefing';
+import { overallLabel } from '@/domain/health/health';
 import { signOut } from '@/app/login/actions';
 import { Card, EmptyState } from '@/components/ui';
+import { exclusionSummary, visibilityFromParam } from '@/domain/classification/classification';
+import { ClassificationChip, NonLiveControls } from '@/app/p/[projectKey]/non-live-controls';
 
 const SEVERITY_RANK: Record<string, number> = {
   critical: 0,
@@ -24,10 +27,30 @@ const SEVERITY_BORDER: Record<string, string> = {
  * what was prepared overnight, and what needs a decision — across every
  * workspace, consequence first.
  */
-export default async function MorningBriefingPage() {
+export default async function MorningBriefingPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const sp = await searchParams;
+  const visibility = visibilityFromParam(sp.includeNonLive);
   const { user, projects, orgRoles } = await listMyProjectsWithOrgRoles();
-  const briefing = await morningBriefing(user.id, projects, orgRoles);
+  const briefing = await morningBriefing(user.id, projects, orgRoles, visibility);
   const { totals, workspaces } = briefing;
+  // Aggregate the non-live prepared items hidden across all workspace cards (headline totals stay live-only).
+  const excludedPrepared = exclusionSummary({
+    excludedDemo: workspaces.reduce((s, w) => s + w.preparedExcluded.demo, 0),
+    excludedSeed: workspaces.reduce((s, w) => s + w.preparedExcluded.seed, 0),
+  });
+  // Separated demo/seed briefing figures (only shown when opted in; live headline totals stay live-only).
+  const sum = (f: (w: (typeof workspaces)[number]['nonLive']) => number) => workspaces.reduce((s, w) => s + f(w.nonLive), 0);
+  const nl = {
+    completedDemo: sum((n) => n.runsCompletedDemo), completedSeed: sum((n) => n.runsCompletedSeed),
+    failedDemo: sum((n) => n.runsFailedDemo), failedSeed: sum((n) => n.runsFailedSeed),
+    workingDemo: sum((n) => n.workingDemo), workingSeed: sum((n) => n.workingSeed),
+    openTasksDemo: sum((n) => n.openTasksDemo), openTasksSeed: sum((n) => n.openTasksSeed),
+    atRiskDemo: sum((n) => n.objectivesAtRiskDemo), atRiskSeed: sum((n) => n.objectivesAtRiskSeed),
+  };
 
   const hour = new Date().getUTCHours();
   const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
@@ -157,6 +180,14 @@ export default async function MorningBriefingPage() {
             </section>
           ) : null}
 
+          <NonLiveControls pathname="/projects" searchParams={sp} includeNonLive={visibility.includeNonLive} excluded={excludedPrepared} />
+          {visibility.includeNonLive ? (
+            <div className="mb-6 grid gap-2 text-xs text-[var(--muted)] sm:grid-cols-2" data-testid="briefing-non-live">
+              <p><span className="font-semibold uppercase text-[#c9a769]">Demo</span> (separate, not in live totals): {nl.completedDemo} completed · {nl.failedDemo} failed · {nl.workingDemo} working · {nl.openTasksDemo} open · {nl.atRiskDemo} at-risk.</p>
+              <p><span className="font-semibold uppercase text-[#7fb2d1]">Seed</span> (separate, not in live totals): {nl.completedSeed} completed · {nl.failedSeed} failed · {nl.workingSeed} working · {nl.openTasksSeed} open · {nl.atRiskSeed} at-risk.</p>
+            </div>
+          ) : null}
+
           {workspaces.some((w) => w.prepared.length > 0) ? (
             <Card title="Prepared while you were away" className="mb-8 border-[var(--accent)]">
               <ul className="space-y-1">
@@ -168,7 +199,7 @@ export default async function MorningBriefingPage() {
                         href={`/p/${p.projectKey}/tasks/${p.taskId}`}
                         className="flex items-center justify-between gap-3 rounded px-2 py-1.5 text-sm hover:bg-[var(--surface-raised)]"
                       >
-                        <span>{p.title}</span>
+                        <span className="flex items-center gap-2"><ClassificationChip classification={p.classification} />{p.title}</span>
                         <span className="text-xs text-[var(--muted)]">
                           {p.status === 'awaiting_approval'
                             ? 'needs your decision'
@@ -196,6 +227,21 @@ export default async function MorningBriefingPage() {
                   <div className="flex items-center justify-between gap-4 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4 transition-colors hover:border-[var(--accent)]">
                     <Link href={`/p/${w.projectKey}`} className="min-w-0 flex-1">
                       <p className="font-semibold">{w.projectName}</p>
+                      {/* Same structured health as the Dashboard (HUB-007) — condition + outcome, not activity alone. */}
+                      <p className="mt-1 text-xs">
+                        <span
+                          className={
+                            w.overall === 'healthy'
+                              ? 'text-[var(--success)]'
+                              : w.overall === 'operational_with_warnings' || w.overall === 'unable_to_assess'
+                                ? 'text-[#e5c07b]'
+                                : 'text-[var(--danger)]'
+                          }
+                        >
+                          {overallLabel(w.overall)}
+                        </span>
+                        {w.outcome ? <span className="ml-2 text-[var(--muted)]">· {w.outcome}</span> : null}
+                      </p>
                       <p className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--muted)]">
                         {quiet ? <span>quiet</span> : null}
                         {w.workingNow > 0 ? (

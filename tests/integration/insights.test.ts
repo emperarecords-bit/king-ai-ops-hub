@@ -126,7 +126,7 @@ describe.skipIf(!available)('management insights', () => {
           createdBy: userId,
         })
         .returning({ id: tasks.id });
-      await db.insert(usageEvents).values({
+      await db.insert(usageEvents).values({ classification: 'live',
         orgId,
         projectId: ctx.projectId,
         taskId: task[0]!.id,
@@ -180,7 +180,7 @@ describe.skipIf(!available)('management insights', () => {
       .returning({ id: tasks.id });
     const run = await db
       .insert(runs)
-      .values({
+      .values({ classification: 'live',
         orgId,
         projectId: ctx.projectId,
         taskId: task[0]!.id,

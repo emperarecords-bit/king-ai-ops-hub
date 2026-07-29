@@ -14,8 +14,11 @@ import { assessAutomation, AUTOMATION_STATE_LABEL } from '@/domain/execution/aut
 import { listEmployees } from '@/domain/agents/org';
 import { listObjectives } from '@/domain/objectives/objectives';
 import { Card, EmptyState, PageHeader } from '@/components/ui';
+import { visibilityFromParam } from '@/domain/classification/classification';
+import { type DataClassification } from '@/types/domain';
 import { CreateWorkItemForm } from './work-item-form';
 import { WorkItemRow } from './work-item-row';
+import { ClassificationChip, NonLiveControls } from '../non-live-controls';
 
 /**
  * Execution — the complete state of the work, in one operational language over two engines
@@ -25,24 +28,29 @@ import { WorkItemRow } from './work-item-row';
  */
 export default async function ExecutionPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ projectKey: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { projectKey } = await params;
+  const sp = await searchParams;
+  const visibility = visibilityFromParam(sp.includeNonLive);
   const ctx = await requireTenant(projectKey);
   const canEdit = ctx.projectRole !== 'viewer';
 
-  const { rows, automations, employees, objectives } = await withTenant(ctx, async (tx) => {
+  const { feed, automations, employees, objectives } = await withTenant(ctx, async (tx) => {
     // Self-heal any task stranded in awaiting_approval with no pending proposal, so "Requires you"
     // never asks for a decision already made (HUB-001).
     await reconcileStrandedApprovalTasks(tx, ctx);
     return {
-      rows: await listExecution(tx, ctx),
+      feed: await listExecution(tx, ctx, visibility),
       automations: await listAutomations(tx, ctx),
       employees: await listEmployees(tx, ctx),
       objectives: await listObjectives(tx, ctx),
     };
   });
+  const rows = feed.rows;
 
   const assessedAutomations = automations.map((x) => ({
     x,
@@ -75,6 +83,13 @@ export default async function ExecutionPage({
       <PageHeader
         title="Execution"
         subtitle="The complete state of the work — human and AI, in one language. Organized by what it's doing; the lens above shows only what needs you."
+      />
+
+      <NonLiveControls
+        pathname={`/p/${projectKey}/work`}
+        searchParams={sp}
+        includeNonLive={visibility.includeNonLive}
+        excluded={feed.excluded}
       />
 
       {canEdit ? (
@@ -115,6 +130,7 @@ export default async function ExecutionPage({
                 {requiresYou.map(({ r, a }) => (
                   <li key={`req-${r.kind}-${r.id}`} className="flex flex-wrap items-baseline gap-x-2 text-sm">
                     <Kind kind={r.kind} />
+                    <ClassificationChip classification={r.classification} />
                     {r.kind === 'ai_task' ? (
                       <Link href={`/p/${projectKey}/tasks/${r.id}`} className="text-[var(--foreground)] hover:text-[var(--accent)]">
                         {r.title}
@@ -145,6 +161,7 @@ export default async function ExecutionPage({
                       <AssessLine a={a} />
                       <WorkItemRow
                         projectKey={projectKey}
+                        classification={r.classification}
                         item={{
                           id: r.id,
                           title: r.title,
@@ -161,7 +178,7 @@ export default async function ExecutionPage({
                       />
                     </div>
                   ) : (
-                    <TaskRow key={r.id} projectKey={projectKey} title={r.title} id={r.id} a={a} owner={r.ownerName} objective={r.objectiveTitle} />
+                    <TaskRow key={r.id} projectKey={projectKey} classification={r.classification} title={r.title} id={r.id} a={a} owner={r.ownerName} objective={r.objectiveTitle} />
                   ),
                 )}
               </div>
@@ -210,6 +227,7 @@ export default async function ExecutionPage({
                   <div key={`rec-${r.id}`} className="py-2 text-sm">
                     <div className="flex flex-wrap items-baseline gap-x-2">
                       <Kind kind={r.kind} />
+                      <ClassificationChip classification={r.classification} />
                       {r.kind === 'ai_task' ? (
                         <Link href={`/p/${projectKey}/tasks/${r.id}`} className="text-[var(--foreground)] hover:text-[var(--accent)]">
                           {r.title}
@@ -271,6 +289,7 @@ function TaskRow({
   a,
   owner,
   objective,
+  classification,
 }: {
   projectKey: string;
   id: string;
@@ -278,11 +297,13 @@ function TaskRow({
   a: ExecutionAssessment;
   owner: string | null;
   objective: string | null;
+  classification: DataClassification;
 }) {
   return (
     <div className="rounded-md border border-[var(--border)] p-3">
       <div className="flex flex-wrap items-center gap-2">
         <Kind kind="ai_task" />
+        <ClassificationChip classification={classification} />
         <Link href={`/p/${projectKey}/tasks/${id}`} className="text-sm font-medium hover:text-[var(--accent)]">
           {title}
         </Link>

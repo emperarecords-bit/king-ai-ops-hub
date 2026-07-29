@@ -125,6 +125,7 @@ export function buildPrimaryUserTurn(
   contextItems: readonly ContextItemForPrompt[],
   objective?: ObjectiveForPrompt | null,
   freshnessComparison?: FreshnessComparison | null,
+  operatingPriorities?: string | null,
 ): string {
   // Group by authority tier (O-16): higher-authority context leads, and each
   // section is labeled so the model knows what it is weighing. Content is still
@@ -173,7 +174,13 @@ export function buildPrimaryUserTurn(
       '\n\n'
     : '';
 
-  return `${objectiveBlock}${contextBlock}\n\n${wrapUntrusted('Task', taskInput)}\n\nComplete the task.`;
+  // Current Operating Priorities (HUB-008) — TRUSTED workspace instructions (active objectives, criteria,
+  // targets, milestones), leading, and NOT untrusted-wrapped. It governs immediate work above any fixed
+  // long-term goal in the role prompt. Decisions are NOT duplicated here — they arrive via the Level-1
+  // Decision Memory context items.
+  const prioritiesBlock = operatingPriorities && operatingPriorities.trim() ? `${operatingPriorities.trim()}\n\n` : '';
+
+  return `${prioritiesBlock}${objectiveBlock}${contextBlock}\n\n${wrapUntrusted('Task', taskInput)}\n\nComplete the task.`;
 }
 
 export const ISSUES_BLOCK_OPEN = '```review-issues';
@@ -198,7 +205,10 @@ export function buildReviewUserTurn(
   taskInput: string,
   primaryResponse: string,
   approvedPolicies: readonly ContextItemForPrompt[] = [],
+  operatingPriorities?: string | null,
 ): string {
+  // Parity (HUB-008): the reviewer receives the SAME trusted Current Operating Priorities the primary saw.
+  const prioritiesBlock = operatingPriorities && operatingPriorities.trim() ? `${operatingPriorities.trim()}\n\n` : '';
   // Context parity (EV-009): the reviewer must judge against the SAME approved
   // organizational policy the primary was given. Without it, the reviewer flags
   // correct policy-grounded statements as unsupported / "fabricated appeal to
@@ -216,10 +226,50 @@ ${approvedPolicies.map((p) => p.content.trim()).join('\n\n')}
     approvedPolicies.length > 0
       ? 'Review the response against the task and the Approved Organizational Policies above.'
       : 'Review the response against the task.';
-  return `${policyBlock}${wrapUntrusted('Original task', taskInput)}\n\n${wrapUntrusted(
+  return `${prioritiesBlock}${policyBlock}${wrapUntrusted('Original task', taskInput)}\n\n${wrapUntrusted(
     'Response under review',
     primaryResponse,
   )}\n\n${closing}`;
+}
+
+// ---------------------------------------------------------------------------
+// HUB-008 — the ONE canonical effective-prompt assembler. Both production paths (primary + reviewer) go
+// through this; the engine never concatenates the layers itself. Untrusted escaping and the trusted/data
+// boundary are exactly the primitives above — this only orders the layers and computes the identity hash.
+// ---------------------------------------------------------------------------
+export const ASSEMBLER_VERSION = 'hub008.v1';
+
+export interface AssembleEffectivePromptInput {
+  variant: 'primary' | 'review';
+  agentSystemPrompt: string;
+  taskInput: string;
+  operatingPriorities?: string | null;
+  // primary
+  contextItems?: readonly ContextItemForPrompt[];
+  objective?: ObjectiveForPrompt | null;
+  freshnessComparison?: FreshnessComparison | null;
+  // review
+  primaryResponse?: string;
+  approvedPolicies?: readonly ContextItemForPrompt[];
+}
+
+export interface AssembledPrompt {
+  system: string;
+  userTurn: string;
+}
+
+/** The single canonical assembler used by both production paths (no flat alternative). */
+export function assembleEffectivePrompt(input: AssembleEffectivePromptInput): AssembledPrompt {
+  if (input.variant === 'review') {
+    return {
+      system: buildReviewSystem(input.agentSystemPrompt),
+      userTurn: buildReviewUserTurn(input.taskInput, input.primaryResponse ?? '', input.approvedPolicies ?? [], input.operatingPriorities),
+    };
+  }
+  return {
+    system: buildPrimarySystem(input.agentSystemPrompt),
+    userTurn: buildPrimaryUserTurn(input.taskInput, input.contextItems ?? [], input.objective, input.freshnessComparison, input.operatingPriorities),
+  };
 }
 
 export function buildRevisionUserTurn(review: string): string {

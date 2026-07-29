@@ -48,5 +48,11 @@ export async function setOwnerAction(_prev: OwnerState, formData: FormData): Pro
     return { error: toPublicMessage(err) };
   }
   revalidatePath(parsed.data.revalidate ?? `/p/${parsed.data.projectKey}`);
+  // Objective ownership appears on more than the detail page — keep the list, Dashboard, and briefing
+  // in step so a change is never shown on one surface and stale on another (HUB-005, req 4).
+  if (parsed.data.object === 'objective') {
+    revalidatePath(`/p/${parsed.data.projectKey}/objectives`);
+    revalidatePath(`/p/${parsed.data.projectKey}`);
+  }
   return { error: null };
 }

@@ -4,7 +4,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
-    include: ['tests/unit/**/*.test.ts', 'tests/integration/**/*.test.ts'],
+    include: ['tests/unit/**/*.test.ts', 'tests/unit/**/*.test.tsx', 'tests/integration/**/*.test.ts'],
     // Playwright specs are driven by `npm run test:e2e`, not vitest.
     // s3-live requires a running MinIO/S3 and drives the GLOBAL document-job
     // queue against a live bucket — it changes the process object-store driver,

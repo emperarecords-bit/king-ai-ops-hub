@@ -5,6 +5,7 @@ import { BudgetExceededError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { runSteps, spendLimits, usageEvents } from '@/db/schema';
 import { costForUsage, PRICING_VERSION } from '@/providers/pricing';
+import { classifyUsageAtInsert } from '@/domain/classification/classification';
 
 /**
  * Usage accounting and the spend gate (invariant I8). Costs are computed at
@@ -29,6 +30,10 @@ export async function recordUsage(
   },
 ): Promise<bigint> {
   const cost = costForUsage(args.provider, args.model, args.usage);
+  // HUB-009 — every NEW usage event gets a stable, non-null classification snapshot at creation (the DB
+  // trigger forbids null). A snapshotted run copies its exact value; a legacy null-snapshot run resolves
+  // its effective classification now (without touching the run); run-less usage snapshots the project.
+  const classification = await classifyUsageAtInsert(tx, ctx, args.runId);
   await tx.insert(usageEvents).values({
     orgId: ctx.orgId,
     projectId: ctx.projectId,
@@ -41,6 +46,7 @@ export async function recordUsage(
     outputTokens: args.usage.outputTokens,
     costMicros: cost.usdMicros,
     pricingVersion: PRICING_VERSION,
+    classification,
   });
   return cost.usdMicros;
 }

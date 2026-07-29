@@ -1,6 +1,6 @@
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { type TenantContext, type WorkItemCondition, WORK_ITEM_CONDITIONS } from '@/types/domain';
+import { type TenantContext, type WorkItemCondition, type DataClassification, WORK_ITEM_CONDITIONS } from '@/types/domain';
 import { ConflictError, ValidationError, NotFoundError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { agents, objectives, profiles, workItems } from '@/db/schema';
@@ -33,6 +33,7 @@ export interface WorkItemRow {
 export interface WorkItemDetail {
   id: string;
   title: string;
+  classification: DataClassification;
   condition: WorkItemCondition | null;
   waitingOn: string | null;
   stage: string;
@@ -57,6 +58,7 @@ export async function getWorkItem(
     .select({
       id: workItems.id,
       title: workItems.title,
+      classification: workItems.classification,
       condition: workItems.condition,
       waitingOn: workItems.waitingOn,
       stage: workItems.stage,

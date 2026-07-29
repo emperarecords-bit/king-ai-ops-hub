@@ -2,6 +2,7 @@ import 'server-only';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import {
   type ContextManifestEntry,
+  type DataClassification,
   type Freshness,
   type TenantContext,
 } from '@/types/domain';
@@ -10,6 +11,7 @@ import { log } from '@/lib/log';
 import { type DbTx } from '@/db/client';
 import { agents, approvals, objectives, runs, tasks } from '@/db/schema';
 import { type ContextItemForPrompt } from '@/orchestration/prompts';
+import { type ClassificationVisibility, type ExclusionSummary, LIVE_ONLY, exclusionSummary, loadProjectClassification, resolveRecordClassification } from '@/domain/classification/classification';
 
 /**
  * Project State context (O-15). Makes an employee aware of the workspace's
@@ -145,24 +147,33 @@ export interface StateTask {
   objectiveRelation: 'this objective' | 'other objective' | 'unattached';
   detail: string | null; // blocker reason or outcome summary
   when: Date;
+  /** HUB-009 — effective classification (for labelling when non-live outcomes are shown). */
+  classification: DataClassification;
 }
 
-interface ClassifiedTasks {
+export interface ClassifiedTasks {
   blockers: StateTask[];
   active: StateTask[];
   recent: StateTask[];
+  /** HUB-009 — demo/seed related tasks hidden by a live-only view (0 when includeNonLive or none). */
+  excluded: ExclusionSummary;
 }
 
 /**
  * Classifies the workspace's tasks into blockers / active / recent, preferring
  * tasks attached to the selected objective and bounding each group. The task
  * being run is excluded. Owner is the latest run's primary employee.
+ *
+ * HUB-009 — visibility-aware: default LIVE_ONLY (a real run's Hub-state context stays live-only); with
+ * `includeNonLive` the display caller also receives authorized demo/seed outcomes, each carrying its
+ * effective classification. Live grouping/headline counts elsewhere are unaffected.
  */
 export async function selectRelatedTasks(
   tx: DbTx,
   ctx: TenantContext,
   objectiveId: string | null,
   excludeTaskId: string | null,
+  visibility: ClassificationVisibility = LIVE_ONLY,
 ): Promise<ClassifiedTasks> {
   const taskRows = await tx
     .select({
@@ -174,6 +185,7 @@ export async function selectRelatedTasks(
       createdAt: tasks.createdAt,
       orgId: tasks.orgId,
       projectId: tasks.projectId,
+      classification: tasks.classification,
     })
     .from(tasks)
     .where(and(eq(tasks.projectId, ctx.projectId), eq(tasks.orgId, ctx.orgId)))
@@ -181,7 +193,18 @@ export async function selectRelatedTasks(
     .limit(100);
   assertScoped(taskRows, ctx, 'selectRelatedTasks');
 
-  const relevant = taskRows.filter((t) => t.id !== excludeTaskId && t.status !== 'cancelled');
+  // HUB-009 — default LIVE_ONLY so a real run's Hub-state context never includes demo/seed outcomes; a
+  // display caller passing includeNonLive additionally receives them (labelled). Headline counts unaffected.
+  const projectClassification = await loadProjectClassification(tx, ctx.projectId);
+  const withClass = taskRows
+    .filter((t) => t.id !== excludeTaskId && t.status !== 'cancelled')
+    .map((t) => ({ ...t, effective: resolveRecordClassification(t.classification, projectClassification).classification }));
+  const relevant = withClass.filter((t) => visibility.includeNonLive || t.effective === 'live');
+  const nonLive = withClass.filter((t) => t.effective !== 'live');
+  const excluded = exclusionSummary({
+    excludedDemo: nonLive.filter((t) => t.effective === 'demo').length,
+    excludedSeed: nonLive.filter((t) => t.effective === 'seed').length,
+  });
   const ids = relevant.map((t) => t.id);
 
   // Latest run per task → owner (primary agent) + result/error, in one pass.
@@ -241,6 +264,7 @@ export async function selectRelatedTasks(
             : 'other objective',
       detail,
       when: t.updatedAt ?? t.createdAt,
+      classification: t.effective,
     };
   };
 
@@ -283,7 +307,7 @@ export async function selectRelatedTasks(
       return toStateTask(t, summary);
     });
 
-  return { blockers, active, recent };
+  return { blockers, active, recent, excluded };
 }
 
 export interface PendingReview {

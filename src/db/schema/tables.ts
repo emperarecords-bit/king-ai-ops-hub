@@ -57,6 +57,7 @@ import {
   workItemConditionEnum,
   orgRoleEnum,
   projectRoleEnum,
+  dataClassificationEnum,
   providerIdEnum,
   providerSelectionEnum,
   reviewVerdictEnum,
@@ -141,6 +142,9 @@ export const projects = pgTable(
     ownerAgentId: uuid('owner_agent_id').references((): AnyPgColumn => agents.id, {
       onDelete: 'set null',
     }),
+    /** HUB-009 — genuine vs demonstration vs fixture data. A whole demo/seed workspace classifies all its
+     *  children effectively non-live (seed > demo > live). Default live; never inferred from key/name. */
+    classification: dataClassificationEnum('classification').notNull().default('live'),
     ...timestamps,
   },
   (t) => [
@@ -232,6 +236,9 @@ export const agents = pgTable(
     temperatureMilli: integer('temperature_milli').notNull().default(700),
     maxOutputTokens: integer('max_output_tokens').notNull().default(4096),
     enabled: boolean('enabled').notNull().default(true),
+    /** HUB-009 — a demo/seed AGENT makes the activity it performs non-live, without the agent itself being
+     *  reclassified when it performs live work. Default live. */
+    classification: dataClassificationEnum('classification').notNull().default('live'),
     ...timestamps,
   },
   (t) => [
@@ -1033,6 +1040,8 @@ export const objectives = pgTable(
     closedBy: uuid('closed_by').references(() => profiles.id, { onDelete: 'set null' }),
     closedAt: timestamp('closed_at', { withTimezone: true }),
     closureReason: text('closure_reason'),
+    /** HUB-009 — genuine vs demonstration vs fixture objective. Default live. */
+    classification: dataClassificationEnum('classification').notNull().default('live'),
     ...timestamps,
   },
   (t) => [
@@ -1151,6 +1160,12 @@ export const tasks = pgTable(
     /** Operator-supplied reason when a person cancels the task (Execution closure). The engine's
      * technical cancelled status + audit history are preserved separately. */
     cancelReason: text('cancel_reason'),
+    /** HUB-002 recovery: when this task was SUPERSEDED, the replacement task it points to. The old task
+     *  becomes terminal (cancelled) but the relationship is preserved so history is never rewritten. */
+    supersededByTaskId: uuid('superseded_by_task_id').references((): AnyPgColumn => tasks.id, { onDelete: 'set null' }),
+    /** HUB-009 — a demo/seed task in an otherwise live project. Its runs snapshot non-live activity. Default
+     *  live; a live project may legitimately contain a demo/seed task. */
+    classification: dataClassificationEnum('classification').notNull().default('live'),
     ...timestamps,
   },
   (t) => [
@@ -1254,6 +1269,8 @@ export const decisions = pgTable(
     reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
     /** Slice 1: the employee accountable for this decision ("who owns this?"). */
     ownerAgentId: uuid('owner_agent_id').references(() => agents.id, { onDelete: 'set null' }),
+    /** HUB-009 — genuine vs demonstration vs fixture decision. Default live. */
+    classification: dataClassificationEnum('classification').notNull().default('live'),
     ...timestamps,
   },
   (t) => [
@@ -1338,6 +1355,8 @@ export const workItems = pgTable(
     closedBy: uuid('closed_by').references(() => profiles.id, { onDelete: 'set null' }),
     closedAt: timestamp('closed_at', { withTimezone: true }),
     closureReason: text('closure_reason'),
+    /** HUB-009 — genuine vs demonstration vs fixture work item. Default live. */
+    classification: dataClassificationEnum('classification').notNull().default('live'),
     ...timestamps,
   },
   (t) => [
@@ -1411,6 +1430,21 @@ export const runs = pgTable(
     retrievedDocuments: jsonb('retrieved_documents').$type<RetrievedDocRef[]>(),
     /** The full assembled context package, grouped by why each part was included (O-14). */
     contextManifest: jsonb('context_manifest').$type<ContextManifestEntry[]>(),
+    /** HUB-008 reproducibility, ALL captured immutably AT DISPATCH (nullable for runs predating the feature —
+     *  never synthesized for old runs). A later edit to an agent's prompt/config cannot change what these
+     *  record. config hash = fingerprint over {provider,model,systemPrompt,temp,maxTokens,role}; prompt hash =
+     *  sha256 of the systemPrompt; effective-prompt hash = sha256 of the assembled system+user turn; the source
+     *  manifest is the ordered list of the inputs (objective, decisions, task, context) with their content hashes. */
+    primaryConfigHash: text('primary_config_hash'),
+    reviewerConfigHash: text('reviewer_config_hash'),
+    primaryPromptHash: text('primary_prompt_hash'),
+    reviewerPromptHash: text('reviewer_prompt_hash'),
+    primaryEffectivePromptHash: text('primary_effective_prompt_hash'),
+    /** The reviewer's STANDING effective-context (system + priorities + approved policies); the response
+     *  under review is captured separately in `messages`. */
+    reviewerEffectivePromptHash: text('reviewer_effective_prompt_hash'),
+    assemblerVersion: text('assembler_version'),
+    sourceManifest: jsonb('source_manifest').$type<{ kind: string; id?: string | null; scope?: string | null; hash: string }[]>(),
     /** IMMUTABLE evidence snapshot at dispatch — per supplied document: exact version, disclosure, and
      *  chunk excerpt. Knowledge extraction cites against this, never live documents, so a proposal
      *  names the evidence the run actually received. */
@@ -1420,6 +1454,11 @@ export const runs = pgTable(
     /** Knowledge-proposal extraction outcome; makes Knowledge extraction idempotent, independent of the
      *  decision extractor — one may succeed while the other is empty/failed. */
     knowledgeExtractionStatus: extractionStatusEnum('knowledge_extraction_status'),
+    /** HUB-009 — IMMUTABLE data-classification snapshot resolved BEFORE dispatch from the effective
+     *  classification of {project, task, performing agents} (seed > demo > live). Nullable ONLY so runs
+     *  predating the feature stay untouched; those are resolved by legacy derivation at read time. A later
+     *  reclassification of the task/project/agent never rewrites this value. */
+    classification: dataClassificationEnum('classification'),
     errorMessage: text('error_message'),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp('finished_at', { withTimezone: true }),
@@ -1456,6 +1495,14 @@ export const runSteps = pgTable(
     succeeded: boolean('succeeded').notNull(),
     errorMessage: text('error_message'),
     latencyMs: integer('latency_ms'),
+    /**
+     * HUB-008 — sha256 of THIS step's exact dispatched request (system + turns), captured at dispatch.
+     * The run-level `primaryEffectivePromptHash` identifies only the INITIAL primary request; a revision
+     * step's request additionally carries the reviewer feedback and the prior primary response, so its
+     * identity is recorded here per step. Null for the deterministic consolidate step (no model call) and
+     * for steps from runs predating this feature. A later prompt edit can never rewrite a stored value.
+     */
+    effectivePromptHash: text('effective_prompt_hash'),
     ...timestamps,
   },
   (t) => [
@@ -1612,6 +1659,11 @@ export const usageEvents = pgTable(
     costMicros: bigint('cost_micros', { mode: 'bigint' }).notNull(),
     /** Pricing table version used, so historical costs stay explainable. */
     pricingVersion: text('pricing_version').notNull(),
+    /** HUB-009 — IMMUTABLE classification snapshot. For run-associated usage this INHERITS the run's
+     *  snapshot at write time; it never independently recomputes if the task/agent/project later changes.
+     *  Nullable: run-less usage (embeddings/extraction) is left null in this increment and resolved by
+     *  legacy derivation from the project at read time; rows predating the feature stay null/untouched. */
+    classification: dataClassificationEnum('classification'),
     ...timestamps,
   },
   (t) => [

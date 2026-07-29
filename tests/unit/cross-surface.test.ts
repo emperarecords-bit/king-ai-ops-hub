@@ -19,6 +19,7 @@ function olr(over: Partial<ObjectiveListRow> & { criteria: SuccessCriterion[]; t
   return {
     id: rest.id ?? 'o1',
     title: rest.title ?? 'Objective',
+    classification: rest.classification ?? 'live',
     status: rest.status ?? 'active',
     priority: rest.priority ?? 1,
     sponsoringDepartment: null,

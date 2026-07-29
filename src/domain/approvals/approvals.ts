@@ -28,6 +28,7 @@ export async function reconcileTaskAuthorization(
   tx: DbTx,
   ctx: TenantContext,
   taskId: string,
+  opts?: { trigger?: 'automatic' | 'manual'; reason?: string },
 ): Promise<boolean> {
   const taskRows = await tx
     .select({ status: tasks.status })
@@ -59,9 +60,80 @@ export async function reconcileTaskAuthorization(
     action: 'task.authorization_reconciled',
     entityType: 'task',
     entityId: taskId,
-    detail: { from: 'awaiting_approval', to: 'completed' },
+    detail: { from: 'awaiting_approval', to: 'completed', trigger: opts?.trigger ?? 'automatic', reason: opts?.reason ?? null },
   });
   return true;
+}
+
+/**
+ * Manual admin reconcile (HUB-002 recovery). A deliberate, audited repair of a task's derived state from
+ * its authoritative approval records — for an admin who wants to force the check rather than wait for a
+ * surface to sweep it. Requires a non-empty reason; idempotent (a no-op when nothing is stale). Reuses the
+ * one reconcile path so there is never parallel state-transition logic. Returns whether it changed anything.
+ */
+export async function manuallyReconcileTask(
+  tx: DbTx,
+  ctx: TenantContext,
+  taskId: string,
+  reason: string,
+): Promise<boolean> {
+  if (ctx.projectRole !== 'admin') throw new AppError('forbidden', 'Only project admins can reconcile a task.');
+  const r = (reason ?? '').trim();
+  if (!r) throw new AppError('validation', 'A reason is required to reconcile a task.');
+  return reconcileTaskAuthorization(tx, ctx, taskId, { trigger: 'manual', reason: r });
+}
+
+/**
+ * Withdraw a single AUTHORIZED-but-unexecuted action (HUB-002 recovery): revoke a permission already
+ * granted, before it executes. Distinct from *refuse* (which denies a still-pending action) and from the
+ * cancel-time `withdrawPendingApprovalsForTask` (which withdraws PENDING proposals). Allowed ONLY while the
+ * approval is `approved` — a pending one must be refused, and rejected/expired/withdrawn are already
+ * terminal. This also structurally forbids withdrawal after execution: once an executed state exists the
+ * status is no longer `approved`, so the guard refuses it. Admin-only; a non-empty reason is required and
+ * preserved; the original decision history is never rewritten (only the status flips to `withdrawn`).
+ */
+export async function withdrawAuthorizedAction(
+  tx: DbTx,
+  ctx: TenantContext,
+  approvalId: string,
+  reason: string,
+): Promise<void> {
+  if (ctx.projectRole !== 'admin') throw new AppError('forbidden', 'Only project admins can withdraw an authorization.');
+  const r = (reason ?? '').trim();
+  if (!r) throw new AppError('validation', 'A reason is required to withdraw an authorization — it becomes operational memory.');
+
+  const rows = await tx
+    .select({ id: approvals.id, taskId: approvals.taskId, status: approvals.status, actionType: approvals.actionType })
+    .from(approvals)
+    .where(and(eq(approvals.id, approvalId), eq(approvals.orgId, ctx.orgId), eq(approvals.projectId, ctx.projectId)))
+    .limit(1);
+  const row = rows[0];
+  if (!row) throw new NotFoundError('Approval');
+
+  if (row.status !== 'approved') {
+    throw new AppError(
+      'conflict',
+      row.status === 'pending'
+        ? 'This action is still awaiting authorization — refuse it instead of withdrawing.'
+        : `This authorization is already ${row.status} and cannot be withdrawn.`,
+    );
+  }
+
+  await tx
+    .update(approvals)
+    .set({ status: 'withdrawn', decisionNote: r, updatedAt: new Date() })
+    .where(eq(approvals.id, approvalId));
+
+  await writeAudit(tx, ctx, {
+    action: 'approval.withdrawn',
+    entityType: 'approval',
+    entityId: approvalId,
+    detail: { actionType: row.actionType, from: 'approved', reason: r },
+  });
+
+  // Derived task state is unaffected (an authorized-holding task already reconciled to completed), but
+  // reconcile defensively in the edge case it was still awaiting — idempotent.
+  await reconcileTaskAuthorization(tx, ctx, row.taskId);
 }
 
 /**

@@ -85,7 +85,7 @@ describe.skipIf(!available)('durable run jobs', () => {
     // died (lease expired) mid-run.
     const t = await mkTask(ctxA, 'running');
     const db = getSetupDb();
-    const run = await db.insert(runs).values({ orgId, projectId: ctxA.projectId, taskId: t, status: 'running', primaryAgentId: await anAgent(ctxA) }).returning({ id: runs.id });
+    const run = await db.insert(runs).values({ classification: 'live', orgId, projectId: ctxA.projectId, taskId: t, status: 'running', primaryAgentId: await anAgent(ctxA) }).returning({ id: runs.id });
     await db.insert(runJobs).values({ orgId, projectId: ctxA.projectId, taskId: t, status: 'running', leasedUntil: new Date(Date.now() - 60_000) });
 
     const result = await reconcileStaleJobs();

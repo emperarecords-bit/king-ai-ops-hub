@@ -108,7 +108,7 @@ async function makeAgent(ctx: TenantContext): Promise<string> {
 async function makeRunSnapshot(ctx: TenantContext, snapshot: RunSourceSnapshot[]): Promise<string> {
   const aId = await makeAgent(ctx);
   const t = await db().insert(tasks).values({ orgId: ctx.orgId, projectId: ctx.projectId, title: 't', input: 'x', providerSelection: 'openai', status: 'completed', createdBy: ctx.userId }).returning({ id: tasks.id });
-  const r = await db().insert(runs).values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId: t[0]!.id, status: 'completed', primaryAgentId: aId, retrievedSources: snapshot }).returning({ id: runs.id });
+  const r = await db().insert(runs).values({ classification: 'live', orgId: ctx.orgId, projectId: ctx.projectId, taskId: t[0]!.id, status: 'completed', primaryAgentId: aId, retrievedSources: snapshot }).returning({ id: runs.id });
   return r[0]!.id;
 }
 async function bindKnowledge(ctx: TenantContext, versionId: string, hash: string) {

@@ -23,6 +23,8 @@ import { AddStandingWorkForm, ToggleScheduleButton } from './standing-forms';
 import { OwnerPicker } from '../../owner-picker';
 import { Breadcrumb } from '../../breadcrumb';
 import { ReasoningPanel } from '../../reasoning-panel';
+import { visibilityFromParam } from '@/domain/classification/classification';
+import { ClassificationChip, NonLiveControls } from '../../non-live-controls';
 
 const CADENCE_LABEL: Record<string, string> = {
   daily: 'Every day',
@@ -38,10 +40,14 @@ const CRITERION_STYLE: Record<string, string> = {
 
 export default async function ObjectiveDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ projectKey: string; objectiveId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { projectKey, objectiveId } = await params;
+  const sp = await searchParams;
+  const visibility = visibilityFromParam(sp.includeNonLive);
   const ctx = await requireTenant(projectKey);
 
   let o;
@@ -49,7 +55,7 @@ export default async function ObjectiveDetailPage({
   let employees;
   try {
     ({ o, schedules, employees } = await withTenant(ctx, async (tx) => ({
-      o: await getObjective(tx, ctx, objectiveId),
+      o: await getObjective(tx, ctx, objectiveId, visibility),
       schedules: await listSchedules(tx, ctx, objectiveId),
       employees: await listAssignableEmployees(tx, ctx),
     })));
@@ -60,12 +66,24 @@ export default async function ObjectiveDetailPage({
 
   const open = o.status === 'draft' || o.status === 'active';
   const isAdmin = ctx.projectRole === 'admin';
+  // The picker lists assignable employees (primary + enabled). But the CURRENT owner must always render
+  // even if they are not assignable — otherwise a disabled/non-primary owner has no <option> and the
+  // select silently falls back to "Unassigned", making a persisted owner look like it reverted (HUB-005
+  // root cause). Union the current owner in, flagged inactive, so ownership stays visible (req 3).
   const ownerOptions = employees.map((e) => ({ id: e.id, name: e.name, title: null }));
+  if (o.accountableAgentId && !ownerOptions.some((e) => e.id === o.accountableAgentId)) {
+    ownerOptions.unshift({
+      id: o.accountableAgentId,
+      name: `${o.accountableEmployee ?? 'Unknown employee'} (inactive)`,
+      title: null,
+    });
+  }
+  // HUB-009 — the headline assessment is LIVE contribution only, regardless of the display toggle.
   const assessment = assessObjective({
     status: o.status,
     criteria: o.successCriteria,
-    taskTotal: o.tasks.length,
-    workItemTotal: o.workItems.length,
+    taskTotal: o.tasks.filter((t) => t.classification === 'live').length,
+    workItemTotal: o.workItems.filter((w) => w.classification === 'live').length,
   });
 
   // 2d cross-surface consistency: the contributing work reads in the *same* operational language
@@ -78,6 +96,7 @@ export default async function ObjectiveDetailPage({
       id: t.id,
       title: t.title,
       href: `/p/${projectKey}/tasks/${t.id}`,
+      classification: t.classification,
       a: assessTask({ status: t.status, ownerAgentId: t.ownerAgentId }),
     })),
     ...o.workItems.map((w) => ({
@@ -85,6 +104,7 @@ export default async function ObjectiveDetailPage({
       id: w.id,
       title: w.title,
       href: `/p/${projectKey}/work/${w.id}`,
+      classification: w.classification,
       a: assessWorkItem({ condition: w.condition, waitingOn: w.waitingOn, ownerAgentId: w.ownerAgentId, updatedAt: w.updatedAt, now }),
     })),
   ];
@@ -311,6 +331,12 @@ export default async function ObjectiveDetailPage({
       {/* Work contributing — human and AI effort together, subordinate to the contract. */}
       <Card title="Work contributing" className="mb-6">
         <p className="mb-3 text-xs text-[var(--muted)]">{assessment.work}</p>
+        <NonLiveControls
+          pathname={`/p/${projectKey}/objectives/${objectiveId}`}
+          searchParams={sp}
+          includeNonLive={visibility.includeNonLive}
+          excluded={o.contributionExcluded}
+        />
         {contributing.length === 0 ? (
           <p className="text-sm text-[var(--muted)]">No work recorded yet.</p>
         ) : (
@@ -325,7 +351,8 @@ export default async function ObjectiveDetailPage({
                     <span className="mr-2 text-xs uppercase text-[var(--muted)]">
                       {c.kind === 'ai_task' ? 'AI' : 'Human'}
                     </span>
-                    {c.title}
+                    <ClassificationChip classification={c.classification} />
+                    <span className="ml-1">{c.title}</span>
                   </span>
                   <span className="shrink-0 text-xs text-[var(--muted)]">
                     {CONDITION_LABEL[c.a.condition]}

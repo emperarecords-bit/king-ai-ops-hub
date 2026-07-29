@@ -4,6 +4,9 @@ import { withTenant } from '@/db/tenant';
 import { listObjectives } from '@/domain/objectives/objectives';
 import { assessObjective } from '@/domain/objectives/assess';
 import { EmptyState, PageHeader, StatusBadge } from '@/components/ui';
+import { type DataClassification } from '@/types/domain';
+import { exclusionSummary, visibilityFromParam } from '@/domain/classification/classification';
+import { ClassificationChip, NonLiveControls } from '../non-live-controls';
 
 /**
  * The portfolio of commitments (HUB-PRODUCT.md → Objectives). Priority-led and stable — grouped
@@ -14,12 +17,24 @@ import { EmptyState, PageHeader, StatusBadge } from '@/components/ui';
  */
 export default async function ObjectivesPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ projectKey: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { projectKey } = await params;
+  const sp = await searchParams;
+  const visibility = visibilityFromParam(sp.includeNonLive);
   const ctx = await requireTenant(projectKey);
-  const objectives = await withTenant(ctx, (tx) => listObjectives(tx, ctx));
+  const all = await withTenant(ctx, (tx) => listObjectives(tx, ctx));
+
+  // HUB-009 — the objective LIST defaults to live-only; the headline verdict is always over LIVE objectives.
+  const liveObjectives = all.filter((o) => o.classification === 'live');
+  const objectives = visibility.includeNonLive ? all : liveObjectives;
+  const excluded = exclusionSummary({
+    excludedDemo: all.filter((o) => o.classification === 'demo').length,
+    excludedSeed: all.filter((o) => o.classification === 'seed').length,
+  });
 
   const assessed = objectives.map((o) => ({
     o,
@@ -30,20 +45,24 @@ export default async function ObjectivesPage({
       workItemTotal: o.workItemTotal,
     }),
   }));
+  // Headline counts are LIVE-only regardless of the display toggle.
+  const liveAssessed = assessed.filter(({ o }) => o.classification === 'live');
   const active = assessed.filter(({ o }) => o.status === 'active' || o.status === 'draft');
   const closed = assessed.filter(({ o }) => o.status === 'completed' || o.status === 'cancelled');
+  const liveActive = liveAssessed.filter(({ o }) => o.status === 'active' || o.status === 'draft');
+  const liveClosed = liveAssessed.filter(({ o }) => o.status === 'completed' || o.status === 'cancelled');
 
-  const advancing = active.filter(({ a }) => a.state === 'advancing' || a.state === 'ready-to-close').length;
-  const noEvidence = active.filter(({ a }) => a.state === 'effort-only' || a.state === 'insufficient').length;
+  const advancing = liveActive.filter(({ a }) => a.state === 'advancing' || a.state === 'ready-to-close').length;
+  const noEvidence = liveActive.filter(({ a }) => a.state === 'effort-only' || a.state === 'insufficient').length;
   const shape: string[] = [];
   if (advancing > 0) shape.push(`${advancing} advancing on evidence`);
   if (noEvidence > 0) shape.push(`${noEvidence} without outcome evidence yet`);
   const verdict =
-    active.length === 0
+    liveActive.length === 0
       ? 'No active commitments yet.'
-      : `${active.length} active ${active.length === 1 ? 'commitment' : 'commitments'}${
+      : `${liveActive.length} active ${liveActive.length === 1 ? 'commitment' : 'commitments'}${
           shape.length ? ` — ${shape.join(', ')}` : ''
-        }.${closed.length > 0 ? ` ${closed.length} closed.` : ''}`;
+        }.${liveClosed.length > 0 ? ` ${liveClosed.length} closed.` : ''}`;
 
   return (
     <div>
@@ -59,6 +78,8 @@ export default async function ObjectivesPage({
           </Link>
         }
       />
+
+      <NonLiveControls pathname={`/p/${projectKey}/objectives`} searchParams={sp} includeNonLive={visibility.includeNonLive} excluded={excluded} />
 
       {objectives.length === 0 ? (
         <EmptyState>
@@ -96,6 +117,7 @@ export default async function ObjectivesPage({
                   >
                     <span className="flex items-center gap-2 text-sm text-[var(--secondary,var(--muted))]">
                       <StatusBadge status={o.status} />
+                      <ClassificationChip classification={o.classification} />
                       <span className="text-[var(--foreground)]">{o.title}</span>
                     </span>
                     <span className="text-xs text-[var(--muted)]">{a.outcomeSummary}</span>
@@ -116,7 +138,7 @@ function Row({
   a,
 }: {
   projectKey: string;
-  o: { id: string; title: string; status: string; accountableEmployee: string | null };
+  o: { id: string; title: string; status: string; accountableEmployee: string | null; classification: DataClassification };
   a: { headline: string; outcomeSummary: string; confidence: string | null };
 }) {
   return (
@@ -124,6 +146,7 @@ function Row({
       <div className="flex items-baseline gap-3">
         <span className="text-base font-medium text-[var(--foreground)]">{o.title}</span>
         <StatusBadge status={o.status} />
+        <ClassificationChip classification={o.classification} />
         {o.accountableEmployee ? (
           <span className="ml-auto text-xs text-[var(--muted)]">{o.accountableEmployee}</span>
         ) : null}

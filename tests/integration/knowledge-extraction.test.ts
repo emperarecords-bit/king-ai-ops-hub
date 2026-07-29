@@ -58,7 +58,7 @@ const SNAPSHOT: RunSourceSnapshot[] = [
 async function mkRun(consolidatedResult: string, snapshot: RunSourceSnapshot[] = SNAPSHOT): Promise<string> {
   const r = await getSetupDb()
     .insert(runs)
-    .values({ orgId, projectId: ctx.projectId, taskId, status: 'completed', primaryAgentId: agentId, consolidatedResult, retrievedSources: snapshot })
+    .values({ classification: 'live', orgId, projectId: ctx.projectId, taskId, status: 'completed', primaryAgentId: agentId, consolidatedResult, retrievedSources: snapshot })
     .returning({ id: runs.id });
   return r[0]!.id;
 }

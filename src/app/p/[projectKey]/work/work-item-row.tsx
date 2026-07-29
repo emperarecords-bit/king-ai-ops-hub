@@ -4,7 +4,8 @@ import Link from 'next/link';
 import { useActionState } from 'react';
 import { finishWorkItemAction, stopWorkItemAction, updateWorkItemAction, type WorkItemState } from './actions';
 import { OwnerPicker, type OwnerOption } from '../owner-picker';
-import { type WorkItemCondition } from '@/types/domain';
+import { ClassificationChip } from '../non-live-controls';
+import { type WorkItemCondition, type DataClassification } from '@/types/domain';
 
 const inputCls =
   'w-full rounded border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-sm';
@@ -41,11 +42,13 @@ export function WorkItemRow({
   item,
   employees,
   canEdit,
+  classification,
 }: {
   projectKey: string;
   item: WorkItemView;
   employees: OwnerOption[];
   canEdit: boolean;
+  classification: DataClassification;
 }) {
   const [state, action, pending] = useActionState<WorkItemState, FormData>(updateWorkItemAction, {
     error: null,
@@ -56,6 +59,7 @@ export function WorkItemRow({
   return (
     <li className="border-b border-[var(--border)] py-3 last:border-0">
       <div className="flex flex-wrap items-center gap-2">
+        <ClassificationChip classification={classification} />
         <Link href={`/p/${projectKey}/work/${item.id}`} className="text-sm font-medium hover:text-[var(--accent)]">
           {item.title}
         </Link>

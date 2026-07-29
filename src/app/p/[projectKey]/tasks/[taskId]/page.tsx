@@ -1,8 +1,9 @@
+import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { CONTEXT_SOURCES, type ContextSource } from '@/types/domain';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
-import { getTask, listMessages, listRuns, listRunSteps, listTasks } from '@/domain/tasks/tasks';
+import { getTask, listMessages, listRuns, listRunSteps, listTasks, selectableTaskCandidates } from '@/domain/tasks/tasks';
 import { listDirectDependencies } from '@/domain/dependencies/dependencies';
 import { listCandidatesForTask } from '@/domain/decisions/decisions';
 import { listApprovals } from '@/domain/approvals/approvals';
@@ -16,6 +17,11 @@ import { assessTask } from '@/domain/execution/assess';
 import { CancelTaskButton, RunButton } from './run-button';
 import { AddDependencyForm, RemoveDependencyButton } from './dependency-forms';
 import { CandidateReview } from './candidate-review';
+import { PromptIdentity } from './prompt-identity';
+import { TaskRecoveryControls } from './recovery-controls';
+import { ObjectiveLinkControls } from './objective-controls';
+import { noEligibleExecutor } from '@/domain/execution/executors';
+import { classifyTaskObjectiveLink, listOpenObjectives } from '@/domain/objectives/task-link';
 
 const ROLE_LABEL: Record<string, string> = {
   user: 'You',
@@ -69,18 +75,45 @@ export default async function TaskDetailPage({
       const candidates = await listCandidatesForTask(tx, ctx, taskId);
       const employees = await listEmployees(tx, ctx);
       const taskApprovals = (await listApprovals(tx, ctx)).filter((a) => a.taskId === taskId);
-      return { task, msgs, runs, latestRun, steps, deps, allTasks, candidates, employees, taskApprovals };
+      const openObjectives = await listOpenObjectives(tx, ctx);
+      return { task, msgs, runs, latestRun, steps, deps, allTasks, candidates, employees, taskApprovals, openObjectives };
     });
   } catch (err) {
     if (err instanceof NotFoundError) notFound();
     throw err;
   }
 
-  const { task, msgs, latestRun, steps, deps, allTasks, candidates, employees, taskApprovals } = data;
+  const { task, msgs, runs, latestRun, steps, deps, allTasks, candidates, employees, taskApprovals, openObjectives } = data;
+  // The canonical objective relationship (HUB-003). This header now reads the SAME tasks.objective_id
+  // every other surface reads — it is no longer the one place that denies a real tie. The purpose line
+  // states a cancelled/completed goal truthfully rather than implying it is still live.
+  const objectivePurpose = task.objectiveTitle
+    ? task.objectiveStatus === 'cancelled' || task.objectiveStatus === 'completed'
+      ? `${task.objectiveTitle} (${task.objectiveStatus})`
+      : task.objectiveTitle
+    : null;
+  // Did any run receive an objective as CONTEXT? That is not a durable link — it must never be shown as one.
+  const hadObjectiveContext = runs.some(
+    (r) =>
+      Array.isArray(r.contextManifest) &&
+      r.contextManifest.some((e) => e && (e.source === 'objective' || e.source === 'objective_progress')),
+  );
+  const linkClass = classifyTaskObjectiveLink({
+    objectiveId: task.objectiveId,
+    objectiveStatus: task.objectiveStatus,
+    hadObjectiveContext,
+  });
   // Authorization is a separate lifecycle from the task's own work. A completed task may still hold
   // an authorized action the Hub has NOT executed — the summary must not imply it did.
   const authorizedUnexecuted = taskApprovals.some((a) => a.status === 'approved');
   const refusedCount = taskApprovals.filter((a) => a.status === 'rejected').length;
+  // "Execution unavailable" is only truthful once the backend has POSITIVELY determined that no
+  // executor exists for the authorized actions (HUB-002, item 7) — never merely because execution
+  // hasn't happened. Phase 3 executors are unbuilt, so noEligibleExecutor is true for a non-empty set.
+  const authorizedActionTypes = taskApprovals
+    .filter((a) => a.status === 'approved')
+    .map((a) => a.actionType);
+  const executionUnavailable = noEligibleExecutor(authorizedActionTypes);
   const ownerName = task.ownerAgentId
     ? (employees.find((e) => e.id === task.ownerAgentId)?.name ?? null)
     : null;
@@ -88,11 +121,18 @@ export default async function TaskDetailPage({
   // Candidates for a new prerequisite: any other task in the workspace not
   // already a direct prerequisite (the domain layer still rejects cycles).
   const existingPrereqIds = new Set(deps.prerequisites.map((p) => p.prerequisiteTaskId));
-  const depCandidates = allTasks
-    .filter((t) => t.id !== taskId && !existingPrereqIds.has(t.id))
-    .map((t) => ({ id: t.id, title: t.title }));
+  // HUB-009 — a live task's dependency picker never offers non-live (demo/seed) candidates (shared pure
+  // builder). The server-side addDependency guard is the real enforcement of a manually-submitted id.
+  const depCandidates = selectableTaskCandidates(allTasks, { excludeId: taskId, excludeIds: existingPrereqIds }).map((t) => ({ id: t.id, title: t.title }));
   const isAdmin = ctx.projectRole === 'admin';
   const canRun = task.status === 'pending' || task.status === 'failed';
+  // Recovery is for a task that is stale/obsolete but not already terminal or mid-run. A cancelled
+  // task is done; a running one must finish first (the domain rejects both anyway).
+  const canRecover = isAdmin && task.status !== 'cancelled' && task.status !== 'running';
+  // A task can only be superseded by an existing, non-cancelled, different task. HUB-009 — demo/seed tasks are
+  // kept out of the selectable candidate list (a live task is never superseded by non-live work).
+  const nonCancelledIds = new Set(allTasks.filter((t) => t.status === 'cancelled').map((t) => t.id));
+  const supersedeCandidates = selectableTaskCandidates(allTasks, { excludeId: taskId, excludeIds: nonCancelledIds }).map((t) => ({ id: t.id, title: t.title }));
   const reviewStep = steps.find((s) => s.kind === 'review' && s.verdictDetail != null);
   const reviewIssues = reviewStep?.verdictDetail?.issues ?? [];
 
@@ -130,12 +170,59 @@ export default async function TaskDetailPage({
 
       <WorkFrame
         kind="ai_task"
-        purpose={null}
+        purpose={objectivePurpose}
         assessment={assessTask({ status: task.status, ownerAgentId: task.ownerAgentId, authorizedUnexecuted })}
         accountable={ownerName ?? null}
         performer="the assigned agent"
         recent={null}
       />
+
+      <Card title="Objective" className="mb-6">
+        {task.objectiveId ? (
+          <p className="text-sm">
+            {linkClass === 'tied_to_closed' ? (
+              <>
+                Tied to{' '}
+                <Link href={`/p/${projectKey}/objectives/${task.objectiveId}`} className="text-[var(--accent)]">
+                  {task.objectiveTitle}
+                </Link>{' '}
+                <span className="text-[var(--muted)]">
+                  — this objective is {task.objectiveStatus}. The task contributed to it; the tie is kept as
+                  historical record.
+                </span>
+              </>
+            ) : (
+              <>
+                Contributing to{' '}
+                <Link href={`/p/${projectKey}/objectives/${task.objectiveId}`} className="text-[var(--accent)]">
+                  {task.objectiveTitle}
+                </Link>
+                <span className="text-[var(--muted)]"> — a direct, durable relationship.</span>
+              </>
+            )}
+          </p>
+        ) : (
+          <p className="text-sm text-[var(--muted)]">
+            Not tied to an objective.
+            {linkClass === 'context_only' ? (
+              <span className="mt-1 block text-xs">
+                A run for this task received an objective as <strong>context</strong>, but that is not a
+                durable relationship — receiving an objective in a run never, on its own, ties the task to
+                it. Attach it explicitly below if it truly contributes.
+              </span>
+            ) : null}
+          </p>
+        )}
+        {isAdmin ? (
+          <ObjectiveLinkControls
+            projectKey={projectKey}
+            taskId={task.id}
+            currentObjectiveId={task.objectiveId}
+            objectives={openObjectives.map((o) => ({ id: o.id, title: o.title }))}
+            completed={task.status === 'completed'}
+          />
+        ) : null}
+      </Card>
 
       {task.status === 'completed' && (authorizedUnexecuted || refusedCount > 0) ? (
         <p className="mb-6 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm">
@@ -144,6 +231,14 @@ export default async function TaskDetailPage({
           {authorizedUnexecuted ? 'Authorized, not executed' : 'Refused'}
           <span className="mt-1 block text-xs text-[var(--muted)]">
             The task finished producing the action. The action itself has not executed.
+            {authorizedUnexecuted && executionUnavailable ? (
+              <>
+                {' '}
+                No executor is currently available to carry out this kind of action, so it will not
+                execute on its own. If it is no longer wanted, withdraw the authorization or use a
+                recovery action below.
+              </>
+            ) : null}
           </span>
         </p>
       ) : null}
@@ -164,6 +259,17 @@ export default async function TaskDetailPage({
           />
           <CancelTaskButton projectKey={projectKey} taskId={task.id} />
         </div>
+      ) : null}
+
+      {canRecover ? (
+        <Card title="Recovery" className="mb-6">
+          <TaskRecoveryControls
+            projectKey={projectKey}
+            taskId={task.id}
+            candidates={supersedeCandidates}
+            showReconcile={task.status === 'awaiting_approval'}
+          />
+        </Card>
       ) : null}
 
       {latestRun?.consolidatedResult ? (
@@ -297,6 +403,8 @@ export default async function TaskDetailPage({
           </ol>
         </Card>
       ) : null}
+
+      {latestRun ? <PromptIdentity run={latestRun} steps={steps} /> : null}
 
       {candidates.length > 0 && isAdmin ? (
         <Card title="Suggested decisions" className="mb-6 border-[#6b5a3d]">

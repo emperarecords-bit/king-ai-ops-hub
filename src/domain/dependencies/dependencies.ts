@@ -6,6 +6,7 @@ import { log } from '@/lib/log';
 import { type DbTx } from '@/db/client';
 import { taskDependencies, tasks } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
+import { loadProjectClassification, resolveRecordClassification } from '@/domain/classification/classification';
 
 /**
  * Task dependency graph (O-18): explicit, Hub-recorded workflow structure —
@@ -34,7 +35,7 @@ function assertScoped(
 
 async function requireTask(tx: DbTx, ctx: TenantContext, taskId: string) {
   const rows = await tx
-    .select({ id: tasks.id, title: tasks.title, status: tasks.status })
+    .select({ id: tasks.id, title: tasks.title, status: tasks.status, classification: tasks.classification })
     .from(tasks)
     .where(and(eq(tasks.id, taskId), eq(tasks.projectId, ctx.projectId), eq(tasks.orgId, ctx.orgId)))
     .limit(1);
@@ -62,6 +63,17 @@ export async function addDependency(
   }
   const dependent = await requireTask(tx, ctx, args.dependentTaskId);
   const prerequisite = await requireTask(tx, ctx, args.prerequisiteTaskId);
+
+  // HUB-009: a LIVE task must not depend on a non-live (demo/seed) task — that would let demonstration or
+  // fixture work gate real execution behavior. This is enforced server-side regardless of any client filter,
+  // so a manually-submitted non-live prerequisite id is still rejected. (A non-live task MAY depend on a live
+  // task: the live prerequisite's behavior is unaffected by having a non-live dependent.)
+  const projectClassification = await loadProjectClassification(tx, ctx.projectId);
+  const dependentClass = resolveRecordClassification(dependent.classification, projectClassification).classification;
+  const prerequisiteClass = resolveRecordClassification(prerequisite.classification, projectClassification).classification;
+  if (dependentClass === 'live' && prerequisiteClass !== 'live') {
+    throw new ConflictError(`A live task cannot depend on a ${prerequisiteClass} task.`);
+  }
 
   // Would adding prereq→dependent close a cycle? Yes iff the DEPENDENT can
   // already reach the PREREQUISITE via forward edges (then prereq→dependent→…

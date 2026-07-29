@@ -59,15 +59,15 @@ async function main() {
 
   let agent = (await db.select().from(agents).where(and(eq(agents.projectId, project.id), eq(agents.role, 'primary'))).limit(1))[0];
   if (!agent) {
-    agent = (await db.insert(agents).values({ orgId: ctx.orgId, projectId: ctx.projectId, name: `[demo] Agent ${randomUUID().slice(0, 4)}`, role: 'primary', provider: 'openai', model: 'gpt-5.4-mini', systemPrompt: 'x' }).returning())[0]!;
+    agent = (await db.insert(agents).values({ orgId: ctx.orgId, projectId: ctx.projectId, name: `[demo] Agent ${randomUUID().slice(0, 4)}`, role: 'primary', provider: 'openai', model: 'gpt-5.4-mini', systemPrompt: 'x', classification: 'seed' }).returning())[0]!;
   }
   const tag = randomUUID().slice(0, 4);
   const mkDoc = async (path: string, sha: string, disclosure: 'workspace_internal' | 'restricted' = 'workspace_internal') => {
     await db.insert(documents).values({ orgId: ctx.orgId, projectId: ctx.projectId, relativePath: path, kind: 'markdown', sha256: sha, sizeBytes: 100, disclosure });
   };
   const seededRun = async (snapshot: RunSourceSnapshot[]): Promise<string> => {
-    const t = (await db.insert(tasks).values({ orgId: ctx.orgId, projectId: ctx.projectId, title: `[demo] extract task ${tag}`, input: 'x', providerSelection: 'openai', status: 'completed', createdBy: ctx.userId }).returning({ id: tasks.id }))[0]!;
-    const r = (await db.insert(runs).values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId: t.id, status: 'completed', primaryAgentId: agent!.id, consolidatedResult: 'demo output', retrievedSources: snapshot }).returning({ id: runs.id }))[0]!;
+    const t = (await db.insert(tasks).values({ orgId: ctx.orgId, projectId: ctx.projectId, title: `[demo] extract task ${tag}`, input: 'x', providerSelection: 'openai', status: 'completed', createdBy: ctx.userId, classification: 'seed' }).returning({ id: tasks.id }))[0]!;
+    const r = (await db.insert(runs).values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId: t.id, status: 'completed', primaryAgentId: agent!.id, consolidatedResult: 'demo output', retrievedSources: snapshot, classification: 'seed' }).returning({ id: runs.id }))[0]!;
     return r.id;
   };
   const cand = (over: Record<string, unknown>): ExtractFn => async () =>
@@ -161,7 +161,7 @@ async function main() {
   log('13 superseded version');
 
   // 14. Invalid / closed scope (task-scoped to a completed task).
-  const closedTask = (await db.insert(tasks).values({ orgId: ctx.orgId, projectId: ctx.projectId, title: `[demo] closed task ${tag}`, input: 'x', providerSelection: 'openai', status: 'completed', createdBy: ctx.userId }).returning({ id: tasks.id }))[0]!;
+  const closedTask = (await db.insert(tasks).values({ orgId: ctx.orgId, projectId: ctx.projectId, title: `[demo] closed task ${tag}`, input: 'x', providerSelection: 'openai', status: 'completed', createdBy: ctx.userId, classification: 'seed' }).returning({ id: tasks.id }))[0]!;
   await tx((t) => createKnowledge(t, ctx, { title: `[demo] Closed-scope note ${tag}`, body: 'Only relevant to a finished task.', kind: 'fact', scopeKind: 'task', scopeTaskId: closedTask.id, activate: true }));
   log('14 closed scope');
 

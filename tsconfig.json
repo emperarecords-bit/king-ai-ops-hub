@@ -51,6 +51,7 @@
     "node_modules",
     ".next",
     "playwright-report",
-    "test-results"
+    "test-results",
+    "scripts/g3c"
   ]
 }

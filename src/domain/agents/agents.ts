@@ -1,7 +1,7 @@
 import { and, asc, eq, inArray } from 'drizzle-orm';
-import { type AgentRole, type TenantContext } from '@/types/domain';
+import { type AgentRole, type DataClassification, type TenantContext } from '@/types/domain';
 import { type ProviderId } from '@/types/provider';
-import { NotFoundError, ValidationError } from '@/lib/errors';
+import { AppError, NotFoundError, ValidationError } from '@/lib/errors';
 import { sha256Hex } from '@/lib/crypto';
 import { type DbTx } from '@/db/client';
 import { agents, departments } from '@/db/schema';
@@ -18,6 +18,8 @@ export interface AgentRow {
   temperatureMilli: number;
   maxOutputTokens: number;
   enabled: boolean;
+  /** HUB-009 — the agent's own data classification (used to classify the ACTIVITY it performs). */
+  classification: DataClassification;
 }
 
 /**
@@ -90,6 +92,7 @@ export async function listAgents(tx: DbTx, ctx: TenantContext): Promise<AgentRow
       temperatureMilli: agents.temperatureMilli,
       maxOutputTokens: agents.maxOutputTokens,
       enabled: agents.enabled,
+      classification: agents.classification,
     })
     .from(agents)
     .where(and(eq(agents.projectId, ctx.projectId), eq(agents.orgId, ctx.orgId)));
@@ -149,6 +152,7 @@ export async function findAgentForRole(
       temperatureMilli: agents.temperatureMilli,
       maxOutputTokens: agents.maxOutputTokens,
       enabled: agents.enabled,
+      classification: agents.classification,
     })
     .from(agents)
     .where(
@@ -212,4 +216,75 @@ export async function updateAgent(
     entityId: agentId,
     detail: { fields: Object.keys(patch) },
   });
+}
+
+/**
+ * HUB-008 — a dedicated, audited employee prompt/config update. Unlike the generic `agent.updated` event
+ * (field names only), this records the PREVIOUS and NEW prompt hash and config fingerprint plus a required
+ * reason — so the audit trail proves what changed without storing the full prompt text. Admin-only.
+ * Idempotent: if the resulting prompt/config is unchanged, it makes no write and emits NO event.
+ */
+export async function updateEmployeePrompt(
+  tx: DbTx,
+  ctx: TenantContext,
+  agentId: string,
+  patch: { systemPrompt?: string; model?: string; temperatureMilli?: number; maxOutputTokens?: number },
+  reason: string,
+): Promise<boolean> {
+  if (ctx.projectRole !== 'admin') {
+    throw new AppError('forbidden', 'Only a project admin can change an employee prompt or configuration.');
+  }
+  const r = (reason ?? '').trim();
+  if (!r) throw new ValidationError(['A reason is required to change an employee prompt or configuration.']);
+  if (patch.model !== undefined && !knownModel(patch.model)) throw new ValidationError([`Unknown model '${patch.model}'.`]);
+  if (patch.temperatureMilli !== undefined && (patch.temperatureMilli < 0 || patch.temperatureMilli > 1000)) {
+    throw new ValidationError(['temperatureMilli must be between 0 and 1000.']);
+  }
+  if (patch.maxOutputTokens !== undefined && (patch.maxOutputTokens < 1 || patch.maxOutputTokens > 65_536)) {
+    throw new ValidationError(['maxOutputTokens must be between 1 and 65536.']);
+  }
+
+  const rows = await tx
+    .select({ role: agents.role, provider: agents.provider, model: agents.model, systemPrompt: agents.systemPrompt, temperatureMilli: agents.temperatureMilli, maxOutputTokens: agents.maxOutputTokens })
+    .from(agents)
+    .where(and(eq(agents.id, agentId), eq(agents.projectId, ctx.projectId), eq(agents.orgId, ctx.orgId)))
+    .limit(1);
+  const before = rows[0];
+  if (!before) throw new NotFoundError('Agent');
+
+  const after = {
+    role: before.role,
+    provider: before.provider,
+    model: patch.model ?? before.model,
+    systemPrompt: patch.systemPrompt ?? before.systemPrompt,
+    temperatureMilli: patch.temperatureMilli ?? before.temperatureMilli,
+    maxOutputTokens: patch.maxOutputTokens ?? before.maxOutputTokens,
+  };
+  const prevConfigHash = agentExecutionFingerprint(before);
+  const newConfigHash = agentExecutionFingerprint(after);
+  if (prevConfigHash === newConfigHash) return false; // idempotent — nothing actually changed, no event
+
+  const changedFields = (['systemPrompt', 'model', 'temperatureMilli', 'maxOutputTokens'] as const).filter(
+    (k) => patch[k] !== undefined && patch[k] !== (before as Record<string, unknown>)[k],
+  );
+
+  await tx
+    .update(agents)
+    .set({ ...patch, updatedAt: new Date() })
+    .where(and(eq(agents.id, agentId), eq(agents.projectId, ctx.projectId), eq(agents.orgId, ctx.orgId)));
+
+  await writeAudit(tx, ctx, {
+    action: 'employee.prompt_updated',
+    entityType: 'agent',
+    entityId: agentId,
+    detail: {
+      changedFields,
+      prevPromptHash: sha256Hex(before.systemPrompt),
+      newPromptHash: sha256Hex(after.systemPrompt),
+      prevConfigHash,
+      newConfigHash,
+      reason: r,
+    },
+  });
+  return true;
 }

@@ -1,8 +1,18 @@
 import { and, desc, eq, inArray } from 'drizzle-orm';
-import { type Cadence, type TaskStatus, type TenantContext, type WorkItemCondition } from '@/types/domain';
+import { type Cadence, type DataClassification, type TaskStatus, type TenantContext, type WorkItemCondition } from '@/types/domain';
 import { type DbTx } from '@/db/client';
 import { agents, objectives, profiles, taskSchedules, tasks, workItems } from '@/db/schema';
 import { tasksWithAuthorizedUnexecutedActions } from '@/domain/approvals/approvals';
+import {
+  type ClassificationVisibility,
+  type ClassifiedItem,
+  type ExclusionSummary,
+  LIVE_ONLY,
+  exclusionSummary,
+  loadProjectClassification,
+  partitionByEffective,
+  resolveRecordClassification,
+} from '@/domain/classification/classification';
 
 /**
  * The unified execution feed (Execution). One stream across both engines — human Work Items and
@@ -32,9 +42,22 @@ export interface ExecutionRow {
   closureReason: string | null;
   closedByName: string | null;
   closedAt: Date | null;
+  /** HUB-009 — effective data classification of this row (for labelling when non-live is shown). */
+  classification: DataClassification;
 }
 
-export async function listExecution(tx: DbTx, ctx: TenantContext): Promise<ExecutionRow[]> {
+export interface ExecutionFeed {
+  rows: ExecutionRow[];
+  /** demo/seed rows hidden by a live-only view (0 when includeNonLive, or none exist). */
+  excluded: ExclusionSummary;
+}
+
+export async function listExecution(
+  tx: DbTx,
+  ctx: TenantContext,
+  visibility: ClassificationVisibility = LIVE_ONLY,
+): Promise<ExecutionFeed> {
+  const projectClassification = await loadProjectClassification(tx, ctx.projectId);
   const wi = await tx
     .select({
       id: workItems.id,
@@ -51,6 +74,7 @@ export async function listExecution(tx: DbTx, ctx: TenantContext): Promise<Execu
       closureReason: workItems.closureReason,
       closedByName: profiles.displayName,
       closedAt: workItems.closedAt,
+      classification: workItems.classification,
     })
     .from(workItems)
     .leftJoin(agents, eq(workItems.ownerAgentId, agents.id))
@@ -70,6 +94,7 @@ export async function listExecution(tx: DbTx, ctx: TenantContext): Promise<Execu
       updatedAt: tasks.updatedAt,
       status: tasks.status,
       cancelReason: tasks.cancelReason,
+      classification: tasks.classification,
     })
     .from(tasks)
     .leftJoin(agents, eq(tasks.ownerAgentId, agents.id))
@@ -84,46 +109,58 @@ export async function listExecution(tx: DbTx, ctx: TenantContext): Promise<Execu
     ts.filter((r) => r.status === 'completed').map((r) => r.id),
   );
 
-  const workItemRows: ExecutionRow[] = wi.map((r) => ({
-    kind: 'work_item',
-    id: r.id,
-    title: r.title,
-    ownerAgentId: r.ownerAgentId,
-    ownerName: r.ownerName,
-    objectiveId: r.objectiveId,
-    objectiveTitle: r.objectiveTitle,
-    updatedAt: r.updatedAt,
-    condition: r.condition,
-    waitingOn: r.waitingOn,
-    stage: r.stage,
-    notes: r.notes,
-    status: null,
-    authorizedUnexecuted: false,
-    closureReason: r.closureReason,
-    closedByName: r.closedByName,
-    closedAt: r.closedAt,
+  const workItemRows = wi.map((r): ClassifiedItem<ExecutionRow> => ({
+    item: {
+      kind: 'work_item' as const,
+      id: r.id,
+      title: r.title,
+      ownerAgentId: r.ownerAgentId,
+      ownerName: r.ownerName,
+      objectiveId: r.objectiveId,
+      objectiveTitle: r.objectiveTitle,
+      updatedAt: r.updatedAt,
+      condition: r.condition,
+      waitingOn: r.waitingOn,
+      stage: r.stage,
+      notes: r.notes,
+      status: null,
+      authorizedUnexecuted: false,
+      closureReason: r.closureReason,
+      closedByName: r.closedByName,
+      closedAt: r.closedAt,
+      classification: resolveRecordClassification(r.classification, projectClassification).classification,
+    },
+    effective: resolveRecordClassification(r.classification, projectClassification),
   }));
-  const taskRows: ExecutionRow[] = ts.map((r) => ({
-    kind: 'ai_task',
-    id: r.id,
-    title: r.title,
-    ownerAgentId: r.ownerAgentId,
-    ownerName: r.ownerName,
-    objectiveId: r.objectiveId,
-    objectiveTitle: r.objectiveTitle,
-    updatedAt: r.updatedAt,
-    condition: null,
-    waitingOn: null,
-    stage: null,
-    notes: null,
-    status: r.status,
-    authorizedUnexecuted: authorizedUnexecuted.has(r.id),
-    closureReason: r.cancelReason,
-    closedByName: null,
-    closedAt: null,
+  const taskRows = ts.map((r): ClassifiedItem<ExecutionRow> => ({
+    item: {
+      kind: 'ai_task' as const,
+      id: r.id,
+      title: r.title,
+      ownerAgentId: r.ownerAgentId,
+      ownerName: r.ownerName,
+      objectiveId: r.objectiveId,
+      objectiveTitle: r.objectiveTitle,
+      updatedAt: r.updatedAt,
+      condition: null,
+      waitingOn: null,
+      stage: null,
+      notes: null,
+      status: r.status,
+      authorizedUnexecuted: authorizedUnexecuted.has(r.id),
+      closureReason: r.cancelReason,
+      closedByName: null,
+      closedAt: null,
+      classification: resolveRecordClassification(r.classification, projectClassification).classification,
+    },
+    effective: resolveRecordClassification(r.classification, projectClassification),
   }));
 
-  return [...workItemRows, ...taskRows].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+  const partition = partitionByEffective([...workItemRows, ...taskRows], visibility);
+  const rows = partition.visible
+    .map((v) => v.item)
+    .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime()); // chronological, preserved
+  return { rows, excluded: exclusionSummary(partition) };
 }
 
 /**

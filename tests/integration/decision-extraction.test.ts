@@ -37,7 +37,7 @@ async function completedRun(title: string, consolidated: string, manifest: Conte
   const t = await db.insert(tasks).values({ orgId, projectId: ctx.projectId, title, input: 'x', providerSelection: 'openai', status: 'completed', createdBy: userId }).returning({ id: tasks.id });
   const r = await db
     .insert(runs)
-    .values({ orgId, projectId: ctx.projectId, taskId: t[0]!.id, status: 'completed', primaryAgentId: agentId, consolidatedResult: consolidated, contextManifest: manifest })
+    .values({ classification: 'live', orgId, projectId: ctx.projectId, taskId: t[0]!.id, status: 'completed', primaryAgentId: agentId, consolidatedResult: consolidated, contextManifest: manifest })
     .returning({ id: runs.id });
   return { taskId: t[0]!.id, runId: r[0]!.id };
 }

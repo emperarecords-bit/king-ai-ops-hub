@@ -152,10 +152,10 @@ async function main() {
   }
   { // supplied to several AI operations, with IMMUTABLE primary + reviewer execution steps recorded
     const s = await byteExact(`${PREFIX}supplied-to-ai.md`, '# Supplied\n\nsupplied to runs');
-    const a = await db.insert(agents).values({ orgId: ctx.orgId, projectId: ctx.projectId, name: '[pf-demo] agent', role: 'primary', provider: 'openai', model: 'agent-current-model', systemPrompt: 'x' }).returning({ id: agents.id });
+    const a = await db.insert(agents).values({ orgId: ctx.orgId, projectId: ctx.projectId, name: '[pf-demo] agent', role: 'primary', provider: 'openai', model: 'agent-current-model', systemPrompt: 'x', classification: 'seed' }).returning({ id: agents.id });
     for (let i = 0; i < 2; i += 1) {
-      const t = await db.insert(tasks).values({ orgId: ctx.orgId, projectId: ctx.projectId, title: `[pf-demo] task ${i}`, input: 'x', providerSelection: 'openai', status: 'completed', createdBy: ctx.userId }).returning({ id: tasks.id });
-      const r = await db.insert(runs).values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId: t[0]!.id, status: 'completed', primaryAgentId: a[0]!.id }).returning({ id: runs.id });
+      const t = await db.insert(tasks).values({ orgId: ctx.orgId, projectId: ctx.projectId, title: `[pf-demo] task ${i}`, input: 'x', providerSelection: 'openai', status: 'completed', createdBy: ctx.userId, classification: 'seed' }).returning({ id: tasks.id });
+      const r = await db.insert(runs).values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId: t[0]!.id, status: 'completed', primaryAgentId: a[0]!.id, classification: 'seed' }).returning({ id: runs.id });
       // Dispatch-time facts frozen on the steps: primary (anthropic) distinct from reviewer (openai).
       await db.insert(runSteps).values([
         { orgId: ctx.orgId, projectId: ctx.projectId, runId: r[0]!.id, stepNumber: 1, kind: 'primary', agentId: a[0]!.id, provider: 'anthropic', model: 'claude-primary-dispatch', succeeded: true },
