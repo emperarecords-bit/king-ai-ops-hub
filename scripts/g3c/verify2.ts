@@ -46,9 +46,25 @@ async function classify(ctx: TenantContext, entityType: string, entityId: string
 // ---- unarchive / rearchive the primary synthetic projects (approved non-destructive) ----
 async function setArchived(value: boolean) {
   const sql = admin(); const { orgId } = await parts(sql);
-  for (const key of [KEYS.live, KEYS.demo, KEYS.seed]) await sql`update projects set archived=${value} where key=${key} and org_id=${orgId}`;
-  const rows = await sql`select key, archived from projects where key in (${KEYS.live}, ${KEYS.demo}, ${KEYS.seed}) and org_id=${orgId} order by key`;
-  console.log(JSON.stringify({ archived: value, rows }, null, 2)); await sql.end();
+  const keys = Object.values(KEYS); // live, demo, seed, agents, snap — every synthetic project
+  const report = [];
+  for (const key of keys) {
+    const p = (await sql`select id from projects where key=${key} and org_id=${orgId}`)[0];
+    if (!p) { report.push({ key, state: 'absent' }); continue; }
+    const before = (await sql`select
+        (select count(*)::int from tasks where project_id=${p.id}) as tasks,
+        (select count(*)::int from runs where project_id=${p.id}) as runs,
+        (select count(*)::int from usage_events where project_id=${p.id}) as usage,
+        (select count(*)::int from audit_logs where project_id=${p.id}) as audit`)[0]!;
+    await sql`update projects set archived=${value} where id=${p.id}`;
+    const after = (await sql`select
+        (select count(*)::int from tasks where project_id=${p.id}) as tasks,
+        (select count(*)::int from runs where project_id=${p.id}) as runs,
+        (select count(*)::int from usage_events where project_id=${p.id}) as usage,
+        (select count(*)::int from audit_logs where project_id=${p.id}) as audit`)[0]!;
+    report.push({ key, archived: value, dataPreserved: before.tasks === after.tasks && before.runs === after.runs && before.usage === after.usage && before.audit === after.audit, counts: after });
+  }
+  console.log(JSON.stringify({ setArchived: value, report }, null, 2)); await sql.end();
 }
 
 // ---- synthetic legacy-null run + usage fixture (replica role bypasses the insert guard) ----
@@ -297,10 +313,34 @@ async function linkdemo() {
   await sql.end();
 }
 
+// ---- final safety check: prove no REAL record was reclassified, no real history mutated ----
+async function safety() {
+  const sql = admin();
+  // Every record.classification_changed event must belong to a hub009-* synthetic project.
+  const events = await sql`
+    select p.key, count(*)::int as n from audit_logs a
+    join projects p on p.id = a.project_id
+    where a.action = 'record.classification_changed'
+    group by p.key order by p.key`;
+  const nonSynthetic = events.filter((e) => !String(e.key).startsWith('hub009-'));
+  // The named Gate-5 candidates + hub008-uiproof must be untouched (still their original state).
+  const ab = (await sql`select id from projects where key='accuratebids-com'`)[0];
+  const namedTasks = await sql`select id, left(title, 40) as title, classification from tasks
+    where project_id=${ab?.id} and title ilike '%[demo]%' order by title`;
+  const hub008 = (await sql`select key, classification, archived from projects where key='hub008-uiproof'`)[0] ?? null;
+  console.log(JSON.stringify({
+    classificationChangeEventsByProject: events,
+    anyOnRealWorkspace: nonSynthetic,
+    gate5_named_demo_tasks: namedTasks,
+    hub008_uiproof: hub008,
+  }, null, 2));
+  await sql.end();
+}
+
 const cmd = process.argv[2];
 const map: Record<string, () => Promise<void>> = {
   unarchive: () => setArchived(false), rearchive: () => setArchived(true),
-  legacyfix, usagetrig, buildAgents, snappath, deps2, audit2, linkdemo,
+  legacyfix, usagetrig, buildAgents, snappath, deps2, audit2, linkdemo, safety,
 };
 const fn = map[cmd ?? ''];
 if (!fn) { console.error('unknown command', cmd); process.exit(2); }
