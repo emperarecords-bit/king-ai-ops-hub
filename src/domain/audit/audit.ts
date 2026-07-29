@@ -23,11 +23,38 @@ export interface AuditEventInput {
  *  indexing). It is not a real profile, so audit records it as a NULL actor. */
 const SYSTEM_ACTOR_ID = '00000000-0000-0000-0000-000000000000';
 
+/**
+ * Advisory-lock CLASS for the per-organization audit chain (first key of the two-int
+ * `pg_advisory_xact_lock(class, org)`). A fixed, distinctive namespace so audit-chain locks can never
+ * collide with other advisory locks in the app; the second key `hashtext(org_id)` keys it per organization
+ * so unrelated orgs never serialize against each other. Transaction-scoped: released automatically on
+ * commit/rollback, and re-entrant within one transaction (many writeAudit calls in a placement batch are fine).
+ */
+const AUDIT_CHAIN_LOCK_CLASS = 41434143; // "ACAC" — audit-chain advisory-lock class
+
+/**
+ * Recognized PRE-EXISTING audit-chain concurrency forks on staging (documented 2026-07, from the O-23
+ * document-ingestion bursts, before the per-org write lock existed). These historical rows are NEVER
+ * rewritten/resequenced/repaired; the validator reports them as recognized exceptions, distinct from any
+ * NEW divergence. Empty in every other environment (these IDs simply never match elsewhere).
+ */
+export const KNOWN_HISTORICAL_AUDIT_FORKS: ReadonlySet<string> = new Set([
+  '6b48a209-229c-4b75-ab6f-638e9fcb8345',
+  '8cfcd362-971f-47a9-ad7a-92974826ded1',
+  'dbf21051-3582-4e1f-9ffe-00cd31bb290a',
+  '3b3120a0-dccf-4aae-a554-cce0fe038e03',
+]);
+
 export async function writeAudit(
   tx: DbTx,
   ctx: Pick<TenantContext, 'orgId' | 'projectId' | 'userId'>,
   event: AuditEventInput,
 ): Promise<void> {
+  // Concurrency-safe chain head: serialize audit writes PER ORG with a transaction-level advisory lock so
+  // two concurrent writers cannot read the same head and fork the chain. Acquired BEFORE reading the head;
+  // released automatically at commit/rollback. Keyed by org (not global) so unrelated orgs never contend.
+  await tx.execute(sql`select pg_advisory_xact_lock(${AUDIT_CHAIN_LOCK_CLASS}, hashtext(${ctx.orgId}))`);
+
   // Chain head for this org. The org-scoped chain means cross-project events
   // (org settings changes) still chain; project attribution lives in its column.
   const prev = await tx
@@ -115,6 +142,66 @@ export function assertCanViewAudit(ctx: TenantContext): void {
   if (ctx.projectRole === 'viewer') {
     throw new AppError('forbidden', 'Your role cannot view the audit history.');
   }
+}
+
+export type AuditLinkStatus = 'linear' | 'recognized_historical_fork' | 'missing_predecessor' | 'unknown_divergence';
+
+export interface AuditChainVerification {
+  /** 'ok' iff there are NO missing predecessors and NO unknown (new) divergences — recognized historical
+   *  forks alone do not degrade the status. */
+  overallStatus: 'ok' | 'anomalies';
+  totalRows: number;
+  /** Total seq-linkage failures (recognized forks + missing predecessors + unknown divergences). */
+  linearLinkFailures: number;
+  recognizedHistoricalForks: number;
+  missingPredecessors: number;
+  unknownDivergences: number;
+  /** Full content-hash re-verification is NOT performed: `detail` is stored as jsonb, whose key order is
+   *  normalized on read, so re-serializing it cannot reproduce the exact bytes that were hashed at write
+   *  time. Linkage is verified; content bytes are not claimed. (No schema migration is added for this.) */
+  hashVerification: 'not_performed_jsonb_key_order';
+  affectedRowIds: {
+    recognizedHistoricalForks: string[];
+    missingPredecessors: string[];
+    unknownDivergences: string[];
+  };
+}
+
+/**
+ * Read-only audit-chain verification for one organization. Distinguishes a valid linear continuation from
+ * (a) a recognized pre-existing historical fork (KNOWN_HISTORICAL_AUDIT_FORKS), (b) a missing predecessor
+ * (prev_hash matches no row), and (c) an unknown divergence (a NEW fork not on the recognized list). It never
+ * returns `ok` just because a break exists — only recognized historical forks are tolerated. It does not
+ * rewrite, resequence, or repair any row.
+ */
+export async function verifyAuditChain(tx: DbTx, ctx: TenantContext): Promise<AuditChainVerification> {
+  assertCanViewAudit(ctx);
+  const rows = await tx
+    .select({ id: auditLogs.id, seq: auditLogs.seq, prevHash: auditLogs.prevHash, rowHash: auditLogs.rowHash })
+    .from(auditLogs)
+    .where(eq(auditLogs.orgId, ctx.orgId))
+    .orderBy(auditLogs.seq);
+  const known = new Set(rows.map((r) => r.rowHash));
+  const recognizedHistoricalForks: string[] = [];
+  const missingPredecessors: string[] = [];
+  const unknownDivergences: string[] = [];
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i]!.prevHash === rows[i - 1]!.rowHash) continue; // valid linear continuation
+    const id = rows[i]!.id;
+    if (!known.has(rows[i]!.prevHash)) missingPredecessors.push(id);
+    else if (KNOWN_HISTORICAL_AUDIT_FORKS.has(id)) recognizedHistoricalForks.push(id);
+    else unknownDivergences.push(id);
+  }
+  return {
+    overallStatus: missingPredecessors.length === 0 && unknownDivergences.length === 0 ? 'ok' : 'anomalies',
+    totalRows: rows.length,
+    linearLinkFailures: recognizedHistoricalForks.length + missingPredecessors.length + unknownDivergences.length,
+    recognizedHistoricalForks: recognizedHistoricalForks.length,
+    missingPredecessors: missingPredecessors.length,
+    unknownDivergences: unknownDivergences.length,
+    hashVerification: 'not_performed_jsonb_key_order',
+    affectedRowIds: { recognizedHistoricalForks, missingPredecessors, unknownDivergences },
+  };
 }
 
 /** Keys whose VALUES are never shown, even if a caller stored them in `detail` (req 3). Structure is kept. */
