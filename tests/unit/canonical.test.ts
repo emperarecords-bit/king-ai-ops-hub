@@ -76,3 +76,65 @@ describe('canonicalization v1', () => {
     expect(hashCanonicalV1({ a: 1 })).toBe(hashCanonicalString(canonical, CANONICALIZATION_VERSION));
   });
 });
+
+describe('canonicalization v1 — code-point ordering & edge cases (P1a correction)', () => {
+  it('orders object keys by Unicode CODE POINT (supplementary plane after BMP)', () => {
+    const kHigh = '￿'; // U+FFFF (BMP, 65535)
+    const kSupp = String.fromCodePoint(0x1f600); // U+1F600 (supplementary, 128512; surrogate pair)
+    const s = canonicalizeV1({ [kSupp]: 1, [kHigh]: 2 });
+    // By code point, U+FFFF < U+1F600. (UTF-16 code-unit order would wrongly put the surrogate first.)
+    expect(s.indexOf(kHigh)).toBeGreaterThanOrEqual(0);
+    expect(s.indexOf(kSupp)).toBeGreaterThanOrEqual(0);
+    expect(s.indexOf(kHigh)).toBeLessThan(s.indexOf(kSupp));
+    // deterministic regardless of insertion order
+    expect(hashCanonicalV1({ [kSupp]: 1, [kHigh]: 2 })).toBe(hashCanonicalV1({ [kHigh]: 2, [kSupp]: 1 }));
+  });
+
+  it('BMP key ordering is deterministic and code-point correct', () => {
+    const s = canonicalizeV1({ b: 1, A: 2, a: 3, '0': 4 });
+    // ASCII code points: '0'(48) < 'A'(65) < 'a'(97) < 'b'(98)
+    expect(s).toBe('{"0":4,"A":2,"a":3,"b":1}');
+  });
+
+  it('canonically-equivalent KEY forms collapse; a post-NFC duplicate key is rejected', () => {
+    const kNFC = String.fromCharCode(0x00e9);
+    const kNFD = String.fromCharCode(0x0065, 0x0301);
+    expect(hashCanonicalV1({ [kNFC]: 1 })).toBe(hashCanonicalV1({ [kNFD]: 1 }));
+    expect(() => canonicalizeV1({ [kNFC]: 1, [kNFD]: 2 })).toThrow(CanonicalizationError);
+  });
+
+  it('normalizes negative zero to 0', () => {
+    expect(canonicalizeV1({ n: -0 })).toBe('{"n":0}');
+    expect(hashCanonicalV1({ n: -0 })).toBe(hashCanonicalV1({ n: 0 }));
+  });
+
+  it('rejects non-exactly-representable (unsafe) integers', () => {
+    expect(() => canonicalizeV1({ n: Number.MAX_SAFE_INTEGER + 1 })).toThrow(CanonicalizationError);
+    expect(() => canonicalizeV1({ n: 2 ** 53 })).toThrow(CanonicalizationError);
+    expect(canonicalizeV1({ n: Number.MAX_SAFE_INTEGER })).toBe(`{"n":${Number.MAX_SAFE_INTEGER}}`);
+  });
+
+  it('empty set field is stable', () => {
+    const opts = { setFields: new Set(['tags']) };
+    expect(canonicalizeV1({ tags: [] }, opts)).toBe('{"tags":[]}');
+    expect(hashCanonicalV1({ tags: [] }, opts)).toBe(hashCanonicalV1({ tags: [] }, opts));
+  });
+
+  it('duplicate paths that normalize equal collapse in a path+set field', () => {
+    const opts = { setFields: new Set(['paths']), pathFields: new Set(['paths']) };
+    expect(hashCanonicalV1({ paths: ['src/a.ts', '/src/a.ts/', 'src/a.ts'] }, opts)).toBe(
+      hashCanonicalV1({ paths: ['src/a.ts'] }, opts),
+    );
+  });
+
+  it('rejects a path field that normalizes outside the repo root', () => {
+    expect(() => canonicalizeV1({ p: '../secret' }, { pathFields: new Set(['p']) })).toThrow(CanonicalizationError);
+    expect(() => canonicalizeV1({ p: 'a/../../b' }, { pathFields: new Set(['p']) })).toThrow(CanonicalizationError);
+  });
+
+  it('hash is stable after JSON serialize + reload of a JSON-safe input', () => {
+    const input = { z: 3, a: { b: [1, 2, 3], c: null }, tags: ['x', 'y'] };
+    const reloaded = JSON.parse(JSON.stringify(input));
+    expect(hashCanonicalV1(reloaded)).toBe(hashCanonicalV1(input));
+  });
+});

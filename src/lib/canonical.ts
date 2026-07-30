@@ -62,9 +62,33 @@ export function normalizeRepoPath(input: string): string {
   return segments.join('/'); // case-sensitive: segments preserved as-is
 }
 
+/** Deterministic Unicode CODE-POINT comparison (not UTF-16 code-unit). Iterating a string yields code
+ *  points, so supplementary-plane characters (surrogate pairs) order correctly across runtimes. */
+function compareCodePoints(a: string, b: string): number {
+  const ai = a[Symbol.iterator]();
+  const bi = b[Symbol.iterator]();
+  for (;;) {
+    const an = ai.next();
+    const bn = bi.next();
+    if (an.done && bn.done) return 0;
+    if (an.done) return -1;
+    if (bn.done) return 1;
+    const ac = an.value.codePointAt(0)!;
+    const bc = bn.value.codePointAt(0)!;
+    if (ac !== bc) return ac < bc ? -1 : 1;
+  }
+}
+
 function canonicalNumber(n: number): string {
   if (!Number.isFinite(n)) throw new CanonicalizationError('non-finite number');
-  if (Number.isInteger(n)) return Object.is(n, -0) ? '0' : n.toString();
+  if (Number.isInteger(n)) {
+    if (!Number.isSafeInteger(n)) {
+      // Beyond ±2^53−1 an integer literal is not exactly representable, so its canonical form is ambiguous.
+      // Reject rather than risk a precision-losing hash (governance money uses bigint, which is exact).
+      throw new CanonicalizationError('integer is not exactly representable (unsafe); use a bigint');
+    }
+    return Object.is(n, -0) ? '0' : n.toString();
+  }
   let s = n.toString();
   if (s.includes('e') || s.includes('E')) s = n.toFixed(20);
   if (s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '');
@@ -100,7 +124,7 @@ function canon(value: unknown, keyName: string, opts: CanonicalizeOptions): stri
     const keys = Object.keys(obj).filter((k) => obj[k] !== undefined); // omitted/undefined dropped; null kept
     for (const k of keys) if (hasControlChar(k)) throw new CanonicalizationError('control character in object key');
     const normalized = keys.map((k) => ({ raw: k, nfc: k.normalize('NFC') }));
-    normalized.sort((a, b) => (a.nfc < b.nfc ? -1 : a.nfc > b.nfc ? 1 : 0));
+    normalized.sort((a, b) => compareCodePoints(a.nfc, b.nfc)); // Unicode code-point order (not UTF-16 units)
     const seen = new Set<string>();
     const parts = normalized.map(({ raw, nfc }) => {
       if (seen.has(nfc)) throw new CanonicalizationError(`duplicate object key after NFC normalization: ${nfc}`);

@@ -1,5 +1,5 @@
 {
-  "id": "6aea4f6b-296d-4b7a-ae15-105ed7405a8c",
+  "id": "0e554786-3ebd-4fe3-b722-6fbc2a7f7dea",
   "prevId": "b2c2ddcc-ebd9-4a8f-bcde-07ef3815bee7",
   "version": "7",
   "dialect": "postgresql",
@@ -6201,7 +6201,7 @@
           "name": "valid_from",
           "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "valid_until": {
           "name": "valid_until",
@@ -6305,8 +6305,8 @@
           "primaryKey": true,
           "notNull": true
         },
-        "version_label": {
-          "name": "version_label",
+        "source_pricing_version": {
+          "name": "source_pricing_version",
           "type": "text",
           "primaryKey": false,
           "notNull": true

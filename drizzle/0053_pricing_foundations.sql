@@ -18,7 +18,7 @@ CREATE TABLE "pricing_schedule_entries" (
 	"unit_definition" text NOT NULL,
 	"min_charge_micros" bigint,
 	"max_output_tokens" integer NOT NULL,
-	"valid_from" timestamp with time zone NOT NULL,
+	"valid_from" timestamp with time zone,
 	"valid_until" timestamp with time zone,
 	"metadata" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	CONSTRAINT "pricing_entries_token_unit_size_pos" CHECK ("pricing_schedule_entries"."token_unit_size" > 0),
@@ -28,7 +28,7 @@ CREATE TABLE "pricing_schedule_entries" (
 --> statement-breakpoint
 CREATE TABLE "pricing_schedules" (
 	"id" uuid PRIMARY KEY NOT NULL,
-	"version_label" text NOT NULL,
+	"source_pricing_version" text NOT NULL,
 	"currency" text NOT NULL,
 	"schedule_hash" text NOT NULL,
 	"canonicalization_version" integer NOT NULL,
@@ -45,15 +45,15 @@ ALTER TABLE "pricing_schedule_entries" ADD CONSTRAINT "pricing_schedule_entries_
 CREATE UNIQUE INDEX "pricing_schedule_entries_schedule_model_uq" ON "pricing_schedule_entries" USING btree ("schedule_id","provider","model");--> statement-breakpoint
 CREATE INDEX "pricing_schedule_entries_schedule_idx" ON "pricing_schedule_entries" USING btree ("schedule_id");
 --> statement-breakpoint
--- P1a seed: one immutable pricing schedule from MODEL_PRICING (source 2026-07-24); gpt-5.2 excluded (delisted/unverified).
-INSERT INTO "pricing_schedules" ("id","version_label","currency","schedule_hash","canonicalization_version","hash_algorithm","seeded_by_migration") VALUES ('f00d0053-0000-4000-8000-000000000001','2026-07-24','USD','b33b04c78711fa8ff3c82ffca5c0dce05b3f526eab753c09f744bfb9cd1aa0d0',1,'sha256','0053_pricing_foundations');
+-- P1a seed: one immutable pricing schedule from MODEL_PRICING (source 2026-07-24); gpt-5.2 excluded (delisted/unverified). valid_from is NULL (no source-defined effective start).
+INSERT INTO "pricing_schedules" ("id","source_pricing_version","currency","schedule_hash","canonicalization_version","hash_algorithm","seeded_by_migration") VALUES ('f00d0053-0000-4000-8000-000000000001','2026-07-24','USD','1989db5b9300e5d09d61f482d5a728aa8c04e9a47a01c3d4636ef0ccd5fe77df',1,'sha256','0053_pricing_foundations');
 --> statement-breakpoint
 INSERT INTO "pricing_schedule_entries" ("schedule_id","provider","model","input_unit_price_micros","output_unit_price_micros","token_unit_size","unit_definition","min_charge_micros","max_output_tokens","valid_from","valid_until") VALUES
-  ('f00d0053-0000-4000-8000-000000000001','anthropic','claude-haiku-4-5-20251001',1000000,5000000,1000000,'per_1m_tokens',NULL,64000,'2026-07-24T00:00:00.000Z',NULL),
-  ('f00d0053-0000-4000-8000-000000000001','anthropic','claude-opus-4-8',5000000,25000000,1000000,'per_1m_tokens',NULL,64000,'2026-07-24T00:00:00.000Z',NULL),
-  ('f00d0053-0000-4000-8000-000000000001','anthropic','claude-sonnet-5',2000000,10000000,1000000,'per_1m_tokens',NULL,64000,'2026-07-24T00:00:00.000Z','2026-09-01T00:00:00.000Z'),
-  ('f00d0053-0000-4000-8000-000000000001','openai','gpt-5.4',2500000,15000000,1000000,'per_1m_tokens',NULL,65536,'2026-07-24T00:00:00.000Z',NULL),
-  ('f00d0053-0000-4000-8000-000000000001','openai','gpt-5.4-mini',750000,4500000,1000000,'per_1m_tokens',NULL,65536,'2026-07-24T00:00:00.000Z',NULL);
+  ('f00d0053-0000-4000-8000-000000000001','anthropic','claude-haiku-4-5-20251001',1000000,5000000,1000000,'per_1m_tokens',NULL,64000,NULL,NULL),
+  ('f00d0053-0000-4000-8000-000000000001','anthropic','claude-opus-4-8',5000000,25000000,1000000,'per_1m_tokens',NULL,64000,NULL,NULL),
+  ('f00d0053-0000-4000-8000-000000000001','anthropic','claude-sonnet-5',2000000,10000000,1000000,'per_1m_tokens',NULL,64000,NULL,'2026-09-01T00:00:00.000Z'),
+  ('f00d0053-0000-4000-8000-000000000001','openai','gpt-5.4',2500000,15000000,1000000,'per_1m_tokens',NULL,65536,NULL,NULL),
+  ('f00d0053-0000-4000-8000-000000000001','openai','gpt-5.4-mini',750000,4500000,1000000,'per_1m_tokens',NULL,65536,NULL,NULL);
 --> statement-breakpoint
-INSERT INTO "platform_pricing_state" ("singleton_key","current_pricing_schedule_id","current_pricing_schedule_hash","seeded_by_migration") VALUES ('GLOBAL','f00d0053-0000-4000-8000-000000000001','b33b04c78711fa8ff3c82ffca5c0dce05b3f526eab753c09f744bfb9cd1aa0d0','0053_pricing_foundations');
+INSERT INTO "platform_pricing_state" ("singleton_key","current_pricing_schedule_id","current_pricing_schedule_hash","seeded_by_migration") VALUES ('GLOBAL','f00d0053-0000-4000-8000-000000000001','1989db5b9300e5d09d61f482d5a728aa8c04e9a47a01c3d4636ef0ccd5fe77df','0053_pricing_foundations');
 

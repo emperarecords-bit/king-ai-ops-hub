@@ -1715,7 +1715,7 @@ export const pricingSchedules = pgTable(
   'pricing_schedules',
   {
     id: uuid('id').primaryKey(),
-    versionLabel: text('version_label').notNull(),
+    sourcePricingVersion: text('source_pricing_version').notNull(),
     currency: text('currency').notNull(),
     scheduleHash: text('schedule_hash').notNull(),
     canonicalizationVersion: integer('canonicalization_version').notNull(),
@@ -1746,7 +1746,7 @@ export const pricingScheduleEntries = pgTable(
     unitDefinition: text('unit_definition').notNull(),
     minChargeMicros: bigint('min_charge_micros', { mode: 'bigint' }),
     maxOutputTokens: integer('max_output_tokens').notNull(),
-    validFrom: timestamp('valid_from', { withTimezone: true }).notNull(),
+    validFrom: timestamp('valid_from', { withTimezone: true }),
     validUntil: timestamp('valid_until', { withTimezone: true }),
     metadata: jsonb('metadata').notNull().default({}),
   },

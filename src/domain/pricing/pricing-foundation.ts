@@ -25,8 +25,12 @@ export const SEED_MIGRATION_ID = '0053_pricing_foundations' as const;
 /** Stable sentinel id for the single seeded schedule (deterministic across environments). */
 export const SEED_SCHEDULE_ID = 'f00d0053-0000-4000-8000-000000000001' as const;
 
-/** Validity lower bound for every seeded entry = the authoritative source date, at UTC midnight. */
-export const SEED_VALID_FROM = '2026-07-24T00:00:00.000Z' as const;
+/**
+ * IMPORTANT: `PRICING_VERSION` ('2026-07-24') is the source OBSERVATION/provenance date — NOT a
+ * contractual price-effective date. The repository does not state an exact effective-from instant for the
+ * listed prices, so entry-level `valid_from` is seeded NULL (no known lower validity boundary). Only a
+ * `valid_until` explicitly defined by the source is stored (see VALIDITY_OVERRIDES).
+ */
 
 /**
  * Models EXCLUDED from the active seeded schedule, with reason. gpt-5.2 is delisted and its rate is marked
@@ -56,7 +60,7 @@ export interface PricingEntry {
   readonly unitDefinition: string;
   readonly minChargeMicros: bigint | null;
   readonly maxOutputTokens: number;
-  readonly validFrom: string;
+  readonly validFrom: string | null; // NULL = no known lower validity boundary (not inferred from source date)
   readonly validUntil: string | null;
 }
 
@@ -91,11 +95,14 @@ export function worstCaseTokenCostMicros(p: WorstCaseInput): bigint {
   return sum > floor ? sum : floor;
 }
 
-/** True iff `atIso` is within [validFrom, validUntil). A null validUntil means open-ended. */
+/**
+ * True iff `atIso` is within the entry's validity window `[validFrom, validUntil)`. A NULL `validFrom`
+ * means no known lower boundary; a NULL `validUntil` means open-ended. Fail-closed after `validUntil`.
+ */
 export function isEntryValidAt(entry: Pick<PricingEntry, 'validFrom' | 'validUntil'>, atIso: string): boolean {
   const at = Date.parse(atIso);
   if (Number.isNaN(at)) throw new Error('invalid timestamp');
-  if (at < Date.parse(entry.validFrom)) return false;
+  if (entry.validFrom != null && at < Date.parse(entry.validFrom)) return false;
   if (entry.validUntil != null && at >= Date.parse(entry.validUntil)) return false;
   return true;
 }
@@ -132,7 +139,7 @@ export function buildSeedEntries(): PricingEntry[] {
       unitDefinition: PRICING_UNIT_DEFINITION,
       minChargeMicros: null,
       maxOutputTokens: p.maxOutputTokens,
-      validFrom: SEED_VALID_FROM,
+      validFrom: null, // source defines no effective-from instant; not inferred from the snapshot date
       validUntil: VALIDITY_OVERRIDES[model]?.validUntil ?? null,
     });
   }
