@@ -300,10 +300,11 @@ export interface ModelUsageRow {
   readonly exactEventCount: number;
   readonly aliasEventCount: number;
   readonly unavailableEventCount: number;
-  /** Estimate is present only for events that matched; recorded cost is always authoritative regardless. */
-  readonly estimatedInputMicros: bigint;
-  readonly estimatedOutputMicros: bigint;
-  readonly estimatedCombinedMicros: bigint;
+  /** Estimate (ceil-up, current P1a schedule) is present only for events that matched; recorded cost is
+   *  always authoritative regardless. These are ESTIMATES, not historical billing components. */
+  readonly estimatedInputCostMicros: bigint;
+  readonly estimatedOutputCostMicros: bigint;
+  readonly estimatedCombinedCostMicros: bigint;
   /** Recorded cost of the events that DID match (the denominator that the estimate actually covers). */
   readonly matchedRecordedCostMicros: bigint;
 }
@@ -321,13 +322,15 @@ export interface EstimateCoverage {
   readonly unavailableEvents: number;
   readonly recordedCostMicros: bigint;
   readonly matchedRecordedCostMicros: bigint;
-  readonly estimatedCombinedMicros: bigint;
-  /** estimatedCombined − matchedRecorded: drift on the covered subset only (never rescaled). */
-  readonly estimateVsRecordedMatchedDeltaMicros: bigint;
+  readonly estimatedInputCostMicros: bigint;
+  readonly estimatedOutputCostMicros: bigint;
+  readonly estimatedCombinedCostMicros: bigint;
+  /** estimatedCombined − matchedRecorded: difference on the covered subset only (never rescaled). */
+  readonly estimatedDifferenceMicros: bigint;
   /** matchedEvents / totalEvents as integer basis points (0..10000); null when no events. */
-  readonly eventCoverageBps: number | null;
+  readonly estimatedEventCoverageBps: number | null;
   /** matchedRecorded / recorded as integer basis points (0..10000); null when recorded is 0. */
-  readonly recordedCostCoverageBps: number | null;
+  readonly estimatedRecordedCostCoverageBps: number | null;
 }
 
 function bps(numerator: bigint, denominator: bigint): number | null {
@@ -417,9 +420,9 @@ export async function getProjectModelUsage(
         exactEventCount: a.exact,
         aliasEventCount: a.alias,
         unavailableEventCount: a.unavailable,
-        estimatedInputMicros: a.estInput,
-        estimatedOutputMicros: a.estOutput,
-        estimatedCombinedMicros: a.estInput + a.estOutput,
+        estimatedInputCostMicros: a.estInput,
+        estimatedOutputCostMicros: a.estOutput,
+        estimatedCombinedCostMicros: a.estInput + a.estOutput,
         matchedRecordedCostMicros: a.matchedRecorded,
       };
     })
@@ -432,7 +435,9 @@ export async function getProjectModelUsage(
   const unavailableEvents = rows.reduce((n, r) => n + r.unavailableEventCount, 0);
   const recordedCostMicros = rows.reduce((s, r) => s + r.recordedCostMicros, 0n);
   const matchedRecordedCostMicros = rows.reduce((s, r) => s + r.matchedRecordedCostMicros, 0n);
-  const estimatedCombinedMicros = rows.reduce((s, r) => s + r.estimatedCombinedMicros, 0n);
+  const estimatedInputCostMicros = rows.reduce((s, r) => s + r.estimatedInputCostMicros, 0n);
+  const estimatedOutputCostMicros = rows.reduce((s, r) => s + r.estimatedOutputCostMicros, 0n);
+  const estimatedCombinedCostMicros = estimatedInputCostMicros + estimatedOutputCostMicros;
 
   const coverage: EstimateCoverage = {
     totalEvents,
@@ -442,10 +447,12 @@ export async function getProjectModelUsage(
     unavailableEvents,
     recordedCostMicros,
     matchedRecordedCostMicros,
-    estimatedCombinedMicros,
-    estimateVsRecordedMatchedDeltaMicros: estimatedCombinedMicros - matchedRecordedCostMicros,
-    eventCoverageBps: totalEvents === 0 ? null : Number((BigInt(matchedEvents) * 10_000n) / BigInt(totalEvents)),
-    recordedCostCoverageBps: bps(matchedRecordedCostMicros, recordedCostMicros),
+    estimatedInputCostMicros,
+    estimatedOutputCostMicros,
+    estimatedCombinedCostMicros,
+    estimatedDifferenceMicros: estimatedCombinedCostMicros - matchedRecordedCostMicros,
+    estimatedEventCoverageBps: totalEvents === 0 ? null : Number((BigInt(matchedEvents) * 10_000n) / BigInt(totalEvents)),
+    estimatedRecordedCostCoverageBps: bps(matchedRecordedCostMicros, recordedCostMicros),
   };
 
   return { rows, coverage };

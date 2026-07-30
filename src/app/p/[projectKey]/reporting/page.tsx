@@ -2,7 +2,6 @@ import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { assertProjectReportAccess } from '@/domain/reporting/access';
 import {
-  type ReportWindow,
   getProjectAttributionReconciliation,
   getProjectBaselineMetadata,
   getProjectDataQualityWarnings,
@@ -12,6 +11,7 @@ import {
   getProjectStepCostBreakdown,
   getProjectUsageSummary,
 } from '@/domain/reporting/m0a';
+import { resolveReportWindow, resolveTopN } from '@/domain/reporting/window';
 import { PageHeader } from '@/components/ui';
 import { DataTable, StatCard, Warn, money, pct } from '@/components/reporting';
 
@@ -37,22 +37,16 @@ export default async function ReportingPage({
   const ctx = await requireTenant(projectKey);
   assertProjectReportAccess(ctx);
 
-  // Default window = all recorded history. Optional ?from / ?to ISO overrides. Half-open [from, to).
-  const parseIso = (v: string | string[] | undefined): Date | null => {
-    if (typeof v !== 'string') return null;
-    const t = Date.parse(v);
-    return Number.isNaN(t) ? null : new Date(t);
-  };
-  const window: ReportWindow = {
-    from: parseIso(sp.from) ?? new Date(0),
-    to: parseIso(sp.to) ?? new Date(),
-  };
+  // Bounded, validated window (default 90d; max 366d) + bounded top-N (default 20; max 200). Invalid ranges
+  // are rejected (ReportInputError). Half-open [from, to).
+  const window = resolveReportWindow(new Date(), sp.from, sp.to);
+  const topN = resolveTopN(sp.limit);
 
   const data = await withTenant(ctx, async (tx) => ({
     summary: await getProjectUsageSummary(tx, ctx.projectId, window),
     steps: await getProjectStepCostBreakdown(tx, ctx.projectId, window),
     model: await getProjectModelUsage(tx, ctx.projectId, window),
-    runs: await getProjectRunCostDistribution(tx, ctx.projectId, window, { limit: 20 }),
+    runs: await getProjectRunCostDistribution(tx, ctx.projectId, window, { limit: topN }),
     employees: await getProjectEmployeeDefaults(tx, ctx.projectId),
     attribution: await getProjectAttributionReconciliation(tx, ctx.projectId, window),
     warnings: await getProjectDataQualityWarnings(tx, ctx.projectId, window),
@@ -113,29 +107,34 @@ export default async function ReportingPage({
 
       {/* Model usage + estimate coverage */}
       <section className="space-y-3">
-        <h2 className="text-lg font-semibold">Model usage & estimate coverage</h2>
+        <h2 className="text-lg font-semibold">Model usage &amp; estimate coverage</h2>
+        <p className="text-xs text-neutral-500">
+          &ldquo;Recorded&rdquo; = authoritative billed <code>cost_micros</code>. &ldquo;Est.&rdquo; columns are
+          ESTIMATES computed with the current verified P1a schedule (ceil-up), not historical billing components,
+          and are never rescaled to recorded cost. A dash means pricing was unavailable for those events.
+        </p>
         <DataTable
-          columns={['Provider', 'Model', 'Match', 'Events', 'Recorded', 'Est. input', 'Est. output', 'Est. combined']}
+          columns={['Provider', 'Model', 'Match', 'Events', 'Recorded', 'Est. input (P1a)', 'Est. output (P1a)', 'Est. combined (P1a)']}
           rows={data.model.rows.map((r) => [
             r.provider,
             r.model,
             `${r.matchState} (${r.exactEventCount}/${r.aliasEventCount}/${r.unavailableEventCount})`,
             r.eventCount,
             money(r.recordedCostMicros),
-            r.exactEventCount + r.aliasEventCount > 0 ? money(r.estimatedInputMicros) : '—',
-            r.exactEventCount + r.aliasEventCount > 0 ? money(r.estimatedOutputMicros) : '—',
-            r.exactEventCount + r.aliasEventCount > 0 ? money(r.estimatedCombinedMicros) : '—',
+            r.exactEventCount + r.aliasEventCount > 0 ? money(r.estimatedInputCostMicros) : '—',
+            r.exactEventCount + r.aliasEventCount > 0 ? money(r.estimatedOutputCostMicros) : '—',
+            r.exactEventCount + r.aliasEventCount > 0 ? money(r.estimatedCombinedCostMicros) : '—',
           ])}
         />
         <div className="grid gap-4 sm:grid-cols-4">
-          <StatCard label="Event coverage" value={pct(data.model.coverage.eventCoverageBps)} sub={`${data.model.coverage.matchedEvents}/${data.model.coverage.totalEvents} matched`} />
-          <StatCard label="Recorded-cost coverage" value={pct(data.model.coverage.recordedCostCoverageBps)} />
+          <StatCard label="Est. event coverage" value={pct(data.model.coverage.estimatedEventCoverageBps)} sub={`${data.model.coverage.matchedEvents}/${data.model.coverage.totalEvents} matched`} />
+          <StatCard label="Est. recorded-cost coverage" value={pct(data.model.coverage.estimatedRecordedCostCoverageBps)} />
           <StatCard label="Matched recorded cost" value={money(data.model.coverage.matchedRecordedCostMicros)} />
-          <StatCard label="Est − recorded (matched)" value={money(data.model.coverage.estimateVsRecordedMatchedDeltaMicros)} sub="drift on covered subset only" />
+          <StatCard label="Est. − recorded (matched)" value={money(data.model.coverage.estimatedDifferenceMicros)} sub="difference on covered subset only" />
         </div>
         <p className="text-xs text-neutral-500">
           Match legend: exact / approved_snapshot_alias / unavailable. The alias map is empty in M0a, so alias
-          counts are always 0. Estimates use the current verified schedule; they are never rescaled to recorded cost.
+          counts are always 0.
         </p>
       </section>
 

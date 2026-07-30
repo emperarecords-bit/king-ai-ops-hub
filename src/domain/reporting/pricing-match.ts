@@ -1,5 +1,5 @@
 import { type ProviderId } from '@/types/provider';
-import { type PricingEntry, buildSeedEntries, isEntryValidAt } from '@/domain/pricing/pricing-foundation';
+import { type PricingEntry, buildSeedEntries, ceilDiv, isEntryValidAt } from '@/domain/pricing/pricing-foundation';
 
 /**
  * M0a pricing MATCH + ESTIMATE — pure, read-only. This never overwrites the authoritative recorded cost
@@ -72,15 +72,20 @@ export interface UsageEstimate {
 }
 
 /**
- * Estimate input/output/combined micros for a usage row under `entry`, using the SAME exact-integer floor
- * arithmetic the recorder used (`(tokens × micros_per_M) / 1_000_000`). Using the identical formula means a
- * row priced by the same schedule value reconciles to its recorded cost exactly — the drift a report shows
- * is then a real price-change signal, not a rounding artifact.
+ * Estimate input/output/combined micros for a usage row under `entry`, using the accepted P1a CEIL-UP
+ * exact-integer formula — `ceil(tokens × rate_micros_per_1m / 1_000_000)` — via the shared `ceilDiv` helper.
+ * Input and output are computed INDEPENDENTLY (each ceils on its own), then summed. All arithmetic is bigint;
+ * no floating-point, no `Number`, no truncation of a positive fractional micro. The estimate is never rescaled
+ * to equal the recorded `cost_micros`; any difference from recorded is reported as-is.
+ *
+ * Consequence (intended): a positive sub-unit charge rounds UP — 1 token at 750000 micros/M estimates to 1
+ * micro, not 0. This deliberately differs from the historical recorder's floor: M0a's estimate is a worst-case
+ * upper bound under the current verified schedule, not a reconstruction of the historical billed value.
  */
 export function estimateUsageMicros(entry: PricingEntry, inputTokens: number, outputTokens: number): UsageEstimate {
   if (!Number.isInteger(inputTokens) || inputTokens < 0) throw new Error('inputTokens must be a non-negative integer');
   if (!Number.isInteger(outputTokens) || outputTokens < 0) throw new Error('outputTokens must be a non-negative integer');
-  const inputMicros = (BigInt(inputTokens) * entry.inputUnitPriceMicros) / entry.tokenUnitSize;
-  const outputMicros = (BigInt(outputTokens) * entry.outputUnitPriceMicros) / entry.tokenUnitSize;
+  const inputMicros = ceilDiv(BigInt(inputTokens) * entry.inputUnitPriceMicros, entry.tokenUnitSize);
+  const outputMicros = ceilDiv(BigInt(outputTokens) * entry.outputUnitPriceMicros, entry.tokenUnitSize);
   return { inputMicros, outputMicros, combinedMicros: inputMicros + outputMicros };
 }

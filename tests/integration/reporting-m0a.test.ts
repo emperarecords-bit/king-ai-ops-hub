@@ -201,7 +201,8 @@ describe('M0a reporting — reconciliation & semantics (DB)', () => {
     // reported (not rescaled). Because seeded cost_micros were synthetic (not the schedule price), the delta is
     // simply estimated−recorded on the covered subset; it must be a real number, never forced to zero.
     const { coverage } = await withTenant(ctx, (tx) => getProjectModelUsage(tx, ctx.projectId, WINDOW));
-    expect(coverage.estimateVsRecordedMatchedDeltaMicros).toBe(coverage.estimatedCombinedMicros - coverage.matchedRecordedCostMicros);
+    expect(coverage.estimatedDifferenceMicros).toBe(coverage.estimatedCombinedCostMicros - coverage.matchedRecordedCostMicros);
+    expect(coverage.estimatedCombinedCostMicros).toBe(coverage.estimatedInputCostMicros + coverage.estimatedOutputCostMicros);
   });
 
   it('data-quality warnings: unknown/excluded, price-invalid, unattributed, run-less; retries/cache uninstrumented', async () => {
