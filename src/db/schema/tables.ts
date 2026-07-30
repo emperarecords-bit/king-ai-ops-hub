@@ -3,6 +3,8 @@ import {
   type AnyPgColumn,
   bigint,
   boolean,
+  check,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -10,6 +12,7 @@ import {
   real,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
@@ -1699,4 +1702,82 @@ export const rateLimitBuckets = pgTable(
     count: integer('count').notNull().default(0),
   },
   (t) => [uniqueIndex('rate_limit_scope_window_uq').on(t.scopeKey, t.windowStart)],
+);
+
+// ---------------------------------------------------------------------------
+// P1a — Immutable, migration-seeded platform pricing (governance foundation).
+// GLOBAL (not tenant-scoped). Seeded by the reviewed migration; no runtime
+// mutation path. Immutability + read-only-for-app_server enforced in rls.sql.
+// ---------------------------------------------------------------------------
+
+/** One immutable pricing schedule per seed. `(id, schedule_hash)` is the composite FK target. */
+export const pricingSchedules = pgTable(
+  'pricing_schedules',
+  {
+    id: uuid('id').primaryKey(),
+    versionLabel: text('version_label').notNull(),
+    currency: text('currency').notNull(),
+    scheduleHash: text('schedule_hash').notNull(),
+    canonicalizationVersion: integer('canonicalization_version').notNull(),
+    hashAlgorithm: text('hash_algorithm').notNull(),
+    seededByMigration: text('seeded_by_migration').notNull(),
+    seededAt: timestamp('seeded_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('pricing_schedules_hash_uq').on(t.scheduleHash),
+    unique('pricing_schedules_id_hash_uq').on(t.id, t.scheduleHash),
+  ],
+);
+
+/** Immutable per-model entries. Prices are integer micros per `token_unit_size` tokens. */
+export const pricingScheduleEntries = pgTable(
+  'pricing_schedule_entries',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    scheduleId: uuid('schedule_id')
+      .notNull()
+      .references(() => pricingSchedules.id, { onDelete: 'restrict' }),
+    provider: providerIdEnum('provider').notNull(),
+    model: text('model').notNull(),
+    inputUnitPriceMicros: bigint('input_unit_price_micros', { mode: 'bigint' }).notNull(),
+    outputUnitPriceMicros: bigint('output_unit_price_micros', { mode: 'bigint' }).notNull(),
+    tokenUnitSize: bigint('token_unit_size', { mode: 'bigint' }).notNull(),
+    unitDefinition: text('unit_definition').notNull(),
+    minChargeMicros: bigint('min_charge_micros', { mode: 'bigint' }),
+    maxOutputTokens: integer('max_output_tokens').notNull(),
+    validFrom: timestamp('valid_from', { withTimezone: true }).notNull(),
+    validUntil: timestamp('valid_until', { withTimezone: true }),
+    metadata: jsonb('metadata').notNull().default({}),
+  },
+  (t) => [
+    uniqueIndex('pricing_schedule_entries_schedule_model_uq').on(t.scheduleId, t.provider, t.model),
+    index('pricing_schedule_entries_schedule_idx').on(t.scheduleId),
+    check('pricing_entries_token_unit_size_pos', sql`${t.tokenUnitSize} > 0`),
+    check('pricing_entries_max_output_pos', sql`${t.maxOutputTokens} > 0`),
+    check(
+      'pricing_entries_prices_nonneg',
+      sql`${t.inputUnitPriceMicros} >= 0 AND ${t.outputUnitPriceMicros} >= 0`,
+    ),
+  ],
+);
+
+/** Deterministic singleton pointer to the current schedule (composite FK prevents id/hash mismatch). */
+export const platformPricingState = pgTable(
+  'platform_pricing_state',
+  {
+    singletonKey: text('singleton_key').primaryKey(),
+    currentPricingScheduleId: uuid('current_pricing_schedule_id').notNull(),
+    currentPricingScheduleHash: text('current_pricing_schedule_hash').notNull(),
+    seededByMigration: text('seeded_by_migration').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('platform_pricing_state_singleton_ck', sql`${t.singletonKey} = 'GLOBAL'`),
+    foreignKey({
+      columns: [t.currentPricingScheduleId, t.currentPricingScheduleHash],
+      foreignColumns: [pricingSchedules.id, pricingSchedules.scheduleHash],
+      name: 'platform_pricing_state_schedule_fk',
+    }),
+  ],
 );

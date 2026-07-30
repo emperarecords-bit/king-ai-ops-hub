@@ -702,3 +702,42 @@ alter table rate_limit_buckets enable row level security;
 alter table rate_limit_buckets force row level security;
 drop policy if exists rate_limit_open on rate_limit_buckets;
 create policy rate_limit_open on rate_limit_buckets using (true) with check (true);
+
+-- ---------------------------------------------------------------------------
+-- P1a — platform pricing (GLOBAL, not tenant-scoped). Migration-seeded and
+-- IMMUTABLE: app_server may READ only; UPDATE/DELETE are blocked for every role
+-- by app.forbid_mutation (superusers bypass RLS but NOT triggers). There is no
+-- INSERT grant/policy for app_server, so runtime code cannot create pricing;
+-- only the migration/platform (superuser) role seeds these rows.
+-- ---------------------------------------------------------------------------
+grant select on pricing_schedules, pricing_schedule_entries, platform_pricing_state to app_server;
+
+alter table pricing_schedules enable row level security;
+alter table pricing_schedules force row level security;
+drop policy if exists pricing_schedules_read on pricing_schedules;
+create policy pricing_schedules_read on pricing_schedules for select using (true);
+
+alter table pricing_schedule_entries enable row level security;
+alter table pricing_schedule_entries force row level security;
+drop policy if exists pricing_schedule_entries_read on pricing_schedule_entries;
+create policy pricing_schedule_entries_read on pricing_schedule_entries for select using (true);
+
+alter table platform_pricing_state enable row level security;
+alter table platform_pricing_state force row level security;
+drop policy if exists platform_pricing_state_read on platform_pricing_state;
+create policy platform_pricing_state_read on platform_pricing_state for select using (true);
+
+drop trigger if exists pricing_schedules_immutable on pricing_schedules;
+create trigger pricing_schedules_immutable
+  before update or delete on pricing_schedules
+  for each row execute function app.forbid_mutation();
+
+drop trigger if exists pricing_schedule_entries_immutable on pricing_schedule_entries;
+create trigger pricing_schedule_entries_immutable
+  before update or delete on pricing_schedule_entries
+  for each row execute function app.forbid_mutation();
+
+drop trigger if exists platform_pricing_state_immutable on platform_pricing_state;
+create trigger platform_pricing_state_immutable
+  before update or delete on platform_pricing_state
+  for each row execute function app.forbid_mutation();
