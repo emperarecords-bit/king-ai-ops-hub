@@ -175,3 +175,64 @@ export async function setWorkspaceArchived(
     detail: { name: before.name },
   });
 }
+
+export interface SetWorkspaceArchiveStateInput {
+  archived: boolean;
+  reason: string;
+}
+
+export interface SetWorkspaceArchiveStateResult {
+  workspaceId: string;
+  from: boolean;
+  to: boolean;
+}
+
+/**
+ * Reason-carrying, audited workspace archive-state change. This is the ADDITIVE sibling of
+ * `setWorkspaceArchived` (kept intact for the existing public settings flow): identical safety
+ * (admin-only, no-op rejected, only `archived`+`updated_at` mutated, reversible), plus a REQUIRED reason
+ * and a richer before/after audit detail. This is the operation authorized for headquarters activation.
+ *
+ * The `projects` update and the `workspace.restored`/`workspace.archived` audit event commit or roll back
+ * together in the caller's transaction, so it composes with `renameOrganization` in one activation batch.
+ */
+export async function setWorkspaceArchiveState(
+  tx: DbTx,
+  ctx: TenantContext,
+  input: SetWorkspaceArchiveStateInput,
+): Promise<SetWorkspaceArchiveStateResult> {
+  assertAdmin(ctx);
+  const reason = (input.reason ?? '').trim();
+  if (!reason) {
+    throw new ValidationError(['A reason is required to change the workspace archive state.']);
+  }
+
+  const before = await getWorkspaceSettings(tx, ctx);
+  if (before.archived === input.archived) {
+    throw new ConflictError(
+      input.archived ? 'This workspace is already archived.' : 'This workspace is not archived.',
+    );
+  }
+
+  await tx
+    .update(projects)
+    .set({ archived: input.archived, updatedAt: new Date() })
+    .where(and(eq(projects.id, ctx.projectId), eq(projects.orgId, ctx.orgId)));
+
+  await writeAudit(tx, ctx, {
+    action: input.archived ? 'workspace.archived' : 'workspace.restored',
+    entityType: 'project',
+    entityId: ctx.projectId,
+    detail: {
+      workspaceId: ctx.projectId,
+      name: before.name,
+      orgId: ctx.orgId,
+      actorId: ctx.userId,
+      from: before.archived,
+      to: input.archived,
+      reason,
+    },
+  });
+
+  return { workspaceId: ctx.projectId, from: before.archived, to: input.archived };
+}
