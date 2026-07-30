@@ -50,7 +50,10 @@ export const KNOWN_HISTORICAL_AUDIT_FORKS: ReadonlySet<string> = new Set([
 
 export async function writeAudit(
   tx: DbTx,
-  ctx: Pick<TenantContext, 'orgId' | 'projectId' | 'userId'>,
+  // projectId is nullable: organization-level events (e.g. organization.renamed) are NOT scoped to a
+  // workspace and record project_id = NULL. Project-level events pass the workspace id. projectId is not
+  // part of the row hash, so a null scope never affects chain integrity.
+  ctx: Pick<TenantContext, 'orgId' | 'userId'> & { projectId: string | null },
   event: AuditEventInput,
 ): Promise<void> {
   // Concurrency-safe chain head: serialize audit writes PER ORG with a transaction-level advisory lock so

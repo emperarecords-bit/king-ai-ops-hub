@@ -44,7 +44,9 @@ export interface RenameOrganizationResult {
  */
 export async function renameOrganization(
   tx: DbTx,
-  ctx: TenantContext,
+  // Organization-level context only: a rename is project-agnostic, so no projectId is required or used.
+  // Its audit event is written with project_id = NULL (organization scope).
+  ctx: Pick<TenantContext, 'orgId' | 'userId'>,
   input: RenameOrganizationInput,
 ): Promise<RenameOrganizationResult> {
   // ---- Authorization: organization OWNER only (verified against memberships, not just ctx) ----
@@ -87,7 +89,7 @@ export async function renameOrganization(
     .set({ name: newName, updatedAt: new Date() })
     .where(eq(organizations.id, ctx.orgId));
 
-  await writeAudit(tx, ctx, {
+  await writeAudit(tx, { orgId: ctx.orgId, userId: ctx.userId, projectId: null }, {
     action: 'organization.renamed',
     entityType: 'organization',
     entityId: ctx.orgId,

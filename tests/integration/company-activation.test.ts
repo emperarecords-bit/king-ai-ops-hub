@@ -98,7 +98,12 @@ describe('renameOrganization', () => {
     expect(detail.reason).toBe('HQ activation');
     expect(detail.slug).toBe(slugBefore);
     expect(detail.orgId).toBe(s.orgId);
+    // org-level scope: entity is the organization, project_id is NULL, actor is the owner
+    expect(ev.entityType).toBe('organization');
     expect(ev.entityId).toBe(s.orgId);
+    expect(ev.orgId).toBe(s.orgId);
+    expect(ev.projectId).toBeNull();
+    expect(ev.actorId).toBe(s.ownerId);
   });
 
   it('organization admin (not owner) is rejected', async () => {
@@ -242,17 +247,36 @@ describe('setWorkspaceArchiveState', () => {
 });
 
 describe('combined company activation (rename + restore in one transaction)', () => {
-  it('rename and restore commit together', async () => {
+  it('rename and restore commit together, using two trusted contexts, with correct audit scopes', async () => {
     if (!available) return;
     const s = await seed({ archived: true });
+    // Two contexts inside ONE transaction: org-owner context (no project) for the rename,
+    // workspace-admin context (projectId = HQ) for the restore.
+    const orgCtx = { orgId: s.orgId, userId: s.ownerId }; // organization scope; projectId omitted → audit project_id NULL
     await db().transaction(async (tx) => {
-      await renameOrganization(tx, s.ownerCtx, { newName: 'Empera International', reason: 'activate HQ' });
+      await renameOrganization(tx, orgCtx, { newName: 'Empera International', reason: 'activate HQ' });
       await setWorkspaceArchiveState(tx, s.ownerCtx, { archived: false, reason: 'activate HQ' });
     });
     expect(await orgName(s.orgId)).toBe('Empera International');
     expect(await isArchived(s.projectId)).toBe(false);
     expect(await auditCount(s.orgId, 'organization.renamed')).toBe(1);
     expect(await auditCount(s.orgId, 'workspace.restored')).toBe(1);
+
+    // organization.renamed — organization scope, project_id NULL
+    const renamed = (await db().select().from(auditLogs).where(and(eq(auditLogs.orgId, s.orgId), eq(auditLogs.action, 'organization.renamed'))))[0]!;
+    expect(renamed.entityType).toBe('organization');
+    expect(renamed.entityId).toBe(s.orgId);
+    expect(renamed.orgId).toBe(s.orgId);
+    expect(renamed.projectId).toBeNull();
+    expect(renamed.actorId).toBe(s.ownerId);
+
+    // workspace.restored — project scope, project_id = HQ workspace
+    const restored = (await db().select().from(auditLogs).where(and(eq(auditLogs.orgId, s.orgId), eq(auditLogs.action, 'workspace.restored'))))[0]!;
+    expect(restored.entityType).toBe('project');
+    expect(restored.entityId).toBe(s.projectId);
+    expect(restored.projectId).toBe(s.projectId);
+    expect(restored.orgId).toBe(s.orgId);
+    expect(restored.actorId).toBe(s.ownerId);
   });
 
   it('a forced failure AFTER rename rolls back BOTH changes', async () => {
