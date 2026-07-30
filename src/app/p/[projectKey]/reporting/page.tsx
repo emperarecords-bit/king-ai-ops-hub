@@ -7,6 +7,7 @@ import {
   getProjectDataQualityWarnings,
   getProjectEmployeeDefaults,
   getProjectModelUsage,
+  getProjectPricingVersionBreakdown,
   getProjectRunCostDistribution,
   getProjectStepCostBreakdown,
   getProjectUsageSummary,
@@ -38,8 +39,9 @@ export default async function ReportingPage({
   assertProjectReportAccess(ctx);
 
   // Bounded, validated window (default 90d; max 366d) + bounded top-N (default 20; max 200). Invalid ranges
-  // are rejected (ReportInputError). Half-open [from, to).
-  const window = resolveReportWindow(new Date(), sp.from, sp.to);
+  // are rejected (ReportInputError). Half-open [from, to). Effective boundaries + their source are displayed.
+  const resolved = resolveReportWindow(new Date(), sp.from, sp.to);
+  const window = resolved.window;
   const topN = resolveTopN(sp.limit);
 
   const data = await withTenant(ctx, async (tx) => ({
@@ -50,6 +52,7 @@ export default async function ReportingPage({
     employees: await getProjectEmployeeDefaults(tx, ctx.projectId),
     attribution: await getProjectAttributionReconciliation(tx, ctx.projectId, window),
     warnings: await getProjectDataQualityWarnings(tx, ctx.projectId, window),
+    pricingVersions: await getProjectPricingVersionBreakdown(tx, ctx.projectId, window),
     baseline: await getProjectBaselineMetadata(tx, ctx.projectId, window),
   }));
 
@@ -61,8 +64,16 @@ export default async function ReportingPage({
     <div className="space-y-8">
       <PageHeader
         title="Usage & cost reporting"
-        subtitle={`Measurement only. Recorded cost is authoritative; current-schedule figures are labeled estimates. Window: ${data.baseline.windowFrom.slice(0, 10)} → ${data.baseline.windowTo.slice(0, 10)} (UTC, half-open).`}
+        subtitle="Measurement only. Recorded cost is authoritative; current-schedule figures are labeled estimates."
       />
+
+      {/* Effective window — explicit about defaulting/clamping so no future range is silently implied. */}
+      <div className="rounded-md border border-neutral-200 bg-neutral-50 px-3 py-2 text-xs text-neutral-600 dark:border-neutral-800 dark:bg-neutral-900/60 dark:text-neutral-300">
+        Effective window ({resolved.timezone}, half-open [from, to)):{' '}
+        <code>{resolved.window.from.toISOString()}</code> ({resolved.fromSource}) →{' '}
+        <code>{resolved.window.to.toISOString()}</code> ({resolved.toSource}).
+        {resolved.toSource === 'clamped' ? ' A future "to" was clamped to the current time.' : ''}
+      </div>
 
       {/* Headline */}
       <section className="grid gap-4 sm:grid-cols-4">
@@ -180,6 +191,23 @@ export default async function ReportingPage({
         />
       </section>
 
+      {/* Pricing-version breakdown */}
+      <section className="space-y-3">
+        <h2 className="text-lg font-semibold">Recorded pricing versions</h2>
+        <DataTable
+          columns={['Stored pricing_version', 'Events', 'Recorded cost']}
+          rows={data.pricingVersions.byVersion.map((v) => [v.pricingVersion, v.eventCount, money(v.recordedCostMicros)])}
+        />
+        <div className="grid gap-4 sm:grid-cols-3">
+          <StatCard label="Current source version" value={data.pricingVersions.currentSourceVersion} />
+          <StatCard label="Events ≠ current version" value={String(data.pricingVersions.eventsWithNonCurrentSourceVersion)} />
+          <StatCard label="Matched est ≠ recorded" value={String(data.pricingVersions.matchedEventsEstimateDiffersFromRecorded)} />
+        </div>
+        <p className="text-xs text-neutral-500">
+          A matching <code>pricing_version</code> string does NOT prove identical arithmetic or billing semantics.
+        </p>
+      </section>
+
       {/* Data-quality warnings */}
       <section className="space-y-3">
         <h2 className="text-lg font-semibold">Data-quality</h2>
@@ -190,7 +218,16 @@ export default async function ReportingPage({
           <StatCard label="Run-less" value={String(data.warnings.runLessEvents)} />
           <StatCard label="Missing employee ref" value={String(data.warnings.missingEmployeeRefEvents)} />
           <StatCard label="Est. cost coverage" value={pct(data.warnings.estimatedCostCoverageBps)} />
+          <StatCard label="Matched est ≠ recorded" value={String(data.warnings.matchedEstimateDiffersFromRecordedCount)} />
         </div>
+        {data.warnings.legacyPricingWarning ? (
+          <Warn>
+            Recorded historical cost was produced by the legacy runtime pricing path (integer FLOOR) and may
+            differ from the current verified ceil-up estimate. {data.warnings.matchedEstimateDiffersFromRecordedCount}{' '}
+            matched event(s) show an estimate ≠ recorded. This is not a claim that every event differs, and
+            recorded cost is never modified.
+          </Warn>
+        ) : null}
         <Warn>
           Retries and cache usage are NOT instrumented in M0a — those figures are a known blind spot, not zero.
           Unknown/unmatched-model and price-invalid events remain in the recorded totals above; only their

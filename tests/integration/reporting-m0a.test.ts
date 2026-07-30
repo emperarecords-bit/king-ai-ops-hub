@@ -12,6 +12,7 @@ import {
   getProjectDataQualityWarnings,
   getProjectEmployeeDefaults,
   getProjectModelUsage,
+  getProjectPricingVersionBreakdown,
   getProjectRunCostDistribution,
   getProjectStepCostBreakdown,
   getProjectUsageSummary,
@@ -215,6 +216,40 @@ describe('M0a reporting — reconciliation & semantics (DB)', () => {
     expect(w.runLessEvents).toBe(1);
     expect(w.retriesInstrumented).toBe(false);
     expect(w.cacheUsageInstrumented).toBe(false);
+  });
+
+  it('legacy-recorder disclosure: floor arithmetic flagged, matched estimate ≠ recorded counted (not a blanket claim)', async () => {
+    if (!available) return;
+    const w = await withTenant(ctx, (tx) => getProjectDataQualityWarnings(tx, ctx.projectId, WINDOW));
+    expect(w.legacyRecorderArithmetic).toBe('floor');
+    // Seeded costs are synthetic; matched ceil-up estimates differ from the forced recorded values.
+    expect(w.matchedEstimateDiffersFromRecordedCount).toBeGreaterThan(0);
+    expect(w.legacyPricingWarning).toBe(true);
+  });
+
+  it('pricing-version breakdown: per-version counts/cost, current-source comparison, estimate≠recorded count', async () => {
+    if (!available) return;
+    const pv = await withTenant(ctx, (tx) => getProjectPricingVersionBreakdown(tx, ctx.projectId, WINDOW));
+    expect(pv.currentSourceVersion).toBe(PV);
+    const row = pv.byVersion.find((v) => v.pricingVersion === PV)!;
+    expect(row.eventCount).toBe(9); // all P1 events stored with the current source version
+    expect(row.recordedCostMicros).toBe(RECORDED_TOTAL);
+    expect(pv.eventsWithNonCurrentSourceVersion).toBe(0);
+    expect(pv.matchedEventsEstimateDiffersFromRecorded).toBeGreaterThan(0);
+  });
+
+  it('pricing-version breakdown counts events whose stored version differs from the current source version', async () => {
+    if (!available) return;
+    // Isolated project with two events at DIFFERENT stored pricing versions (run-less, no FKs needed).
+    const p3 = (await db.insert(projects).values({ orgId, key: fixtureKey('m0a3'), name: 'P3' }).returning({ id: projects.id }))[0]!.id;
+    await db.insert(projectMembers).values({ orgId, projectId: p3, userId, role: 'admin' });
+    const ctx3: TenantContext = { userId, orgId, projectId: p3, orgRole: 'owner', projectRole: 'admin' };
+    const at = new Date('2026-07-15T00:00:00Z');
+    await db.insert(usageEvents).values({ orgId, projectId: p3, provider: 'openai', model: 'gpt-5.4-mini', inputTokens: 1, outputTokens: 1, costMicros: 5n, pricingVersion: PV, classification: 'live', createdAt: at });
+    await db.insert(usageEvents).values({ orgId, projectId: p3, provider: 'openai', model: 'gpt-5.4-mini', inputTokens: 1, outputTokens: 1, costMicros: 5n, pricingVersion: '2026-01-01', classification: 'live', createdAt: at });
+    const pv = await withTenant(ctx3, (tx) => getProjectPricingVersionBreakdown(tx, ctx3.projectId, WINDOW));
+    expect(pv.byVersion.length).toBe(2);
+    expect(pv.eventsWithNonCurrentSourceVersion).toBe(1); // the 2026-01-01 row
   });
 
   it('cost per COMPLETED task includes all its runs (incl. failed); superseded task not merged', async () => {

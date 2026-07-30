@@ -35,22 +35,47 @@ function parseIsoOrThrow(raw: string | undefined, label: string): Date | undefin
   return new Date(t);
 }
 
+export type BoundarySource = 'provided' | 'defaulted' | 'clamped';
+
+export interface ResolvedWindow {
+  readonly window: ReportWindow;
+  /** Reporting timezone for the displayed boundaries. All boundaries are UTC. */
+  readonly timezone: 'UTC';
+  readonly fromSource: BoundarySource;
+  readonly toSource: BoundarySource;
+}
+
 /**
  * Resolve a bounded, validated window from raw `from`/`to`. `now` is injected for determinism/testing.
- * Rules: missing `to` → now; missing `from` → to − DEFAULT_WINDOW_DAYS; `to` is clamped to now (no future
- * upper bound); `from ≥ to` rejected; span > MAX_WINDOW_DAYS rejected; a `from` in the future (after clamping)
- * yields `from ≥ to` and is therefore rejected.
+ * Rules: missing `to` → now (defaulted); a future `to` → clamped to now; missing `from` → to −
+ * DEFAULT_WINDOW_DAYS (defaulted); `from ≥ to` rejected; span > MAX_WINDOW_DAYS rejected; a `from` in the
+ * future (after clamping) yields `from ≥ to` and is therefore rejected. The returned `fromSource`/`toSource`
+ * make defaulting/clamping EXPLICIT so a caller never believes a future range was queried.
  */
 export function resolveReportWindow(
   now: Date,
   fromRaw: string | string[] | undefined,
   toRaw: string | string[] | undefined,
-): ReportWindow {
+): ResolvedWindow {
   const parsedTo = parseIsoOrThrow(parseParam(toRaw), 'to');
   const parsedFrom = parseIsoOrThrow(parseParam(fromRaw), 'from');
 
   // Upper bound never exceeds now (future-only windows collapse and are rejected below).
-  const to = new Date(Math.min((parsedTo ?? now).getTime(), now.getTime()));
+  let toSource: BoundarySource;
+  let toMs: number;
+  if (parsedTo == null) {
+    toSource = 'defaulted';
+    toMs = now.getTime();
+  } else if (parsedTo.getTime() > now.getTime()) {
+    toSource = 'clamped';
+    toMs = now.getTime();
+  } else {
+    toSource = 'provided';
+    toMs = parsedTo.getTime();
+  }
+  const to = new Date(toMs);
+
+  const fromSource: BoundarySource = parsedFrom == null ? 'defaulted' : 'provided';
   const from = parsedFrom ?? new Date(to.getTime() - DEFAULT_WINDOW_DAYS * DAY_MS);
 
   if (from.getTime() >= to.getTime()) {
@@ -59,7 +84,7 @@ export function resolveReportWindow(
   if (to.getTime() - from.getTime() > MAX_WINDOW_DAYS * DAY_MS) {
     throw new ReportInputError(`Report window may not exceed ${MAX_WINDOW_DAYS} days.`);
   }
-  return { from, to };
+  return { window: { from, to }, timezone: 'UTC', fromSource, toSource };
 }
 
 /** Resolve a bounded top-N. Absent → DEFAULT_TOP_N. Non-integer / < 1 / > MAX_TOP_N → rejected. */

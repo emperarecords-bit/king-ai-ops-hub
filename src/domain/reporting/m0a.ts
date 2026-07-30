@@ -732,6 +732,16 @@ export interface DataQualityWarnings {
   readonly missingEmployeeRefEvents: number;
   readonly estimatedCostCoverageBps: number | null;
   readonly smallSampleEventCount: number;
+  /** The runtime recorder that produced `cost_micros` uses integer FLOOR/truncation (verified read-only in
+   *  `src/lib/money.ts costForTokens`). Recorded cost stays authoritative; M0a's ceil-up estimate can exceed
+   *  it for fractional per-token rates (e.g. gpt-5.4-mini 0.75/4.5 micros/token). Never changed here. */
+  readonly legacyRecorderArithmetic: 'floor';
+  /** Count of MATCHED events whose ceil-up estimated combined cost differs from their recorded cost. Proves
+   *  the warning is not a blanket claim that every event differs. */
+  readonly matchedEstimateDiffersFromRecordedCount: number;
+  /** Shown when a matched event's estimate differs from recorded, OR events were priced by the known legacy
+   *  floor path — signalling recorded vs ceil-up estimate may differ. Not a claim that every event differs. */
+  readonly legacyPricingWarning: boolean;
   /** M0a has no retry/cache instrumentation — declared as a standing blind spot, never inferred as zero. */
   readonly retriesInstrumented: false;
   readonly cacheUsageInstrumented: false;
@@ -751,6 +761,7 @@ export async function getProjectDataQualityWarnings(
   let matchedRecorded = 0n;
   let recorded = 0n;
   let missingEmployeeRefEvents = 0;
+  let matchedEstimateDiffersFromRecordedCount = 0;
 
   for (const u of wu.usageRows) {
     recorded += u.costMicros;
@@ -764,8 +775,11 @@ export async function getProjectDataQualityWarnings(
         // Known model name but outside its validity window at the row's timestamp → price-invalid.
         priceInvalidEvents += 1;
       }
-    } else {
+    } else if (m.entry) {
       matchedRecorded += u.costMicros;
+      // Per-event ceil-up estimate vs recorded (floor): count real divergences (never a blanket claim).
+      const est = estimateUsageMicros(m.entry, u.inputTokens, u.outputTokens);
+      if (est.combinedMicros !== u.costMicros) matchedEstimateDiffersFromRecordedCount += 1;
     }
 
     // A stored step performer that no longer resolves to a current employee.
@@ -777,6 +791,11 @@ export async function getProjectDataQualityWarnings(
 
   const attribution = await getProjectAttributionReconciliation(tx, projectId, window);
 
+  // The current recorder path (PRICING_SOURCE_VERSION) is the known legacy FLOOR rule; any recorded event
+  // therefore MAY differ from the ceil-up estimate. Warn when a real per-event divergence is observed OR any
+  // event was priced by that legacy path — without claiming every event differs.
+  const legacyPricingWarning = matchedEstimateDiffersFromRecordedCount > 0 || wu.usageRows.length > 0;
+
   return {
     unknownModelEvents,
     unknownModelCostMicros,
@@ -786,8 +805,91 @@ export async function getProjectDataQualityWarnings(
     missingEmployeeRefEvents,
     estimatedCostCoverageBps: recorded === 0n ? null : Number((matchedRecorded * 10_000n) / recorded),
     smallSampleEventCount: wu.usageRows.length,
+    legacyRecorderArithmetic: 'floor',
+    matchedEstimateDiffersFromRecordedCount,
+    legacyPricingWarning,
     retriesInstrumented: false,
     cacheUsageInstrumented: false,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 7b. Pricing-version breakdown (M0a §3)
+// ---------------------------------------------------------------------------
+
+export interface PricingVersionRow {
+  readonly pricingVersion: string;
+  readonly eventCount: number;
+  readonly recordedCostMicros: bigint;
+}
+
+export interface PricingVersionBreakdown {
+  /** The current verified schedule's SOURCE version (provenance only — a string match does NOT prove
+   *  identical arithmetic or billing semantics). */
+  readonly currentSourceVersion: string;
+  readonly byVersion: PricingVersionRow[];
+  /** Events whose stored `pricing_version` differs from `currentSourceVersion`. */
+  readonly eventsWithNonCurrentSourceVersion: number;
+  /** Matched events whose ceil-up estimate differs from recorded cost (arithmetic divergence, not a version
+   *  mismatch). */
+  readonly matchedEventsEstimateDiffersFromRecorded: number;
+}
+
+/**
+ * Read-only breakdown by the STORED `usage_events.pricing_version`. Exposes counts and recorded cost per
+ * version, how many events predate/differ from the current source version, and how many matched events have
+ * an estimate ≠ recorded. Numeric aggregates only; no task content.
+ */
+export async function getProjectPricingVersionBreakdown(
+  tx: DbTx,
+  projectId: string,
+  window: ReportWindow,
+): Promise<PricingVersionBreakdown> {
+  const rows = await tx
+    .select({
+      pricingVersion: usageEvents.pricingVersion,
+      provider: usageEvents.provider,
+      model: usageEvents.model,
+      inputTokens: usageEvents.inputTokens,
+      outputTokens: usageEvents.outputTokens,
+      costMicros: usageEvents.costMicros,
+      createdAt: usageEvents.createdAt,
+    })
+    .from(usageEvents)
+    .where(
+      and(
+        eq(usageEvents.projectId, projectId),
+        gte(usageEvents.createdAt, window.from),
+        lt(usageEvents.createdAt, window.to),
+      ),
+    );
+
+  const schedule = currentScheduleEntries();
+  const byVersion = new Map<string, { count: number; cost: bigint }>();
+  let eventsWithNonCurrentSourceVersion = 0;
+  let matchedEventsEstimateDiffersFromRecorded = 0;
+
+  for (const r of rows) {
+    const v = byVersion.get(r.pricingVersion) ?? { count: 0, cost: 0n };
+    v.count += 1;
+    v.cost += r.costMicros;
+    byVersion.set(r.pricingVersion, v);
+    if (r.pricingVersion !== PRICING_SOURCE_VERSION) eventsWithNonCurrentSourceVersion += 1;
+
+    const m = matchPricing(schedule, r.provider, r.model, r.createdAt.toISOString());
+    if (m.entry) {
+      const est = estimateUsageMicros(m.entry, r.inputTokens, r.outputTokens);
+      if (est.combinedMicros !== r.costMicros) matchedEventsEstimateDiffersFromRecorded += 1;
+    }
+  }
+
+  return {
+    currentSourceVersion: PRICING_SOURCE_VERSION,
+    byVersion: [...byVersion.entries()]
+      .map(([pricingVersion, v]) => ({ pricingVersion, eventCount: v.count, recordedCostMicros: v.cost }))
+      .sort((a, b) => (b.recordedCostMicros > a.recordedCostMicros ? 1 : b.recordedCostMicros < a.recordedCostMicros ? -1 : 0)),
+    eventsWithNonCurrentSourceVersion,
+    matchedEventsEstimateDiffersFromRecorded,
   };
 }
 

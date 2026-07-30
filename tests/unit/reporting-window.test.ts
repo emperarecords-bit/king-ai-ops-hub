@@ -13,16 +13,21 @@ const NOW = new Date('2026-07-30T00:00:00.000Z');
 const DAY = 24 * 60 * 60 * 1000;
 
 describe('M0a report window validation', () => {
-  it('missing from & to → bounded default window ending now', () => {
-    const w = resolveReportWindow(NOW, undefined, undefined);
-    expect(w.to.getTime()).toBe(NOW.getTime());
-    expect(w.from.getTime()).toBe(NOW.getTime() - DEFAULT_WINDOW_DAYS * DAY);
+  it('missing from & to → bounded default window ending now, both sources defaulted', () => {
+    const r = resolveReportWindow(NOW, undefined, undefined);
+    expect(r.window.to.getTime()).toBe(NOW.getTime());
+    expect(r.window.from.getTime()).toBe(NOW.getTime() - DEFAULT_WINDOW_DAYS * DAY);
+    expect(r.fromSource).toBe('defaulted');
+    expect(r.toSource).toBe('defaulted');
+    expect(r.timezone).toBe('UTC');
   });
 
-  it('missing from → derived as to − default; missing to → now', () => {
-    const w = resolveReportWindow(NOW, undefined, '2026-07-20T00:00:00.000Z');
-    expect(w.to.toISOString()).toBe('2026-07-20T00:00:00.000Z');
-    expect(w.from.getTime()).toBe(w.to.getTime() - DEFAULT_WINDOW_DAYS * DAY);
+  it('missing from → derived as to − default (defaulted); provided to → provided', () => {
+    const r = resolveReportWindow(NOW, undefined, '2026-07-20T00:00:00.000Z');
+    expect(r.window.to.toISOString()).toBe('2026-07-20T00:00:00.000Z');
+    expect(r.window.from.getTime()).toBe(r.window.to.getTime() - DEFAULT_WINDOW_DAYS * DAY);
+    expect(r.fromSource).toBe('defaulted');
+    expect(r.toSource).toBe('provided');
   });
 
   it('invalid date strings are rejected', () => {
@@ -43,9 +48,10 @@ describe('M0a report window validation', () => {
     expect(() => resolveReportWindow(NOW, okFrom, NOW.toISOString())).not.toThrow();
   });
 
-  it('future to is clamped to now; a fully-future window collapses and is rejected', () => {
-    const w = resolveReportWindow(NOW, '2026-07-01T00:00:00Z', '2999-01-01T00:00:00Z');
-    expect(w.to.getTime()).toBe(NOW.getTime()); // clamped
+  it('future to is clamped to now and reported as clamped; a fully-future window is rejected', () => {
+    const r = resolveReportWindow(NOW, '2026-07-01T00:00:00Z', '2999-01-01T00:00:00Z');
+    expect(r.window.to.getTime()).toBe(NOW.getTime()); // clamped
+    expect(r.toSource).toBe('clamped');
     expect(() => resolveReportWindow(NOW, '2999-01-01T00:00:00Z', '2999-02-01T00:00:00Z')).toThrow(AppError);
   });
 
