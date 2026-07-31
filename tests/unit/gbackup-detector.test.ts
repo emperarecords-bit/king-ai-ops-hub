@@ -85,6 +85,37 @@ describe('G-Backup-A classifier — exact + recognized EOL variants', () => {
   });
 });
 
+describe('G-Backup-A2 classifier — LEGACY_ATTESTED_MATCH', () => {
+  it('an irregular applied hash with a verified attestation key → NO_PENDING + legacyAttestedMatches', () => {
+    const source = [0, 1, 2].map((i) => srcEntry(i, `000${i}_m`, 1000 + i, BUF(i)));
+    const applied = source.map((s, i) => ({ hash: i === 1 ? 'e'.repeat(64) : s.committedBlobSha256, createdAt: s.when, id: i + 1 }));
+    const legacyAttestedKeys = new Set([String(source[1]!.when)]);
+    const r = classifyMigrationState(base({ source, applied, legacyAttestedKeys }));
+    expect(r.state).toBe('NO_PENDING');
+    expect(r.legacyAttestedMatches).toBe(1);
+    expect(r.exactExecutionMatches).toBe(2);
+    expect(r.unknownHistoricalMismatches).toBe(0);
+    expect(r.legacyAttestedDetails[0]!.tag).toBe('0001_m');
+  });
+
+  it('the SAME irregular hash WITHOUT the attestation key → HISTORICAL_HASH_MISMATCH (fail closed)', () => {
+    const source = [0, 1, 2].map((i) => srcEntry(i, `000${i}_m`, 1000 + i, BUF(i)));
+    const applied = source.map((s, i) => ({ hash: i === 1 ? 'e'.repeat(64) : s.committedBlobSha256, createdAt: s.when, id: i + 1 }));
+    const r = classifyMigrationState(base({ source, applied }));
+    expect(r.state).toBe('HISTORICAL_HASH_MISMATCH');
+    expect(r.legacyAttestedMatches).toBe(0);
+    expect(r.unknownHistoricalMismatches).toBe(1);
+  });
+
+  it('an attestation key for a DIFFERENT migration does not rescue an unattested mismatch', () => {
+    const source = [0, 1, 2].map((i) => srcEntry(i, `000${i}_m`, 1000 + i, BUF(i)));
+    const applied = source.map((s, i) => ({ hash: i === 1 ? 'e'.repeat(64) : s.committedBlobSha256, createdAt: s.when, id: i + 1 }));
+    const legacyAttestedKeys = new Set([String(source[2]!.when)]); // wrong migration
+    const r = classifyMigrationState(base({ source, applied, legacyAttestedKeys }));
+    expect(r.state).toBe('HISTORICAL_HASH_MISMATCH');
+  });
+});
+
 describe('G-Backup-A classifier — pending binding', () => {
   it('pending runtime bytes = recognized EOL variant → PENDING_FORWARD, pendingBindable true', () => {
     const source = [0, 1, 2].map((i) => srcEntry(i, `000${i}_m`, 1000 + i, BUF(i)));

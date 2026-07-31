@@ -1,0 +1,31 @@
+{
+  "manifestVersion": "1",
+  "forensicMethodVersion": "gbackup-forensic.v1",
+  "migrationIndex": 4,
+  "migrationTag": "0004_knowledge_k1",
+  "journalTimestamp": 1784873208836,
+  "sourceCommit": "3a1ed677afaf6616aa5b051f99a4d013ca74a599",
+  "sourceBlobHash": "71beb3fb639ba301269bdebc16efe4f096d13787f638f11a88d0a07cfb932a31",
+  "appliedExecutionHash": "c2c7463a277ae0c157775121b3c471fb99ce04f4f896334f070f2a8848830754",
+  "sourceByteLength": 3805,
+  "appliedByteLength": 3806,
+  "lfCount": 47,
+  "crlfCount": 1,
+  "loneCrCount": 0,
+  "insertedByteCount": 1,
+  "deletedByteCount": 0,
+  "substitutedByteCount": 0,
+  "insertedCrBeforeLfCount": 1,
+  "changedLineIndexes": [48],
+  "eolMapHash": "99dbc727e5a3ec717dec84af216ece2a1f7427f7547b107da5bd6ce8828329c2",
+  "sqlContext": {
+    "hasStringLiteralSpanningNewline": false,
+    "hasDollarQuote": false,
+    "hasCopyFromStdin": false,
+    "hasProceduralBody": false,
+    "changedEolInsideSensitiveContent": false
+  },
+  "statementCategoryCounts": { "create": 8, "alter": 6 },
+  "databaseObjectCategoryCounts": { "enum_type": 4, "table": 1, "index": 3 },
+  "localStagingComparison": "agree"
+}

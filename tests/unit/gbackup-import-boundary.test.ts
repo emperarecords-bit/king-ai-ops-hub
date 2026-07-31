@@ -42,6 +42,7 @@ describe('G-Backup-A import boundary', () => {
         'receipt-schema.ts',
         'receipt-verify.ts',
         'source-manifest.ts',
+        'legacy-attestation.ts',
       ]),
     );
   });

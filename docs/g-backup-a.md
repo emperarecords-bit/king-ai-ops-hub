@@ -160,6 +160,48 @@ on `0004`** (0 divergences; 0053 recognized), which **differs from the previousl
 `NO_PENDING`**. This is surfaced (not hard-coded) for owner decision — see the correction report. Historical
 `__drizzle_migrations` rows were not modified.
 
+## G-Backup-A2 — signed legacy execution attestation (Treatment B)
+
+A narrowly-scoped, immutable, owner-signed recognition of ONE historical migration whose applied bytes differ
+from the committed source by a proven-inert difference. Not an alias, not a policy relaxation, not a wildcard.
+
+- **Separate authority:** Ed25519 keys **distinct** from deployment-backup receipts and every app secret
+  (`APP_ENCRYPTION_KEY`, GitHub, Fly, DB, provider). A dedicated public-key trust store + revocation set.
+- **Schema (`legacy-attestation.ts`):** strict, bounded `LegacyMigrationAttestationV1` binding index/tag/
+  timestamp/sourceCommit/sourceBlobHash/appliedExecutionHash + byte-difference proof + `evidenceManifestHash` +
+  treatment + approver + signature. A separate strict **evidence manifest** carries structural evidence only
+  (no SQL/DB contents); the attestation binds its hash and the verifier recomputes it.
+- **Detector match class `LEGACY_ATTESTED_MATCH`:** granted only when exact + EOL-variant both failed AND a
+  fully-verified attestation matches the exact index/tag/timestamp/sourceCommit/sourceBlobHash/appliedHash, the
+  evidence-manifest hash verifies, the key is trusted + not revoked, and the treatment is supported. Never by
+  tag/hash alone; no wildcard/range/prefix. Results surface separate counts: exact / EOL-variant /
+  legacy-attested / unknown-mismatch / divergence. `NO_PENDING` requires every applied migration to be exact, an
+  EOL variant, or a valid legacy-attested match, with nothing pending.
+- **Fail-closed:** an unsigned draft, evidence manifest, owner statement, comment, fixture, or hard-coded pair
+  makes nothing pass; malformed/missing/revoked/mis-scoped attestations contribute nothing. `0004` stays
+  `HISTORICAL_HASH_MISMATCH` until a **real signed** attestation is committed under separate authorization.
+- **Storage:** production verification consumes only an explicit, validated trusted bundle + key store — never
+  an arbitrary repo file. Unsigned drafts live in `scripts/backup/legacy-drafts/` (inactive, never loaded).
+
+### Owner offline signing ceremony (proposed — do NOT execute now)
+
+1. Owner generates a **dedicated** Ed25519 key **outside** the app/repo (e.g. `ssh-keygen -t ed25519` or
+   `openssl genpkey -algorithm ed25519`), kept offline / in an approved secrets manager. **Never pasted into chat.**
+2. Owner extracts the **public** key only.
+3. Public key reviewed and added to the trust store under a **separate authorized commit** (onboarding).
+4. Claude produces the **final canonical unsigned payload** (from the completed `signedPayload` with real
+   `keyId`/`approvedAt`) and displays its SHA-256 digest + the human-readable structural facts.
+5. Owner verifies the displayed facts (index 4, tag, source `71beb3fb…`, applied `c2c7463a…`, +1 `0x0D` at line
+   48, EOL-map `99dbc727…`, evidence hash `3c0453dc…`).
+6. Owner signs the exact canonical bytes **offline** with the private key.
+7. Owner returns **only** the signature + public metadata (never the private key).
+8. The signature is **independently verified** (`verifyLegacyAttestation`) before activation.
+9. The finalized **signed** attestation is committed via a **separate authorization** and referenced in the
+   trusted bundle.
+10. **Revocation:** the key id is added to the trust store's `revoked` set (a separate authorized commit);
+    `verifyLegacyAttestation` rejects any attestation signed by a revoked key, immediately re-failing-closed the
+    affected migration until re-attested with a new key.
+
 ## Scope
 
 Implemented: journal reader, DB migration-state reader, deterministic set hashing, classifier, receipt schema +

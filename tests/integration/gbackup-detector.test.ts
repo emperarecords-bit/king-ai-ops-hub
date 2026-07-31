@@ -78,6 +78,40 @@ describe('G-Backup-A detector — read-only against the real local DB', () => {
     expect(a.state).toBe('HISTORICAL_HASH_MISMATCH');
   });
 
+  it('a VALID ephemeral legacy attestation for 0004 → LEGACY_ATTESTED_MATCH + NO_PENDING (isolated test only)', async () => {
+    if (!dbAvailable) return;
+    const { generateKeyPairSync } = await import('node:crypto');
+    const { signLegacyAttestation } = await import('../../scripts/backup/legacy-attestation');
+    const kp = generateKeyPairSync('ed25519');
+    const manifest = buildSourceManifestFromGit('HEAD', 'drizzle');
+    const e0004 = manifest.entries.find((e) => e.tag === '0004_knowledge_k1')!;
+    const appliedRow = await sql<{ hash: string }[]>`select hash from drizzle.__drizzle_migrations where created_at = ${e0004.when}`;
+    const appliedHash = appliedRow[0]!.hash;
+    const signed = {
+      attestationVersion: '1' as const, attestationId: 'att-0004', migrationIndex: e0004.idx, migrationTag: e0004.tag, journalTimestamp: e0004.when,
+      sourceCommit: manifest.sourceCommit, sourceBlobHash: e0004.committedBlobSha256, appliedExecutionHash: appliedHash,
+      sourceByteLength: 3805, appliedByteLength: 3806, differenceType: 'eol_only' as const,
+      insertedByteCount: 1, deletedByteCount: 0, substitutedByteCount: 0, insertedCrBeforeLfCount: 1, changedLineIndexes: [48],
+      eolMapHash: '99dbc727e5a3ec717dec84af216ece2a1f7427f7547b107da5bd6ce8828329c2',
+      sqlContextAssessment: 'outside_sensitive_content' as const, databaseEffectAssessment: 'local_staging_agree' as const,
+      evidenceManifestHash: 'c'.repeat(64), approvedTreatment: 'signed_legacy_execution_attestation' as const,
+      approvedAt: '2026-01-01T00:00:00.000Z', approverRole: 'owner', signatureAlgorithm: 'ed25519' as const, keyId: 'ephemeral-test',
+    };
+    const att = signLegacyAttestation(signed, kp.privateKey);
+    const r = await detectMigrationState(sql, {
+      sourceManifest: manifest,
+      migrationsFolder: 'drizzle',
+      legacyAttestationBundle: { attestations: [att], store: { keyring: { 'ephemeral-test': kp.publicKey }, revoked: new Set() } },
+    });
+    expect(r.state).toBe('NO_PENDING');
+    expect(r.legacyAttestedMatches).toBe(1);
+    expect(r.legacyAttestedDetails[0]!.tag).toBe('0004_knowledge_k1');
+    expect(r.unknownHistoricalMismatches).toBe(0);
+    // And WITHOUT any attestation the real detector still reports 0004 as a mismatch (fail closed).
+    const bare = await detectMigrationState(sql, { sourceManifest: manifest, migrationsFolder: 'drizzle' });
+    expect(bare.state).toBe('HISTORICAL_HASH_MISMATCH');
+  });
+
   it('the catalog probe finds this DB non-empty (app schema/tables exist) — read-only', async () => {
     if (!dbAvailable) return;
     const rel = await sql<{ n: number }[]>`

@@ -8,6 +8,12 @@ import {
   recognizedHashes,
 } from './migration-hash';
 import { type SourceManifest, type SourceManifestEntry } from './source-manifest';
+import {
+  type LegacyEvidenceManifest,
+  type LegacyTrustStore,
+  legacyAttestationSchema,
+  verifyLegacyAttestation,
+} from './legacy-attestation';
 
 /**
  * G-Backup-A — migration-state detector. Compares the APPLIED history (`drizzle.__drizzle_migrations`) against a
@@ -78,6 +84,9 @@ export interface ClassifyInput {
   readonly hasUnexplainedUserObjects: boolean;
   /** The database identity equals the expected new-bootstrap target (never inferred). */
   readonly databaseIdentityMatches: boolean;
+  /** Set of `String(journalTimestamp)` for migrations with a VERIFIED legacy execution attestation (G-Backup-A2).
+   *  Populated by the reader AFTER cryptographic verification — the pure classifier only consumes it. */
+  readonly legacyAttestedKeys?: ReadonlySet<string>;
 }
 
 export interface ClassifyResult {
@@ -87,6 +96,8 @@ export interface ClassifyResult {
   readonly exactExecutionMatches: number;
   readonly lineEndingVariantMatches: number;
   readonly variantDetails: VariantMatchDetail[];
+  readonly legacyAttestedMatches: number;
+  readonly legacyAttestedDetails: { idx: number; tag: string; appliedHash: string }[];
   readonly unknownHistoricalMismatches: number;
   readonly unknownDatabaseDivergences: number;
   readonly runtimeMismatchWarnings: RuntimeMismatchWarning[];
@@ -103,6 +114,8 @@ function empty(state: MigrationState, sourceMigrationSetHash: string, detail: st
     exactExecutionMatches: 0,
     lineEndingVariantMatches: 0,
     variantDetails: [],
+    legacyAttestedMatches: 0,
+    legacyAttestedDetails: [],
     unknownHistoricalMismatches: 0,
     unknownDatabaseDivergences: 0,
     runtimeMismatchWarnings: [],
@@ -161,9 +174,12 @@ export function classifyMigrationState(inp: ClassifyInput): ClassifyResult {
     return empty('UNKNOWN_DATABASE_DIVERGENCE', setHash, `database has ${A.length} applied migrations but source has ${S.length}`);
   }
 
-  // (3) prefix map with recognized-variant awareness.
+  // (3) prefix map with recognized-variant + legacy-attested awareness (accumulate; decide state at end).
   const variantDetails: VariantMatchDetail[] = [];
+  const legacyAttestedDetails: { idx: number; tag: string; appliedHash: string }[] = [];
   const runtimeMismatchWarnings: RuntimeMismatchWarning[] = [];
+  const unknownMismatchTags: string[] = [];
+  const attested = inp.legacyAttestedKeys ?? new Set<string>();
   let exact = 0;
   let variant = 0;
   for (let i = 0; i < A.length; i++) {
@@ -179,31 +195,19 @@ export function classifyMigrationState(inp: ClassifyInput): ClassifyResult {
       exact++;
     } else if (recognized.has(a.hash)) {
       variant++;
-      variantDetails.push({
-        idx: s.idx,
-        tag: s.tag,
-        appliedHash: a.hash,
-        committedSourceHash: s.committedBlobSha256,
-        recognizedVariantType: s.recognizedVariantType,
-        runtimeWorkingTreeHash: rt?.rawHash ?? null,
-        runtimeEqualsApplied,
-      });
+      variantDetails.push({ idx: s.idx, tag: s.tag, appliedHash: a.hash, committedSourceHash: s.committedBlobSha256, recognizedVariantType: s.recognizedVariantType, runtimeWorkingTreeHash: rt?.rawHash ?? null, runtimeEqualsApplied });
+    } else if (attested.has(String(s.when))) {
+      // A VERIFIED legacy execution attestation (verified by the reader) covers exactly this migration.
+      legacyAttestedDetails.push({ idx: s.idx, tag: s.tag, appliedHash: a.hash });
     } else {
-      return {
-        ...empty('HISTORICAL_HASH_MISMATCH', setHash, `applied[${i}] hash for ${s.tag} matches neither the committed source nor a recognized LF/CRLF variant`),
-        exactExecutionMatches: exact,
-        lineEndingVariantMatches: variant,
-        variantDetails,
-        unknownHistoricalMismatches: 1,
-      };
+      unknownMismatchTags.push(s.tag);
     }
-    // Runtime-byte diagnostic: current working-tree bytes differ from the applied historical bytes.
     if (!runtimeEqualsApplied) {
       runtimeMismatchWarnings.push({ idx: s.idx, tag: s.tag, appliedHash: a.hash, runtimeWorkingTreeHash: rt?.rawHash ?? null });
     }
   }
 
-  // (4) pending forward + pending-binding to the portable source (correction: pending bytes must be bound).
+  // (4) pending forward + pending-binding to the portable source.
   const pending = S.slice(A.length);
   const pendingBindingDetails: PendingBindingDetail[] = pending.map((s) => {
     const rt = runtimeByWhen.get(s.when) ?? null;
@@ -218,16 +222,22 @@ export function classifyMigrationState(inp: ClassifyInput): ClassifyResult {
     exactExecutionMatches: exact,
     lineEndingVariantMatches: variant,
     variantDetails,
-    unknownHistoricalMismatches: 0,
+    legacyAttestedMatches: legacyAttestedDetails.length,
+    legacyAttestedDetails,
     unknownDatabaseDivergences: 0,
     runtimeMismatchWarnings,
     pendingBindingDetails,
   };
 
-  if (A.length === S.length) {
-    return { ...common, state: 'NO_PENDING', pendingTags: [], pendingBindable: true, detail: `all ${S.length} migrations applied (${exact} exact, ${variant} recognized EOL variant)` };
+  // Any unrecognized (not exact, not EOL variant, not legacy-attested) applied hash → fail closed.
+  if (unknownMismatchTags.length > 0) {
+    return { ...common, state: 'HISTORICAL_HASH_MISMATCH', pendingTags: [], pendingBindable: false, unknownHistoricalMismatches: unknownMismatchTags.length, detail: `applied hash for ${unknownMismatchTags.join(', ')} matches neither committed source, recognized EOL variant, nor a valid legacy attestation` };
   }
-  return { ...common, state: 'PENDING_FORWARD', pendingTags: pending.map((s) => s.tag), pendingBindable, detail: `${pending.length} unapplied forward migration(s); pendingBindable=${pendingBindable}` };
+
+  if (A.length === S.length) {
+    return { ...common, state: 'NO_PENDING', pendingTags: [], pendingBindable: true, unknownHistoricalMismatches: 0, detail: `all ${S.length} migrations applied (${exact} exact, ${variant} EOL variant, ${legacyAttestedDetails.length} legacy-attested)` };
+  }
+  return { ...common, state: 'PENDING_FORWARD', pendingTags: pending.map((s) => s.tag), pendingBindable, unknownHistoricalMismatches: 0, detail: `${pending.length} unapplied forward migration(s); pendingBindable=${pendingBindable}` };
 }
 
 // -- Read-only reader --------------------------------------------------------
@@ -251,6 +261,14 @@ export async function detectMigrationState(
     declaredBootstrap?: boolean;
     expectedDatabaseIdentity?: string;
     nodeModulesDir?: string;
+    /** G-Backup-A2: verified-if-valid legacy attestations for specific historical migrations. Each is
+     *  cryptographically verified against the trusted store + the exact source entry + the applied hash before
+     *  it can contribute a LEGACY_ATTESTED_MATCH. An empty/absent bundle keeps every mismatch fail-closed. */
+    legacyAttestationBundle?: {
+      attestations: unknown[];
+      store: LegacyTrustStore;
+      evidenceManifests?: Record<string, LegacyEvidenceManifest>;
+    };
   },
 ): Promise<DetectResult> {
   const drizzleVersion = installedDrizzleVersion(opts.nodeModulesDir);
@@ -312,11 +330,44 @@ export async function detectMigrationState(
       applied = rows.map((r) => ({ hash: r.hash, createdAt: Number(r.created_at), id: r.id ?? null }));
     }
 
+    // Verify any supplied legacy attestations (crypto + exact-scope bindings) BEFORE classification. Only a
+    // fully-verified attestation contributes a key; a draft/invalid/mis-scoped one contributes nothing.
+    const legacyAttestedKeys = new Set<string>();
+    if (opts.legacyAttestationBundle && applied) {
+      const appliedByWhen = new Map(applied.map((a) => [a.createdAt, a.hash]));
+      const sourceByWhen = new Map(opts.sourceManifest.entries.map((s) => [s.when, s]));
+      for (const raw of opts.legacyAttestationBundle.attestations) {
+        const parsed = legacyAttestationSchema.safeParse(raw);
+        if (!parsed.success) continue; // malformed → contributes nothing (fail closed)
+        const att = parsed.data;
+        const s = sourceByWhen.get(att.journalTimestamp);
+        const appliedHash = appliedByWhen.get(att.journalTimestamp);
+        if (!s || appliedHash == null) continue;
+        const res = verifyLegacyAttestation(
+          att,
+          {
+            migrationIndex: s.idx,
+            migrationTag: s.tag,
+            journalTimestamp: s.when,
+            sourceCommit: opts.sourceManifest.sourceCommit,
+            sourceBlobHash: s.committedBlobSha256,
+            appliedHash,
+            supportedVersions: new Set(['1']),
+            supportedAlgorithms: new Set(['ed25519']),
+            evidenceManifest: opts.legacyAttestationBundle.evidenceManifests?.[att.migrationTag],
+          },
+          opts.legacyAttestationBundle.store,
+        );
+        if (res.ok) legacyAttestedKeys.add(String(s.when));
+      }
+    }
+
     const result = classifyMigrationState({
       source: opts.sourceManifest.entries,
       sourceMigrationSetHash: opts.sourceManifest.sourceMigrationSetHash,
       applied,
       runtime: runtime.map((r) => ({ when: r.when, tag: r.tag, rawHash: r.hash })),
+      legacyAttestedKeys,
       migrationsTableMissing,
       declaredBootstrap: opts.declaredBootstrap ?? false,
       hasUnexplainedUserObjects,
