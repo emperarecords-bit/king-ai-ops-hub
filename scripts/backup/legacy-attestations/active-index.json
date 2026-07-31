@@ -1,0 +1,12 @@
+{
+  "bundleVersion": "1",
+  "note": "Explicit active legacy-attestation index. The loader trusts ONLY the files named here — never a directory scan, never anything under legacy-drafts/. Paths are relative to scripts/backup.",
+  "keyBundleFile": "legacy-trust/legacy-migration-keys.json",
+  "entries": [
+    {
+      "tag": "0004_knowledge_k1",
+      "attestationFile": "legacy-attestations/0004_knowledge_k1.json",
+      "evidenceFile": "legacy-evidence/0004_knowledge_k1.evidence.json"
+    }
+  ]
+}

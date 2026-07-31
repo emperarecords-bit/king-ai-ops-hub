@@ -1,0 +1,41 @@
+{
+  "allowedEnvironments": [
+    "development",
+    "staging"
+  ],
+  "applicationId": "king-ai-ops-hub",
+  "appliedByteLength": 3806,
+  "appliedExecutionHash": "c2c7463a277ae0c157775121b3c471fb99ce04f4f896334f070f2a8848830754",
+  "approvedAt": "2026-07-31T18:56:46.247Z",
+  "approvedTreatment": "signed_legacy_execution_attestation",
+  "approverId": "king",
+  "approverRole": "owner",
+  "approvingOrganization": "empera-international",
+  "attestationId": "lma1_0d13d308cc76793c0836ad277467d1fac83bf513384259619dd5407b94193c7f",
+  "attestationVersion": "1",
+  "changedLineIndexes": [
+    48
+  ],
+  "databaseEffectAssessment": "local_staging_agree",
+  "deletedByteCount": 0,
+  "differenceType": "eol_only",
+  "eolMapHash": "99dbc727e5a3ec717dec84af216ece2a1f7427f7547b107da5bd6ce8828329c2",
+  "evidenceManifestHash": "80535017ed9088dfe54f2e3b57b73ff96c502a4427fd099d480c07d8589a7252",
+  "insertedByteCount": 1,
+  "insertedCrBeforeLfCount": 1,
+  "journalTimestamp": 1784873208836,
+  "keyId": "empera-lma-001",
+  "migrationIndex": 4,
+  "migrationNamespace": "drizzle",
+  "migrationPath": "drizzle/0004_knowledge_k1.sql",
+  "migrationTag": "0004_knowledge_k1",
+  "repositoryId": "emperarecords-bit/king-ai-ops-hub",
+  "reviewedMigrationSetHash": "bda5268c13770652747a180ba44f95340f58f798bab633ccb08ca2e0645416b4",
+  "reviewedSourceCommit": "3a1ed677afaf6616aa5b051f99a4d013ca74a599",
+  "signatureAlgorithm": "ed25519",
+  "sourceBlobHash": "71beb3fb639ba301269bdebc16efe4f096d13787f638f11a88d0a07cfb932a31",
+  "sourceByteLength": 3805,
+  "sqlContextAssessment": "outside_sensitive_content",
+  "substitutedByteCount": 0,
+  "signature": "XQZhIozeQajkAirJg5nIaLRuPBtAwRkZFBsdVwJlygyciy2R7F-DS-5MAyYfv0XEYM0ZHKM00oIfM8NGgJD8DQ"
+}

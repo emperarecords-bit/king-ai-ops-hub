@@ -46,6 +46,7 @@ describe('G-Backup-A import boundary', () => {
         'legacy-attestation-canonical.ts',
         'legacy-attestation-verify.ts',
         'legacy-attestation-sign.ts',
+        'legacy-active-bundle.ts',
       ]),
     );
   });

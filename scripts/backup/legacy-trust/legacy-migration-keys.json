@@ -1,0 +1,13 @@
+{
+  "bundleVersion": "1",
+  "note": "Active trusted public keys for legacy_migration_attestation verification. Public verification material only — NEVER private-key material. Loaded explicitly by legacy-active-bundle.ts; never by directory scan.",
+  "keys": [
+    {
+      "keyId": "empera-lma-001",
+      "algorithm": "ed25519",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA0UvWMLPBFCRkXnt8CWTcERFu+3KQ7hFEmFma0ib2Tww=\n-----END PUBLIC KEY-----\n",
+      "purpose": "legacy_migration_attestation",
+      "status": "active"
+    }
+  ]
+}
