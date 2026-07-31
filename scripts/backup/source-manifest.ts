@@ -23,6 +23,22 @@ import {
 
 export const SOURCE_MANIFEST_VERSION = '1' as const;
 
+/**
+ * The ONE canonical repository identity this build's source manifests may carry (correction: source-manifest
+ * repository identity). It is a compile-time constant — NEVER derived from `git remote`, `origin`, a mutable
+ * remote URL, the local directory name, or any caller-provided display text. The producer stamps exactly this
+ * value; the validator (`parseSourceManifest`) accepts exactly this value and rejects everything else (a URL,
+ * a remote alias, a wrong owner/repo, a different capitalization, whitespace-wrapped text, an embedded-credential
+ * form, or any prefix/wildcard). This prevents a producer from attaching an arbitrary repository identity to an
+ * otherwise-valid set of migration blobs.
+ *
+ * Application identity is deliberately NOT part of the Git source manifest — it is a separately trusted RUNTIME
+ * configuration value (see `migration-detector` `legacyAttestationBundle.scope.applicationId`). Keeping it out of
+ * the manifest is intentional: the manifest is a portable, git-derived artifact, while the application binding is
+ * an environment-level runtime decision.
+ */
+export const CANONICAL_REPOSITORY_ID = 'emperarecords-bit/king-ai-ops-hub' as const;
+
 export interface SourceManifestEntry {
   readonly idx: number;
   readonly tag: string;
@@ -35,6 +51,8 @@ export interface SourceManifestEntry {
 
 export interface SourceManifest {
   readonly manifestVersion: string;
+  /** Canonical repository identity — always exactly {@link CANONICAL_REPOSITORY_ID}; never derived from a remote. */
+  readonly repositoryId: string;
   readonly sourceCommit: string;
   readonly folder: string;
   readonly entries: SourceManifestEntry[];
@@ -59,7 +77,19 @@ function gitShow(commit: string, repoPath: string): Buffer {
  * bytes from the commit (not the working tree), so the result is byte-stable regardless of local checkout /
  * autocrlf. Throws MigrationReadError if git or a blob is unavailable (caller maps to DETECTOR_FAILURE).
  */
-export function buildSourceManifestFromGit(commitish: string, folder = 'drizzle'): SourceManifest {
+export function buildSourceManifestFromGit(
+  commitish: string,
+  folder = 'drizzle',
+  expectedRepositoryId?: string,
+): SourceManifest {
+  // Repository identity is a compile-time constant. If a narrowly-trusted config input is supplied, it must equal
+  // the canonical id exactly — any other value (URL, remote alias, wrong owner/repo, capitalization, whitespace,
+  // credentials, prefix/wildcard) is rejected. The identity is NEVER read from `git remote`/`origin`/dirname.
+  if (expectedRepositoryId !== undefined && expectedRepositoryId !== CANONICAL_REPOSITORY_ID) {
+    throw new MigrationReadError(
+      `expectedRepositoryId does not match the canonical repository identity (${CANONICAL_REPOSITORY_ID})`,
+    );
+  }
   // Resolve the commit-ish (e.g. "HEAD", "origin/main") to a full commit hash so the manifest is bound to an
   // exact, portable source commit rather than a moving ref.
   let commit: string;
@@ -93,6 +123,7 @@ export function buildSourceManifestFromGit(commitish: string, folder = 'drizzle'
   entries.sort((a, b) => a.idx - b.idx);
   return {
     manifestVersion: SOURCE_MANIFEST_VERSION,
+    repositoryId: CANONICAL_REPOSITORY_ID,
     sourceCommit: commit,
     folder,
     entries,
@@ -117,6 +148,10 @@ const entrySchema = z
 export const sourceManifestSchema = z
   .object({
     manifestVersion: z.literal(SOURCE_MANIFEST_VERSION),
+    // Exact-match the ONE canonical repository identity. `z.literal` accepts only this exact string, so a URL,
+    // remote alias, wrong owner/repo, different capitalization, whitespace-wrapped value, embedded-credential
+    // form, or prefix/wildcard is rejected at parse time — the validator matches the identity exactly.
+    repositoryId: z.literal(CANONICAL_REPOSITORY_ID),
     sourceCommit: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/),
     folder: z.string().min(1),
     entries: z.array(entrySchema).min(1),

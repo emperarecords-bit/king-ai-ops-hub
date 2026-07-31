@@ -1,11 +1,11 @@
 {
   "status": "UNSIGNED_INACTIVE",
-  "note": "DRAFT ONLY. Not signed, not trusted, not loaded by production verification. 0004 remains HISTORICAL_HASH_MISMATCH until a signed attestation is committed under a separate authorization. keyId/approverId/approvingOrganization/applicationId/approvedAt are placeholders; there is NO signature. allowedEnvironments deliberately EXCLUDES production — production requires explicit owner approval during the ceremony.",
+  "note": "DRAFT ONLY. Not signed, not trusted, not loaded by production verification. 0004 remains HISTORICAL_HASH_MISMATCH until a signed attestation is committed under a separate authorization. repositoryId and applicationId are now FINALIZED to their known logical identities; keyId/approverId/approvingOrganization/approvedAt remain owner-controlled ceremony placeholders and there is NO signature. allowedEnvironments deliberately EXCLUDES production — production requires explicit owner approval during the ceremony.",
   "signedPayload": {
     "attestationVersion": "1",
-    "attestationId": "lma1_56e84c5571490e712423604aa938101def37aa910d8a888a0b6c96d46343b13e",
+    "attestationId": "lma1_4029658831f8842cf5b0ca96b1248006f78bc7b250c8a941cf41b876d0699a86",
     "repositoryId": "emperarecords-bit/king-ai-ops-hub",
-    "applicationId": "REPLACE_WITH_TARGET_APPLICATION_ID",
+    "applicationId": "king-ai-ops-hub",
     "migrationNamespace": "drizzle",
     "migrationPath": "drizzle/0004_knowledge_k1.sql",
     "allowedEnvironments": ["development", "staging"],
@@ -38,8 +38,8 @@
   },
   "reviewDigests": {
     "evidenceManifestHash": "80535017ed9088dfe54f2e3b57b73ff96c502a4427fd099d480c07d8589a7252",
-    "derivedDraftAttestationId": "lma1_56e84c5571490e712423604aa938101def37aa910d8a888a0b6c96d46343b13e",
-    "placeholderCanonicalPayloadHash": "6498c0fa18405488027d7f5ecccee1d12e246e574fd70dc920e87d76e6be2aa4",
-    "note": "Both derivedDraftAttestationId and placeholderCanonicalPayloadHash are computed over the PLACEHOLDER payload; they CHANGE once applicationId/approverId/approvingOrganization/approvedAt/keyId are finalized by the owner (attestationId is re-derived at ceremony time)."
+    "derivedDraftAttestationId": "lma1_4029658831f8842cf5b0ca96b1248006f78bc7b250c8a941cf41b876d0699a86",
+    "placeholderCanonicalPayloadHash": "f4a50c0e0b23295450448e6360faa6117b74013965dbdaec388fd82d83b6d32a",
+    "note": "repositoryId and applicationId are now finalized. derivedDraftAttestationId = lma1_<sha256(content-domain + canonical payload minus attestationId)>; placeholderCanonicalPayloadHash = sha256(sign-domain + canonical full payload). Both still contain the ceremony placeholders (approverId/approvingOrganization/approvedAt/keyId), so BOTH values CHANGE again when the owner finalizes those during the signing ceremony (attestationId is re-derived then). This draft remains UNSIGNED_INACTIVE and authorizes nothing."
   }
 }
