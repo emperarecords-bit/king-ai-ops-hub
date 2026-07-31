@@ -22,8 +22,8 @@ function signed(over: Partial<SignedReceipt> = {}): SignedReceipt {
     sourceRelease: 'v124',
     targetApplication: 'king-ai-ops-hub-staging',
     pendingMigrations: ['0054_example'],
-    migrationSetHash: 'abcdef0123',
-    deploymentNonce: 'nonce-1',
+    migrationSetHash: 'a'.repeat(64),
+    deploymentNonce: 'nonce-abcdefghij0123',
     verificationResult: 'verified',
     signatureAlgorithm: 'ed25519',
     keyId: 'k1',
@@ -40,7 +40,7 @@ function ctx(over: Partial<VerifyContext> = {}): VerifyContext {
     volumeId: 'vol_4m3kmknl059qpd6v',
     targetApplication: 'king-ai-ops-hub-staging',
     sourceCommit: '3a1ed677afaf6616aa5b051f99a4d013ca74a599',
-    migrationSetHash: 'abcdef0123',
+    migrationSetHash: 'a'.repeat(64),
     supportedReceiptVersions: new Set(['1']),
     supportedAlgorithms: new Set(['ed25519']),
     keyring: { k1: kp.publicKey },
@@ -104,9 +104,9 @@ describe('G-Backup-A receipt signing + verification', () => {
     expect(verifyReceipt(r, ctx())).toMatchObject({ reason: expect.stringContaining('predate migration') });
   });
 
-  it('whitespace-only deploymentNonce is rejected by the nonce check', () => {
-    const r = signReceipt(signed({ deploymentNonce: ' ' }), kp.privateKey);
-    expect(verifyReceipt(r, ctx())).toMatchObject({ reason: 'missing deploymentNonce' });
+  it('a too-short / whitespace deploymentNonce is rejected (schema bounds high-entropy nonces)', () => {
+    const r = { ...signReceipt(signed(), kp.privateKey), deploymentNonce: ' ' };
+    expect(verifyReceipt(r, ctx())).toMatchObject({ ok: false, reason: expect.stringContaining('schema') });
   });
 
   it('receipt with an extra (secret-looking) field is rejected by the strict schema', () => {
@@ -119,5 +119,37 @@ describe('G-Backup-A receipt signing + verification', () => {
     const a = canonicalReceiptString(s);
     const b = canonicalReceiptString(JSON.parse(JSON.stringify(s)) as SignedReceipt);
     expect(a).toBe(b);
+  });
+});
+
+describe('G-Backup-A receipt content-safety constraints (correction 5)', () => {
+  const good = () => signReceipt(signed(), kp.privateKey);
+  // A tampered field is caught at the STRICT SCHEMA before signature verification.
+  it('rejects a database URL with credentials in a name field', () => {
+    expect(verifyReceipt({ ...good(), databaseApp: 'postgres://u:p@h:5432/db' }, ctx())).toMatchObject({ reason: expect.stringContaining('schema') });
+  });
+  it('rejects a bearer token', () => {
+    expect(verifyReceipt({ ...good(), sourceRelease: 'Bearer abc.def.ghi' }, ctx())).toMatchObject({ reason: expect.stringContaining('schema') });
+  });
+  it('rejects a PEM private-key block', () => {
+    expect(verifyReceipt({ ...good(), keyId: '-----BEGIN PRIVATE KEY-----' }, ctx())).toMatchObject({ reason: expect.stringContaining('schema') });
+  });
+  it('rejects multiline injection', () => {
+    expect(verifyReceipt({ ...good(), databaseApp: 'ok\nrm -rf' }, ctx())).toMatchObject({ reason: expect.stringContaining('schema') });
+  });
+  it('rejects control characters', () => {
+    expect(verifyReceipt({ ...good(), databaseApp: 'okbell' }, ctx())).toMatchObject({ reason: expect.stringContaining('schema') });
+  });
+  it('rejects an overlong field', () => {
+    expect(verifyReceipt({ ...good(), databaseApp: 'a'.repeat(129) }, ctx())).toMatchObject({ reason: expect.stringContaining('schema') });
+  });
+  it('rejects an invalid git commit', () => {
+    expect(verifyReceipt({ ...good(), sourceCommit: 'nothex' }, ctx())).toMatchObject({ reason: expect.stringContaining('schema') });
+  });
+  it('rejects an invalid migration-set hash', () => {
+    expect(verifyReceipt({ ...good(), migrationSetHash: 'abc' }, ctx())).toMatchObject({ reason: expect.stringContaining('schema') });
+  });
+  it('rejects an invalid signature encoding', () => {
+    expect(verifyReceipt({ ...good(), signature: 'not+valid/base64url==' }, ctx())).toMatchObject({ reason: expect.stringContaining('schema') });
   });
 });

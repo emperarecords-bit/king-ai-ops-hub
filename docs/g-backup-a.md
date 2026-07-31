@@ -97,6 +97,69 @@ G-Backup-A adds **no** `deployment_records` table (that would introduce a migrat
 operational — the bootstrap paradox). The receipt is an external signed artifact; verification results are for
 deployment logs only; no organization audit event is emitted; no database table is added.
 
+## Corrections round 2 — three identities, recognized EOL variants, catalog bootstrap
+
+**Three distinct migration identities** (correction 1):
+- `sourceMigrationSetHash` (`source-manifest.ts`) — derived from ordered **Git blob** contents at an exact,
+  resolved source commit (idx, tag, when, committed-blob sha256). OS-/autocrlf-stable. **This is what the signed
+  receipt's `migrationSetHash` means.** Never the working tree.
+- `drizzleExecutionHash` (`migration-hash.ts`) — sha256 of the raw file bytes present in the execution env.
+- `appliedExecutionHash` — the immutable hash in `drizzle.__drizzle_migrations` (never modified).
+
+**Recognized line-ending variants (newline transform ONLY):** for each committed blob the detector derives the
+exact committed hash plus **one** deterministic EOL transform (LF→CRLF for an LF blob, CRLF→LF for a CRLF blob;
+MIXED blobs have no variant). An applied hash is a recognized variant **only** if it exactly equals one of those.
+No space/tab/trailing-whitespace/blank-line/Unicode/comment/separator normalization. A recognized variant does
+**not** become `HISTORICAL_HASH_MISMATCH` when timestamp+ordinal+ordering match and the source blob is bound to
+the expected commit; the overall state may remain `NO_PENDING` with structured evidence (`exactExecutionMatches`,
+`lineEndingVariantMatches`, per-migration variant details). A **runtime-byte warning** is still reported when the
+current working-tree bytes differ from the applied historical bytes (diagnostic; not a blocker for an applied,
+schema-free migration). A **pending** migration whose runtime bytes are not an exact committed-source or
+recognized EOL variant is **blocked**.
+
+**Catalog-complete `BOOTSTRAP_EMPTY`** (correction 3): the reader probes `pg_class`/`pg_proc` joined to
+`pg_namespace`, excluding system schemas and extension-owned objects (`pg_depend deptype='e'`). Any user
+table/partition/sequence/view/matview/function outside that allowlist ⇒ `MIGRATION_TABLE_MISSING_NONEMPTY`.
+`BOOTSTRAP_EMPTY` requires: table absent **and** explicit declaration **and** database-identity match **and** no
+unexplained user objects. An empty `public` schema is allowed; an `app` schema (a Hub object) is not.
+
+**Backup required for `PENDING_FORWARD` in EVERY environment** (correction 4): no development bypass. A logical
+dev-backup receipt is deferred to G-Backup-C; until then a development `PENDING_FORWARD` is blocked.
+
+**Receipt content constraints** (correction 5): each field carries a bounded charset/length, so a credential URI,
+bearer token, PEM block, multiline value, or control character cannot be smuggled into an allowed string field.
+Structural + pattern-based — not a proof that no secret can ever be embedded.
+
+**Ordering / duplicates** (correction 6): `drizzle.__drizzle_migrations` is `(id integer, hash text, created_at
+bigint)`; ordering `created_at asc, id asc`. Fail-closed on duplicate applied timestamp/hash, out-of-order
+applied rows, applied-count > source, and duplicated/unordered journal timestamps.
+
+### Build-provenance limitation (correction 1)
+
+The current Fly image is built from the **local working-tree build context**; a git commit alone does not prove
+the build context was byte-identical to the git blobs. **G-Backup-B must receive or embed a trusted source
+manifest generated from the approved commit** (serialized JSON — the release image may not contain `.git`), and
+the release validator must compare the actual migration files in the image against that manifest and **fail
+closed** on any dirty/altered/unsupported build-context file. A separate source-build-hardening increment (not
+now) may add `drizzle/*.sql text eol=lf`, clean-tree enforcement, clean-checkout/`git archive` builds, and
+artifact-to-commit attestation.
+
+### Confirmed classification — and the `0004` finding
+
+Running the corrected detector against the **real** applied histories (read-only):
+- `0053_pricing_foundations`: committed LF; its deterministic CRLF variant equals staging's applied hash →
+  **recognized clean variant** ✓.
+- `0004_knowledge_k1`: committed LF (`71beb3fb…`); its deterministic CRLF variant is `0564b6e6…`, but **both
+  staging and local applied `c2c7463a…`** — which matches **neither** the committed blob **nor** its single
+  deterministic EOL transform. It LF-normalizes to the committed content (so it is line-ending-only in the loose
+  sense) but is an **irregular/mixed** form. Under the strict policy this is **`HISTORICAL_HASH_MISMATCH`**, not a
+  recognized variant.
+
+Consequence: the corrected detector classifies **both staging and the local dev DB as `HISTORICAL_HASH_MISMATCH`
+on `0004`** (0 divergences; 0053 recognized), which **differs from the previously stated expectation of
+`NO_PENDING`**. This is surfaced (not hard-coded) for owner decision — see the correction report. Historical
+`__drizzle_migrations` rows were not modified.
+
 ## Scope
 
 Implemented: journal reader, DB migration-state reader, deterministic set hashing, classifier, receipt schema +

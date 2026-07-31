@@ -41,6 +41,7 @@ describe('G-Backup-A import boundary', () => {
         'receipt-canonical.ts',
         'receipt-schema.ts',
         'receipt-verify.ts',
+        'source-manifest.ts',
       ]),
     );
   });
