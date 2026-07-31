@@ -8,12 +8,8 @@ import {
   recognizedHashes,
 } from './migration-hash';
 import { type SourceManifest, type SourceManifestEntry } from './source-manifest';
-import {
-  type LegacyEvidenceManifest,
-  type LegacyTrustStore,
-  legacyAttestationSchema,
-  verifyLegacyAttestation,
-} from './legacy-attestation';
+import { type LegacyEnvironment, type LegacyEvidenceManifest, legacyAttestationSchema } from './legacy-attestation-schema';
+import { type LegacyTrustStore, validateAttestationBundle, verifyLegacyAttestation } from './legacy-attestation-verify';
 
 /**
  * G-Backup-A — migration-state detector. Compares the APPLIED history (`drizzle.__drizzle_migrations`) against a
@@ -98,6 +94,8 @@ export interface ClassifyResult {
   readonly variantDetails: VariantMatchDetail[];
   readonly legacyAttestedMatches: number;
   readonly legacyAttestedDetails: { idx: number; tag: string; appliedHash: string }[];
+  /** Supplied-but-invalid attestations (correction 4): structured, non-secret. Migration stays blocked. */
+  readonly invalidLegacyAttestations: { idx: number | null; tag: string | null; reasonCode: string; keyId: string | null }[];
   readonly unknownHistoricalMismatches: number;
   readonly unknownDatabaseDivergences: number;
   readonly runtimeMismatchWarnings: RuntimeMismatchWarning[];
@@ -116,6 +114,7 @@ function empty(state: MigrationState, sourceMigrationSetHash: string, detail: st
     variantDetails: [],
     legacyAttestedMatches: 0,
     legacyAttestedDetails: [],
+    invalidLegacyAttestations: [],
     unknownHistoricalMismatches: 0,
     unknownDatabaseDivergences: 0,
     runtimeMismatchWarnings: [],
@@ -224,6 +223,7 @@ export function classifyMigrationState(inp: ClassifyInput): ClassifyResult {
     variantDetails,
     legacyAttestedMatches: legacyAttestedDetails.length,
     legacyAttestedDetails,
+    invalidLegacyAttestations: [] as { idx: number | null; tag: string | null; reasonCode: string; keyId: string | null }[],
     unknownDatabaseDivergences: 0,
     runtimeMismatchWarnings,
     pendingBindingDetails,
@@ -268,6 +268,11 @@ export async function detectMigrationState(
       attestations: unknown[];
       store: LegacyTrustStore;
       evidenceManifests?: Record<string, LegacyEvidenceManifest>;
+      /** Trusted runtime scope config — verified exactly against each attestation (never wildcard). */
+      scope: { repositoryId: string; applicationId: string; environment: LegacyEnvironment; migrationNamespace: string };
+      /** Producer-side ancestry evidence per tag (reviewedSourceCommit ⊑ deployment commit), when required. */
+      requireAncestry?: boolean;
+      ancestryConfirmedTags?: ReadonlySet<string>;
     };
   },
 ): Promise<DetectResult> {
@@ -330,35 +335,56 @@ export async function detectMigrationState(
       applied = rows.map((r) => ({ hash: r.hash, createdAt: Number(r.created_at), id: r.id ?? null }));
     }
 
-    // Verify any supplied legacy attestations (crypto + exact-scope bindings) BEFORE classification. Only a
-    // fully-verified attestation contributes a key; a draft/invalid/mis-scoped one contributes nothing.
+    // Verify any supplied legacy attestations (bundle rules + crypto + exact scope) BEFORE classification. Only
+    // a fully-verified attestation contributes a key; a supplied-but-invalid one is surfaced explicitly and the
+    // migration stays fail-closed.
     const legacyAttestedKeys = new Set<string>();
-    if (opts.legacyAttestationBundle && applied) {
-      const appliedByWhen = new Map(applied.map((a) => [a.createdAt, a.hash]));
-      const sourceByWhen = new Map(opts.sourceManifest.entries.map((s) => [s.when, s]));
-      for (const raw of opts.legacyAttestationBundle.attestations) {
-        const parsed = legacyAttestationSchema.safeParse(raw);
-        if (!parsed.success) continue; // malformed → contributes nothing (fail closed)
-        const att = parsed.data;
-        const s = sourceByWhen.get(att.journalTimestamp);
-        const appliedHash = appliedByWhen.get(att.journalTimestamp);
-        if (!s || appliedHash == null) continue;
-        const res = verifyLegacyAttestation(
-          att,
-          {
-            migrationIndex: s.idx,
-            migrationTag: s.tag,
-            journalTimestamp: s.when,
-            sourceCommit: opts.sourceManifest.sourceCommit,
-            sourceBlobHash: s.committedBlobSha256,
-            appliedHash,
-            supportedVersions: new Set(['1']),
-            supportedAlgorithms: new Set(['ed25519']),
-            evidenceManifest: opts.legacyAttestationBundle.evidenceManifests?.[att.migrationTag],
-          },
-          opts.legacyAttestationBundle.store,
-        );
-        if (res.ok) legacyAttestedKeys.add(String(s.when));
+    const invalidLegacyAttestations: { idx: number | null; tag: string | null; reasonCode: string; keyId: string | null }[] = [];
+    const bundle = opts.legacyAttestationBundle;
+    if (bundle && applied) {
+      const bundleValid = validateAttestationBundle(bundle.attestations);
+      if (!bundleValid.ok) {
+        invalidLegacyAttestations.push({ idx: null, tag: null, reasonCode: 'bundle_invalid', keyId: null });
+      } else {
+        const appliedByWhen = new Map(applied.map((a) => [a.createdAt, a.hash]));
+        const sourceByWhen = new Map(opts.sourceManifest.entries.map((s) => [s.when, s]));
+        for (const raw of bundle.attestations) {
+          const parsed = legacyAttestationSchema.safeParse(raw);
+          if (!parsed.success) {
+            invalidLegacyAttestations.push({ idx: null, tag: null, reasonCode: 'schema_invalid', keyId: null });
+            continue;
+          }
+          const att = parsed.data;
+          const s = sourceByWhen.get(att.journalTimestamp);
+          const appliedHash = appliedByWhen.get(att.journalTimestamp);
+          if (!s || appliedHash == null) {
+            invalidLegacyAttestations.push({ idx: att.migrationIndex, tag: att.migrationTag, reasonCode: 'scope_mismatch', keyId: att.keyId });
+            continue;
+          }
+          const res = verifyLegacyAttestation(
+            att,
+            {
+              repositoryId: bundle.scope.repositoryId,
+              applicationId: bundle.scope.applicationId,
+              environment: bundle.scope.environment,
+              migrationNamespace: bundle.scope.migrationNamespace,
+              migrationPath: `${bundle.scope.migrationNamespace}/${s.tag}.sql`,
+              migrationIndex: s.idx,
+              migrationTag: s.tag,
+              journalTimestamp: s.when,
+              sourceBlobHash: s.committedBlobSha256,
+              appliedHash,
+              supportedVersions: new Set(['1']),
+              supportedAlgorithms: new Set(['ed25519']),
+              evidenceManifest: bundle.evidenceManifests?.[att.migrationTag],
+              requireAncestry: bundle.requireAncestry,
+              ancestryConfirmed: bundle.ancestryConfirmedTags?.has(att.migrationTag),
+            },
+            bundle.store,
+          );
+          if (res.ok) legacyAttestedKeys.add(String(s.when));
+          else invalidLegacyAttestations.push({ idx: s.idx, tag: s.tag, reasonCode: res.reasonCode, keyId: res.keyId });
+        }
       }
     }
 
@@ -373,7 +399,7 @@ export async function detectMigrationState(
       hasUnexplainedUserObjects,
       databaseIdentityMatches,
     });
-    return { ...result, appliedCount: applied ? applied.length : null, drizzleVersion, runtimeExecution: runtime };
+    return { ...result, invalidLegacyAttestations, appliedCount: applied ? applied.length : null, drizzleVersion, runtimeExecution: runtime };
   } catch (e) {
     return fail(`database query failed: ${e instanceof Error ? e.message : String(e)}`);
   }

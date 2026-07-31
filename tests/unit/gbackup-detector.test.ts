@@ -98,6 +98,17 @@ describe('G-Backup-A2 classifier — LEGACY_ATTESTED_MATCH', () => {
     expect(r.legacyAttestedDetails[0]!.tag).toBe('0001_m');
   });
 
+  it('a later forward migration does NOT invalidate a legacy-attested applied migration', () => {
+    const source = [0, 1, 2, 3].map((i) => srcEntry(i, `000${i}_m`, 1000 + i, BUF(i)));
+    const applied = [0, 1, 2].map((i) => ({ hash: i === 1 ? 'e'.repeat(64) : source[i]!.committedBlobSha256, createdAt: source[i]!.when, id: i + 1 }));
+    const legacyAttestedKeys = new Set([String(source[1]!.when)]);
+    const runtime = source.map((s) => ({ when: s.when, tag: s.tag, rawHash: s.committedBlobSha256 }));
+    const r = classifyMigrationState(base({ source, applied, legacyAttestedKeys, runtime }));
+    expect(r.state).toBe('PENDING_FORWARD');
+    expect(r.legacyAttestedMatches).toBe(1);
+    expect(r.pendingTags).toEqual(['0003_m']);
+  });
+
   it('the SAME irregular hash WITHOUT the attestation key → HISTORICAL_HASH_MISMATCH (fail closed)', () => {
     const source = [0, 1, 2].map((i) => srcEntry(i, `000${i}_m`, 1000 + i, BUF(i)));
     const applied = source.map((s, i) => ({ hash: i === 1 ? 'e'.repeat(64) : s.committedBlobSha256, createdAt: s.when, id: i + 1 }));

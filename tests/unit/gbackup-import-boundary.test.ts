@@ -42,7 +42,10 @@ describe('G-Backup-A import boundary', () => {
         'receipt-schema.ts',
         'receipt-verify.ts',
         'source-manifest.ts',
-        'legacy-attestation.ts',
+        'legacy-attestation-schema.ts',
+        'legacy-attestation-canonical.ts',
+        'legacy-attestation-verify.ts',
+        'legacy-attestation-sign.ts',
       ]),
     );
   });
@@ -71,6 +74,20 @@ describe('G-Backup-A import boundary', () => {
     expect(migrate.includes("from './backup")).toBe(false);
     // The current (unchanged) behavior: it still calls the old preMigrationBackup().
     expect(migrate.includes('preMigrationBackup')).toBe(true);
+  });
+
+  it('the SIGNER module is NOT imported by the runtime verifier, detector, or migrate.ts (correction 3)', () => {
+    const signerImport = "legacy-attestation-sign";
+    for (const f of ['legacy-attestation-verify.ts', 'legacy-attestation-schema.ts', 'legacy-attestation-canonical.ts', 'migration-detector.ts']) {
+      const src = readFileSync(join(DIR, f), 'utf8');
+      expect(src.includes(signerImport), `${f} must not import the signer`).toBe(false);
+    }
+    const migrate = readFileSync(join(ROOT, 'scripts', 'migrate.ts'), 'utf8');
+    expect(migrate.includes(signerImport)).toBe(false);
+    // The runtime verifier exposes no signing method / private-key path.
+    const verifySrc = readFileSync(join(DIR, 'legacy-attestation-verify.ts'), 'utf8');
+    expect(verifySrc.includes('sign as cryptoSign')).toBe(false);
+    expect(/\bcryptoSign\b/.test(verifySrc)).toBe(false);
   });
 
   it('executor eligibility remains false for every action', () => {

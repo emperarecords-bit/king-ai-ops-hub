@@ -183,6 +183,36 @@ from the committed source by a proven-inert difference. Not an alias, not a poli
 - **Storage:** production verification consumes only an explicit, validated trusted bundle + key store — never
   an arbitrary repo file. Unsigned drafts live in `scripts/backup/legacy-drafts/` (inactive, never loaded).
 
+### G-Backup-A2 corrections
+
+- **No exact-current-commit circular dependency.** `reviewedSourceCommit` (+ informational `reviewedMigrationSetHash`)
+  is **provenance only**. Runtime authorization binds to the **current** source-manifest entry: repositoryId,
+  applicationId, migrationNamespace, migrationPath, migrationIndex, migrationTag, journalTimestamp, and
+  `sourceBlobHash`. A later deployment commit (with legitimate forward migrations) still verifies; a **changed
+  historical blob** (`sourceBlobHash` differs) invalidates it. Whole-migration-set-hash equality is **not**
+  required. Optional ancestry (reviewedSourceCommit ⊑ deployment commit) is **producer-side** evidence from a
+  trusted build manifest (`requireAncestry`/`ancestryConfirmed`) — never a runtime `.git` claim.
+- **Repository / application / environment scope.** Explicit `repositoryId`, `applicationId`, `migrationNamespace`,
+  `migrationPath`, and a bounded `allowedEnvironments` list (`development`/`staging`/`production`). The verifier
+  requires exact matches against trusted runtime config; **no wildcard**. **Production is never inherited from
+  staging** — the `0004` draft's `allowedEnvironments` is `[development, staging]` only.
+- **Signer/runtime separation.** Split into `legacy-attestation-schema.ts`, `-canonical.ts`, `-verify.ts`
+  (runtime; PUBLIC keys only), and `-sign.ts` (the ONLY module taking a private key). The runtime verifier, the
+  migration detector, and `scripts/migrate.ts` do **not** import the signer — enforced by a static boundary test.
+- **Invalid-attestation diagnostics.** A supplied-but-invalid attestation yields a structured, non-secret
+  `invalidLegacyAttestations` entry `{idx, tag, reasonCode, keyId}` (`schema_invalid`, `unknown_key`,
+  `revoked_key`, `invalid_signature`, `scope_mismatch`, `source_mismatch`, `applied_hash_mismatch`,
+  `evidence_mismatch`, `unsupported_version`/`_algorithm`/`_treatment`, `invalid_byte_claim`, `unsafe_assessment`,
+  `ancestry_unverifiable`, or `bundle_invalid`). The migration stays blocked; absent ≠ invalid.
+- **Bundle duplicate/conflict rules (fail-closed).** `validateAttestationBundle` rejects a duplicate
+  `attestationId` (even if identical — no "first file wins"), and more than one attestation for the same
+  (repositoryId, applicationId, migrationTag, appliedExecutionHash) scope regardless of key, and any
+  schema-invalid entry. `attestationId` must be unique; `attestationContentDigest` is available for
+  content-equality checks.
+- **Approval identity.** `approverId` + `approvingOrganization` (bounded, non-secret) alongside `approverRole`;
+  the key id remains the cryptographic identity. The draft leaves these (and `applicationId`, `keyId`,
+  `approvedAt`) as placeholders — never auto-chosen in code.
+
 ### Owner offline signing ceremony (proposed — do NOT execute now)
 
 1. Owner generates a **dedicated** Ed25519 key **outside** the app/repo (e.g. `ssh-keygen -t ed25519` or

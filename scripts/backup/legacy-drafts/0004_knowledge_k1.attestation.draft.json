@@ -1,13 +1,19 @@
 {
   "status": "UNSIGNED_INACTIVE",
-  "note": "DRAFT ONLY. Not signed, not trusted, not loaded by production verification. 0004 remains HISTORICAL_HASH_MISMATCH until a signed attestation is committed under a separate authorization. keyId is a placeholder; there is NO signature.",
+  "note": "DRAFT ONLY. Not signed, not trusted, not loaded by production verification. 0004 remains HISTORICAL_HASH_MISMATCH until a signed attestation is committed under a separate authorization. keyId/approverId/approvingOrganization/applicationId/approvedAt are placeholders; there is NO signature. allowedEnvironments deliberately EXCLUDES production — production requires explicit owner approval during the ceremony.",
   "signedPayload": {
     "attestationVersion": "1",
     "attestationId": "draft-0004-knowledge-k1",
+    "repositoryId": "king-ai-ops-hub",
+    "applicationId": "REPLACE_WITH_TARGET_APPLICATION_ID",
+    "migrationNamespace": "drizzle",
+    "migrationPath": "drizzle/0004_knowledge_k1.sql",
+    "allowedEnvironments": ["development", "staging"],
     "migrationIndex": 4,
     "migrationTag": "0004_knowledge_k1",
     "journalTimestamp": 1784873208836,
-    "sourceCommit": "3a1ed677afaf6616aa5b051f99a4d013ca74a599",
+    "reviewedSourceCommit": "3a1ed677afaf6616aa5b051f99a4d013ca74a599",
+    "reviewedMigrationSetHash": "bda5268c13770652747a180ba44f95340f58f798bab633ccb08ca2e0645416b4",
     "sourceBlobHash": "71beb3fb639ba301269bdebc16efe4f096d13787f638f11a88d0a07cfb932a31",
     "appliedExecutionHash": "c2c7463a277ae0c157775121b3c471fb99ce04f4f896334f070f2a8848830754",
     "sourceByteLength": 3805,
@@ -21,15 +27,18 @@
     "eolMapHash": "99dbc727e5a3ec717dec84af216ece2a1f7427f7547b107da5bd6ce8828329c2",
     "sqlContextAssessment": "outside_sensitive_content",
     "databaseEffectAssessment": "local_staging_agree",
-    "evidenceManifestHash": "3c0453dc31ed511d93375ba7a7132a8b3a82832d0d1e9ec0e66791c1fd0aa494",
+    "evidenceManifestHash": "80535017ed9088dfe54f2e3b57b73ff96c502a4427fd099d480c07d8589a7252",
     "approvedTreatment": "signed_legacy_execution_attestation",
     "approvedAt": "REPLACE_WITH_APPROVAL_TIMESTAMP",
     "approverRole": "owner",
+    "approverId": "REPLACE_WITH_APPROVER_ID",
+    "approvingOrganization": "REPLACE_WITH_ORG",
     "signatureAlgorithm": "ed25519",
     "keyId": "REPLACE_WITH_OWNER_KEY_ID"
   },
   "reviewDigests": {
-    "evidenceManifestHash": "3c0453dc31ed511d93375ba7a7132a8b3a82832d0d1e9ec0e66791c1fd0aa494",
-    "note": "The FINAL canonical payload digest is recomputed at ceremony time from the completed signedPayload (after keyId/approvedAt are set); the ceremony displays it for owner review before signing."
+    "evidenceManifestHash": "80535017ed9088dfe54f2e3b57b73ff96c502a4427fd099d480c07d8589a7252",
+    "placeholderCanonicalPayloadHash": "1ac379063cead123aa6dba3c6f5110fba3c4f9403ba9c4c9e91d0e045ae63ed9",
+    "note": "placeholderCanonicalPayloadHash is over the placeholder payload; the FINAL ceremony digest CHANGES once applicationId/approverId/approvingOrganization/approvedAt/keyId are finalized by the owner."
   }
 }

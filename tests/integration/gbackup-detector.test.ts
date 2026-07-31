@@ -81,27 +81,36 @@ describe('G-Backup-A detector — read-only against the real local DB', () => {
   it('a VALID ephemeral legacy attestation for 0004 → LEGACY_ATTESTED_MATCH + NO_PENDING (isolated test only)', async () => {
     if (!dbAvailable) return;
     const { generateKeyPairSync } = await import('node:crypto');
-    const { signLegacyAttestation } = await import('../../scripts/backup/legacy-attestation');
+    const { signLegacyAttestation } = await import('../../scripts/backup/legacy-attestation-sign');
     const kp = generateKeyPairSync('ed25519');
     const manifest = buildSourceManifestFromGit('HEAD', 'drizzle');
     const e0004 = manifest.entries.find((e) => e.tag === '0004_knowledge_k1')!;
     const appliedRow = await sql<{ hash: string }[]>`select hash from drizzle.__drizzle_migrations where created_at = ${e0004.when}`;
     const appliedHash = appliedRow[0]!.hash;
     const signed = {
-      attestationVersion: '1' as const, attestationId: 'att-0004', migrationIndex: e0004.idx, migrationTag: e0004.tag, journalTimestamp: e0004.when,
-      sourceCommit: manifest.sourceCommit, sourceBlobHash: e0004.committedBlobSha256, appliedExecutionHash: appliedHash,
+      attestationVersion: '1' as const, attestationId: 'att-0004',
+      repositoryId: 'king-ai-ops-hub', applicationId: 'king-ai-ops-hub-staging', migrationNamespace: 'drizzle',
+      migrationPath: `drizzle/${e0004.tag}.sql`, allowedEnvironments: ['development', 'staging'] as ('development' | 'staging' | 'production')[],
+      migrationIndex: e0004.idx, migrationTag: e0004.tag, journalTimestamp: e0004.when,
+      reviewedSourceCommit: manifest.sourceCommit, reviewedMigrationSetHash: manifest.sourceMigrationSetHash,
+      sourceBlobHash: e0004.committedBlobSha256, appliedExecutionHash: appliedHash,
       sourceByteLength: 3805, appliedByteLength: 3806, differenceType: 'eol_only' as const,
       insertedByteCount: 1, deletedByteCount: 0, substitutedByteCount: 0, insertedCrBeforeLfCount: 1, changedLineIndexes: [48],
       eolMapHash: '99dbc727e5a3ec717dec84af216ece2a1f7427f7547b107da5bd6ce8828329c2',
       sqlContextAssessment: 'outside_sensitive_content' as const, databaseEffectAssessment: 'local_staging_agree' as const,
       evidenceManifestHash: 'c'.repeat(64), approvedTreatment: 'signed_legacy_execution_attestation' as const,
-      approvedAt: '2026-01-01T00:00:00.000Z', approverRole: 'owner', signatureAlgorithm: 'ed25519' as const, keyId: 'ephemeral-test',
+      approvedAt: '2026-01-01T00:00:00.000Z', approverRole: 'owner', approverId: 'empera-owner', approvingOrganization: 'Empera-International',
+      signatureAlgorithm: 'ed25519' as const, keyId: 'ephemeral-test',
     };
     const att = signLegacyAttestation(signed, kp.privateKey);
     const r = await detectMigrationState(sql, {
       sourceManifest: manifest,
       migrationsFolder: 'drizzle',
-      legacyAttestationBundle: { attestations: [att], store: { keyring: { 'ephemeral-test': kp.publicKey }, revoked: new Set() } },
+      legacyAttestationBundle: {
+        attestations: [att],
+        store: { keyring: { 'ephemeral-test': kp.publicKey }, revoked: new Set() },
+        scope: { repositoryId: 'king-ai-ops-hub', applicationId: 'king-ai-ops-hub-staging', environment: 'staging', migrationNamespace: 'drizzle' },
+      },
     });
     expect(r.state).toBe('NO_PENDING');
     expect(r.legacyAttestedMatches).toBe(1);
@@ -109,6 +118,44 @@ describe('G-Backup-A detector — read-only against the real local DB', () => {
     expect(r.unknownHistoricalMismatches).toBe(0);
     // And WITHOUT any attestation the real detector still reports 0004 as a mismatch (fail closed).
     const bare = await detectMigrationState(sql, { sourceManifest: manifest, migrationsFolder: 'drizzle' });
+    expect(bare.state).toBe('HISTORICAL_HASH_MISMATCH');
+  });
+
+  it('a supplied-but-INVALID attestation is surfaced explicitly and remains blocked (distinct from absent)', async () => {
+    if (!dbAvailable) return;
+    const { generateKeyPairSync } = await import('node:crypto');
+    const { signLegacyAttestation } = await import('../../scripts/backup/legacy-attestation-sign');
+    const signer = generateKeyPairSync('ed25519');
+    const untrusted = generateKeyPairSync('ed25519'); // signer key NOT in the store
+    const manifest = buildSourceManifestFromGit('HEAD', 'drizzle');
+    const e0004 = manifest.entries.find((e) => e.tag === '0004_knowledge_k1')!;
+    const appliedHash = (await sql<{ hash: string }[]>`select hash from drizzle.__drizzle_migrations where created_at = ${e0004.when}`)[0]!.hash;
+    const signed = {
+      attestationVersion: '1' as const, attestationId: 'att-0004', repositoryId: 'king-ai-ops-hub', applicationId: 'king-ai-ops-hub-staging',
+      migrationNamespace: 'drizzle', migrationPath: `drizzle/${e0004.tag}.sql`, allowedEnvironments: ['development', 'staging'] as ('development' | 'staging' | 'production')[],
+      migrationIndex: e0004.idx, migrationTag: e0004.tag, journalTimestamp: e0004.when,
+      reviewedSourceCommit: manifest.sourceCommit, reviewedMigrationSetHash: manifest.sourceMigrationSetHash,
+      sourceBlobHash: e0004.committedBlobSha256, appliedExecutionHash: appliedHash,
+      sourceByteLength: 3805, appliedByteLength: 3806, differenceType: 'eol_only' as const,
+      insertedByteCount: 1, deletedByteCount: 0, substitutedByteCount: 0, insertedCrBeforeLfCount: 1, changedLineIndexes: [48],
+      eolMapHash: '99dbc727e5a3ec717dec84af216ece2a1f7427f7547b107da5bd6ce8828329c2',
+      sqlContextAssessment: 'outside_sensitive_content' as const, databaseEffectAssessment: 'local_staging_agree' as const,
+      evidenceManifestHash: 'c'.repeat(64), approvedTreatment: 'signed_legacy_execution_attestation' as const,
+      approvedAt: '2026-01-01T00:00:00.000Z', approverRole: 'owner', approverId: 'empera-owner', approvingOrganization: 'Empera-International',
+      signatureAlgorithm: 'ed25519' as const, keyId: 'untrusted-key',
+    };
+    const att = signLegacyAttestation(signed, untrusted.privateKey); // signed by an UNTRUSTED key
+    const r = await detectMigrationState(sql, {
+      sourceManifest: manifest, migrationsFolder: 'drizzle',
+      legacyAttestationBundle: { attestations: [att], store: { keyring: { 'other-key': signer.publicKey }, revoked: new Set() }, scope: { repositoryId: 'king-ai-ops-hub', applicationId: 'king-ai-ops-hub-staging', environment: 'staging', migrationNamespace: 'drizzle' } },
+    });
+    expect(r.state).toBe('HISTORICAL_HASH_MISMATCH');
+    expect(r.legacyAttestedMatches).toBe(0);
+    expect(r.invalidLegacyAttestations.length).toBe(1);
+    expect(r.invalidLegacyAttestations[0]!.reasonCode).toBe('unknown_key');
+    // ABSENT attestation is distinguishable: no invalid entries.
+    const bare = await detectMigrationState(sql, { sourceManifest: manifest, migrationsFolder: 'drizzle' });
+    expect(bare.invalidLegacyAttestations.length).toBe(0);
     expect(bare.state).toBe('HISTORICAL_HASH_MISMATCH');
   });
 
