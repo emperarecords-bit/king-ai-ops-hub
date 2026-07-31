@@ -355,6 +355,31 @@ describe('Phase 10 hardened — real link/junction escape rejection', () => {
     symlinkSync(join(process.cwd(), 'scripts', 'backup', 'legacy-evidence'), evDir);
     expect(() => loadActiveLegacyBundle(root)).toThrow(ActiveBundleError);
   });
+  it.runIf(symlinkCapable)('symlink resolving to a repo path OUTSIDE the active dir rejected', () => {
+    const root = fixture();
+    const attAbs = join(root, 'scripts', 'backup', REAL.att);
+    rmSync(attAbs);
+    // points inside the repo but outside legacy-attestations/
+    symlinkSync(join(root, 'scripts', 'backup', 'legacy-trust', 'legacy-migration-keys.json'), attAbs);
+    expect(() => loadActiveLegacyBundle(root)).toThrow(ActiveBundleError);
+  });
+  it.runIf(symlinkCapable)('broken symlink rejected', () => {
+    const root = fixture();
+    const attAbs = join(root, 'scripts', 'backup', REAL.att);
+    rmSync(attAbs);
+    symlinkSync(join(root, 'scripts', 'backup', 'legacy-attestations', 'nonexistent-target.json'), attAbs);
+    expect(() => loadActiveLegacyBundle(root)).toThrow(ActiveBundleError);
+  });
+  it.runIf(symlinkCapable)('symlink loop rejected', () => {
+    const root = fixture();
+    const evDir = join(root, 'scripts', 'backup', 'legacy-evidence');
+    rmSync(evDir, { recursive: true });
+    const a = evDir;
+    const b = join(root, 'scripts', 'backup', 'legacy-evidence-loop-b');
+    symlinkSync(b, a); // a -> b
+    symlinkSync(a, b); // b -> a  (loop); the loader rejects at the symlink component before any resolution
+    expect(() => loadActiveLegacyBundle(root)).toThrow(ActiveBundleError);
+  });
 });
 
 // ---------------------------------------------------------------------------
