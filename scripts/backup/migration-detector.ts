@@ -266,13 +266,14 @@ export async function detectMigrationState(
      *  it can contribute a LEGACY_ATTESTED_MATCH. An empty/absent bundle keeps every mismatch fail-closed. */
     legacyAttestationBundle?: {
       attestations: unknown[];
+      /** A VALIDATED trust store (from `loadTrustBundle`) — never a raw caller record. */
       store: LegacyTrustStore;
       evidenceManifests?: Record<string, LegacyEvidenceManifest>;
       /** Trusted runtime scope config — verified exactly against each attestation (never wildcard). */
       scope: { repositoryId: string; applicationId: string; environment: LegacyEnvironment; migrationNamespace: string };
-      /** Producer-side ancestry evidence per tag (reviewedSourceCommit ⊑ deployment commit), when required. */
-      requireAncestry?: boolean;
-      ancestryConfirmedTags?: ReadonlySet<string>;
+      /** Deterministic verification time for approval-time validation. */
+      verificationTime: Date;
+      maxClockSkewMs?: number;
     };
   },
 ): Promise<DetectResult> {
@@ -377,8 +378,8 @@ export async function detectMigrationState(
               supportedVersions: new Set(['1']),
               supportedAlgorithms: new Set(['ed25519']),
               evidenceManifest: bundle.evidenceManifests?.[att.migrationTag],
-              requireAncestry: bundle.requireAncestry,
-              ancestryConfirmed: bundle.ancestryConfirmedTags?.has(att.migrationTag),
+              verificationTime: bundle.verificationTime,
+              maxClockSkewMs: bundle.maxClockSkewMs,
             },
             bundle.store,
           );

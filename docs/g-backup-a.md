@@ -213,6 +213,35 @@ from the committed source by a proven-inert difference. Not an alias, not a poli
   the key id remains the cryptographic identity. The draft leaves these (and `applicationId`, `keyId`,
   `approvedAt`) as placeholders — never auto-chosen in code.
 
+### G-Backup-A2 trust-boundary corrections (final)
+
+- **No naked ancestry boolean.** `requireAncestry`/`ancestryConfirmed` are removed; a caller boolean can never
+  authorize ancestry. Runtime binds only to the current source-manifest entry (repo/path/index/tag/timestamp/
+  sourceBlobHash). Ancestry is **deferred**: a future producer with Git verifies it and emits a **signed
+  build-provenance statement** binding the deployment commit + source-manifest hash; runtime consumes the
+  verified statement, never a claim (the release image may lack `.git`).
+- **Exact immutable scope.** `repositoryId = emperarecords-bit/king-ai-ops-hub`, `applicationId =
+  king-ai-ops-hub` (not the Fly staging app name), `migrationNamespace = drizzle`, `migrationPath =
+  drizzle/<tag>.sql`. Exact, case-sensitive; a repo URL is rejected by the schema; no wildcard/prefix.
+- **Validated trust bundle.** `loadTrustBundle(entries[])` validates an ordered array (`keyId, algorithm,
+  publicKeyPem, purpose='legacy_migration_attestation', status, notBefore?, notAfter?`) and rejects — before
+  building any map — duplicate ids, same id with different key material, active+revoked conflicts, unknown
+  status, unsupported algorithm, wrong purpose, or malformed keys. The verifier consumes only the validated
+  store. A receipt key can never verify a legacy attestation (purpose is enforced).
+- **Deterministic id.** `attestationId = lma1_<sha256 of the canonical payload excluding attestationId+signature>`;
+  the verifier recomputes it (`invalid_attestation_id` on mismatch) — one id ↔ one payload.
+- **Environment-overlap conflicts.** The bundle validator expands `allowedEnvironments` into effective keys
+  `(repo, app, namespace, path, index, tag, timestamp, sourceBlob, appliedHash, env)` and rejects any overlap
+  regardless of id/key/timestamp/superset. Disjoint environments may coexist. No first/newest/key-priority.
+- **Revocation + withdrawal.** Key revocation is implemented (revoked → all its attestations fail; active+revoked
+  → fail-closed at load). Attestation-level **withdrawal** is a documented, signed/source-controlled record
+  schema (`withdrawalRecordSchema`) — **deferred, not activated**; deletion of a file is never the only path.
+- **Approval time.** `approvedAt` must be normalized UTC (`…Z`), not materially future (default 5-min skew), and
+  within any key `notBefore`/`notAfter`; a revoked key fails regardless. Verification time is supplied
+  deterministically (tests). No automatic expiration for `0004`.
+- **Content-safety (accurate).** The schema rejects unrecognized fields and known dangerous forms; it does not
+  mathematically prove no sensitive value can appear in an allowed field.
+
 ### Owner offline signing ceremony (proposed — do NOT execute now)
 
 1. Owner generates a **dedicated** Ed25519 key **outside** the app/repo (e.g. `ssh-keygen -t ed25519` or

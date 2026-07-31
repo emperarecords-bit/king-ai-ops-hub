@@ -19,7 +19,25 @@ export function attestationSigningBytes(signed: SignedLegacyAttestation): Buffer
   return Buffer.from(LEGACY_SIGN_DOMAIN + canonicalizeV1(signed), 'utf8');
 }
 
-/** Content digest of the signed payload (excludes the signature). Used for duplicate/conflict detection. */
+export const LEGACY_CONTENT_DOMAIN = 'gbackup-legacy-migration-attestation-content/v1\n' as const;
+
+/**
+ * Deterministic content digest over the canonical payload EXCLUDING `attestationId` (and the signature, which is
+ * not part of `SignedLegacyAttestation`). This is the identity basis: `attestationId = lma1_<digest>`, so one id
+ * can never refer to two payloads and two ids can never refer to one payload.
+ */
 export function attestationContentDigest(signed: SignedLegacyAttestation): string {
-  return createHash('sha256').update(LEGACY_SIGN_DOMAIN + canonicalizeV1(signed), 'utf8').digest('hex');
+  const { attestationId: _id, ...rest } = signed;
+  void _id;
+  return createHash('sha256').update(LEGACY_CONTENT_DOMAIN + canonicalizeV1(rest), 'utf8').digest('hex');
+}
+
+/** The deterministic attestation id derived from the content digest. */
+export function deriveAttestationId(signed: SignedLegacyAttestation): string {
+  return `lma1_${attestationContentDigest(signed)}`;
+}
+
+/** PRODUCER/TEST helper (pure, no crypto): set `attestationId` to its derived value. */
+export function finalizeAttestationId(signed: SignedLegacyAttestation): SignedLegacyAttestation {
+  return { ...signed, attestationId: deriveAttestationId(signed) };
 }

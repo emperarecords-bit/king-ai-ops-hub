@@ -3,8 +3,8 @@
   "note": "DRAFT ONLY. Not signed, not trusted, not loaded by production verification. 0004 remains HISTORICAL_HASH_MISMATCH until a signed attestation is committed under a separate authorization. keyId/approverId/approvingOrganization/applicationId/approvedAt are placeholders; there is NO signature. allowedEnvironments deliberately EXCLUDES production — production requires explicit owner approval during the ceremony.",
   "signedPayload": {
     "attestationVersion": "1",
-    "attestationId": "draft-0004-knowledge-k1",
-    "repositoryId": "king-ai-ops-hub",
+    "attestationId": "lma1_56e84c5571490e712423604aa938101def37aa910d8a888a0b6c96d46343b13e",
+    "repositoryId": "emperarecords-bit/king-ai-ops-hub",
     "applicationId": "REPLACE_WITH_TARGET_APPLICATION_ID",
     "migrationNamespace": "drizzle",
     "migrationPath": "drizzle/0004_knowledge_k1.sql",
@@ -38,7 +38,8 @@
   },
   "reviewDigests": {
     "evidenceManifestHash": "80535017ed9088dfe54f2e3b57b73ff96c502a4427fd099d480c07d8589a7252",
-    "placeholderCanonicalPayloadHash": "1ac379063cead123aa6dba3c6f5110fba3c4f9403ba9c4c9e91d0e045ae63ed9",
-    "note": "placeholderCanonicalPayloadHash is over the placeholder payload; the FINAL ceremony digest CHANGES once applicationId/approverId/approvingOrganization/approvedAt/keyId are finalized by the owner."
+    "derivedDraftAttestationId": "lma1_56e84c5571490e712423604aa938101def37aa910d8a888a0b6c96d46343b13e",
+    "placeholderCanonicalPayloadHash": "6498c0fa18405488027d7f5ecccee1d12e246e574fd70dc920e87d76e6be2aa4",
+    "note": "Both derivedDraftAttestationId and placeholderCanonicalPayloadHash are computed over the PLACEHOLDER payload; they CHANGE once applicationId/approverId/approvingOrganization/approvedAt/keyId are finalized by the owner (attestationId is re-derived at ceremony time)."
   }
 }

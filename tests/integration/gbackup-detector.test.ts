@@ -82,14 +82,15 @@ describe('G-Backup-A detector — read-only against the real local DB', () => {
     if (!dbAvailable) return;
     const { generateKeyPairSync } = await import('node:crypto');
     const { signLegacyAttestation } = await import('../../scripts/backup/legacy-attestation-sign');
+    const { finalizeAttestationId } = await import('../../scripts/backup/legacy-attestation-canonical');
+    const { loadTrustBundle } = await import('../../scripts/backup/legacy-attestation-verify');
     const kp = generateKeyPairSync('ed25519');
     const manifest = buildSourceManifestFromGit('HEAD', 'drizzle');
     const e0004 = manifest.entries.find((e) => e.tag === '0004_knowledge_k1')!;
-    const appliedRow = await sql<{ hash: string }[]>`select hash from drizzle.__drizzle_migrations where created_at = ${e0004.when}`;
-    const appliedHash = appliedRow[0]!.hash;
+    const appliedHash = (await sql<{ hash: string }[]>`select hash from drizzle.__drizzle_migrations where created_at = ${e0004.when}`)[0]!.hash;
     const signed = {
-      attestationVersion: '1' as const, attestationId: 'att-0004',
-      repositoryId: 'king-ai-ops-hub', applicationId: 'king-ai-ops-hub-staging', migrationNamespace: 'drizzle',
+      attestationVersion: '1' as const, attestationId: `lma1_${'0'.repeat(64)}`,
+      repositoryId: 'emperarecords-bit/king-ai-ops-hub', applicationId: 'king-ai-ops-hub', migrationNamespace: 'drizzle',
       migrationPath: `drizzle/${e0004.tag}.sql`, allowedEnvironments: ['development', 'staging'] as ('development' | 'staging' | 'production')[],
       migrationIndex: e0004.idx, migrationTag: e0004.tag, journalTimestamp: e0004.when,
       reviewedSourceCommit: manifest.sourceCommit, reviewedMigrationSetHash: manifest.sourceMigrationSetHash,
@@ -102,14 +103,17 @@ describe('G-Backup-A detector — read-only against the real local DB', () => {
       approvedAt: '2026-01-01T00:00:00.000Z', approverRole: 'owner', approverId: 'empera-owner', approvingOrganization: 'Empera-International',
       signatureAlgorithm: 'ed25519' as const, keyId: 'ephemeral-test',
     };
-    const att = signLegacyAttestation(signed, kp.privateKey);
+    const att = signLegacyAttestation(finalizeAttestationId(signed), kp.privateKey);
+    const store = loadTrustBundle([{ keyId: 'ephemeral-test', algorithm: 'ed25519', publicKeyPem: kp.publicKey.export({ type: 'spki', format: 'pem' }).toString(), purpose: 'legacy_migration_attestation', status: 'active' }]);
+    if (!store.ok) throw new Error(store.reason);
     const r = await detectMigrationState(sql, {
       sourceManifest: manifest,
       migrationsFolder: 'drizzle',
       legacyAttestationBundle: {
         attestations: [att],
-        store: { keyring: { 'ephemeral-test': kp.publicKey }, revoked: new Set() },
-        scope: { repositoryId: 'king-ai-ops-hub', applicationId: 'king-ai-ops-hub-staging', environment: 'staging', migrationNamespace: 'drizzle' },
+        store: store.store,
+        scope: { repositoryId: 'emperarecords-bit/king-ai-ops-hub', applicationId: 'king-ai-ops-hub', environment: 'staging', migrationNamespace: 'drizzle' },
+        verificationTime: new Date('2026-06-01T00:00:00.000Z'),
       },
     });
     expect(r.state).toBe('NO_PENDING');
@@ -125,13 +129,15 @@ describe('G-Backup-A detector — read-only against the real local DB', () => {
     if (!dbAvailable) return;
     const { generateKeyPairSync } = await import('node:crypto');
     const { signLegacyAttestation } = await import('../../scripts/backup/legacy-attestation-sign');
+    const { finalizeAttestationId } = await import('../../scripts/backup/legacy-attestation-canonical');
+    const { loadTrustBundle } = await import('../../scripts/backup/legacy-attestation-verify');
     const signer = generateKeyPairSync('ed25519');
     const untrusted = generateKeyPairSync('ed25519'); // signer key NOT in the store
     const manifest = buildSourceManifestFromGit('HEAD', 'drizzle');
     const e0004 = manifest.entries.find((e) => e.tag === '0004_knowledge_k1')!;
     const appliedHash = (await sql<{ hash: string }[]>`select hash from drizzle.__drizzle_migrations where created_at = ${e0004.when}`)[0]!.hash;
     const signed = {
-      attestationVersion: '1' as const, attestationId: 'att-0004', repositoryId: 'king-ai-ops-hub', applicationId: 'king-ai-ops-hub-staging',
+      attestationVersion: '1' as const, attestationId: `lma1_${'0'.repeat(64)}`, repositoryId: 'emperarecords-bit/king-ai-ops-hub', applicationId: 'king-ai-ops-hub',
       migrationNamespace: 'drizzle', migrationPath: `drizzle/${e0004.tag}.sql`, allowedEnvironments: ['development', 'staging'] as ('development' | 'staging' | 'production')[],
       migrationIndex: e0004.idx, migrationTag: e0004.tag, journalTimestamp: e0004.when,
       reviewedSourceCommit: manifest.sourceCommit, reviewedMigrationSetHash: manifest.sourceMigrationSetHash,
@@ -144,10 +150,12 @@ describe('G-Backup-A detector — read-only against the real local DB', () => {
       approvedAt: '2026-01-01T00:00:00.000Z', approverRole: 'owner', approverId: 'empera-owner', approvingOrganization: 'Empera-International',
       signatureAlgorithm: 'ed25519' as const, keyId: 'untrusted-key',
     };
-    const att = signLegacyAttestation(signed, untrusted.privateKey); // signed by an UNTRUSTED key
+    const att = signLegacyAttestation(finalizeAttestationId(signed), untrusted.privateKey); // signed by an UNTRUSTED key
+    const store = loadTrustBundle([{ keyId: 'other-key', algorithm: 'ed25519', publicKeyPem: signer.publicKey.export({ type: 'spki', format: 'pem' }).toString(), purpose: 'legacy_migration_attestation', status: 'active' }]);
+    if (!store.ok) throw new Error(store.reason);
     const r = await detectMigrationState(sql, {
       sourceManifest: manifest, migrationsFolder: 'drizzle',
-      legacyAttestationBundle: { attestations: [att], store: { keyring: { 'other-key': signer.publicKey }, revoked: new Set() }, scope: { repositoryId: 'king-ai-ops-hub', applicationId: 'king-ai-ops-hub-staging', environment: 'staging', migrationNamespace: 'drizzle' } },
+      legacyAttestationBundle: { attestations: [att], store: store.store, scope: { repositoryId: 'emperarecords-bit/king-ai-ops-hub', applicationId: 'king-ai-ops-hub', environment: 'staging', migrationNamespace: 'drizzle' }, verificationTime: new Date('2026-06-01T00:00:00.000Z') },
     });
     expect(r.state).toBe('HISTORICAL_HASH_MISMATCH');
     expect(r.legacyAttestedMatches).toBe(0);

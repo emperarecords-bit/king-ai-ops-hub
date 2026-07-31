@@ -5,8 +5,12 @@ import { z } from 'zod';
  *
  * Corrections: `reviewedSourceCommit` (provenance, NOT an exact-current-deployment constraint) is separated
  * from runtime binding (which is against the CURRENT source-manifest entry). Explicit repository / application /
- * namespace / path / environment scope prevents cross-repo/app reuse. Bounded, `.strict()` fields keep secrets
- * and SQL structurally out.
+ * namespace / path / environment scope prevents cross-repo/app reuse.
+ *
+ * Content-safety note (corrected): `.strict()` rejects UNRECOGNIZED fields, and each field's format/length/
+ * character/pattern constraints reduce accidental secret inclusion and reject known dangerous forms (embedded-
+ * credential URLs, PEM blocks, bearer tokens, multiline text, control characters). This does NOT mathematically
+ * prove that no sensitive identifier or datum could ever appear in an allowed field.
  */
 
 export const LEGACY_ATTESTATION_VERSION = '1' as const;
@@ -17,15 +21,24 @@ export const LEGACY_DB_EFFECT_RESULTS = ['local_staging_agree', 'divergent', 'un
 export const LEGACY_TREATMENTS = ['signed_legacy_execution_attestation'] as const;
 export const LEGACY_ENVIRONMENTS = ['development', 'staging', 'production'] as const;
 export type LegacyEnvironment = (typeof LEGACY_ENVIRONMENTS)[number];
+export const LEGACY_KEY_PURPOSE = 'legacy_migration_attestation' as const;
 
 const Ident = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/);
+/** Repository identity such as `owner/repo` — exact, case-sensitive; allows a slash. Never a URL. */
+const RepoId = z.string().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/);
 const PathStr = z.string().min(1).max(256).regex(/^[A-Za-z0-9._/-]+$/);
 const LowerToken = z.string().min(1).max(64).regex(/^[a-z0-9_-]+$/);
+/** Deterministic attestation id: `lma1_<sha256 of the canonical payload minus attestationId+signature>`. */
+const AttestationId = z.string().regex(/^lma1_[0-9a-f]{64}$/);
 const HexCommit = z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/);
 const Sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 const SignatureB64Url = z.string().min(80).max(120).regex(/^[A-Za-z0-9_-]+$/);
 const MigrationTag = z.string().min(1).max(128).regex(/^[0-9]{4}_[a-z0-9_]+$/);
-const IsoTimestamp = z.string().max(40).regex(/^[0-9T:.\-+Z]+$/).refine((s) => !Number.isNaN(Date.parse(s)), 'invalid timestamp');
+const IsoUtcTimestamp = z
+  .string()
+  .max(40)
+  .regex(/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,3})?Z$/, 'must be a normalized UTC (…Z) timestamp')
+  .refine((s) => !Number.isNaN(Date.parse(s)), 'invalid timestamp');
 const Uint = z.number().int().nonnegative();
 
 // -- Evidence manifest (structural evidence only) -----------------------------
@@ -73,9 +86,9 @@ export type LegacyEvidenceManifest = z.infer<typeof evidenceManifestSchema>;
 export const signedAttestationSchema = z
   .object({
     attestationVersion: z.literal(LEGACY_ATTESTATION_VERSION),
-    attestationId: Ident,
+    attestationId: AttestationId,
     // Scope (correction 2)
-    repositoryId: Ident,
+    repositoryId: RepoId,
     applicationId: Ident,
     migrationNamespace: Ident,
     migrationPath: PathStr,
@@ -105,7 +118,7 @@ export const signedAttestationSchema = z
     evidenceManifestHash: Sha256Hex,
     // Approval identity (correction 6)
     approvedTreatment: z.enum(LEGACY_TREATMENTS),
-    approvedAt: IsoTimestamp,
+    approvedAt: IsoUtcTimestamp,
     approverRole: LowerToken,
     approverId: LowerToken,
     approvingOrganization: Ident,
@@ -124,3 +137,41 @@ export function toSignedAttestationPayload(a: LegacyMigrationAttestation): Signe
   void _s;
   return signed;
 }
+
+// -- Trusted-key bundle entry (validated by the loader, not a raw record) ------
+
+export const trustKeyEntrySchema = z
+  .object({
+    keyId: Ident,
+    algorithm: z.enum(LEGACY_SIGNATURE_ALGORITHMS),
+    /** PEM-encoded SPKI public key. */
+    publicKeyPem: z.string().min(1).max(4096),
+    purpose: z.literal(LEGACY_KEY_PURPOSE),
+    status: z.enum(['active', 'revoked']),
+    notBefore: IsoUtcTimestamp.optional(),
+    notAfter: IsoUtcTimestamp.optional(),
+  })
+  .strict();
+
+export type TrustKeyEntry = z.infer<typeof trustKeyEntrySchema>;
+
+/**
+ * DEFERRED (design only; not activated in G-Backup-A2): a signed / source-controlled attestation-WITHDRAWAL
+ * record. Key revocation (via the trust bundle) is implemented; attestation-level withdrawal is documented here
+ * so deletion of a source file is never the only revocation path. No withdrawal record is created now.
+ */
+export const withdrawalRecordSchema = z
+  .object({
+    withdrawalVersion: z.literal('1'),
+    withdrawnAttestationId: AttestationId,
+    reasonCode: LowerToken,
+    effectiveAt: IsoUtcTimestamp,
+    approvingAuthority: Ident,
+    replacementAttestationId: AttestationId.optional(),
+    signatureAlgorithm: z.enum(LEGACY_SIGNATURE_ALGORITHMS),
+    keyId: Ident,
+    signature: SignatureB64Url,
+  })
+  .strict();
+
+export type LegacyWithdrawalRecord = z.infer<typeof withdrawalRecordSchema>;
