@@ -1,12 +1,20 @@
 {
   "bundleVersion": "1",
-  "note": "Explicit active legacy-attestation index. The loader trusts ONLY the files named here — never a directory scan, never anything under legacy-drafts/. Paths are relative to scripts/backup.",
+  "note": "Explicit active legacy-attestation index. The loader trusts ONLY the files named here — never a directory scan for authorization, never anything under legacy-drafts/. Every path is an untrusted repo-relative POSIX path, confined to its expected active root. Each entry binds the key/attestation/evidence relationship explicitly; the loader cross-checks all bound values and fails closed on any mismatch. The Ed25519 signature is intentionally NOT duplicated here.",
   "keyBundleFile": "legacy-trust/legacy-migration-keys.json",
   "entries": [
     {
       "tag": "0004_knowledge_k1",
+      "keyId": "empera-lma-001",
+      "attestationId": "lma1_0d13d308cc76793c0836ad277467d1fac83bf513384259619dd5407b94193c7f",
+      "migrationIndex": 4,
+      "migrationTag": "0004_knowledge_k1",
       "attestationFile": "legacy-attestations/0004_knowledge_k1.json",
-      "evidenceFile": "legacy-evidence/0004_knowledge_k1.evidence.json"
+      "evidenceFile": "legacy-evidence/0004_knowledge_k1.evidence.json",
+      "expectedEvidenceManifestHash": "80535017ed9088dfe54f2e3b57b73ff96c502a4427fd099d480c07d8589a7252",
+      "expectedPublicKeyFingerprintSha256": "ecd174572f5f80c45c29ff4186270711e3bb0ad8eb8d5cd00648b7c2b58b5803",
+      "allowedEnvironments": ["development", "staging"],
+      "productionAuthorized": false
     }
   ]
 }
