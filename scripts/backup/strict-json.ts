@@ -1,19 +1,20 @@
 /**
  * G-Backup-A Phase-10 hardening — a strict, recursive-descent JSON parser for ACTIVE governance files.
  *
- * Standard `JSON.parse` silently accepts duplicate object keys (last-value-wins), a UTF-8 BOM (in some engines),
- * and — combined with sloppy callers — trailing data. That can diverge human review, signing review, and runtime
- * interpretation. This parser is deliberately strict and rejects, WITHOUT using a regex for structure:
- *   - a UTF-8 BOM (byte-level check)
- *   - invalid UTF-8 (decode + re-encode round-trip check)
- *   - duplicate object keys at ANY nesting depth
- *   - JSON comments (`//`, block) — an unexpected character error
- *   - trailing non-whitespace after the single top-level value
- *   - more than one top-level value (same trailing-data error)
- *   - non-finite numbers (grammar cannot express them; re-checked defensively)
- *   - unescaped control characters inside strings
- * Only JSON whitespace (space, tab, CR, LF) is skipped. A single numeric-token regex is used purely to scan a
- * number literal (tokenization, not duplicate detection).
+ * Rejects (no regex for structure or duplicate detection):
+ *   - a UTF-8 BOM (byte-level) and invalid UTF-8 (decode + re-encode round-trip)
+ *   - duplicate object keys at ANY nesting depth, compared on the DECODED + NFC-normalized key value (so
+ *     `"key"` vs `"key"` and `"é"` vs `"é"` are duplicates — matching how the canonicalizer collapses
+ *     keys)
+ *   - unpaired / invalid UTF-16 surrogate escapes in any string; valid surrogate pairs decode to one code point
+ *   - JSON comments, trailing data / multiple top-level values
+ *   - unescaped control characters in strings
+ *   - numbers that are not exactly representable as an IEEE-754 double (see NUMERIC POLICY below)
+ *
+ * NUMERIC POLICY: integer literals must be safe integers (|n| ≤ Number.MAX_SAFE_INTEGER); any literal that
+ * overflows to a non-finite value is rejected; a NONZERO fractional/exponent literal that underflows to 0 is
+ * rejected; leading-zero forms (`01`) are rejected by the number grammar. All current governance numbers,
+ * including `journalTimestamp` = 1784873208836 (< 2^53), remain accepted. No bigint is introduced here.
  */
 
 export class StrictJsonError extends Error {
@@ -25,6 +26,7 @@ export class StrictJsonError extends Error {
 
 const JSON_WS = new Set<number>([0x20, 0x09, 0x0a, 0x0d]);
 const NUMBER_TOKEN = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/;
+const HEX4 = /^[0-9a-fA-F]{4}$/;
 
 class StrictParser {
   private i = 0;
@@ -63,19 +65,20 @@ class StrictParser {
   private object(): Record<string, unknown> {
     this.i++; // consume {
     const obj: Record<string, unknown> = {};
-    const keys = new Set<string>();
+    const seen = new Set<string>(); // decoded + NFC-normalized keys
     this.skipWs();
     if (this.peek() === '}') return (this.i++, obj);
     for (;;) {
       this.skipWs();
       if (this.peek() !== '"') this.fail('expected a string object key');
-      const k = this.string();
-      if (keys.has(k)) throw new StrictJsonError(`duplicate object key ${JSON.stringify(k)}`);
-      keys.add(k);
+      const key = this.string();
+      const semantic = key.normalize('NFC');
+      if (seen.has(semantic)) throw new StrictJsonError(`duplicate object key (decoded+NFC) ${JSON.stringify(semantic)}`);
+      seen.add(semantic);
       this.skipWs();
       if (this.peek() !== ':') this.fail('expected ":" after object key');
       this.i++;
-      obj[k] = this.value();
+      obj[key] = this.value();
       this.skipWs();
       const c = this.peek();
       if (c === ',') {
@@ -105,6 +108,14 @@ class StrictParser {
     }
   }
 
+  /** Read exactly 4 hex digits starting at this.i; advance past them; return the code unit. */
+  private hex4(): number {
+    const h = this.s.slice(this.i, this.i + 4);
+    if (h.length !== 4 || !HEX4.test(h)) this.fail('invalid \\u escape');
+    this.i += 4;
+    return parseInt(h, 16);
+  }
+
   private string(): string {
     this.i++; // consume opening quote
     let out = '';
@@ -114,25 +125,37 @@ class StrictParser {
       const code = this.s.charCodeAt(this.i);
       if (ch === '"') return (this.i++, out);
       if (ch === '\\') {
-        this.i++;
+        this.i++; // move to escape char
         const e = this.s[this.i];
-        if (e === '"') out += '"';
-        else if (e === '\\') out += '\\';
-        else if (e === '/') out += '/';
-        else if (e === 'b') out += '\b';
-        else if (e === 'f') out += '\f';
-        else if (e === 'n') out += '\n';
-        else if (e === 'r') out += '\r';
-        else if (e === 't') out += '\t';
+        if (e === '"') { out += '"'; this.i++; }
+        else if (e === '\\') { out += '\\'; this.i++; }
+        else if (e === '/') { out += '/'; this.i++; }
+        else if (e === 'b') { out += '\b'; this.i++; }
+        else if (e === 'f') { out += '\f'; this.i++; }
+        else if (e === 'n') { out += '\n'; this.i++; }
+        else if (e === 'r') { out += '\r'; this.i++; }
+        else if (e === 't') { out += '\t'; this.i++; }
         else if (e === 'u') {
-          const hex = this.s.slice(this.i + 1, this.i + 5);
-          if (hex.length !== 4 || !/^[0-9a-fA-F]{4}$/.test(hex)) this.fail('invalid \\u escape');
-          out += String.fromCharCode(parseInt(hex, 16));
-          this.i += 4;
+          this.i++; // move to first hex digit
+          const cu = this.hex4();
+          if (cu >= 0xd800 && cu <= 0xdbff) {
+            // high surrogate — must be immediately followed by a \u low surrogate
+            if (this.s[this.i] === '\\' && this.s[this.i + 1] === 'u') {
+              this.i += 2;
+              const lo = this.hex4();
+              if (lo < 0xdc00 || lo > 0xdfff) this.fail('invalid low surrogate after high surrogate');
+              out += String.fromCharCode(cu, lo);
+            } else {
+              this.fail('unpaired high surrogate');
+            }
+          } else if (cu >= 0xdc00 && cu <= 0xdfff) {
+            this.fail('unpaired low surrogate');
+          } else {
+            out += String.fromCharCode(cu);
+          }
         } else {
           this.fail('invalid escape sequence');
         }
-        this.i++;
       } else if (code < 0x20) {
         this.fail('unescaped control character in string');
       } else {
@@ -145,9 +168,16 @@ class StrictParser {
   private number(): number {
     const m = NUMBER_TOKEN.exec(this.s.slice(this.i));
     if (!m || m[0].length === 0) this.fail('invalid number');
-    this.i += m[0].length;
-    const n = Number(m[0]);
-    if (!Number.isFinite(n)) throw new StrictJsonError('non-finite number');
+    const tok = m[0];
+    this.i += tok.length;
+    const n = Number(tok);
+    if (!Number.isFinite(n)) throw new StrictJsonError('non-finite / overflowing number');
+    const fractional = /[.eE]/.test(tok);
+    if (!fractional) {
+      if (!Number.isSafeInteger(n)) throw new StrictJsonError('integer outside the IEEE-754 safe range');
+    } else if (n === 0 && /[1-9]/.test(tok)) {
+      throw new StrictJsonError('nonzero number underflowed to zero');
+    }
     return n;
   }
 }

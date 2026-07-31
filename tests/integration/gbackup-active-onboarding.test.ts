@@ -1,4 +1,5 @@
 import { execSync } from 'node:child_process';
+import { generateKeyPairSync } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -8,6 +9,7 @@ import { buildSourceManifestFromGit } from '../../scripts/backup/source-manifest
 import { classifyMigrationState, detectMigrationState } from '../../scripts/backup/migration-detector';
 import {
   ActiveBundleError,
+  computeActiveIndexSemanticDigest,
   isNonAuthoritativeDraftPath,
   loadActiveLegacyBundle,
   validateActiveRelPath,
@@ -275,6 +277,159 @@ describe('Phase 10 hardened — draft exclusion + repository hygiene', () => {
     const migrate = readFileSync(join('scripts', 'migrate.ts'), 'utf8');
     expect(migrate.includes('legacy-active-bundle')).toBe(false);
     expect(migrate.includes('preMigrationBackup')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('Phase 10 hardened — strict JSON: semantic duplicate keys + surrogates + numbers', () => {
+  it('literal and \\u-escaped equivalent key is a duplicate', () => expect(() => parseStrictJsonText('{"key":1,"\\u006bey":2}')).toThrow(StrictJsonError));
+  it('two different escape forms decoding to the same key rejected', () => expect(() => parseStrictJsonText('{"\\u0041":1,"A":2}')).toThrow(StrictJsonError));
+  it('NFC-equivalent top-level keys rejected (é vs e+combining)', () => expect(() => parseStrictJsonText('{"\\u00e9":1,"e\\u0301":2}')).toThrow(StrictJsonError));
+  it('nested NFC-equivalent duplicate keys rejected', () => expect(() => parseStrictJsonText('{"o":{"\\u00e9":1,"e\\u0301":2}}')).toThrow(StrictJsonError));
+  it('valid surrogate pair decodes (accepted)', () => expect(parseStrictJsonText('{"k":"\\uD83D\\uDE00"}')).toEqual({ k: '\u{1F600}' }));
+  it('unpaired high surrogate rejected', () => expect(() => parseStrictJsonText('{"k":"\\uD83D"}')).toThrow(StrictJsonError));
+  it('unpaired low surrogate rejected', () => expect(() => parseStrictJsonText('{"k":"\\uDE00x"}')).toThrow(StrictJsonError));
+
+  it('max/min safe integer accepted; journalTimestamp accepted', () => {
+    expect(parseStrictJsonText(`{"n":${Number.MAX_SAFE_INTEGER}}`)).toEqual({ n: Number.MAX_SAFE_INTEGER });
+    expect(parseStrictJsonText(`{"n":${Number.MIN_SAFE_INTEGER}}`)).toEqual({ n: Number.MIN_SAFE_INTEGER });
+    expect(parseStrictJsonText('{"t":1784873208836}')).toEqual({ t: 1784873208836 });
+  });
+  it('unsafe positive / negative integers rejected', () => {
+    expect(() => parseStrictJsonText('{"n":9007199254740993}')).toThrow(StrictJsonError);
+    expect(() => parseStrictJsonText('{"n":-9007199254740993}')).toThrow(StrictJsonError);
+  });
+  it('overflow to non-finite rejected', () => expect(() => parseStrictJsonText('{"n":1e400}')).toThrow(StrictJsonError));
+  it('nonzero underflow to zero rejected', () => expect(() => parseStrictJsonText('{"n":1e-400}')).toThrow(StrictJsonError));
+  it('invalid leading zero rejected', () => expect(() => parseStrictJsonText('{"n":01}')).toThrow(StrictJsonError));
+});
+
+// ---------------------------------------------------------------------------
+let junctionCapable = false;
+try {
+  const d = mkdtempSync(join(tmpdir(), 'gb-jct-'));
+  mkdirSync(join(d, 'target'));
+  symlinkSync(join(d, 'target'), join(d, 'jct'), 'junction');
+  junctionCapable = true;
+  cleanup.push(d);
+} catch { junctionCapable = false; }
+
+describe('Phase 10 hardened — real link/junction escape rejection', () => {
+  it.runIf(junctionCapable)('parent junction escaping the active root rejected', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'gb-out-')); cleanup.push(outside);
+    mkdirSync(join(outside, 'legacy-evidence'), { recursive: true });
+    writeFileSync(join(outside, 'legacy-evidence', '0004_knowledge_k1.evidence.json'), realBuf(REAL.ev));
+    const root = fixture();
+    const evDir = join(root, 'scripts', 'backup', 'legacy-evidence');
+    rmSync(evDir, { recursive: true });
+    symlinkSync(join(outside, 'legacy-evidence'), evDir, 'junction');
+    expect(() => loadActiveLegacyBundle(root)).toThrow(ActiveBundleError);
+  });
+  it.runIf(junctionCapable)('junction to a repo path OUTSIDE the active root rejected', () => {
+    const root = fixture();
+    const evDir = join(root, 'scripts', 'backup', 'legacy-evidence');
+    rmSync(evDir, { recursive: true });
+    symlinkSync(join(root, 'scripts', 'backup', 'legacy-trust'), evDir, 'junction'); // points at a different active root
+    expect(() => loadActiveLegacyBundle(root)).toThrow(ActiveBundleError);
+  });
+  it.runIf(junctionCapable)('broken junction rejected', () => {
+    const target = mkdtempSync(join(tmpdir(), 'gb-brk-'));
+    mkdirSync(join(target, 'legacy-evidence'), { recursive: true });
+    const root = fixture();
+    const evDir = join(root, 'scripts', 'backup', 'legacy-evidence');
+    rmSync(evDir, { recursive: true });
+    symlinkSync(join(target, 'legacy-evidence'), evDir, 'junction');
+    rmSync(target, { recursive: true, force: true }); // break it
+    expect(() => loadActiveLegacyBundle(root)).toThrow(ActiveBundleError);
+  });
+  it.runIf(symlinkCapable)('final-file symlink rejected', () => {
+    const root = fixture();
+    const attAbs = join(root, 'scripts', 'backup', REAL.att);
+    rmSync(attAbs); symlinkSync(join(process.cwd(), 'scripts', 'backup', REAL.att), attAbs);
+    expect(() => loadActiveLegacyBundle(root)).toThrow(ActiveBundleError);
+  });
+  it.runIf(symlinkCapable)('parent-directory symlink rejected', () => {
+    const root = fixture();
+    const evDir = join(root, 'scripts', 'backup', 'legacy-evidence');
+    rmSync(evDir, { recursive: true });
+    symlinkSync(join(process.cwd(), 'scripts', 'backup', 'legacy-evidence'), evDir);
+    expect(() => loadActiveLegacyBundle(root)).toThrow(ActiveBundleError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('Phase 10 hardened — active-directory allowlist (only indexed + README.md)', () => {
+  it('exact README.md accepted', () => {
+    expect(() => loadActiveLegacyBundle(fixture((c) => c.addFile('legacy-trust/README.md', '# notes')))).not.toThrow();
+  });
+  const reject: [string, string][] = [
+    ['.json.bak', 'legacy-attestations/0004_knowledge_k1.json.bak'],
+    ['.json.old', 'legacy-evidence/0004_knowledge_k1.evidence.json.old'],
+    ['hidden file', 'legacy-trust/.secret'],
+    ['editor swap file', 'legacy-attestations/.0004.json.swp'],
+    ['shadow PEM', 'legacy-trust/shadow.pem'],
+    ['unindexed YAML', 'legacy-evidence/policy.yaml'],
+    ['arbitrary text', 'legacy-evidence/notes.txt'],
+  ];
+  for (const [label, rel] of reject) {
+    it(`rejects an unindexed ${label}`, () => {
+      expect(() => loadActiveLegacyBundle(fixture((c) => c.addFile(rel, 'x')))).toThrow(ActiveBundleError);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+describe('Phase 10 hardened — unreferenced trust-key rejection', () => {
+  const realKeys = JSON.parse(realBuf(REAL.keys).toString('utf8')) as { keys: Record<string, unknown>[] };
+  const realPem = realKeys.keys[0]!.publicKeyPem as string;
+  const genPem = () => generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const keysWith = (extra: Record<string, unknown>) => JSON.stringify({ ...realKeys, keys: [...realKeys.keys, extra] }, null, 2);
+
+  it('exact current single key accepted', () => expect(() => loadActiveLegacyBundle(fixture())).not.toThrow());
+  it('additional ACTIVE key rejected', () => {
+    const root = fixture((c) => c.writeRaw(REAL.keys, keysWith({ keyId: 'extra-key', algorithm: 'ed25519', publicKeyPem: genPem(), purpose: 'legacy_migration_attestation', status: 'active' })));
+    expect(() => loadActiveLegacyBundle(root)).toThrow(ActiveBundleError);
+  });
+  it('additional REVOKED key rejected', () => {
+    const root = fixture((c) => c.writeRaw(REAL.keys, keysWith({ keyId: 'extra-key', algorithm: 'ed25519', publicKeyPem: genPem(), purpose: 'legacy_migration_attestation', status: 'revoked' })));
+    expect(() => loadActiveLegacyBundle(root)).toThrow(ActiveBundleError);
+  });
+  it('same public key under another key ID rejected', () => {
+    const root = fixture((c) => c.writeRaw(REAL.keys, keysWith({ keyId: 'clone-id', algorithm: 'ed25519', publicKeyPem: realPem, purpose: 'legacy_migration_attestation', status: 'active' })));
+    expect(() => loadActiveLegacyBundle(root)).toThrow(ActiveBundleError);
+  });
+  it('wrong-purpose key rejected', () => {
+    const root = fixture((c) => c.writeRaw(REAL.keys, keysWith({ keyId: 'extra-key', algorithm: 'ed25519', publicKeyPem: genPem(), purpose: 'receipt_signing', status: 'active' })));
+    expect(() => loadActiveLegacyBundle(root)).toThrow(ActiveBundleError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('Phase 10 hardened — active-index version + self-integrity digest', () => {
+  const realIndex = JSON.parse(realBuf(REAL.index).toString('utf8')) as { bundleVersion: string; keyBundleFile: string; entries: Record<string, unknown>[]; note?: string };
+  it('supported index version accepted', () => expect(() => loadActiveLegacyBundle(fixture())).not.toThrow());
+  it('missing version rejected', () => {
+    const root = fixture((c) => { delete (c.index as Record<string, unknown>).bundleVersion; });
+    expect(() => loadActiveLegacyBundle(root)).toThrow();
+  });
+  it('unsupported version rejected', () => {
+    const root = fixture((c) => { c.index.bundleVersion = '2'; });
+    expect(() => loadActiveLegacyBundle(root)).toThrow();
+  });
+  it('index diagnostics are stable across loads', () => {
+    const a = loadActiveLegacyBundle(process.cwd());
+    const b = loadActiveLegacyBundle(process.cwd());
+    const da = a.diagnostics.files.find((f) => f.path.endsWith('active-index.json'))!;
+    const db = b.diagnostics.files.find((f) => f.path.endsWith('active-index.json'))!;
+    expect(da.semanticDigest).toBe(db.semanticDigest);
+    expect(da.rawSha256).toBe(db.rawSha256);
+  });
+  it('semantic digest changes iff BINDING metadata changes (note is excluded)', () => {
+    const base = computeActiveIndexSemanticDigest(realIndex);
+    const withNote = computeActiveIndexSemanticDigest({ ...realIndex, note: 'a totally different note' });
+    const changedBinding = computeActiveIndexSemanticDigest({ ...realIndex, entries: realIndex.entries.map((e) => ({ ...e, migrationIndex: 99 })) });
+    expect(withNote).toBe(base);
+    expect(changedBinding).not.toBe(base);
   });
 });
 

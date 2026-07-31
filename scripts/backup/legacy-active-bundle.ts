@@ -2,7 +2,7 @@ import { createHash, verify as cryptoVerify } from 'node:crypto';
 import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { z } from 'zod';
-import { normalizeRepoPath } from '@/lib/canonical';
+import { canonicalizeV1, normalizeRepoPath } from '@/lib/canonical';
 import {
   type LegacyEnvironment,
   type LegacyEvidenceManifest,
@@ -147,6 +147,14 @@ const activeIndexSchema = z
   })
   .strict();
 
+/** Deterministic semantic digest of the active index over its BINDING metadata (note excluded). */
+export function computeActiveIndexSemanticDigest(index: { bundleVersion: string; keyBundleFile: string; entries: unknown[]; note?: string }): string {
+  return createHash('sha256')
+    .update('gbackup-active-index/v1\n', 'utf8')
+    .update(canonicalizeV1({ bundleVersion: index.bundleVersion, keyBundleFile: index.keyBundleFile, entries: index.entries }), 'utf8')
+    .digest('hex');
+}
+
 export interface ActiveFileDiagnostic {
   readonly path: string;
   readonly rawByteLength: number;
@@ -180,14 +188,24 @@ function sha256(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex');
 }
 
-/** Reject any UNREFERENCED *.json in an active root (fail-closed ambiguity policy). Non-JSON (README) ignored. */
-function assertNoUnreferencedJson(baseAbs: string, root: string, referencedBasenames: Set<string>): void {
+/** Exact non-governance filenames permitted (documentation only) in an active root. */
+const ALLOWED_DOC_FILES = new Set<string>(['README.md']);
+
+/**
+ * Fail-closed directory policy: an active root may contain ONLY explicitly-referenced governance files plus an
+ * exact documentation allowlist. Every other entry — a `.json.bak`/`.json.old`, a hidden or swap file, an
+ * alternate extension, a shadow PEM, an unindexed text/YAML file, or ANY subdirectory — is rejected.
+ */
+function assertActiveDirClean(baseAbs: string, root: string, referencedBasenames: Set<string>): void {
   const dir = join(baseAbs, root);
-  for (const name of readdirSync(dir)) {
-    if (!name.toLowerCase().endsWith('.json')) continue;
-    if (!referencedBasenames.has(name)) {
-      throw new ActiveBundleError(`unreferenced governance JSON in ${root}/: ${name} (every active JSON must be indexed)`);
+  for (const dirent of readdirSync(dir, { withFileTypes: true })) {
+    const name = dirent.name;
+    if (referencedBasenames.has(name)) {
+      if (!dirent.isFile()) throw new ActiveBundleError(`indexed active entry ${root}/${name} is not a regular file`);
+      continue;
     }
+    if (dirent.isFile() && ALLOWED_DOC_FILES.has(name)) continue;
+    throw new ActiveBundleError(`disallowed entry in ${root}/: ${name} (only indexed governance files and ${[...ALLOWED_DOC_FILES].join(', ')} are permitted)`);
   }
 }
 
@@ -199,10 +217,13 @@ export function loadActiveLegacyBundle(repoRoot: string = process.cwd()): Active
   const baseAbs = join(repoRoot, LEGACY_ACTIVE_BASE);
   const files: ActiveFileDiagnostic[] = [];
 
-  // 1. Active index (validated path + strict parse + schema).
+  // 1. Active index (validated path + strict parse + schema). The version is `bundleVersion` (z.literal('1') —
+  // a missing/unsupported version is rejected by the schema). Its canonical semantic digest is over the binding
+  // metadata (note excluded), so it changes iff a bound value changes.
   const idxRead = readGovernanceFile(baseAbs, ROOT_ATTESTATIONS, ACTIVE_INDEX_REL);
   const index = activeIndexSchema.parse(idxRead.value);
-  files.push({ path: `scripts/backup/${idxRead.norm}`, rawByteLength: idxRead.buf.length, rawSha256: sha256(idxRead.buf), schema: `active-index/${index.bundleVersion}` });
+  const indexSemanticDigest = computeActiveIndexSemanticDigest(index);
+  files.push({ path: `scripts/backup/${idxRead.norm}`, rawByteLength: idxRead.buf.length, rawSha256: sha256(idxRead.buf), schema: `active-index/${index.bundleVersion}`, semanticDigest: indexSemanticDigest });
 
   // 2. Trust bundle (confined to legacy-trust).
   const kbRead = readGovernanceFile(baseAbs, ROOT_TRUST, index.keyBundleFile);
@@ -231,6 +252,7 @@ export function loadActiveLegacyBundle(repoRoot: string = process.cwd()): Active
   const referencedAttestationFiles = new Set<string>([basename(ACTIVE_INDEX_REL)]);
   const referencedEvidenceFiles = new Set<string>();
   const referencedTrustFiles = new Set<string>([basename(index.keyBundleFile)]);
+  const referencedKeyIds = new Set<string>(index.entries.map((e) => e.keyId));
 
   for (const entry of index.entries) {
     if (seenTags.has(entry.tag)) throw new ActiveBundleError(`duplicate active tag ${entry.tag}`);
@@ -302,10 +324,20 @@ export function loadActiveLegacyBundle(repoRoot: string = process.cwd()): Active
   const bundleValid = validateAttestationBundle(rawAttestations);
   if (!bundleValid.ok) throw new ActiveBundleError(`attestation bundle rejected: ${bundleValid.reason}`);
 
-  // Ambiguity policy: no UNREFERENCED governance JSON in any active root.
-  assertNoUnreferencedJson(baseAbs, ROOT_TRUST, referencedTrustFiles);
-  assertNoUnreferencedJson(baseAbs, ROOT_ATTESTATIONS, referencedAttestationFiles);
-  assertNoUnreferencedJson(baseAbs, ROOT_EVIDENCE, referencedEvidenceFiles);
+  // Every trusted key (active OR revoked) must be referenced by an active index entry. An unreferenced active,
+  // revoked, replacement, receipt-purpose (rejected earlier by loadTrustBundle), or same-material-different-id key
+  // fails closed — "the extra key is unused" is not a safety argument.
+  for (const keyId of store.keyring.keys()) {
+    if (!referencedKeyIds.has(keyId)) throw new ActiveBundleError(`trust bundle contains an UNREFERENCED active key: ${keyId}`);
+  }
+  for (const keyId of store.revoked) {
+    if (!referencedKeyIds.has(keyId)) throw new ActiveBundleError(`trust bundle contains an UNREFERENCED revoked key: ${keyId}`);
+  }
+
+  // Ambiguity policy: only indexed governance files + an exact doc allowlist may exist in each active root.
+  assertActiveDirClean(baseAbs, ROOT_TRUST, referencedTrustFiles);
+  assertActiveDirClean(baseAbs, ROOT_ATTESTATIONS, referencedAttestationFiles);
+  assertActiveDirClean(baseAbs, ROOT_EVIDENCE, referencedEvidenceFiles);
 
   return { store, attestations, rawAttestations, evidenceManifests, activeTags, keyFingerprints, signingFacts, diagnostics: { files, keys: keyDiag } };
 }
