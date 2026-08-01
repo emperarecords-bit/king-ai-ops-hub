@@ -17,7 +17,7 @@ if (!keyLoad.ok) throw new Error(keyLoad.reason);
 
 const ev = normalizeFlyVolumeSnapshot(
   { id: 'vs_abc123', status: 'created', volumeId: 'vol_4m3kmknl059qpd6v', databaseApp: 'king-ai-hub-db-staging', createdAt: '2026-08-01T11:50:00.000Z', retentionDays: 7, storedSizeBytes: 130000000 },
-  { snapshotRequestedAt: '2026-08-01T11:49:58.000Z', providerObservedAt: '2026-08-01T11:50:05.000Z', snapshotDiscoveryMethod: 'create-response-id' },
+  { snapshotRequestedAt: '2026-08-01T11:49:58.000Z', providerObservedAt: '2026-08-01T11:50:05.000Z', snapshotDiscoveryMethod: 'create-response-id', discoveryEvidence: { createResponseSnapshotId: 'vs_abc123', listedSnapshotId: 'vs_abc123' } },
 );
 function baseSigned(): SignedReceiptV2 {
   const e = ev.evidence;
@@ -26,6 +26,7 @@ function baseSigned(): SignedReceiptV2 {
     environment: 'staging', targetApplication: 'king-ai-ops-hub-staging', databaseApp: e.databaseApp,
     sourceVolumeId: e.sourceVolumeId, databaseSystemIdentifier: '7300338420798239475',
     snapshotProvider: 'fly-volumes', providerSnapshotStatus: e.providerSnapshotStatus, canonicalSnapshotStatus: 'complete', snapshotDiscoveryMethod: 'create-response-id',
+    snapshotDiscoveryEvidence: { createResponseSnapshotId: 'vs_abc123', listedSnapshotId: 'vs_abc123' },
     snapshotId: e.snapshotId, snapshotRequestedAt: e.snapshotRequestedAt, snapshotCreatedAt: e.snapshotCreatedAt, providerObservedAt: e.providerObservedAt,
     retentionDays: 7, storedSizeBytes: 130000000, normalizedProviderEvidenceDigest: ev.normalizedProviderEvidenceDigest, providerAdapterVersion: 'fly-volumes.v1',
     sourceCommit: 'd2805ffab69bb83926a50d0422d65823b521138f', targetImageRef: 'registry.fly.io/king-ai-ops-hub-staging:deployment-01ABC',
@@ -83,7 +84,7 @@ describe('G-Backup-B1 transport (injected fake; no network)', () => {
     snapshotProvider: 'fly-volumes', providerAdapterVersion: 'fly-volumes.v1', minRetentionDays: 7, maxSnapshotAgeMs: 30 * 60 * 1000,
     sourceCommit: 'd2805ffab69bb83926a50d0422d65823b521138f', targetImageRef: 'registry.fly.io/king-ai-ops-hub-staging:deployment-01ABC',
     deploymentNonce: NONCE, portableMigrationSetHash: 'b'.repeat(64), runtimeMigrationSetHash: 'c'.repeat(64),
-    pendingMigrations: receipt.pendingMigrations, verificationTime: new Date('2026-08-01T11:50:10.000Z'), migrationStartedAt: new Date('2026-08-01T11:50:20.000Z'),
+    pendingMigrations: receipt.pendingMigrations, migrationStartedAt: new Date('2026-08-01T11:50:20.000Z'),
     supportedSchemaVersions: new Set(['2']), supportedAlgorithms: new Set(['ed25519']), keyStore: keyLoad.store,
   });
   const fetcher = (r: Partial<{ status: number; bytes: Buffer; contentEncoding: string | null; redirected: boolean; throwCode: string }>, counter?: { n: number }): ReceiptFetcher => ({

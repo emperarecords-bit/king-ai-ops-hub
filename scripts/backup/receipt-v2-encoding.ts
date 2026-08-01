@@ -50,3 +50,27 @@ export function isCanonicalUint64Decimal(s: unknown): s is string {
     return false;
   }
 }
+
+/** As {@link isCanonicalUint64Decimal} but strictly positive (1 ≤ n ≤ 2^64-1) — for the PostgreSQL system id. */
+export function isNonZeroCanonicalUint64Decimal(s: unknown): s is string {
+  if (!isCanonicalUint64Decimal(s)) return false;
+  try {
+    return BigInt(s) >= 1n;
+  } catch {
+    return false;
+  }
+}
+
+const SAFE_PATH_SEGMENT = /^[A-Za-z0-9._-]+$/;
+
+/** Canonical repo-relative POSIX path: safe segments, no absolute/backslash/`.`/`..`/repeated-sep/control, NFC. */
+export function isCanonicalRepoPath(p: unknown): p is string {
+  if (typeof p !== 'string' || p.length === 0 || p.length > 256) return false;
+  if (p.normalize('NFC') !== p) return false; // reject non-NFC
+  if (p.includes('\\') || p.startsWith('/')) return false;
+  for (const seg of p.split('/')) {
+    if (seg.length === 0 || seg === '.' || seg === '..') return false;
+    if (!SAFE_PATH_SEGMENT.test(seg)) return false;
+  }
+  return true;
+}

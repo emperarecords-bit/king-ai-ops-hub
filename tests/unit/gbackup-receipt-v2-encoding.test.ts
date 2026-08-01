@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   isCanonicalDeploymentNonce,
   isCanonicalEd25519SignatureB64Url,
+  isCanonicalRepoPath,
   isCanonicalUint64Decimal,
   isCanonicalUtcTimestamp,
+  isNonZeroCanonicalUint64Decimal,
 } from '../../scripts/backup/receipt-v2-encoding';
 
 describe('G-Backup-B1 canonical UTC timestamp', () => {
@@ -60,5 +62,35 @@ describe('G-Backup-B1 canonical uint64 decimal (PostgreSQL system identifier)', 
     expect(isCanonicalUint64Decimal('-1')).toBe(false);
     expect(isCanonicalUint64Decimal('1.0')).toBe(false);
     expect(isCanonicalUint64Decimal('1e3')).toBe(false);
+  });
+});
+
+describe('G-Backup-B1 nonzero canonical uint64 (PostgreSQL system id must be > 0)', () => {
+  it('accepts 1 and 2^64-1; rejects 0 and non-canonical forms', () => {
+    expect(isNonZeroCanonicalUint64Decimal('1')).toBe(true);
+    expect(isNonZeroCanonicalUint64Decimal('7300338420798239475')).toBe(true);
+    expect(isNonZeroCanonicalUint64Decimal('18446744073709551615')).toBe(true);
+    expect(isNonZeroCanonicalUint64Decimal('0')).toBe(false); // zero is not a valid system id
+    expect(isNonZeroCanonicalUint64Decimal('18446744073709551616')).toBe(false);
+    expect(isNonZeroCanonicalUint64Decimal('01')).toBe(false);
+  });
+});
+
+describe('G-Backup-B1 canonical repo path (NFC POSIX, safe segments)', () => {
+  it('accepts a canonical repo-relative path', () => {
+    expect(isCanonicalRepoPath('drizzle/0054_example.sql')).toBe(true);
+    expect(isCanonicalRepoPath('a.sql')).toBe(true);
+  });
+  it('rejects absolute / backslash / traversal / empty-segment / control / non-NFC / overlong', () => {
+    expect(isCanonicalRepoPath('/drizzle/x.sql')).toBe(false);
+    expect(isCanonicalRepoPath('drizzle\\x.sql')).toBe(false);
+    expect(isCanonicalRepoPath('drizzle/../secret')).toBe(false);
+    expect(isCanonicalRepoPath('drizzle//x.sql')).toBe(false);
+    expect(isCanonicalRepoPath('drizzle/./x.sql')).toBe(false);
+    expect(isCanonicalRepoPath('drizzle/x .sql')).toBe(false); // space is not a safe segment char
+    expect(isCanonicalRepoPath('café/x.sql')).toBe(false); // non-ASCII segment fails the safe-segment class
+    expect(isCanonicalRepoPath('é.sql')).toBe(false); // decomposed (non-NFC) input
+    expect(isCanonicalRepoPath('')).toBe(false);
+    expect(isCanonicalRepoPath('a/'.repeat(200) + 'x')).toBe(false); // > 256 chars
   });
 });
