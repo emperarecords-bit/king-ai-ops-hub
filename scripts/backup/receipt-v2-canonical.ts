@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { canonicalizeV1 } from '@/lib/canonical';
 import { type SignedReceiptV2 } from './receipt-v2-schema';
+import { isCanonicalDeploymentNonce } from './receipt-v2-encoding';
 
 /**
  * G-Backup-B1 — v2 canonicalization, deterministic receipt-id derivation, and signing bytes. Domain-separated and
@@ -39,8 +40,7 @@ export function receiptV2CanonicalHash(signed: SignedReceiptV2): string {
   return createHash('sha256').update(RECEIPT_V2_SIGN_DOMAIN, 'utf8').update(canonicalizeV1(signed), 'utf8').digest('hex');
 }
 
-/** 128-bit deployment nonce: unpadded base64url (22 chars) OR lowercase hex (32 chars). Exact length only. */
-const NONCE_RE = /^(?:[0-9a-f]{32}|[A-Za-z0-9_-]{22})$/;
+/** 128-bit deployment nonce — CANONICAL base64url(22) or lowercase hex(32) (see receipt-v2-encoding). */
 export function isValidDeploymentNonce(s: unknown): s is string {
-  return typeof s === 'string' && NONCE_RE.test(s);
+  return isCanonicalDeploymentNonce(s);
 }

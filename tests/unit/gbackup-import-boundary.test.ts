@@ -56,6 +56,9 @@ describe('G-Backup-A import boundary', () => {
         'receipt-v2-verify.ts',
         'receipt-v2-locator.ts',
         'receipt-transport.ts',
+        'receipt-v2-encoding.ts',
+        'receipt-key-bundle.ts',
+        'receipt-v2-controller.ts',
       ]),
     );
   });

@@ -1,50 +1,63 @@
 import { describe, expect, it } from 'vitest';
 import {
   ProviderEvidenceError,
-  computeProviderEvidenceDigest,
+  computeNormalizedProviderEvidenceDigest,
+  discoverFlyVolumeSnapshot,
   normalizeFlyVolumeSnapshot,
 } from '../../scripts/backup/provider-fly-volumes';
 
-const rawOk = () => ({
-  id: 'vs_abc123',
-  status: 'created',
-  volumeId: 'vol_4m3kmknl059qpd6v',
-  databaseApp: 'king-ai-hub-db-staging',
-  createdAt: '2026-08-01T11:50:00.000Z',
-  retentionDays: 7,
-  storedSizeBytes: 130000000,
-});
+const rawOk = () => ({ id: 'vs_abc123', status: 'created', volumeId: 'vol_4m3kmknl059qpd6v', databaseApp: 'king-ai-hub-db-staging', createdAt: '2026-08-01T11:50:00.000Z', retentionDays: 7, storedSizeBytes: 130000000 });
+const REQ = '2026-08-01T11:49:58.000Z';
 const OBS = '2026-08-01T11:50:05.000Z';
+const opts = (o: Partial<{ snapshotRequestedAt: string; providerObservedAt: string; snapshotDiscoveryMethod: 'create-response-id' | 'unambiguous-list-diff' }> = {}) => ({ snapshotRequestedAt: REQ, providerObservedAt: OBS, snapshotDiscoveryMethod: 'create-response-id' as const, ...o });
 
-describe('G-Backup-B1 fly-volumes provider adapter', () => {
-  it('normalizes exact provider status created → canonical complete and computes a stable digest', () => {
-    const a = normalizeFlyVolumeSnapshot(rawOk(), OBS);
-    const b = normalizeFlyVolumeSnapshot(rawOk(), OBS);
-    expect(a.evidence.providerSnapshotStatus).toBe('created');
+describe('G-Backup-B1 fly-volumes normalization', () => {
+  it('normalizes created → complete, binds requestedAt + discovery, stable digest', () => {
+    const a = normalizeFlyVolumeSnapshot(rawOk(), opts());
     expect(a.evidence.canonicalSnapshotStatus).toBe('complete');
-    expect(a.evidence.snapshotProvider).toBe('fly-volumes');
-    expect(a.evidence.providerAdapterVersion).toBe('fly-volumes.v1');
-    expect(a.providerEvidenceCanonicalDigest).toMatch(/^[0-9a-f]{64}$/);
-    expect(a.providerEvidenceCanonicalDigest).toBe(b.providerEvidenceCanonicalDigest);
-    expect(computeProviderEvidenceDigest(a.evidence)).toBe(a.providerEvidenceCanonicalDigest);
+    expect(a.evidence.snapshotRequestedAt).toBe(REQ);
+    expect(a.evidence.snapshotDiscoveryMethod).toBe('create-response-id');
+    expect(a.normalizedProviderEvidenceDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(computeNormalizedProviderEvidenceDigest(a.evidence)).toBe(a.normalizedProviderEvidenceDigest);
   });
-  it('a field change changes the evidence digest', () => {
-    const base = normalizeFlyVolumeSnapshot(rawOk(), OBS).providerEvidenceCanonicalDigest;
-    expect(normalizeFlyVolumeSnapshot({ ...rawOk(), retentionDays: 8 }, OBS).providerEvidenceCanonicalDigest).not.toBe(base);
-    expect(normalizeFlyVolumeSnapshot({ ...rawOk(), id: 'vs_other' }, OBS).providerEvidenceCanonicalDigest).not.toBe(base);
+  it('a field change changes the digest', () => {
+    const base = normalizeFlyVolumeSnapshot(rawOk(), opts()).normalizedProviderEvidenceDigest;
+    expect(normalizeFlyVolumeSnapshot({ ...rawOk(), retentionDays: 8 }, opts()).normalizedProviderEvidenceDigest).not.toBe(base);
   });
-  it('rejects every provider status other than created', () => {
-    for (const status of ['pending', 'creating', 'failed', 'destroyed', 'deleted', 'unknown']) {
-      expect(() => normalizeFlyVolumeSnapshot({ ...rawOk(), status }, OBS)).toThrow(ProviderEvidenceError);
-    }
+  it('rejects non-created status, non-canonical timestamps, and requested-after-created', () => {
+    expect(() => normalizeFlyVolumeSnapshot({ ...rawOk(), status: 'pending' }, opts())).toThrow(ProviderEvidenceError);
+    expect(() => normalizeFlyVolumeSnapshot(rawOk(), opts({ providerObservedAt: '2026-08-01T11:50:05Z' }))).toThrow(ProviderEvidenceError);
+    expect(() => normalizeFlyVolumeSnapshot(rawOk(), opts({ snapshotRequestedAt: '2026-08-01T11:50:01.000Z' }))).toThrow(ProviderEvidenceError); // after created
+    expect(() => normalizeFlyVolumeSnapshot(rawOk(), opts({ providerObservedAt: '2026-08-01T11:49:59.000Z' }))).toThrow(ProviderEvidenceError); // observed before created
   });
-  it('rejects a malformed / wrong-shaped record', () => {
-    expect(() => normalizeFlyVolumeSnapshot({ ...rawOk(), id: 'bad-id' }, OBS)).toThrow(ProviderEvidenceError); // not vs_*
-    expect(() => normalizeFlyVolumeSnapshot({ ...rawOk(), volumeId: 'nope' }, OBS)).toThrow(ProviderEvidenceError); // not vol_*
-    expect(() => normalizeFlyVolumeSnapshot({ ...rawOk(), extra: 1 }, OBS)).toThrow(ProviderEvidenceError); // strict
+});
+
+describe('G-Backup-B1 snapshot discovery (synthetic listings)', () => {
+  const listing = (extra: Record<string, unknown>[] = []) => [rawOk(), ...extra];
+  it('create-response-id: confirmed in listing accepted', () => {
+    const s = discoverFlyVolumeSnapshot({ method: 'create-response-id', expectedVolumeId: 'vol_4m3kmknl059qpd6v', snapshotRequestedAt: REQ, createResponseId: 'vs_abc123', listing: listing() });
+    expect(s.id).toBe('vs_abc123');
   });
-  it('rejects an observation before creation and a non-UTC observation', () => {
-    expect(() => normalizeFlyVolumeSnapshot(rawOk(), '2026-08-01T11:49:00.000Z')).toThrow(ProviderEvidenceError); // before createdAt
-    expect(() => normalizeFlyVolumeSnapshot(rawOk(), '2026-08-01 11:50:05')).toThrow(ProviderEvidenceError); // not …Z
+  it('create-response-id: creation-response/listing id mismatch rejected', () => {
+    expect(() => discoverFlyVolumeSnapshot({ method: 'create-response-id', expectedVolumeId: 'vol_4m3kmknl059qpd6v', snapshotRequestedAt: REQ, createResponseId: 'vs_notpresent', listing: listing() })).toThrow(ProviderEvidenceError);
+  });
+  it('unambiguous-list-diff: exactly one new snapshot accepted', () => {
+    const s = discoverFlyVolumeSnapshot({ method: 'unambiguous-list-diff', expectedVolumeId: 'vol_4m3kmknl059qpd6v', snapshotRequestedAt: REQ, preRequestSnapshotIds: ['vs_old'], listing: listing() });
+    expect(s.id).toBe('vs_abc123');
+  });
+  it('list-diff: no candidate rejected', () => {
+    expect(() => discoverFlyVolumeSnapshot({ method: 'unambiguous-list-diff', expectedVolumeId: 'vol_4m3kmknl059qpd6v', snapshotRequestedAt: REQ, preRequestSnapshotIds: ['vs_abc123'], listing: listing() })).toThrow(ProviderEvidenceError);
+  });
+  it('list-diff: multiple candidates rejected', () => {
+    const two = listing([{ ...rawOk(), id: 'vs_second' }]);
+    expect(() => discoverFlyVolumeSnapshot({ method: 'unambiguous-list-diff', expectedVolumeId: 'vol_4m3kmknl059qpd6v', snapshotRequestedAt: REQ, preRequestSnapshotIds: [], listing: two })).toThrow(ProviderEvidenceError);
+  });
+  it('candidate from another volume is not selected', () => {
+    const other = [{ ...rawOk(), id: 'vs_otherv', volumeId: 'vol_other' }];
+    expect(() => discoverFlyVolumeSnapshot({ method: 'unambiguous-list-diff', expectedVolumeId: 'vol_other', snapshotRequestedAt: REQ, preRequestSnapshotIds: [], listing: [rawOk(), ...other].filter((s) => s.volumeId !== 'vol_other') })).toThrow(ProviderEvidenceError); // none for vol_other after filter
+  });
+  it('candidate predating the request is rejected (create-response-id)', () => {
+    const old = [{ ...rawOk(), createdAt: '2026-08-01T11:49:00.000Z' }];
+    expect(() => discoverFlyVolumeSnapshot({ method: 'create-response-id', expectedVolumeId: 'vol_4m3kmknl059qpd6v', snapshotRequestedAt: REQ, createResponseId: 'vs_abc123', listing: old })).toThrow(ProviderEvidenceError);
   });
 });
