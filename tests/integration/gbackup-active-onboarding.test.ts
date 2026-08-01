@@ -258,7 +258,7 @@ describe('Phase 10 hardened — draft exclusion + repository hygiene', () => {
   it('no private-key PEM in tracked non-test files; data files carry only PUBLIC keys', () => {
     const marker = ['PRIVATE', 'KEY' + '-'.repeat(5)].join(' ');
     let out = '';
-    try { out = execSync(`git grep -lF ${JSON.stringify(marker)} -- . ':(exclude)tests/'`, { encoding: 'utf8' }); } catch { out = ''; }
+    try { out = execSync(`git grep -lF ${JSON.stringify(marker)} -- . ":(exclude)tests/**"`, { encoding: 'utf8' }); } catch { out = ''; }
     expect(out.trim()).toBe('');
     const keysFile = readFileSync(join('scripts', 'backup', 'legacy-trust', 'legacy-migration-keys.json'), 'utf8');
     expect(keysFile.includes('PUBLIC KEY' + '-'.repeat(5))).toBe(true);
