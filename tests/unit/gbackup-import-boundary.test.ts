@@ -48,6 +48,17 @@ describe('G-Backup-A import boundary', () => {
         'legacy-attestation-sign.ts',
         'legacy-active-bundle.ts',
         'strict-json.ts',
+        'runtime-migration-set.ts',
+        'provider-fly-volumes.ts',
+        'receipt-v2-schema.ts',
+        'receipt-v2-canonical.ts',
+        'receipt-v2-sign.ts',
+        'receipt-v2-verify.ts',
+        'receipt-v2-locator.ts',
+        'receipt-transport.ts',
+        'receipt-v2-encoding.ts',
+        'receipt-key-bundle.ts',
+        'receipt-v2-controller.ts',
       ]),
     );
   });
@@ -90,6 +101,25 @@ describe('G-Backup-A import boundary', () => {
     const verifySrc = readFileSync(join(DIR, 'legacy-attestation-verify.ts'), 'utf8');
     expect(verifySrc.includes('sign as cryptoSign')).toBe(false);
     expect(/\bcryptoSign\b/.test(verifySrc)).toBe(false);
+  });
+
+  it('G-Backup-B1: the receipt-v2 SIGNER is not imported by the v2 verifier, transport, locator, detector, or migrate.ts', () => {
+    const signer = 'receipt-v2-sign';
+    for (const f of ['receipt-v2-verify.ts', 'receipt-v2-canonical.ts', 'receipt-v2-schema.ts', 'receipt-transport.ts', 'receipt-v2-locator.ts', 'provider-fly-volumes.ts', 'runtime-migration-set.ts', 'migration-detector.ts']) {
+      expect(readFileSync(join(DIR, f), 'utf8').includes(signer), `${f} must not import the v2 signer`).toBe(false);
+    }
+    expect(readFileSync(join(ROOT, 'scripts', 'migrate.ts'), 'utf8').includes(signer)).toBe(false);
+  });
+
+  it('G-Backup-B1: the receipt transport carries no Fly/deploy authority and no signer', () => {
+    const t = readFileSync(join(DIR, 'receipt-transport.ts'), 'utf8');
+    for (const bad of ['flyctl', 'fly deploy', 'FLY_API_TOKEN', 'access-token', 'receipt-v2-sign', 'cryptoSign', ' sign(']) {
+      expect(t.includes(bad), `receipt-transport must not reference ${bad}`).toBe(false);
+    }
+    // The v2 runtime verifier only VERIFIES (no signing primitive).
+    const v = readFileSync(join(DIR, 'receipt-v2-verify.ts'), 'utf8');
+    expect(/\bcryptoSign\b/.test(v)).toBe(false);
+    expect(v.includes('sign as')).toBe(false);
   });
 
   it('executor eligibility remains false for every action', () => {

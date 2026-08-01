@@ -69,7 +69,11 @@ export function computeSourceMigrationSetHash(entries: readonly SourceManifestEn
 
 function gitShow(commit: string, repoPath: string): Buffer {
   // execFileSync (no shell) — commit + path are passed as argv, not interpolated into a command string.
-  return execFileSync('git', ['show', `${commit}:${repoPath}`], { maxBuffer: 256 * 1024 * 1024 });
+  // stdout/stderr are piped (not inherited) so an expected git failure is captured, not printed as raw fatal:.
+  return execFileSync('git', ['show', `${commit}:${repoPath}`], {
+    maxBuffer: 256 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
 }
 
 /**
@@ -94,7 +98,11 @@ export function buildSourceManifestFromGit(
   // exact, portable source commit rather than a moving ref.
   let commit: string;
   try {
-    commit = execFileSync('git', ['rev-parse', '--verify', `${commitish}^{commit}`]).toString('utf8').trim();
+    commit = execFileSync('git', ['rev-parse', '--verify', `${commitish}^{commit}`], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+      .toString('utf8')
+      .trim();
   } catch (e) {
     throw new MigrationReadError(`cannot resolve commit '${commitish}': ${e instanceof Error ? e.message : String(e)}`);
   }
