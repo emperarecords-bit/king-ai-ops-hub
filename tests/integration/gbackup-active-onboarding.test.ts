@@ -490,7 +490,9 @@ describe('Phase 10 hardened — local-DB detector with the ACTIVE bundle', () =>
     expect(r.legacyAttestedDetails[0]!.tag).toBe(TAG);
     expect(r.unknownHistoricalMismatches).toBe(0);
     expect(r.unknownDatabaseDivergences).toBe(0);
-    expect(r.exactExecutionMatches + r.lineEndingVariantMatches + r.legacyAttestedMatches).toBe(54);
+    // Migration-count independent: every applied migration is accounted for as exact / EOL-variant / legacy-attested,
+    // so the total equals the committed source manifest's length (no absolute-count edit when a migration is added).
+    expect(r.exactExecutionMatches + r.lineEndingVariantMatches + r.legacyAttestedMatches).toBe(MANIFEST.entries.length);
   });
   it('production rejected; missing key / revoked key / tampered signature all fail closed', async () => {
     if (!dbReady) return;

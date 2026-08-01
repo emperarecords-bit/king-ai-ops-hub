@@ -69,7 +69,9 @@ describe('G-Backup-A detector — read-only against the real local DB', () => {
     const a = await detectMigrationState(sql, { sourceManifest: manifest, migrationsFolder: 'drizzle' });
     const b = await detectMigrationState(sql, { sourceManifest: manifest, migrationsFolder: 'drizzle' });
     expect(a.drizzleVersion).toBe(EXPECTED_DRIZZLE_VERSION);
-    expect(a.appliedCount).toBe(54);
+    // Migration-count independent: the applied count must equal the committed source manifest's length (adding a
+    // new migration never needs an absolute-count edit). Still detects a missing/extra applied migration.
+    expect(a.appliedCount).toBe(manifest.entries.length);
     expect(a.state).toBe(b.state); // deterministic
     // The local (and staging) dev DBs applied `0004_knowledge_k1` from an IRREGULAR/mixed line-ending form
     // (`c2c7463a…`) that LF-normalizes to the committed content but is NOT the committed blob nor its single
