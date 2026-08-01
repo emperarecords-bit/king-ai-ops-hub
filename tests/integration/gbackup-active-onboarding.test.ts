@@ -269,14 +269,17 @@ describe('Phase 10 hardened — draft exclusion + repository hygiene', () => {
       expect(tracked.includes(forbidden), `${forbidden} must not be tracked`).toBe(false);
     }
   });
-  it('loader + strict-json do not import the signer; migrate.ts unchanged', () => {
+  it('loader + strict-json do not import the signer; migrate.ts imports no legacy attestation module', () => {
+    // G-Backup-B2a intentionally wires the pre-migration gate into migrate.ts, so the earlier "migrate.ts is
+    // byte-unchanged" invariant no longer holds. The security invariant that remains: migrate.ts must not pull in
+    // the legacy attestation loader or the signer.
     for (const f of ['legacy-active-bundle.ts', 'strict-json.ts']) {
       expect(readFileSync(join('scripts', 'backup', f), 'utf8').includes('legacy-attestation-sign')).toBe(false);
     }
-    expect(execSync('git diff --name-only main..HEAD -- scripts/migrate.ts', { encoding: 'utf8' }).trim()).toBe('');
     const migrate = readFileSync(join('scripts', 'migrate.ts'), 'utf8');
     expect(migrate.includes('legacy-active-bundle')).toBe(false);
-    expect(migrate.includes('preMigrationBackup')).toBe(true);
+    expect(migrate.includes('legacy-attestation-sign')).toBe(false);
+    expect(migrate.includes('receipt-v2-sign')).toBe(false);
   });
 });
 
