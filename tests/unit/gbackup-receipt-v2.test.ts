@@ -13,7 +13,7 @@ const HOSTS = new Set(['receipts.example.com']);
 const NONCE = 'deadbeefdeadbeefdeadbeefdeadbeef';
 const kp = generateKeyPairSync('ed25519');
 const keyLoad = loadReceiptKeyBundle([{ keyId: 'test-dbr-001', algorithm: 'ed25519', publicKeyPem: kp.publicKey.export({ type: 'spki', format: 'pem' }).toString(), purpose: 'deployment_backup_receipt', status: 'active' }]);
-if (!keyLoad.ok) throw new Error(keyLoad.reason);
+if (!keyLoad.ok) throw new Error(keyLoad.code);
 
 const ev = normalizeFlyVolumeSnapshot(
   { id: 'vs_abc123', status: 'created', volumeId: 'vol_4m3kmknl059qpd6v', databaseApp: 'king-ai-hub-db-staging', createdAt: '2026-08-01T11:50:00.000Z', retentionDays: 7, storedSizeBytes: 130000000 },

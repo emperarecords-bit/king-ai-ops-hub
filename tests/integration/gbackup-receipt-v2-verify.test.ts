@@ -15,7 +15,7 @@ const DIGEST = `sha256:${'a'.repeat(64)}`;
 const DBID = '7300338420798239475';
 const REF = 'registry.fly.io/king-ai-ops-hub-staging:deployment-01ABC';
 
-const store = () => { const l = loadReceiptKeyBundle([{ keyId: 'test-dbr-001', algorithm: 'ed25519', publicKeyPem: PEM, purpose: 'deployment_backup_receipt', status: 'active' }]); if (!l.ok) throw new Error(l.reason); return l.store; };
+const store = () => { const l = loadReceiptKeyBundle([{ keyId: 'test-dbr-001', algorithm: 'ed25519', publicKeyPem: PEM, purpose: 'deployment_backup_receipt', status: 'active' }]); if (!l.ok) throw new Error(l.code); return l.store; };
 
 const DISCOVERY_EV = { createResponseSnapshotId: 'vs_abc123', listedSnapshotId: 'vs_abc123' } as const;
 function evidenceObj(over: Partial<NormalizedProviderEvidence> = {}): { e: NormalizedProviderEvidence; digest: string } {

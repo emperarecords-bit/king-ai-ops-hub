@@ -6,31 +6,49 @@ import { isCanonicalUtcTimestamp } from './receipt-v2-encoding';
  * G-Backup-B1 correction — deployment-receipt key trust bundle. A DEPLOYMENT-RECEIPT key must be distinct in
  * PURPOSE from a legacy migration-attestation key. Duplicate detection is by CANONICAL cryptographic identity (the
  * DER-SubjectPublicKeyInfo SHA-256 fingerprint), never PEM text, so the same key under a second id is rejected even
- * across line-wrapping / CRLF-vs-LF / trailing-whitespace / alternate PEM spellings. Private-key input is rejected
- * explicitly (createPublicKey would otherwise DERIVE a public key from a private PEM). The store retains the parsed
- * public key + fingerprint so verification never reinterprets ambiguous text.
+ * across line-wrapping / CRLF-vs-LF / trailing-whitespace / alternate PEM spellings.
+ *
+ * Every rejection returns a STABLE STRUCTURED CODE (never a generic exception, never PEM contents). Private-key
+ * input is rejected FIRST, before any parse could derive a public key from a private container — for ALL private
+ * PEM spellings (PKCS#8, encrypted PKCS#8, PKCS#1 RSA, SEC1 EC, OpenSSH), each of which carries the `PRIVATE KEY`
+ * banner. The store retains the parsed public key + fingerprint so verification never reinterprets ambiguous text.
  */
 
 export const RECEIPT_KEY_PURPOSE = 'deployment_backup_receipt' as const;
 export const RECEIPT_KEY_ALGORITHMS = ['ed25519'] as const;
 /** DER SubjectPublicKeyInfo length for an Ed25519 public key (12-byte prefix + 32-byte key). */
 export const ED25519_SPKI_DER_LEN = 44;
+/** Substring common to EVERY private-key PEM banner: PKCS#8, ENCRYPTED PKCS#8, RSA (PKCS#1), EC (SEC1), OPENSSH. */
+export const PRIVATE_KEY_MARKER = 'PRIVATE KEY';
 
 const Ident = z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/);
 const CanonicalUtc = z.string().refine(isCanonicalUtcTimestamp, 'must be a canonical UTC timestamp');
 
+// `purpose` and `algorithm` are parsed as free strings so a WRONG value yields a distinct structured code
+// (`wrong_key_purpose` / `wrong_key_algorithm`) rather than collapsing into a generic `schema_invalid`.
 export const receiptKeyEntrySchema = z
   .object({
     keyId: Ident,
-    algorithm: z.enum(RECEIPT_KEY_ALGORITHMS),
+    algorithm: z.string().min(1).max(32),
     publicKeyPem: z.string().min(1).max(4096),
-    purpose: z.literal(RECEIPT_KEY_PURPOSE),
+    purpose: z.string().min(1).max(64),
     status: z.enum(['active', 'revoked', 'inactive']),
     notBefore: CanonicalUtc.optional(),
     notAfter: CanonicalUtc.optional(),
   })
   .strict();
 export type ReceiptKeyEntry = z.infer<typeof receiptKeyEntrySchema>;
+
+export type ReceiptKeyLoadFailCode =
+  | 'schema_invalid'
+  | 'wrong_key_purpose'
+  | 'wrong_key_algorithm'
+  | 'wrong_key_type'
+  | 'malformed_public_key'
+  | 'private_key_material_rejected'
+  | 'duplicate_key_id'
+  | 'duplicate_key_fingerprint'
+  | 'invalid_validity_window';
 
 export interface TrustedReceiptKeyEntry {
   readonly publicKey: KeyObject;
@@ -53,57 +71,55 @@ export interface ReceiptKeyStore {
   readonly inactive: ReadonlySet<string>;
   readonly diagnostics: readonly ReceiptKeyDiagnostic[];
 }
-export type ReceiptKeyBundleLoad = { readonly ok: true; readonly store: ReceiptKeyStore } | { readonly ok: false; readonly reason: string };
+export type ReceiptKeyBundleLoad =
+  | { readonly ok: true; readonly store: ReceiptKeyStore }
+  | { readonly ok: false; readonly code: ReceiptKeyLoadFailCode; readonly keyId: string | null };
 
-const PRIVATE_KEY_MARKER = 'PRIVATE KEY';
+const failCode = (code: ReceiptKeyLoadFailCode, keyId: string | null): ReceiptKeyBundleLoad => ({ ok: false, code, keyId });
 
 export function loadReceiptKeyBundle(entries: readonly unknown[]): ReceiptKeyBundleLoad {
   const active = new Map<string, TrustedReceiptKeyEntry>();
   const revoked = new Set<string>();
   const inactive = new Set<string>();
   const diagnostics: ReceiptKeyDiagnostic[] = [];
-  const seenById = new Map<string, { pem: string; status: string }>();
+  const seenIds = new Set<string>();
   const fingerprintToId = new Map<string, string>();
   for (const raw of entries) {
     const parsed = receiptKeyEntrySchema.safeParse(raw);
-    if (!parsed.success) return { ok: false, reason: `receipt key entry schema invalid: ${parsed.error.issues[0]?.message ?? 'invalid'}` };
+    if (!parsed.success) return failCode('schema_invalid', null);
     const e = parsed.data;
-    if (e.purpose !== RECEIPT_KEY_PURPOSE) return { ok: false, reason: `key ${e.keyId} has wrong purpose` };
-    if (e.publicKeyPem.includes(PRIVATE_KEY_MARKER)) return { ok: false, reason: `key ${e.keyId} supplied private-key material` };
 
-    const prior = seenById.get(e.keyId);
-    if (prior) {
-      if (prior.pem !== e.publicKeyPem) return { ok: false, reason: `duplicate keyId ${e.keyId} with different public-key material` };
-      if (prior.status !== e.status) return { ok: false, reason: `keyId ${e.keyId} has conflicting status` };
-      return { ok: false, reason: `duplicate keyId ${e.keyId}` };
-    }
-    seenById.set(e.keyId, { pem: e.publicKeyPem, status: e.status });
+    // Reject private-key containers BEFORE any parse could derive a public key from them (all PEM spellings).
+    if (e.publicKeyPem.includes(PRIVATE_KEY_MARKER)) return failCode('private_key_material_rejected', e.keyId);
+    if (e.purpose !== RECEIPT_KEY_PURPOSE) return failCode('wrong_key_purpose', e.keyId);
+    if (!(RECEIPT_KEY_ALGORITHMS as readonly string[]).includes(e.algorithm)) return failCode('wrong_key_algorithm', e.keyId);
+    if (seenIds.has(e.keyId)) return failCode('duplicate_key_id', e.keyId);
+    seenIds.add(e.keyId);
 
     let key: KeyObject;
     try {
       key = createPublicKey(e.publicKeyPem);
     } catch {
-      return { ok: false, reason: `keyId ${e.keyId} has a malformed public key` };
+      return failCode('malformed_public_key', e.keyId);
     }
-    if (key.type !== 'public') return { ok: false, reason: `keyId ${e.keyId} is not a public key` };
-    if (key.asymmetricKeyType !== 'ed25519') return { ok: false, reason: `keyId ${e.keyId} actual key type is not ${e.algorithm}` };
+    if (key.type !== 'public') return failCode('malformed_public_key', e.keyId);
+    if (key.asymmetricKeyType !== 'ed25519') return failCode('wrong_key_type', e.keyId);
     const der = key.export({ type: 'spki', format: 'der' });
-    if (der.length !== ED25519_SPKI_DER_LEN) return { ok: false, reason: `keyId ${e.keyId} has an unexpected DER-SPKI length ${der.length}` };
+    if (der.length !== ED25519_SPKI_DER_LEN) return failCode('malformed_public_key', e.keyId);
     const fingerprint = createHash('sha256').update(der).digest('hex');
 
     const otherId = fingerprintToId.get(fingerprint);
-    if (otherId && otherId !== e.keyId) return { ok: false, reason: `public key already trusted under a different keyId (${otherId})` };
+    if (otherId && otherId !== e.keyId) return failCode('duplicate_key_fingerprint', e.keyId);
     fingerprintToId.set(fingerprint, e.keyId);
 
     const nb = e.notBefore ? Date.parse(e.notBefore) : null;
     const na = e.notAfter ? Date.parse(e.notAfter) : null;
-    if (nb != null && na != null && !(nb < na)) return { ok: false, reason: `keyId ${e.keyId} has notBefore >= notAfter` };
+    if (nb != null && na != null && !(nb < na)) return failCode('invalid_validity_window', e.keyId);
 
     diagnostics.push({ keyId: e.keyId, purpose: e.purpose, status: e.status, derSpkiByteLength: der.length, fingerprintSha256: fingerprint, notBefore: e.notBefore ?? null, notAfter: e.notAfter ?? null });
     if (e.status === 'revoked') { revoked.add(e.keyId); continue; }
     if (e.status === 'inactive') { inactive.add(e.keyId); continue; }
     active.set(e.keyId, { publicKey: key, fingerprintSha256: fingerprint, notBefore: nb, notAfter: na });
   }
-  for (const id of active.keys()) if (revoked.has(id) || inactive.has(id)) return { ok: false, reason: `keyId ${id} has conflicting status` };
   return { ok: true, store: { keyring: active, revoked, inactive, diagnostics } };
 }
