@@ -191,6 +191,8 @@ export async function submitSchedule(
   }
   const weekdayRaw = formData.get('weekday');
   const monthdayRaw = formData.get('monthday');
+  const reviewEnabled = formData.get('reviewEnabled') === 'on';
+  const rawReviewer = formData.get('reviewerAgentId');
   return objectiveMutation(formData, (ctx, objectiveId) =>
     withTenant(ctx, async (tx) => {
       const employees = await listAssignableEmployees(tx, ctx);
@@ -201,7 +203,10 @@ export async function submitSchedule(
         input: String(formData.get('input') ?? ''),
         objectiveId,
         providerSelection: assignee.provider,
-        reviewEnabled: formData.get('reviewEnabled') === 'on',
+        reviewEnabled,
+        // P1a agent pinning — pin the exact employees (createSchedule re-validates them in-workspace).
+        assignedPrimaryAgentId: assigneeId,
+        assignedReviewerAgentId: reviewEnabled && rawReviewer ? String(rawReviewer) : null,
         cadence: String(formData.get('cadence') ?? 'weekly') as 'daily' | 'weekly' | 'monthly',
         atHour: Number(formData.get('atHour') ?? 6),
         weekday: weekdayRaw != null && weekdayRaw !== '' ? Number(weekdayRaw) : null,
@@ -294,6 +299,8 @@ export async function editSchedule(
   }
   const weekdayRaw = formData.get('weekday');
   const monthdayRaw = formData.get('monthday');
+  const reviewEnabled = formData.get('reviewEnabled') === 'on';
+  const rawReviewer = formData.get('reviewerAgentId');
   return objectiveMutation(formData, (ctx, objectiveId) =>
     withTenant(ctx, async (tx) => {
       const employees = await listAssignableEmployees(tx, ctx);
@@ -304,7 +311,9 @@ export async function editSchedule(
         input: String(formData.get('input') ?? ''),
         objectiveId,
         providerSelection: assignee.provider,
-        reviewEnabled: formData.get('reviewEnabled') === 'on',
+        reviewEnabled,
+        assignedPrimaryAgentId: assigneeId,
+        assignedReviewerAgentId: reviewEnabled && rawReviewer ? String(rawReviewer) : null,
         cadence: String(formData.get('cadence') ?? 'weekly') as 'daily' | 'weekly' | 'monthly',
         atHour: Number(formData.get('atHour') ?? 6),
         weekday: weekdayRaw != null && weekdayRaw !== '' ? Number(weekdayRaw) : null,

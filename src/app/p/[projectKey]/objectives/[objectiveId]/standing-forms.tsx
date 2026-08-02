@@ -16,13 +16,16 @@ export function AddStandingWorkForm({
   projectKey,
   objectiveId,
   employees,
+  reviewers = [],
 }: {
   projectKey: string;
   objectiveId: string;
   employees: Array<{ id: string; name: string }>;
+  reviewers?: Array<{ id: string; name: string }>;
 }) {
   const [open, setOpen] = useState(false);
   const [cadence, setCadence] = useState<'daily' | 'weekly' | 'monthly'>('weekly');
+  const [reviewEnabled, setReviewEnabled] = useState(true);
   const [state, formAction, pending] = useActionState(submitSchedule, initialState);
 
   if (!open) {
@@ -94,9 +97,33 @@ export function AddStandingWorkForm({
         </select>
       </div>
       <label className="flex items-center gap-2 text-sm">
-        <input type="checkbox" name="reviewEnabled" defaultChecked className="accent-[var(--accent)]" />
-        Cross-check each result
+        <input
+          type="checkbox"
+          name="reviewEnabled"
+          checked={reviewEnabled}
+          onChange={(e) => setReviewEnabled(e.target.checked)}
+          className="accent-[var(--accent)]"
+        />
+        {reviewEnabled ? 'Cross-check with an exact reviewer' : 'No automated review'}
       </label>
+      {reviewEnabled ? (
+        reviewers.length > 0 ? (
+          <select name="reviewerAgentId" required defaultValue="" className={inputCls} aria-label="Reviewer employee">
+            <option value="" disabled>
+              Select a reviewer…
+            </option>
+            {reviewers.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <p className="text-xs text-[var(--danger)]">
+            No reviewer employees are configured. Add one, or turn off automated review.
+          </p>
+        )
+      ) : null}
       <div className="flex items-center gap-2">
         <button
           type="submit"

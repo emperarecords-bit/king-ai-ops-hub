@@ -56,7 +56,7 @@ async function main() {
   try {
     if (forceFail) await db.update(agents).set({ model: 'nonexistent-model-zzz-c2-verify' }).where(eq(agents.id, primary.id));
 
-    const taskId = await tx((t) => createTask(t, ctx, { title: `[c2-verify] ${forceFail ? 'failure' : 'success'} run`, input: query, providerSelection: primary.provider as never, reviewEnabled: false }));
+    const taskId = await tx((t) => createTask(t, ctx, { title: `[c2-verify] ${forceFail ? 'failure' : 'success'} run`, input: query, providerSelection: primary.provider as never, reviewEnabled: false, primaryAgentId: primary.id }));
     let runError: string | null = null;
     try {
       await startRun(ctx, taskId);

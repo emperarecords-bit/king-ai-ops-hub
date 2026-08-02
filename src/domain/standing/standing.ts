@@ -14,6 +14,7 @@ import { type DbTx, getDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { taskSchedules, tasks, usageEvents } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
+import { getAssignableAgentById } from '@/domain/agents/agents';
 import { createTask } from '@/domain/tasks/tasks';
 import { startRun } from '@/domain/tasks/runner';
 import { computeNextRunAt } from './cadence';
@@ -49,6 +50,11 @@ export const createScheduleSchema = z
     atHour: z.number().int().min(0).max(23).default(6),
     weekday: z.number().int().min(0).max(6).nullable().default(null),
     monthday: z.number().int().min(1).max(28).nullable().default(null),
+    /** P1a agent pinning — the exact employees every due tick pins its produced task to. Required primary;
+     *  reviewer required IFF reviewEnabled and never equal to the primary. Validated against the workspace
+     *  in createSchedule/updateSchedule. */
+    assignedPrimaryAgentId: z.string().uuid(),
+    assignedReviewerAgentId: z.string().uuid().nullable().default(null),
   })
   .refine((v) => v.cadence !== 'weekly' || v.weekday != null, {
     message: 'Weekly standing work needs a weekday.',
@@ -58,6 +64,15 @@ export const createScheduleSchema = z
   })
   .refine((v) => v.modelTier !== 'flagship' || v.flagshipCategory != null, {
     message: 'Flagship standing work must declare a category.',
+  })
+  .refine((v) => !v.reviewEnabled || v.assignedReviewerAgentId != null, {
+    message: 'A cross-check requires an assigned reviewer employee.',
+  })
+  .refine((v) => v.reviewEnabled || v.assignedReviewerAgentId == null, {
+    message: 'A reviewer can only be assigned when cross-check is enabled.',
+  })
+  .refine((v) => v.assignedReviewerAgentId == null || v.assignedReviewerAgentId !== v.assignedPrimaryAgentId, {
+    message: 'The reviewer must be a different employee than the primary.',
   });
 
 export interface ScheduleRow {
@@ -126,6 +141,37 @@ export async function listSchedules(
   }));
 }
 
+/**
+ * P1a agent pinning — validate a schedule's assigned employees against THIS workspace, fail closed. Returns
+ * the ids to persist. Shared by create + edit so both paths pin the same way the task form does: the primary
+ * must be an enabled primary-role agent here; a reviewer (required IFF reviewEnabled) an enabled reviewer.
+ */
+async function validateScheduleAssignment(
+  tx: DbTx,
+  ctx: TenantContext,
+  d: { reviewEnabled: boolean; assignedPrimaryAgentId: string; assignedReviewerAgentId: string | null },
+): Promise<{ assignedPrimaryAgentId: string; assignedReviewerAgentId: string | null }> {
+  const primary = await getAssignableAgentById(tx, ctx, d.assignedPrimaryAgentId, 'primary');
+  if (!primary) {
+    throw new ValidationError(['Selected primary employee is not an enabled primary agent in this workspace.']);
+  }
+  let reviewerId: string | null = null;
+  if (d.reviewEnabled) {
+    if (!d.assignedReviewerAgentId) {
+      throw new ValidationError(['A cross-check requires an assigned reviewer employee.']);
+    }
+    const reviewer = await getAssignableAgentById(tx, ctx, d.assignedReviewerAgentId, 'reviewer');
+    if (!reviewer) {
+      throw new ValidationError(['Selected reviewer employee is not an enabled reviewer agent in this workspace.']);
+    }
+    if (reviewer.id === primary.id) {
+      throw new ValidationError(['The reviewer must be a different employee than the primary.']);
+    }
+    reviewerId = reviewer.id;
+  }
+  return { assignedPrimaryAgentId: primary.id, assignedReviewerAgentId: reviewerId };
+}
+
 export async function createSchedule(
   tx: DbTx,
   ctx: TenantContext,
@@ -137,6 +183,7 @@ export async function createSchedule(
   const parsed = createScheduleSchema.safeParse(input);
   if (!parsed.success) throw new ValidationError(parsed.error.issues.map((i) => i.message));
   const d = parsed.data;
+  const assignment = await validateScheduleAssignment(tx, ctx, d);
 
   const inserted = await tx
     .insert(taskSchedules)
@@ -148,6 +195,8 @@ export async function createSchedule(
       input: d.input,
       providerSelection: d.providerSelection,
       reviewEnabled: d.reviewEnabled,
+      assignedPrimaryAgentId: assignment.assignedPrimaryAgentId,
+      assignedReviewerAgentId: assignment.assignedReviewerAgentId,
       modelTier: d.modelTier,
       flagshipCategory: d.flagshipCategory,
       cadence: d.cadence,
@@ -225,6 +274,7 @@ export async function updateSchedule(
     throw new ValidationError(parsed.error.issues.map((i) => i.message));
   }
   const d = parsed.data;
+  const assignment = await validateScheduleAssignment(tx, ctx, d);
 
   const existing = await tx
     .select({
@@ -260,6 +310,8 @@ export async function updateSchedule(
       objectiveId: d.objectiveId,
       providerSelection: d.providerSelection,
       reviewEnabled: d.reviewEnabled,
+      assignedPrimaryAgentId: assignment.assignedPrimaryAgentId,
+      assignedReviewerAgentId: assignment.assignedReviewerAgentId,
       modelTier: d.modelTier,
       flagshipCategory: d.flagshipCategory,
       cadence: d.cadence,
@@ -293,7 +345,11 @@ export async function updateSchedule(
 
 export interface TickResult {
   due: number;
+  /** Schedules that dispatched a task + run this tick. */
   started: number;
+  /** Due schedules left UNTOUCHED because their pinned assignment was missing or invalid: no task, no run,
+   *  no clock advance, only an append-only `schedule.assignment_required` audit. They stay due next tick. */
+  assignmentRequired: number;
   failures: Array<{ scheduleId: string; reason: string }>;
 }
 
@@ -308,7 +364,12 @@ export async function runDueSchedules(now = new Date()): Promise<TickResult> {
   // non-superuser app_server role there is no direct cross-tenant read of
   // task_schedules; the dispatcher returns only the identity tuple + the
   // author's project role. Every subsequent read/write runs under withTenant().
-  const listed = await getDb().execute(sql`select * from app.list_due_schedules(${now})`);
+  // Bind the cutoff as an explicit ISO string cast to timestamptz. Passing a raw JS Date as a
+  // function argument trips a postgres-js parameter-binding path; an ISO string + ::timestamptz cast is
+  // unambiguous and identical in meaning.
+  const listed = await getDb().execute(
+    sql`select * from app.list_due_schedules(${now.toISOString()}::timestamptz)`,
+  );
   const dueRows = ((listed as { rows?: unknown[] }).rows ??
     (Array.isArray(listed) ? listed : [])) as Array<{
     schedule_id: string;
@@ -318,7 +379,7 @@ export async function runDueSchedules(now = new Date()): Promise<TickResult> {
     project_role: string | null;
   }>;
 
-  const result: TickResult = { due: dueRows.length, started: 0, failures: [] };
+  const result: TickResult = { due: dueRows.length, started: 0, assignmentRequired: 0, failures: [] };
 
   for (const row of dueRows) {
     const ctx: TenantContext = {
@@ -361,6 +422,8 @@ export async function runDueSchedules(now = new Date()): Promise<TickResult> {
             input: taskSchedules.input,
             providerSelection: taskSchedules.providerSelection,
             reviewEnabled: taskSchedules.reviewEnabled,
+            assignedPrimaryAgentId: taskSchedules.assignedPrimaryAgentId,
+            assignedReviewerAgentId: taskSchedules.assignedReviewerAgentId,
             modelTier: taskSchedules.modelTier,
             flagshipCategory: taskSchedules.flagshipCategory,
             cadence: taskSchedules.cadence,
@@ -375,6 +438,52 @@ export async function runDueSchedules(now = new Date()): Promise<TickResult> {
       )[0],
     );
     if (!schedule) continue; // vanished between listing and processing
+
+    // P1a agent pinning — VALIDATE the pinned assignment BEFORE any clock advance or dispatch. A due schedule
+    // whose assignment is missing OR invalid (no pinned primary; a primary/reviewer that is disabled, deleted,
+    // cross-workspace, or wrong-role per getAssignableAgentById; a review-enabled schedule with no reviewer; or
+    // reviewer == primary) must dispatch NO task and NO run, and leave nextRunAt / lastRunAt / cadence / enabled
+    // and EVERY other column byte-for-byte UNCHANGED — no UPDATE to the row at all. The only side effect is the
+    // append-only schedule.assignment_required audit. Because the clock never advances, the occurrence is
+    // neither consumed nor skipped: the schedule simply stays due each tick until an admin corrects it. Never
+    // provider-substitute; never disable/reschedule/rewrite the schedule. (A schedule authored/edited after P1a
+    // always carries a valid pinned assignment; this path is for legacy/decayed rows only.)
+    const validated = await withTenant(
+      ctx,
+      async (tx): Promise<{ primaryId: string } | { reason: string }> => {
+        if (schedule.assignedPrimaryAgentId == null) return { reason: 'no_assigned_primary' };
+        const primary = await getAssignableAgentById(tx, ctx, schedule.assignedPrimaryAgentId, 'primary');
+        if (!primary) return { reason: 'primary_not_assignable' };
+        if (schedule.reviewEnabled) {
+          if (schedule.assignedReviewerAgentId == null) return { reason: 'review_enabled_without_reviewer' };
+          const reviewer = await getAssignableAgentById(tx, ctx, schedule.assignedReviewerAgentId, 'reviewer');
+          if (!reviewer) return { reason: 'reviewer_not_assignable' };
+          if (reviewer.id === primary.id) return { reason: 'reviewer_equals_primary' };
+        }
+        return { primaryId: primary.id };
+      },
+    );
+    if ('reason' in validated) {
+      // Append-only audit ONLY — no UPDATE to the schedule row. Detail carries identity ids + a machine
+      // reason, never the schedule brief or any secret.
+      await withTenant(ctx, (tx) =>
+        writeAudit(tx, ctx, {
+          action: 'schedule.assignment_required',
+          entityType: 'task_schedule',
+          entityId: schedule.id,
+          detail: { scheduleId: schedule.id, reason: validated.reason },
+        }),
+      );
+      result.assignmentRequired += 1;
+      result.failures.push({
+        scheduleId: schedule.id,
+        reason: `assignment required (${validated.reason}); left due, not dispatched`,
+      });
+      continue;
+    }
+    // Validated: the pinned primary (and reviewer, when review is enabled) are enabled agents of the right
+    // role in this workspace. getAssignableAgentById loaded by the exact pinned id, so this equals the pin.
+    const assignedPrimaryAgentId = validated.primaryId;
 
     // Advance the clock FIRST: a crash below runs once next window, never N.
     const nextRunAt = computeNextRunAt(schedule, now);
@@ -396,6 +505,9 @@ export async function runDueSchedules(now = new Date()): Promise<TickResult> {
           flagshipCategory: schedule.flagshipCategory,
           objectiveId: schedule.objectiveId,
           scheduleId: schedule.id,
+          // The tick pins the produced task to the schedule's exact employees.
+          primaryAgentId: assignedPrimaryAgentId,
+          reviewerAgentId: schedule.assignedReviewerAgentId,
         }),
       );
       const outcome = await startRun(ctx, taskId);
