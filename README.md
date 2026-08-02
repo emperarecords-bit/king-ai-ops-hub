@@ -52,7 +52,8 @@ cp .env.example .env.local
 # 2) Database (Docker Postgres on port 5433)
 npm run db:up
 npm run db:generate     # emit SQL from the Drizzle schema (first time / schema change)
-npm run db:migrate      # apply migrations + RLS + append-only triggers + app role
+npm run db:bootstrap    # FRESH database: prerequisite + migrations + RLS + verification
+#   For an already-provisioned DB, `npm run db:migrate` applies only new migrations.
 
 # 3) Seed the org, the five workspaces, default agents, spend limits
 npm run db:seed
@@ -64,6 +65,81 @@ npm run dev             # http://localhost:3000
 ```
 
 Sign up with the seeded email, pick a workspace, submit a task.
+
+### Database bootstrap (fresh vs incremental vs test)
+
+A **fresh, empty** database needs one extra step before the Drizzle migrations
+can run: the `app` schema must exist. Migration `0052` references `app.*`, but
+no migration creates `app` — `src/db/rls.sql` does, and rls.sql runs *after* the
+migrations. `npm run db:bootstrap` closes that gap: it creates the `app` schema
+first (idempotent), then runs the exact same migrate path, then verifies the
+result. An already-provisioned database already has `app`, so `db:migrate` alone
+is fine there.
+
+Required env (names only — never commit real values; see [.env.example](.env.example)):
+
+- `DATABASE_MIGRATION_URL` — the migration/owner role (DDL rights). Used to run
+  migrations and apply RLS. Falls back to `DATABASE_URL` if unset.
+- `DATABASE_URL` — the runtime connection. In production this is the
+  non-superuser `app_server` role (RLS is only enforced under it).
+
+```bash
+npm run db:bootstrap        # = tsx scripts/migrate.ts --verify
+```
+
+Stages (in order): pre-migration backup (best-effort) → advisory lock →
+**ensure `app` schema** → Drizzle migrations `0000…` → apply `rls.sql` →
+**verify**. Sample verification line on success:
+
+```
+Bootstrap verified: 56/56 migrations, app schema present, 9 required functions,
+RLS on [tasks, runs, agents, organizations], tenant isolation ok
+(same-tenant select=1, cross-tenant read=0, cross-tenant insert rejected=true), no fixtures.
+```
+
+Failure behavior: any migration, RLS-application, or verification failure makes
+the command **exit non-zero** (it throws; there is no partial-success path).
+Verification checks the applied migration count against the committed journal
+length, the `app` schema and required functions, RLS + policies on tenant
+tables, live tenant isolation under `app_server`, and that **no fixtures** exist.
+
+What verification does and does NOT do:
+
+- **Rollback-only isolation probe — commits NO probe tenants.** The tenant-isolation
+  check opens ONE reserved connection and runs a single transaction that seeds two
+  disposable tenants, exercises RLS under `app_server`, and is **always rolled
+  back**. It NEVER commits — not even transiently — so the target database never
+  holds a probe tenant, and cleanup is the rollback itself (not a post-commit
+  DELETE). A fresh read afterward asserts zero residue.
+- **No `APP_SERVER_TEST_PASSWORD` required.** Verification switches to the runtime
+  role transaction-locally with `SET LOCAL ROLE app_server` on the migration
+  connection — it does **not** open a second `app_server` connection, so no
+  `app_server` password/URL is needed. If the login role cannot assume
+  `app_server`, verification **fails closed** (throws, non-zero) and never falls
+  back to an RLS-bypass role.
+- **No automatic rollback of completed migrations/RLS.** Bootstrap does not undo
+  migrations or the RLS layer once they have been applied; on failure it stops and
+  exits non-zero, leaving whatever completed in place for inspection. Recovery is
+  the operator's decision (e.g. restore from the pre-migration backup), not an
+  automatic down-migration.
+- **P1c corrects initialization ORDERING only.** The fix is a one-line `app`-schema
+  pre-creation in the bootstrap path; migrations `0000…0055`, their snapshots, and
+  the journal are byte-for-byte unchanged.
+- **Cloud migration stays blocked** until the enforced G-Backup pre-migration
+  backup gate is merged and configured; `db:bootstrap` verification does not lift
+  that block.
+
+- **Fresh init** → `npm run db:bootstrap` (prerequisite + migrate + rls + verify).
+- **Incremental** → `npm run db:migrate` (applies only new migrations; the
+  prerequisite still runs, harmlessly).
+- **Test / disposable** → the P1c suite sets **both** `DATABASE_URL` and
+  `DATABASE_MIGRATION_URL` plus `REQUIRE_DISPOSABLE_DB=1` and drives the same
+  path against throwaway `king_ai_hub_p1c_*` databases.
+
+> ⚠️ **Never point disposable/verification runs at the shared `king_ai_hub`.**
+> With `REQUIRE_DISPOSABLE_DB=1` the harness refuses to run unless both URLs are
+> set and neither names `king_ai_hub` exactly. Disposable DBs are created and
+> dropped per run; the shared database is never migrated or mutated by tests.
 
 ## Quality gate
 

@@ -60,6 +60,46 @@ Required in production: `DATABASE_URL` (as `app_server`), `OPENAI_API_KEY`,
 
 ## 3. Database lifecycle (Phase 3)
 
+- **Fresh-database bootstrap (P1c):** a brand-new, empty database cannot be
+  migrated by `migrate()` alone — migration `0052_classification_guard.sql`
+  references the `app` schema, which no migration creates (`src/db/rls.sql`
+  does, and it runs *after* the Drizzle migrations). `npm run db:bootstrap`
+  (`tsx scripts/migrate.ts --verify`) fixes this by creating the `app` schema
+  first, then running the *same* migrate path, then verifying. Required env
+  (names only): `DATABASE_MIGRATION_URL` (owner/DDL role; falls back to
+  `DATABASE_URL`) and `DATABASE_URL` (runtime role — `app_server` in prod).
+  Order: `[pre-migration backup] → [advisory lock] → [ensure app schema] →
+  [drizzle migrate] → [apply rls.sql] → [verify]`. Verification asserts the
+  applied-migration count equals the committed journal length, the `app` schema
+  and required functions exist, RLS + policies are present on tenant tables,
+  tenant isolation holds under `app_server`, and no fixtures were created; any
+  failure throws → **non-zero exit**. The one-line prerequisite lives in the
+  bootstrap PATH (`scripts/bootstrap-prerequisite.ts`), not in a migration, so
+  the committed migrations/snapshots/journal are unchanged — P1c corrects
+  initialization **ordering only** — and it is the reusable seam the future
+  G-Backup-B2a gate slots behind:
+  `[B2a gate] → ensureAppSchema → migrate → rls → verify`.
+- **Rollback-only isolation probe (no committed probe tenants).** The tenant-isolation
+  check runs a SINGLE reserved connection inside ONE transaction that is **always
+  rolled back** — it seeds two disposable tenants, exercises RLS under `app_server`
+  via `SET LOCAL ROLE app_server` (transaction-local; no second connection), and
+  **never commits**. No probe tenant is ever written to the target DB, and a fresh
+  read afterward asserts zero residue. Because identity is switched transaction-locally,
+  **`APP_SERVER_TEST_PASSWORD` is NOT required** for verification; if the login role
+  cannot assume `app_server`, verification **fails closed** (throws, non-zero) and
+  never falls back to an RLS-bypass role.
+- **No automatic rollback of completed migrations/RLS.** Bootstrap does not undo
+  applied migrations or the RLS layer on failure; it stops and exits non-zero,
+  leaving completed work in place. Recovery (e.g. restore from the pre-migration
+  backup) is an operator decision, not an automatic down-migration.
+- **Cloud migration remains blocked** until the enforced G-Backup pre-migration
+  backup gate is merged and configured; `db:bootstrap` verification does not lift
+  that block.
+- **Fresh vs incremental:** `db:bootstrap` is for first-time initialization;
+  `db:migrate` is the incremental path (applies only new migrations; the
+  prerequisite still runs, harmlessly). Disposable/test runs set **both** DB
+  URLs plus `REQUIRE_DISPOSABLE_DB=1` and target throwaway `king_ai_hub_p1c_*`
+  databases — **never** the shared `king_ai_hub` (the harness refuses it).
 - **Deploy-time migrations:** Fly `release_command = npm run db:migrate` runs
   before new machines take traffic.
 - **Concurrency:** `migrate.ts` takes a Postgres **advisory lock** so two
