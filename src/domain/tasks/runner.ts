@@ -2,7 +2,7 @@ import 'server-only';
 import { eq, and } from 'drizzle-orm';
 import { type TenantContext } from '@/types/domain';
 import { type ProviderId } from '@/types/provider';
-import { AppError } from '@/lib/errors';
+import { AppError, AssignmentRequiredError } from '@/lib/errors';
 import { serverEnv } from '@/lib/env.server';
 import { log } from '@/lib/log';
 import { withTenant } from '@/db/tenant';
@@ -23,7 +23,7 @@ import {
   type RunSourceSnapshot,
   type StepKind,
 } from '@/types/domain';
-import { agentExecutionFingerprint, findAgentForRole, type AgentRow } from '@/domain/agents/agents';
+import { agentExecutionFingerprint, getAssignableAgentById, type AgentRow } from '@/domain/agents/agents';
 import { assembleCurrentOperatingPriorities } from '@/domain/prompts/effective-prompt';
 import { computeActivityClassification } from '@/domain/classification/classification';
 import { ASSEMBLER_VERSION, assembleEffectivePrompt } from '@/orchestration/prompts';
@@ -114,6 +114,26 @@ export function resolveProviderPair(selection: 'openai' | 'anthropic' | 'both', 
   };
 }
 
+/**
+ * P1a agent pinning — persist a fail-closed assignment audit in its OWN committed transaction. The
+ * preflight transaction rolls back when the runner throws AssignmentRequiredError, so this evidence must
+ * NOT live in that transaction or it would vanish with it. Detail carries identity ids + a machine reason
+ * ONLY — never a system prompt or secret.
+ */
+async function auditAssignmentFailure(
+  ctx: TenantContext,
+  event: { action: string; entityType: string; entityId: string; detail: Record<string, unknown> },
+): Promise<void> {
+  await withTenant(ctx, (tx) =>
+    writeAudit(tx, ctx, {
+      action: event.action,
+      entityType: event.entityType,
+      entityId: event.entityId,
+      detail: event.detail,
+    }),
+  );
+}
+
 export async function startRun(
   ctx: TenantContext,
   taskId: string,
@@ -142,22 +162,62 @@ export async function startRun(
     await consumeRateLimit(tx, `runs:project:${ctx.projectId}`, env.RATE_LIMIT_RUNS_PER_MINUTE);
     await assertWithinBudget(tx, ctx.projectId);
 
-    const pair = resolveProviderPair(task.providerSelection, task.reviewEnabled);
-    const primaryRow = await findAgentForRole(tx, ctx, 'primary', pair.primary);
+    // P1a agent pinning — the run executes the EXACT employees the task is pinned to. The runner never
+    // re-derives an agent from the provider (the historical non-deterministic bug); it fails closed instead.
+    //
+    // Legacy/unpinned task: no primary was ever assigned. Do NOT provider-resolve and do NOT mutate the
+    // task — record the reason in a SEPARATE committed transaction (this preflight tx rolls back on throw)
+    // and refuse the run.
+    if (task.assignedPrimaryAgentId == null) {
+      await auditAssignmentFailure(ctx, {
+        action: 'task.assignment_required',
+        entityType: 'task',
+        entityId: taskId,
+        detail: { reason: 'no_assigned_primary' },
+      });
+      throw new AssignmentRequiredError('no_assigned_primary');
+    }
+    // Load the pinned primary strictly by its id. Null ⇒ disabled / deleted / cross-workspace / wrong-role
+    // since the task was pinned — fail closed, never fall back to findAgentForRole.
+    const primaryRow = await getAssignableAgentById(tx, ctx, task.assignedPrimaryAgentId, 'primary');
     if (!primaryRow) {
-      throw new AppError(
-        'validation',
-        `No enabled primary agent configured for ${pair.primary} in this project.`,
-      );
+      await auditAssignmentFailure(ctx, {
+        action: 'run.assignment_validation_failed',
+        entityType: 'task',
+        entityId: taskId,
+        detail: { requestedPrimaryAgentId: task.assignedPrimaryAgentId, reason: 'primary_not_assignable' },
+      });
+      throw new AssignmentRequiredError('primary_not_assignable');
     }
     let reviewerRow: AgentRow | null = null;
-    if (pair.reviewer) {
-      reviewerRow = await findAgentForRole(tx, ctx, 'reviewer', pair.reviewer);
+    if (task.reviewEnabled) {
+      if (task.assignedReviewerAgentId == null) {
+        await auditAssignmentFailure(ctx, {
+          action: 'run.assignment_validation_failed',
+          entityType: 'task',
+          entityId: taskId,
+          detail: { reason: 'review_enabled_without_reviewer' },
+        });
+        throw new AssignmentRequiredError('review_enabled_without_reviewer');
+      }
+      reviewerRow = await getAssignableAgentById(tx, ctx, task.assignedReviewerAgentId, 'reviewer');
       if (!reviewerRow) {
-        throw new AppError(
-          'validation',
-          `Review is enabled but no reviewer agent is configured for ${pair.reviewer}.`,
-        );
+        await auditAssignmentFailure(ctx, {
+          action: 'run.assignment_validation_failed',
+          entityType: 'task',
+          entityId: taskId,
+          detail: { requestedReviewerAgentId: task.assignedReviewerAgentId, reason: 'reviewer_not_assignable' },
+        });
+        throw new AssignmentRequiredError('reviewer_not_assignable');
+      }
+      if (reviewerRow.id === primaryRow.id) {
+        await auditAssignmentFailure(ctx, {
+          action: 'run.assignment_validation_failed',
+          entityType: 'task',
+          entityId: taskId,
+          detail: { requestedReviewerAgentId: task.assignedReviewerAgentId, reason: 'reviewer_equals_primary' },
+        });
+        throw new AssignmentRequiredError('reviewer_equals_primary');
       }
     }
 
@@ -433,6 +493,10 @@ export async function startRun(
         status: 'running',
         primaryAgentId: primaryRow.id,
         reviewerAgentId: reviewerRow?.id ?? null,
+        // P1a agent pinning — immutable requested-vs-actual evidence. We loaded the rows STRICTLY by the
+        // pinned (requested) ids, so requested == actual by construction; the assertion below proves it.
+        requestedPrimaryAgentId: task.assignedPrimaryAgentId,
+        requestedReviewerAgentId: task.assignedReviewerAgentId ?? null,
         retrievedDocuments: retrievedRefs.length > 0 ? retrievedRefs : null,
         contextManifest: contextManifest.length > 0 ? contextManifest : null,
         retrievedSources: retrievedSources.length > 0 ? retrievedSources : null,
@@ -449,6 +513,16 @@ export async function startRun(
       })
       .returning({ id: runs.id });
     const runId = runInserted[0]!.id;
+
+    // P1a agent pinning — the run must not start unless the ACTUAL executing agents equal the REQUESTED
+    // (pinned) ones. Because we loaded strictly by the requested id this is guaranteed; assert it as a hard
+    // invariant so any future refactor that reintroduces substitution fails loudly instead of silently.
+    if (
+      primaryRow.id !== task.assignedPrimaryAgentId ||
+      (reviewerRow?.id ?? null) !== (task.assignedReviewerAgentId ?? null)
+    ) {
+      throw new AppError('run_invalid_state', 'Assignment integrity check failed: executing agents differ from the assigned employees.');
+    }
 
     // Versioned-path evidence (Stage C2): the normalized run→version relationships are written HERE, in
     // the same durable operation that created the run and BEFORE provider dispatch — so a successful run
@@ -498,6 +572,33 @@ export async function startRun(
         flagshipCategory: task.flagshipCategory,
       },
     });
+
+    // P1a agent pinning — proof the run executed EXACTLY the pinned employee (requested == actual).
+    // Identity ids + provider ONLY; no prompt text, no secrets.
+    await writeAudit(tx, ctx, {
+      action: 'run.assignment_confirmed',
+      entityType: 'run',
+      entityId: runId,
+      detail: {
+        requestedPrimaryAgentId: task.assignedPrimaryAgentId,
+        actualPrimaryAgentId: primaryRow.id,
+        matched: true,
+        primaryProvider: primaryRow.provider,
+      },
+    });
+    if (reviewerRow) {
+      await writeAudit(tx, ctx, {
+        action: 'reviewer.assignment_confirmed',
+        entityType: 'run',
+        entityId: runId,
+        detail: {
+          requestedReviewerAgentId: task.assignedReviewerAgentId ?? null,
+          actualReviewerAgentId: reviewerRow.id,
+          matched: true,
+          reviewerProvider: reviewerRow.provider,
+        },
+      });
+    }
 
     return { task, runId, primaryRow, reviewerRow, contextItems, objective, freshnessComparison, operatingPriorities };
   });

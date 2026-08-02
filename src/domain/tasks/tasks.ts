@@ -19,6 +19,7 @@ import { ConflictError, NotFoundError, ValidationError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { messages, objectives, runs, runSteps, tasks } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
+import { getAssignableAgentById } from '@/domain/agents/agents';
 import { withdrawPendingApprovalsForTask } from '@/domain/approvals/approvals';
 
 /**
@@ -66,12 +67,27 @@ export const createTaskSchema = z
     objectiveId: z.string().uuid().nullable().default(null),
     /** Set only by the standing-work tick (Sprint 8); never by forms. */
     scheduleId: z.string().uuid().nullable().default(null),
+    /** P1a agent pinning — the EXACT employees this task runs. `primaryAgentId` is required (a task is
+     *  always pinned to a specific enabled primary). `reviewerAgentId` is required IFF reviewEnabled, and
+     *  must be absent otherwise; it can never equal the primary. Validated against the workspace in
+     *  createTask (a tampered/stale id ⇒ ValidationError). */
+    primaryAgentId: z.string().uuid(),
+    reviewerAgentId: z.string().uuid().nullable().default(null),
   })
   .refine((v) => v.modelTier !== 'flagship' || v.flagshipCategory != null, {
     message: 'Flagship runs must declare a category from the reserved list.',
   })
   .refine((v) => v.modelTier === 'flagship' || v.flagshipCategory == null, {
     message: 'A category only applies to flagship runs.',
+  })
+  .refine((v) => !v.reviewEnabled || v.reviewerAgentId != null, {
+    message: 'A cross-check requires an assigned reviewer employee.',
+  })
+  .refine((v) => v.reviewEnabled || v.reviewerAgentId == null, {
+    message: 'A reviewer can only be assigned when cross-check is enabled.',
+  })
+  .refine((v) => v.reviewerAgentId == null || v.reviewerAgentId !== v.primaryAgentId, {
+    message: 'The reviewer must be a different employee than the primary.',
   });
 
 export type CreateTaskInput = z.input<typeof createTaskSchema>;
@@ -86,16 +102,42 @@ export async function createTask(
     throw new ValidationError(parsed.error.issues.map((i) => i.message));
   }
 
-  // `both` without review makes no sense (there would be no second provider) —
-  // normalize instead of erroring: both ⇒ review on.
-  const reviewEnabled =
-    parsed.data.providerSelection === 'both' ? true : parsed.data.reviewEnabled;
+  const reviewEnabled = parsed.data.reviewEnabled;
 
   // The canonical objective link is persisted here — so it is validated here (HUB-003, req #4).
   // A task may only be tied to an objective in its own workspace; the FK alone would accept any uuid.
   if (parsed.data.objectiveId) {
     await resolveObjectiveInWorkspace(tx, ctx, parsed.data.objectiveId);
   }
+
+  // P1a agent pinning — validate the pinned employees against THIS workspace, fail closed. The primary
+  // must be an enabled primary-role agent here; a tampered, stale, disabled, wrong-role, or cross-workspace
+  // id resolves to null and is rejected (never silently substituted). The composite FK is a second net.
+  const primaryAgent = await getAssignableAgentById(tx, ctx, parsed.data.primaryAgentId, 'primary');
+  if (!primaryAgent) {
+    throw new ValidationError(['Selected primary employee is not an enabled primary agent in this workspace.']);
+  }
+
+  let reviewerAgent = null;
+  if (reviewEnabled) {
+    // reviewerAgentId is guaranteed non-null here by the schema refinement, but re-check for safety.
+    if (!parsed.data.reviewerAgentId) {
+      throw new ValidationError(['A cross-check requires an assigned reviewer employee.']);
+    }
+    reviewerAgent = await getAssignableAgentById(tx, ctx, parsed.data.reviewerAgentId, 'reviewer');
+    if (!reviewerAgent) {
+      throw new ValidationError(['Selected reviewer employee is not an enabled reviewer agent in this workspace.']);
+    }
+    if (reviewerAgent.id === primaryAgent.id) {
+      throw new ValidationError(['The reviewer must be a different employee than the primary.']);
+    }
+  }
+
+  // Provider routing is DERIVED from the pinned primary — never 'both', never a passed value. This keeps
+  // downstream provider selection consistent with the employee that actually executes (the runner reads
+  // the pinned agents, not providerSelection, but other surfaces still read this column).
+  const providerSelection = primaryAgent.provider;
+  const assignedReviewerAgentId = reviewEnabled ? reviewerAgent!.id : null;
 
   const inserted = await tx
     .insert(tasks)
@@ -104,12 +146,14 @@ export async function createTask(
       projectId: ctx.projectId,
       title: parsed.data.title,
       input: parsed.data.input,
-      providerSelection: parsed.data.providerSelection,
+      providerSelection,
       reviewEnabled,
       modelTier: parsed.data.modelTier,
       flagshipCategory: parsed.data.flagshipCategory,
       objectiveId: parsed.data.objectiveId,
       scheduleId: parsed.data.scheduleId,
+      assignedPrimaryAgentId: primaryAgent.id,
+      assignedReviewerAgentId,
       status: 'pending',
       createdBy: ctx.userId,
     })
@@ -123,11 +167,29 @@ export async function createTask(
     entityId: taskId,
     detail: {
       title: parsed.data.title,
-      providerSelection: parsed.data.providerSelection,
+      providerSelection,
       reviewEnabled,
       modelTier: parsed.data.modelTier,
       flagshipCategory: parsed.data.flagshipCategory,
       objectiveId: parsed.data.objectiveId,
+    },
+  });
+
+  // P1a — a DISTINCT event records the exact pinning decision (identity only: ids / names / provider /
+  // model). NO systemPrompt, NO secrets. This is the durable "who was pinned, and to what execution
+  // profile" record; run.assignment_confirmed later proves the run executed exactly these.
+  await writeAudit(tx, ctx, {
+    action: 'task.assignment_created',
+    entityType: 'task',
+    entityId: taskId,
+    detail: {
+      requestedPrimaryAgentId: primaryAgent.id,
+      primaryAgentName: primaryAgent.name,
+      primaryProvider: primaryAgent.provider,
+      primaryModel: primaryAgent.model,
+      requestedReviewerAgentId: reviewerAgent?.id ?? null,
+      reviewerName: reviewerAgent?.name ?? null,
+      reviewerProvider: reviewerAgent?.provider ?? null,
     },
   });
 

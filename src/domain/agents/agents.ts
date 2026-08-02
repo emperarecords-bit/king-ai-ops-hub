@@ -110,12 +110,30 @@ export interface AssignableEmployee {
   name: string;
   departmentName: string | null;
   provider: ProviderId;
+  /** P1a agent pinning — shown in the picker so an operator sees the exact model that will execute. */
+  model: string;
+  /** Business title (e.g. "Sales Manager"); descriptive only. */
+  title: string | null;
 }
+
+/** Columns the full AgentRow selection needs — shared by every loader that returns an AgentRow. */
+const AGENT_ROW_COLUMNS = {
+  id: agents.id,
+  name: agents.name,
+  role: agents.role,
+  provider: agents.provider,
+  model: agents.model,
+  systemPrompt: agents.systemPrompt,
+  temperatureMilli: agents.temperatureMilli,
+  maxOutputTokens: agents.maxOutputTokens,
+  enabled: agents.enabled,
+  classification: agents.classification,
+} as const;
 
 /**
  * Enabled primary-role employees — the "Who should do this work?" picker
- * (Sprint 5, assignee-first). The pick determines the leading vendor; the
- * cross-check counterpart is derived per D-005.
+ * (Sprint 5, assignee-first). P1a: the pick is now the EXACT employee the run
+ * executes (pinned on the task), not merely a vendor hint.
  */
 export async function listAssignableEmployees(
   tx: DbTx,
@@ -127,6 +145,8 @@ export async function listAssignableEmployees(
       name: agents.name,
       departmentName: departments.name,
       provider: agents.provider,
+      model: agents.model,
+      title: agents.title,
     })
     .from(agents)
     .leftJoin(departments, eq(agents.departmentId, departments.id))
@@ -141,7 +161,72 @@ export async function listAssignableEmployees(
     .orderBy(asc(agents.name));
 }
 
-/** The enabled agent for (role, provider), or null. Engine input resolution. */
+/**
+ * P1a agent pinning — enabled reviewer-role employees, the exact-reviewer picker (shown when review is
+ * enabled). Symmetric to listAssignableEmployees; the chosen reviewer is pinned on the task and executed
+ * verbatim (no opposing-provider auto-selection).
+ */
+export async function listReviewerEmployees(
+  tx: DbTx,
+  ctx: TenantContext,
+): Promise<AssignableEmployee[]> {
+  return tx
+    .select({
+      id: agents.id,
+      name: agents.name,
+      departmentName: departments.name,
+      provider: agents.provider,
+      model: agents.model,
+      title: agents.title,
+    })
+    .from(agents)
+    .leftJoin(departments, eq(agents.departmentId, departments.id))
+    .where(
+      and(
+        eq(agents.projectId, ctx.projectId),
+        eq(agents.orgId, ctx.orgId),
+        eq(agents.role, 'reviewer'),
+        eq(agents.enabled, true),
+      ),
+    )
+    .orderBy(asc(agents.name));
+}
+
+/**
+ * P1a agent pinning — the fail-closed pin primitive. Loads the FULL AgentRow for a specific agent id ONLY
+ * when it is (a) in this workspace, (b) of the required technical role, and (c) enabled. Returns null for a
+ * disabled / wrong-role / cross-workspace / missing id — every caller treats null as "not a valid pin" and
+ * refuses to substitute. RLS + the (id, org, project) filter make a cross-workspace id invisible; the role
+ * and enabled filters make a stale or wrong-kind pin fail closed.
+ */
+export async function getAssignableAgentById(
+  tx: DbTx,
+  ctx: TenantContext,
+  agentId: string,
+  role: AgentRole,
+): Promise<AgentRow | null> {
+  const rows = await tx
+    .select(AGENT_ROW_COLUMNS)
+    .from(agents)
+    .where(
+      and(
+        eq(agents.id, agentId),
+        eq(agents.projectId, ctx.projectId),
+        eq(agents.orgId, ctx.orgId),
+        eq(agents.role, role),
+        eq(agents.enabled, true),
+      ),
+    )
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+/**
+ * The enabled agent for (role, provider), or null. P1a: this is now ONLY a reviewer-default helper; the
+ * runner never uses it to resolve a PINNED primary (that goes through getAssignableAgentById). A
+ * deterministic order (oldest first, then id) removes the historical non-determinism where two enabled
+ * agents on the same provider could be returned in an arbitrary order.
+ */
 export async function findAgentForRole(
   tx: DbTx,
   ctx: TenantContext,
@@ -149,18 +234,7 @@ export async function findAgentForRole(
   provider: ProviderId,
 ): Promise<AgentRow | null> {
   const rows = await tx
-    .select({
-      id: agents.id,
-      name: agents.name,
-      role: agents.role,
-      provider: agents.provider,
-      model: agents.model,
-      systemPrompt: agents.systemPrompt,
-      temperatureMilli: agents.temperatureMilli,
-      maxOutputTokens: agents.maxOutputTokens,
-      enabled: agents.enabled,
-      classification: agents.classification,
-    })
+    .select(AGENT_ROW_COLUMNS)
     .from(agents)
     .where(
       and(
@@ -171,6 +245,7 @@ export async function findAgentForRole(
         eq(agents.enabled, true),
       ),
     )
+    .orderBy(asc(agents.createdAt), asc(agents.id))
     .limit(1);
   return rows[0] ?? null;
 }
