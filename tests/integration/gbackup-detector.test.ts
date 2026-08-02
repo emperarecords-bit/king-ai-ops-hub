@@ -4,8 +4,13 @@ import postgres from 'postgres';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { afterAll, describe, expect, it } from 'vitest';
 import { EXPECTED_DRIZZLE_VERSION, computeExpectedMigrations, installedDrizzleVersion } from '../../scripts/backup/migration-hash';
-import { buildSourceManifestFromGit } from '../../scripts/backup/source-manifest';
 import { classifyMigrationState, detectMigrationState } from '../../scripts/backup/migration-detector';
+import { buildDbComparisonManifest } from '../support/db-migration-manifest';
+import { assertDisposableDbForVerification } from '../support/require-disposable-db';
+
+// Refuse this G-Backup DB test against the shared `king_ai_hub` when REQUIRE_DISPOSABLE_DB=1 — before the
+// pool below is constructed. No-op without the flag (default suite unchanged).
+assertDisposableDbForVerification('gbackup-detector.test');
 
 const URL = process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL ?? 'postgresql://king:king@localhost:5433/king_ai_hub';
 const sql = postgres(URL, { max: 2, prepare: false });
@@ -36,7 +41,7 @@ describe('G-Backup-A hash mirror — drizzle equivalence + portable source manif
     // Build the portable source from Git, then simulate an applied history where two migrations were applied
     // from CRLF bytes (their recognized variant) — exactly staging's shape. The classifier must return
     // NO_PENDING with 2 recognized variants and 0 unknown mismatches, derived (not hard-coded).
-    const manifest = buildSourceManifestFromGit('HEAD', 'drizzle');
+    const manifest = buildDbComparisonManifest('drizzle');
     const variantIdx = new Set([4, 53]);
     const applied = manifest.entries.map((e) => ({
       hash: variantIdx.has(e.idx) && e.recognizedVariantSha256 ? e.recognizedVariantSha256 : e.committedBlobSha256,
@@ -65,7 +70,7 @@ describe('G-Backup-A hash mirror — drizzle equivalence + portable source manif
 describe('G-Backup-A detector — read-only against the real local DB', () => {
   it('classifies the migrated local DB deterministically under the STRICT clean-variant policy', async () => {
     if (!dbAvailable) return;
-    const manifest = buildSourceManifestFromGit('HEAD', 'drizzle');
+    const manifest = buildDbComparisonManifest('drizzle');
     const a = await detectMigrationState(sql, { sourceManifest: manifest, migrationsFolder: 'drizzle' });
     const b = await detectMigrationState(sql, { sourceManifest: manifest, migrationsFolder: 'drizzle' });
     expect(a.drizzleVersion).toBe(EXPECTED_DRIZZLE_VERSION);
@@ -87,7 +92,7 @@ describe('G-Backup-A detector — read-only against the real local DB', () => {
     const { finalizeAttestationId } = await import('../../scripts/backup/legacy-attestation-canonical');
     const { loadTrustBundle } = await import('../../scripts/backup/legacy-attestation-verify');
     const kp = generateKeyPairSync('ed25519');
-    const manifest = buildSourceManifestFromGit('HEAD', 'drizzle');
+    const manifest = buildDbComparisonManifest('drizzle');
     const e0004 = manifest.entries.find((e) => e.tag === '0004_knowledge_k1')!;
     const appliedHash = (await sql<{ hash: string }[]>`select hash from drizzle.__drizzle_migrations where created_at = ${e0004.when}`)[0]!.hash;
     const signed = {
@@ -135,7 +140,7 @@ describe('G-Backup-A detector — read-only against the real local DB', () => {
     const { loadTrustBundle } = await import('../../scripts/backup/legacy-attestation-verify');
     const signer = generateKeyPairSync('ed25519');
     const untrusted = generateKeyPairSync('ed25519'); // signer key NOT in the store
-    const manifest = buildSourceManifestFromGit('HEAD', 'drizzle');
+    const manifest = buildDbComparisonManifest('drizzle');
     const e0004 = manifest.entries.find((e) => e.tag === '0004_knowledge_k1')!;
     const appliedHash = (await sql<{ hash: string }[]>`select hash from drizzle.__drizzle_migrations where created_at = ${e0004.when}`)[0]!.hash;
     const signed = {

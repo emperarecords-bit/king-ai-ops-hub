@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import postgres from 'postgres';
 import { afterAll, describe, expect, it } from 'vitest';
-import { buildSourceManifestFromGit } from '../../scripts/backup/source-manifest';
 import { classifyMigrationState, detectMigrationState } from '../../scripts/backup/migration-detector';
+import { buildDbComparisonManifest } from '../support/db-migration-manifest';
+import { assertDisposableDbForVerification } from '../support/require-disposable-db';
 import {
   ActiveBundleError,
   computeActiveIndexSemanticDigest,
@@ -459,9 +460,13 @@ describe('Phase 10 hardened — active-index version + self-integrity digest', (
 });
 
 // ---------------------------------------------------------------------------
+// Refuse this G-Backup DB test against the shared `king_ai_hub` when REQUIRE_DISPOSABLE_DB=1 — before the
+// pool below is constructed. No-op without the flag.
+assertDisposableDbForVerification('gbackup-active-onboarding.test');
+
 const URL = process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL ?? 'postgresql://king:king@localhost:5433/king_ai_hub';
 const sql = postgres(URL, { max: 2, prepare: false });
-const MANIFEST = buildSourceManifestFromGit('HEAD', 'drizzle');
+const MANIFEST = buildDbComparisonManifest('drizzle');
 let dbReady = false;
 try {
   await sql`select 1 as ok`;
@@ -519,7 +524,10 @@ describe('Phase 10 hardened — local-DB detector with the ACTIVE bundle', () =>
     expect(r.lineEndingVariantMatches).toBe(1);
     expect(r.variantDetails[0]!.tag).toBe('0053_pricing_foundations');
     expect(r.legacyAttestedMatches).toBe(1);
-    expect(r.exactExecutionMatches).toBe(52);
+    // Migration-count independent: 0053 is the sole EOL variant and 0004 the sole attested; every OTHER entry
+    // (including any uncommitted tail such as 0055) is an exact committed-blob match. Derive from the manifest
+    // length so adding a migration never needs an absolute-count edit here.
+    expect(r.exactExecutionMatches).toBe(MANIFEST.entries.length - 2);
     expect(r.variantDetails.every((v) => v.tag !== TAG)).toBe(true);
   });
 });
