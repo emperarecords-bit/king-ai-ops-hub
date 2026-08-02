@@ -247,6 +247,11 @@ export const agents = pgTable(
   (t) => [
     index('agents_org_project_idx').on(t.orgId, t.projectId),
     uniqueIndex('agents_project_name_uq').on(t.projectId, t.name),
+    // P1a agent pinning — a tenant-bound candidate key so tasks/runs/task_schedules can bind COMPOSITE
+    // foreign keys on (org_id, project_id, agent_id) → agents(org_id, project_id, id). id is already the
+    // primary key (globally unique), so this is additive/safe; its purpose is to make an agent reference
+    // enforce SAME-workspace by construction (a non-null agent id can never point across tenants).
+    unique('agents_tenant_id_uq').on(t.orgId, t.projectId, t.id),
   ],
 );
 
@@ -1103,6 +1108,11 @@ export const taskSchedules = pgTable(
     input: text('input').notNull(),
     providerSelection: providerSelectionEnum('provider_selection').notNull(),
     reviewEnabled: boolean('review_enabled').notNull().default(true),
+    /** P1a agent pinning — the exact employees each due tick pins its produced task to. Nullable so legacy
+     *  schedules migrate cleanly; a null pin ⇒ the tick SKIPS dispatch (fail closed), never provider-derives
+     *  an agent. Same-workspace enforced by the composite FKs below. */
+    assignedPrimaryAgentId: uuid('assigned_primary_agent_id'),
+    assignedReviewerAgentId: uuid('assigned_reviewer_agent_id'),
     modelTier: modelTierEnum('model_tier').notNull().default('standard'),
     flagshipCategory: flagshipCategoryEnum('flagship_category'),
     cadence: cadenceEnum('cadence').notNull(),
@@ -1124,6 +1134,10 @@ export const taskSchedules = pgTable(
     index('task_schedules_due_idx').on(t.enabled, t.nextRunAt),
     index('task_schedules_org_project_idx').on(t.orgId, t.projectId),
     index('task_schedules_objective_idx').on(t.objectiveId),
+    // P1a agent pinning — composite FKs to agents (MATCH SIMPLE / RESTRICT): null skips (legacy schedules),
+    // non-null is workspace-bound so a schedule can never pin a cross-workspace employee.
+    foreignKey({ columns: [t.orgId, t.projectId, t.assignedPrimaryAgentId], foreignColumns: [agents.orgId, agents.projectId, agents.id], name: 'task_schedules_assigned_primary_agent_fk' }).onDelete('restrict'),
+    foreignKey({ columns: [t.orgId, t.projectId, t.assignedReviewerAgentId], foreignColumns: [agents.orgId, agents.projectId, agents.id], name: 'task_schedules_assigned_reviewer_agent_fk' }).onDelete('restrict'),
   ],
 );
 
@@ -1157,6 +1171,12 @@ export const tasks = pgTable(
     status: taskStatusEnum('status').notNull().default('pending'),
     /** Slice 1: the employee accountable for this task ("who owns this?"). */
     ownerAgentId: uuid('owner_agent_id').references(() => agents.id, { onDelete: 'set null' }),
+    /** P1a agent pinning — the EXACT enabled employees this task is pinned to. The run executes these
+     *  specific agents; the runner never re-derives an agent from the provider. Nullable so legacy rows
+     *  migrate cleanly (a null pin ⇒ the runner fails closed rather than substituting). Enforced same-
+     *  workspace by the composite FKs below (non-null ⇒ must live in this org+project). */
+    assignedPrimaryAgentId: uuid('assigned_primary_agent_id'),
+    assignedReviewerAgentId: uuid('assigned_reviewer_agent_id'),
     createdBy: uuid('created_by')
       .notNull()
       .references(() => profiles.id, { onDelete: 'restrict' }),
@@ -1175,6 +1195,11 @@ export const tasks = pgTable(
     index('tasks_org_project_idx').on(t.orgId, t.projectId),
     index('tasks_project_status_idx').on(t.projectId, t.status),
     index('tasks_project_created_idx').on(t.projectId, t.createdAt),
+    // P1a agent pinning — composite FKs to agents. MATCH SIMPLE: a NULL agent id skips the check (legacy
+    // rows are fine); a non-null id must reference an agent in the SAME (org_id, project_id) — a cross-
+    // workspace pin is impossible. RESTRICT: a pinned employee cannot be deleted out from under history.
+    foreignKey({ columns: [t.orgId, t.projectId, t.assignedPrimaryAgentId], foreignColumns: [agents.orgId, agents.projectId, agents.id], name: 'tasks_assigned_primary_agent_fk' }).onDelete('restrict'),
+    foreignKey({ columns: [t.orgId, t.projectId, t.assignedReviewerAgentId], foreignColumns: [agents.orgId, agents.projectId, agents.id], name: 'tasks_assigned_reviewer_agent_fk' }).onDelete('restrict'),
   ],
 );
 
@@ -1427,6 +1452,13 @@ export const runs = pgTable(
     reviewerAgentId: uuid('reviewer_agent_id').references(() => agents.id, {
       onDelete: 'restrict',
     }),
+    /** P1a agent pinning — IMMUTABLE requested-vs-actual evidence. `requested*` records the exact agent
+     *  ids the task/schedule pinned (what was asked for); `primaryAgentId`/`reviewerAgentId` above stay the
+     *  ACTUAL agents the run executed. The runner loads strictly by the requested id, so requested == actual
+     *  by construction (asserted before the run starts). Nullable ONLY so runs predating the feature stay
+     *  untouched. Composite FKs (below) keep a non-null requested id in this workspace. */
+    requestedPrimaryAgentId: uuid('requested_primary_agent_id'),
+    requestedReviewerAgentId: uuid('requested_reviewer_agent_id'),
     /** Deterministic consolidation output. Null until the run finishes. */
     consolidatedResult: text('consolidated_result'),
     /** Project-folder chunks retrieved for this run (D-020 transparency). */
@@ -1470,6 +1502,10 @@ export const runs = pgTable(
   (t) => [
     index('runs_org_project_idx').on(t.orgId, t.projectId),
     index('runs_task_idx').on(t.taskId),
+    // P1a agent pinning — composite FKs on the immutable requested-agent evidence. Same MATCH SIMPLE /
+    // RESTRICT semantics as tasks: null skips the check (pre-feature runs), non-null is workspace-bound.
+    foreignKey({ columns: [t.orgId, t.projectId, t.requestedPrimaryAgentId], foreignColumns: [agents.orgId, agents.projectId, agents.id], name: 'runs_requested_primary_agent_fk' }).onDelete('restrict'),
+    foreignKey({ columns: [t.orgId, t.projectId, t.requestedReviewerAgentId], foreignColumns: [agents.orgId, agents.projectId, agents.id], name: 'runs_requested_reviewer_agent_fk' }).onDelete('restrict'),
   ],
 );
 
