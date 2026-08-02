@@ -146,8 +146,10 @@ describe.skipIf(!available)('HUB-009 audited classification operation', () => {
 
 describe.skipIf(!available)('HUB-009 run + usage snapshots (created at dispatch, immutable)', () => {
   async function runFor(ctx: TenantContext, taskId: string): Promise<string> {
-    await mkAgent(ctx, 'primary', 'openai');
-    await mkAgent(ctx, 'reviewer', 'anthropic');
+    const primaryId = await mkAgent(ctx, 'primary', 'openai');
+    const reviewerId = await mkAgent(ctx, 'reviewer', 'anthropic');
+    // P1a agent pinning — the task must be pinned to the exact employees before it can run.
+    await db.update(tasks).set({ assignedPrimaryAgentId: primaryId, assignedReviewerAgentId: reviewerId }).where(eq(tasks.id, taskId));
     setProviderOverrideForTests((id) => (id === 'openai' ? new FakeProvider('openai').reply('answer') : id === 'anthropic' ? new FakeProvider('anthropic').reply('VERDICT: approve\n\nok.') : undefined));
     const outcome = await startRun(ctx, taskId);
     expect(outcome.status).toBe('completed');

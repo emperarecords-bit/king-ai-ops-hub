@@ -112,7 +112,7 @@ async function freshWorkspace() {
 
   const taskId = (await db
     .insert(tasks)
-    .values({ orgId, projectId: pid, title: 'Pilot activation checklist', input: TASK_INPUT, providerSelection: 'both', reviewEnabled: true, status: 'pending', createdBy: ctx.userId, objectiveId })
+    .values({ orgId, projectId: pid, title: 'Pilot activation checklist', input: TASK_INPUT, providerSelection: 'both', reviewEnabled: true, status: 'pending', createdBy: ctx.userId, objectiveId, assignedPrimaryAgentId: primaryId, assignedReviewerAgentId: reviewerId })
     .returning({ id: tasks.id }))[0]!.id;
 
   // Decisions: three applicable (workspace / matching-objective / this-task) + two inapplicable.
@@ -260,11 +260,11 @@ describe.skipIf(!available)('HUB-008 end-to-end runner persistence (non-billable
   });
 
   it('a run with review disabled records primary identity and null reviewer identity', async () => {
-    const { ctx } = await freshWorkspace();
-    // A fresh single-provider task without review.
+    const { ctx, primaryId } = await freshWorkspace();
+    // A fresh single-provider task without review, pinned to the enabled openai primary (P1a).
     const soloTaskId = (await db
       .insert(tasks)
-      .values({ orgId, projectId: ctx.projectId, title: 'Solo', input: 'Do a small thing.', providerSelection: 'openai', reviewEnabled: false, status: 'pending', createdBy: ctx.userId })
+      .values({ orgId, projectId: ctx.projectId, title: 'Solo', input: 'Do a small thing.', providerSelection: 'openai', reviewEnabled: false, status: 'pending', createdBy: ctx.userId, assignedPrimaryAgentId: primaryId })
       .returning({ id: tasks.id }))[0]!.id;
     const openai = new FakeProvider('openai').reply('Solo answer.');
     setProviderOverrideForTests((id) => (id === 'openai' ? openai : undefined));

@@ -2,11 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
+import { assertDisposableDbForVerification } from '@tests/support/require-disposable-db';
 import { type TenantContext } from '@/types/domain';
 import { AppError } from '@/lib/errors';
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import {
+  agents,
   memberships,
   organizations,
   profiles,
@@ -33,6 +35,9 @@ process.env.DATABASE_URL =
   process.env.TEST_DATABASE_URL ??
   'postgresql://king:king@localhost:5433/king_ai_hub';
 
+// Refuse standing-work P1a verification against the shared DB when REQUIRE_DISPOSABLE_DB=1 (module-init guard).
+assertDisposableDbForVerification('standing.test');
+
 let available = false;
 try {
   await getSetupDb().select({ one: profiles.id }).from(profiles).limit(1);
@@ -49,6 +54,7 @@ let adminCtx: TenantContext;
 let memberCtx: TenantContext;
 let orgId = '';
 let projectId = '';
+let primaryAgentId = '';
 
 beforeAll(async () => {
   if (!available) return;
@@ -75,6 +81,13 @@ beforeAll(async () => {
     { orgId, projectId, userId: adminId, role: 'admin' },
     { orgId, projectId, userId: memberId, role: 'member' },
   ]);
+  // P1a agent pinning — a schedule now pins an exact primary employee, so seed one enabled primary.
+  primaryAgentId = (
+    await db
+      .insert(agents)
+      .values({ orgId, projectId, name: 'Standing Primary', role: 'primary', provider: 'openai', model: 'gpt-x', systemPrompt: 'x' })
+      .returning({ id: agents.id })
+  )[0]!.id;
   adminCtx = { userId: adminId, orgId, projectId, orgRole: 'owner', projectRole: 'admin' };
   memberCtx = { userId: memberId, orgId, projectId, orgRole: 'member', projectRole: 'member' };
 });
@@ -95,6 +108,8 @@ describe.skipIf(!available)('standing work', () => {
           input: 'Do a thing.',
           providerSelection: 'openai',
           cadence: 'daily',
+          reviewEnabled: false,
+          assignedPrimaryAgentId: primaryAgentId,
         }),
       ),
     ).rejects.toThrow(AppError);
@@ -110,6 +125,8 @@ describe.skipIf(!available)('standing work', () => {
         cadence: 'weekly',
         weekday: 1,
         atHour: 6,
+        reviewEnabled: false,
+        assignedPrimaryAgentId: primaryAgentId,
       }),
     );
     const rows = await withTenant(adminCtx, (tx) => listSchedules(tx, adminCtx));
@@ -129,6 +146,8 @@ describe.skipIf(!available)('standing work', () => {
           input: 'x',
           providerSelection: 'openai',
           cadence: 'weekly',
+          reviewEnabled: false,
+          assignedPrimaryAgentId: primaryAgentId,
         }),
       ),
     ).rejects.toThrow(/weekday/i);
