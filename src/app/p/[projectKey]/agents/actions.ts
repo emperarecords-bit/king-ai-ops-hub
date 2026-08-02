@@ -132,6 +132,12 @@ export async function saveAgent(_prev: AgentFormState, formData: FormData): Prom
 
   try {
     const ctx = await requireTenant(parsed.data.projectKey);
+    // Admin-only employee configuration (P1b). Denial happens BEFORE any withTenant/updateAgent write, so a
+    // non-admin can never partially mutate an agent's model/prompt/sampling/enabled. Mirrors the sibling
+    // createEmployeeAction / saveEmployeeOrgAction gates exactly.
+    if (ctx.projectRole !== 'admin') {
+      return { error: 'Only workspace admins can change employee configuration.', saved: false };
+    }
     await withTenant(ctx, (tx) =>
       updateAgent(tx, ctx, parsed.data.agentId, {
         model: parsed.data.model,

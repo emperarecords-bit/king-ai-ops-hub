@@ -306,7 +306,7 @@ export default async function ObjectiveDetailPage({
                       : ' · never run'}
                   </span>
                 </div>
-                {open ? (
+                {open && isAdmin ? (
                   <ToggleScheduleButton
                     projectKey={projectKey}
                     objectiveId={o.id}
@@ -318,7 +318,9 @@ export default async function ObjectiveDetailPage({
             ))}
           </ul>
         )}
-        {open && employees.length > 0 ? (
+        {/* P1b — creating/editing/pausing standing work is admin-only. Non-admins keep the read-only list
+            above; the server gate in the schedule actions is authoritative, so hiding is convenience only. */}
+        {open && isAdmin && employees.length > 0 ? (
           <AddStandingWorkForm
             projectKey={projectKey}
             objectiveId={o.id}
@@ -331,6 +333,10 @@ export default async function ObjectiveDetailPage({
               name: r.departmentName ? `${r.name} (${r.departmentName}) · ${r.provider} · ${r.model}` : `${r.name} · ${r.provider} · ${r.model}`,
             }))}
           />
+        ) : open && !isAdmin && schedules.length > 0 ? (
+          <p className="mt-3 text-xs text-[var(--muted)]">
+            Read-only. Only workspace admins can create, edit, or pause standing work.
+          </p>
         ) : null}
       </Card>
 
