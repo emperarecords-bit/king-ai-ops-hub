@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
+import { ensureAppSchema } from './bootstrap-prerequisite';
+import { verifyBootstrap } from './bootstrap-verify';
 
 /**
  * Takes a safety dump before any DDL runs (SPRINT-03-PLAN.md §6). Best-effort
@@ -49,6 +51,14 @@ async function main() {
   console.log('Acquiring migration advisory lock…');
   await sql`select pg_advisory_lock(${LOCK_KEY})`;
   try {
+    // Fresh-database bootstrap PREREQUISITE (P1c): create the `app` schema BEFORE migrate(). Migration 0052 is
+    // the only migration that references `app`, but no migration creates it — rls.sql does, and rls.sql runs
+    // AFTER migrate(). Without this line a fresh, empty DB aborts at 0052 with `schema "app" does not exist`.
+    // Idempotent, so an already-migrated (incremental) DB passes straight through it. This is the reusable seam
+    // where the future G-Backup-B2a gate slots in: [B2a gate] -> ensureAppSchema -> migrate -> rls -> verify.
+    console.log('Ensuring bootstrap prerequisite (app schema)…');
+    await ensureAppSchema(sql);
+
     console.log('Applying Drizzle migrations…');
     await migrate(db, { migrationsFolder: join(process.cwd(), 'drizzle') });
 
@@ -57,6 +67,22 @@ async function main() {
     await sql.unsafe(rls);
 
     console.log('Migration complete.');
+
+    // Full-bootstrap verification, opt-in via BOOTSTRAP_VERIFY=1 (set by `npm run db:bootstrap`). Plain
+    // `db:migrate` stays incremental and does NOT verify. verifyBootstrap THROWS on any failure, so the
+    // top-level catch below turns it into a nonzero exit.
+    if (process.env.BOOTSTRAP_VERIFY === '1' || process.argv.includes('--verify')) {
+      console.log('Verifying bootstrap (journal, app schema, functions, RLS, tenant isolation, no fixtures)…');
+      const result = await verifyBootstrap(sql);
+      console.log(
+        `Bootstrap verified: ${result.journalCount}/${result.expectedJournalCount} migrations, ` +
+          `app schema present, ${result.requiredFunctionsPresent.length} required functions, ` +
+          `RLS on [${Object.keys(result.rlsEnabled).join(', ')}], ` +
+          `tenant isolation ok (same-tenant select=${result.tenantIsolation.sameTenantSelect}, ` +
+          `cross-tenant read=${result.tenantIsolation.crossTenantRead}, cross-tenant insert rejected=` +
+          `${result.tenantIsolation.crossTenantInsertRejected}), no fixtures.`,
+      );
+    }
   } finally {
     await sql`select pg_advisory_unlock(${LOCK_KEY})`;
     await sql.end();
