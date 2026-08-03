@@ -620,7 +620,9 @@ describe('Phase 10 hardened — local-DB detector with the ACTIVE bundle', () =>
     expect(r.legacyAttestedDetails[0]!.tag).toBe(TAG);
     expect(r.unknownHistoricalMismatches).toBe(0);
     expect(r.unknownDatabaseDivergences).toBe(0);
-    expect(r.exactExecutionMatches + r.lineEndingVariantMatches + r.legacyAttestedMatches).toBe(54);
+    // Migration-count independent: every applied migration is accounted for as exact / EOL-variant / legacy-attested,
+    // so the total equals the committed source manifest's length (no absolute-count edit when a migration is added).
+    expect(r.exactExecutionMatches + r.lineEndingVariantMatches + r.legacyAttestedMatches).toBe(MANIFEST.entries.length);
   });
   it('production rejected; missing key / revoked key / tampered signature all fail closed', async () => {
     if (!dbReady) return;
@@ -647,7 +649,10 @@ describe('Phase 10 hardened — local-DB detector with the ACTIVE bundle', () =>
     expect(r.lineEndingVariantMatches).toBe(1);
     expect(r.variantDetails[0]!.tag).toBe('0053_pricing_foundations');
     expect(r.legacyAttestedMatches).toBe(1);
-    expect(r.exactExecutionMatches).toBe(52);
+    // Migration-count independent (reconciliation): every remaining applied migration is an exact match, so the
+    // exact count is the manifest length minus the one EOL variant (0053) and the one legacy-attested (0004) —
+    // never a hardcoded absolute (was `52`, which assumed exactly 54 migrations; the branch endpoint is now 0054).
+    expect(r.exactExecutionMatches).toBe(MANIFEST.entries.length - r.lineEndingVariantMatches - r.legacyAttestedMatches);
     expect(r.variantDetails.every((v) => v.tag !== TAG)).toBe(true);
   });
 });

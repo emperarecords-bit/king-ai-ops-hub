@@ -97,6 +97,7 @@ grant select, insert, update on
   objectives, milestones, knowledge_items, task_schedules,
   documents, document_versions, document_chunks, document_version_tombstones, object_cleanup_operations, document_purge_operations, run_document_versions, task_dependencies, decisions, decision_injections, knowledge_injections, knowledge_sources, knowledge_verification_events, knowledge_disclosure_grants, document_disclosure_grants, knowledge_proposals, ai_operations, run_jobs, document_jobs,
   work_items,
+  instruments, watchlists, watchlist_items, market_quotes, research_notes, trade_theses, paper_portfolios, paper_positions, paper_orders, paper_fills, risk_limits, restricted_symbols, risk_checks, kill_switches,
   usage_events, spend_limits, rate_limit_buckets, profiles
 to app_server;
 
@@ -108,7 +109,9 @@ to app_server;
 -- dedicated least-privilege `purge_agent` role on a separate connection (below).
 grant delete on
   rate_limit_buckets, integration_secrets, project_context_items,
-  documents, document_chunks, task_dependencies, run_jobs, document_jobs
+  documents, document_chunks, task_dependencies, run_jobs, document_jobs,
+  -- Trading: only the mutable curation lists are deletable; orders/fills/positions/risk_checks are never hard-deleted.
+  watchlists, watchlist_items, restricted_symbols
 to app_server;
 -- Belt: revoke any previously-granted delete on immutable version rows from app_server. Purge is the ONLY
 -- deletion path for these, and it runs as purge_agent (below) — app_server must never delete them directly.
@@ -631,7 +634,11 @@ begin
     'artifacts', 'approvals', 'usage_events', 'spend_limits',
     'objectives', 'milestones', 'knowledge_items', 'task_schedules',
     'documents', 'document_versions', 'document_chunks', 'document_version_tombstones', 'object_cleanup_operations', 'document_purge_operations', 'run_document_versions', 'task_dependencies', 'decisions', 'decision_injections', 'knowledge_injections', 'knowledge_sources', 'knowledge_verification_events', 'knowledge_disclosure_grants', 'document_disclosure_grants', 'knowledge_proposals', 'ai_operations', 'run_jobs',
-    'document_jobs', 'work_items'
+    'document_jobs', 'work_items',
+    -- Stock Trading (P1): every trading table is strictly (org, project) tenant-scoped.
+    'instruments', 'watchlists', 'watchlist_items', 'market_quotes', 'research_notes', 'trade_theses',
+    'paper_portfolios', 'paper_positions', 'paper_orders', 'paper_fills', 'risk_limits', 'restricted_symbols',
+    'risk_checks', 'kill_switches'
   ]
   loop
     execute format('alter table %I enable row level security', t);
@@ -741,3 +748,65 @@ drop trigger if exists platform_pricing_state_immutable on platform_pricing_stat
 create trigger platform_pricing_state_immutable
   before update or delete on platform_pricing_state
   for each row execute function app.forbid_mutation();
+
+-- Stock Trading (P1): tenant-bind references that cannot be plain composite FKs -----------------------------------
+-- Trading→trading references use composite FKs (org_id, project_id, parent_id) in the schema. The remaining
+-- tenant-bound references — to Hub tables (approvals, agents) and the circular order↔risk_check pair — are enforced
+-- here with narrow constraint triggers. The existence check filters on (id, org_id, project_id), so a cross-workspace
+-- reference (or one hidden by RLS) fails closed. No SECURITY DEFINER: the explicit org/project filter is authoritative.
+
+create or replace function app.trading_ref_same_tenant(p_relname text, p_id uuid, p_org uuid, p_project uuid)
+returns void language plpgsql set search_path = public, pg_temp as $$
+declare ok boolean;
+begin
+  if p_id is null then return; end if;
+  execute format('select exists(select 1 from %I where id = $1 and org_id = $2 and project_id = $3)', p_relname)
+    into ok using p_id, p_org, p_project;
+  if not ok then
+    raise exception 'trading tenant violation: %.% is not in org % project %', p_relname, p_id, p_org, p_project
+      using errcode = '23514';
+  end if;
+end $$;
+grant execute on function app.trading_ref_same_tenant(text, uuid, uuid, uuid) to app_server;
+
+create or replace function app.trg_paper_orders_tenant() returns trigger
+language plpgsql as $$
+begin
+  perform app.trading_ref_same_tenant('approvals', new.approval_id, new.org_id, new.project_id);
+  perform app.trading_ref_same_tenant('risk_checks', new.risk_check_id, new.org_id, new.project_id);
+  perform app.trading_ref_same_tenant('agents', new.proposed_by_agent_id, new.org_id, new.project_id);
+  return new;
+end $$;
+drop trigger if exists trading_paper_orders_tenant_trg on paper_orders;
+create constraint trigger trading_paper_orders_tenant_trg after insert or update on paper_orders
+  deferrable initially immediate for each row execute function app.trg_paper_orders_tenant();
+
+create or replace function app.trg_research_notes_tenant() returns trigger
+language plpgsql as $$
+begin
+  perform app.trading_ref_same_tenant('agents', new.author_agent_id, new.org_id, new.project_id);
+  return new;
+end $$;
+drop trigger if exists trading_research_notes_tenant_trg on research_notes;
+create constraint trigger trading_research_notes_tenant_trg after insert or update on research_notes
+  deferrable initially immediate for each row execute function app.trg_research_notes_tenant();
+
+create or replace function app.trg_trade_theses_tenant() returns trigger
+language plpgsql as $$
+begin
+  perform app.trading_ref_same_tenant('agents', new.author_agent_id, new.org_id, new.project_id);
+  return new;
+end $$;
+drop trigger if exists trading_trade_theses_tenant_trg on trade_theses;
+create constraint trigger trading_trade_theses_tenant_trg after insert or update on trade_theses
+  deferrable initially immediate for each row execute function app.trg_trade_theses_tenant();
+
+create or replace function app.trg_risk_checks_tenant() returns trigger
+language plpgsql as $$
+begin
+  perform app.trading_ref_same_tenant('agents', new.evaluated_by_agent_id, new.org_id, new.project_id);
+  return new;
+end $$;
+drop trigger if exists trading_risk_checks_tenant_trg on risk_checks;
+create constraint trigger trading_risk_checks_tenant_trg after insert or update on risk_checks
+  deferrable initially immediate for each row execute function app.trg_risk_checks_tenant();

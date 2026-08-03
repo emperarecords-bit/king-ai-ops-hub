@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { MigrationReadError } from '../../scripts/backup/migration-hash';
 import {
@@ -9,10 +10,14 @@ import {
 
 describe('G-Backup-A portable source manifest (Git-blob identity)', () => {
   const manifest = buildSourceManifestFromGit('HEAD', 'drizzle');
+  // Migration-count independent: derive the expected count from the committed journal so adding a migration
+  // (0054, …) never needs an absolute-count edit. Never silently shrinks below the historical 54.
+  const journalCount = (JSON.parse(readFileSync('drizzle/meta/_journal.json', 'utf8')) as { entries: unknown[] }).entries.length;
 
   it('builds an ordered manifest from Git blobs with a stable set-hash', () => {
     expect(manifest.manifestVersion).toBe('1');
-    expect(manifest.entries.length).toBe(54);
+    expect(manifest.entries.length).toBe(journalCount);
+    expect(journalCount).toBeGreaterThanOrEqual(54);
     for (let i = 1; i < manifest.entries.length; i++) expect(manifest.entries[i]!.idx).toBeGreaterThan(manifest.entries[i - 1]!.idx);
     expect(manifest.sourceMigrationSetHash).toMatch(/^[0-9a-f]{64}$/);
     expect(computeSourceMigrationSetHash(manifest.entries)).toBe(manifest.sourceMigrationSetHash);
@@ -31,7 +36,7 @@ describe('G-Backup-A portable source manifest (Git-blob identity)', () => {
     const s = serializeSourceManifest(manifest);
     const parsed = parseSourceManifest(s);
     expect(parsed.sourceMigrationSetHash).toBe(manifest.sourceMigrationSetHash);
-    expect(parsed.entries.length).toBe(54);
+    expect(parsed.entries.length).toBe(journalCount);
   });
 
   it('a manifest whose set-hash does not match its entries is rejected', () => {
