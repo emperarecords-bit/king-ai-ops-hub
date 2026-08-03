@@ -147,10 +147,11 @@ jobs:
           echo "GBACKUP_EXPECTED_DB_IDENTITY=$CI_DB" >> "$GITHUB_ENV"
       - name: Assert disposable target (accepts CI db, rejects king_ai_hub / staging / production)
         run: node scripts/ci/assert-disposable.mjs
-      - name: Prerequisite app schema (idempotent; also works around pre-P1c fresh-bootstrap at <=0053)
-        run: psql -v ON_ERROR_STOP=1 -d "$CI_DB" -c "CREATE SCHEMA IF NOT EXISTS app;"
-      - name: Bootstrap from committed migrations (current identity)
-        run: npm run db:migrate
+      # NOTE (P1c): the `app` schema is deliberately NOT pre-created here — this job starts from a genuinely EMPTY
+      # disposable database so `npm run db:migrate` must create the prerequisite schema itself (via P1c's
+      # ensureAppSchema, which runs after the declared-bootstrap gate). This proves the fresh-database bootstrap.
+      - name: Bootstrap from an EMPTY database (declared-bootstrap gate → ensureAppSchema → migrate → RLS → verify)
+        run: npm run db:bootstrap
       - name: Branch-aware migration count matches committed journal
         run: node scripts/ci/check-migration-count.mjs
       - name: Full sequential repository suite (RLS + tenancy included)

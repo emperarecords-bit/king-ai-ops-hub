@@ -13,14 +13,27 @@ import {
   runPreMigrationGate,
 } from './backup/premigration-gate';
 import { createHttpsReceiptFetcher } from './backup/receipt-transport';
+import { ensureAppSchema } from './bootstrap-prerequisite';
+import { verifyBootstrap } from './bootstrap-verify';
 
 /**
- * G-Backup-B2a — the pre-migration VERIFICATION GATE replaces the old Windows-only best-effort backup. Before ANY
- * database mutation (`migrate()` and `src/db/rls.sql`), the gate runs UNDER the advisory lock and must resolve to a
- * verdict; on staging it is fail-closed (a non-empty database requires a valid signed receipt). Only a catalog-
- * verified bootstrap-empty database or an explicit local/dev/test bypass may proceed without a receipt.
+ * G-Backup-B2a × P1c reconciled migration entrypoint.
  *
- * This release path is a CONSUMER only: it never signs a receipt and never holds Fly snapshot authority.
+ * The pre-migration VERIFICATION GATE (B2a) replaces the old best-effort backup. Before ANY database mutation the
+ * gate runs UNDER the advisory lock and must resolve to a verdict; on staging it is fail-closed (a non-empty
+ * database requires a valid signed receipt). Only a catalog-verified bootstrap-empty database or an explicit
+ * local/dev/test bypass may proceed without a receipt. This release path is a CONSUMER only: it never signs a
+ * receipt and never holds Fly snapshot authority.
+ *
+ * Immediately AFTER the gate — and before Drizzle migrate() — the P1c fresh-database PREREQUISITE creates the
+ * `app` schema, without which a genuinely empty database aborts at 0052 (`schema "app" does not exist`). After
+ * RLS, an opt-in P1c bootstrap VERIFICATION (rollback-only) runs when requested.
+ *
+ * Final stage order under the SAME advisory lock:
+ *   advisory lock → B2a gate → ensureAppSchema → Drizzle migrate → RLS → [optional verifyBootstrap] → cleanup.
+ * The gate runs before ensureAppSchema or any other catalog mutation; a failed stage skips all later stages and
+ * is fatal (finalizeMigrationConnection re-raises the primary error → nonzero exit), while the advisory lock is
+ * always released and the connection always closed, and a cleanup error never masks the primary failure.
  */
 
 const SOURCE_IDENTITY_PATH = join(process.cwd(), 'source-identity.json');
@@ -131,7 +144,8 @@ async function main() {
     await sql`select pg_advisory_lock(${LOCK_KEY})`;
     locked = true;
 
-    // Pre-migration verification gate — UNDER the lock, BEFORE any mutation. Fail-closed on staging.
+    // Pre-migration verification gate — UNDER the lock, BEFORE any mutation (including ensureAppSchema).
+    // Fail-closed on staging.
     const config = buildGateConfigFromEnv();
     const fetcher = createHttpsReceiptFetcher({
       maxBytes: config.transportMaxBytes,
@@ -148,6 +162,13 @@ async function main() {
     });
     console.log(`Pre-migration gate passed: ${verdict.mode} — ${verdict.detail}`);
 
+    // Fresh-database bootstrap PREREQUISITE (P1c): create the `app` schema AFTER the gate and BEFORE migrate().
+    // Migration 0052 references `app`, but no migration creates it — rls.sql does, and rls.sql runs AFTER
+    // migrate(). Without this, a fresh, empty DB aborts at 0052. Idempotent, so an already-migrated (incremental)
+    // DB passes straight through it.
+    console.log('Ensuring bootstrap prerequisite (app schema)…');
+    await ensureAppSchema(sql);
+
     console.log('Applying Drizzle migrations…');
     await migrate(db, { migrationsFolder: join(process.cwd(), 'drizzle') });
 
@@ -156,11 +177,28 @@ async function main() {
     await sql.unsafe(rls);
 
     console.log('Migration complete.');
+
+    // Full-bootstrap verification (P1c), opt-in via BOOTSTRAP_VERIFY=1 (set by `npm run db:bootstrap`) — runs
+    // AFTER RLS, and only when explicitly requested. Plain `db:migrate` stays incremental and does NOT verify.
+    // verifyBootstrap is rollback-only (no persisted probe writes) and THROWS on any failure, which the catch
+    // below turns into a fatal nonzero exit.
+    if (process.env.BOOTSTRAP_VERIFY === '1' || process.argv.includes('--verify')) {
+      console.log('Verifying bootstrap (journal, app schema, functions, RLS, tenant isolation, no fixtures)…');
+      const result = await verifyBootstrap(sql);
+      console.log(
+        `Bootstrap verified: ${result.journalCount}/${result.expectedJournalCount} migrations, ` +
+          `app schema present, ${result.requiredFunctionsPresent.length} required functions, ` +
+          `RLS on [${Object.keys(result.rlsEnabled).join(', ')}], ` +
+          `tenant isolation ok (same-tenant select=${result.tenantIsolation.sameTenantSelect}, ` +
+          `cross-tenant read=${result.tenantIsolation.crossTenantRead}, cross-tenant insert rejected=` +
+          `${result.tenantIsolation.crossTenantInsertRejected}), no fixtures.`,
+      );
+    }
   } catch (e) {
     primaryError = e;
   }
   // Cleanup on every post-acquisition path: unlock (if locked) then close, always both; a cleanup failure never
-  // masks an earlier gate/migrate/rls failure, and surfaces on its own when nothing else failed.
+  // masks an earlier gate/schema/migrate/rls/verify failure, and surfaces on its own when nothing else failed.
   await finalizeMigrationConnection(primaryError, {
     locked,
     unlock: () => sql`select pg_advisory_unlock(${LOCK_KEY})`.then(() => undefined),

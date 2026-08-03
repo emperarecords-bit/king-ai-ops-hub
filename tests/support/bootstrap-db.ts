@@ -157,3 +157,41 @@ export function makeIdentityMigrationsFolder(
     applied0004Sha256: kind === 'legacy' ? LEGACY_0004_SHA256 : createHash('sha256').update(committed0004).digest('hex'),
   };
 }
+
+/**
+ * (P1c) Build a temporary migrations folder containing migrations 0000..(count-1) and a `meta/_journal.json`
+ * sliced to those entries, so an "incremental" database (migrated only through an earlier migration) can be
+ * simulated WITHOUT editing any committed migration. Drizzle's runtime migrator reads only the journal + `.sql`
+ * files (no snapshots), so this faithfully migrates a database to an EARLIER point.
+ */
+export function makeTruncatedMigrationsFolder(count: number, sourceFolder = 'drizzle'): { folder: string; cleanup: () => void } {
+  const journal = JSON.parse(readFileSync(join(sourceFolder, 'meta', '_journal.json'), 'utf8')) as {
+    entries: { idx: number; tag: string }[];
+  };
+  const kept = journal.entries.slice(0, count);
+  const dir = mkdtempSync(join(tmpdir(), 'p1c-mig-'));
+  cpSync(join(sourceFolder, 'meta'), join(dir, 'meta'), { recursive: true });
+  writeFileSync(join(dir, 'meta', '_journal.json'), JSON.stringify({ ...journal, entries: kept }, null, 2));
+  for (const e of kept) cpSync(join(sourceFolder, `${e.tag}.sql`), join(dir, `${e.tag}.sql`));
+  return { folder: dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+/**
+ * (P1c) Build a temporary migrations folder whose single migration contains INVALID SQL, to simulate a migration
+ * failure without editing any committed migration.
+ */
+export function makeBadMigrationsFolder(): { folder: string; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), 'p1c-bad-'));
+  const when = Date.now();
+  cpSync(join('drizzle', 'meta'), join(dir, 'meta'), { recursive: true });
+  writeFileSync(
+    join(dir, 'meta', '_journal.json'),
+    JSON.stringify(
+      { version: '7', dialect: 'postgresql', entries: [{ idx: 0, version: '7', when, tag: '0000_bad', breakpoints: true }] },
+      null,
+      2,
+    ),
+  );
+  writeFileSync(join(dir, '0000_bad.sql'), 'CREATE TABLE this is not valid sql at all;');
+  return { folder: dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}

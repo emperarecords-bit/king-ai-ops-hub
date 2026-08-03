@@ -274,19 +274,20 @@ describe('Phase 10 hardened — draft exclusion + repository hygiene', () => {
     for (const f of ['legacy-active-bundle.ts', 'strict-json.ts']) {
       expect(readFileSync(join('scripts', 'backup', f), 'utf8').includes('legacy-attestation-sign')).toBe(false);
     }
-    // RECONCILIATION (G-Backup-B2a × current main): main replaced the old `git diff main..HEAD -- scripts/migrate.ts`
-    // byte-identity check (clone-topology dependent, never proved SAFETY) with the semantic assertMigrateStageOrder
-    // checker. B2a intentionally wires the pre-migration VERIFICATION GATE (runPreMigrationGate) into migrate.ts in
-    // place of the old preMigrationBackup seam — the checker recognizes the gate as the pre-migration safety seam,
-    // so it validates gate → migrate → RLS ordering (advisory lock/cleanup present, failures fatal), clone-topology
-    // independent. B2a security invariant retained: this release path is a CONSUMER — migrate.ts imports neither the
-    // legacy loader nor the attestation/receipt signer, and the gate must be present.
+    // RECONCILIATION (G-Backup-B2a × P1c): the final production seam wires BOTH the B2a pre-migration gate
+    // (runPreMigrationGate) AND P1c's fresh-database bootstrap (ensureAppSchema + verifyBootstrap) into migrate.ts.
+    // assertMigrateStageOrder (clone-topology independent — no main..HEAD) requires all of them and validates the
+    // full order: gate → ensureAppSchema → migrate → RLS → verify, advisory lock/cleanup bracketing, failures
+    // fatal. B2a security invariant retained: this release path is a CONSUMER — migrate.ts imports neither the
+    // legacy loader nor the attestation/receipt signer.
     const migrate = readFileSync(join('scripts', 'migrate.ts'), 'utf8');
     expect(() => assertMigrateStageOrder(migrate)).not.toThrow();
     expect(migrate.includes('legacy-active-bundle')).toBe(false);
     expect(migrate.includes('legacy-attestation-sign')).toBe(false);
     expect(migrate.includes('receipt-v2-sign')).toBe(false);
     expect(migrate.includes('runPreMigrationGate')).toBe(true); // B2a pre-migration gate is wired in
+    expect(migrate.includes('ensureAppSchema')).toBe(true); // P1c fresh-database prerequisite is wired in
+    expect(migrate.includes('verifyBootstrap')).toBe(true); // P1c bootstrap verification is wired in
   });
 });
 
@@ -294,16 +295,16 @@ describe('Phase 10 hardened — draft exclusion + repository hygiene', () => {
 // The safety-stage invariant of the deployment path scripts/migrate.ts, exercised POSITIVELY against the real
 // committed source and NEGATIVELY against synthetic bad-ordered sources. Pure (a function of the source text):
 // no git history, no branch name, no database, no hardcoded hashes, and it never compares the file to itself.
-// `ensureAppSchema` (P1c) and `verifyBootstrap` (P1d) are OPTIONAL stages — verified in order WHEN PRESENT — so
-// this same checker accepts accepted-main (which has neither) and the later P1c/P1d migrate.ts (which add them).
+// The final B2a×P1c contract REQUIRES every stage — gate (runPreMigrationGate) → ensureAppSchema → migrate → RLS
+// → verifyBootstrap → cleanup — so a source MISSING any required stage fails (the check never passes vacuously).
 describe('Phase 10 hardened — migrate.ts safety-stage ordering invariant (semantic)', () => {
   const NL = '\n';
-  // A synthetic, fully-staged GOOD source (P1c/P1d shape: includes the OPTIONAL ensureAppSchema + verify stages).
+  // A synthetic, fully-staged GOOD source (the reconciled B2a×P1c shape under one advisory lock).
   const GOOD = [
     'async function main() {',
-    '  preMigrationBackup();',
     '  await sql`select pg_advisory_lock(4021)`;',
     '  try {',
+    '    await runPreMigrationGate(config);',
     '    await ensureAppSchema(sql);',
     '    await migrate(db, { migrationsFolder: "drizzle" });',
     '    await sql.unsafe(readFileSync("rls.sql", "utf8"));',
@@ -317,33 +318,47 @@ describe('Phase 10 hardened — migrate.ts safety-stage ordering invariant (sema
     '',
   ].join(NL);
 
-  it('ACCEPTS the real accepted-main scripts/migrate.ts (positive; optional stages absent)', () => {
+  it('ACCEPTS the real reconciled scripts/migrate.ts (gate → ensureAppSchema → migrate → RLS → verify)', () => {
     const real = readFileSync(join('scripts', 'migrate.ts'), 'utf8');
     const idx = assertMigrateStageOrder(real);
-    expect(idx.backupCall).toBeLessThan(idx.migrate);
-    expect(idx.advisoryLock).toBeLessThan(idx.migrate);
+    // every required stage is PRESENT (not -1):
+    expect(idx.backupCall).not.toBe(-1); // the B2a pre-migration gate (seam)
+    expect(idx.ensureAppSchema).not.toBe(-1);
+    expect(idx.verify).not.toBe(-1);
+    // full order under the advisory lock:
+    expect(idx.advisoryLock).toBeLessThan(idx.backupCall);
+    expect(idx.backupCall).toBeLessThan(idx.ensureAppSchema);
+    expect(idx.ensureAppSchema).toBeLessThan(idx.migrate);
     expect(idx.migrate).toBeLessThan(idx.rlsApply);
-    expect(idx.migrate).toBeLessThan(idx.advisoryUnlock);
+    expect(idx.rlsApply).toBeLessThan(idx.verify);
+    expect(idx.verify).toBeLessThan(idx.advisoryUnlock);
     expect(idx.advisoryUnlock).toBeLessThan(idx.sqlEnd);
-    // accepted main carries neither optional stage yet:
-    expect(idx.ensureAppSchema).toBe(-1);
-    expect(idx.verify).toBe(-1);
   });
 
-  it('ACCEPTS a fully-staged source WITH the optional app-schema + verify stages (forward-compatible)', () => {
+  it('ACCEPTS the fully-staged synthetic GOOD source', () => {
     const idx = assertMigrateStageOrder(GOOD);
     expect(idx.backupCall).toBeLessThan(idx.ensureAppSchema);
     expect(idx.ensureAppSchema).toBeLessThan(idx.migrate);
-    expect(idx.advisoryLock).toBeLessThan(idx.ensureAppSchema);
     expect(idx.migrate).toBeLessThan(idx.rlsApply);
     expect(idx.rlsApply).toBeLessThan(idx.verify);
+    expect(idx.verify).toBeLessThan(idx.advisoryUnlock);
   });
 
   const NEG: [string, string, string][] = [
-    ['backup removed', GOOD.replace('  preMigrationBackup();' + NL, ''), 'backup_call_missing'],
+    ['gate (seam) removed', GOOD.replace('    await runPreMigrationGate(config);' + NL, ''), 'backup_call_missing'],
     ['advisory lock removed', GOOD.replace('  await sql`select pg_advisory_lock(4021)`;' + NL, ''), 'advisory_lock_missing'],
+    ['missing ensureAppSchema', GOOD.replace('    await ensureAppSchema(sql);' + NL, ''), 'ensure_app_schema_missing'],
+    ['missing verification', GOOD.replace('    await verifyBootstrap(sql);' + NL, ''), 'verify_missing'],
     [
-      'app-schema after migrate',
+      'schema before gate',
+      GOOD.replace('    await runPreMigrationGate(config);' + NL, '').replace(
+        'await ensureAppSchema(sql);',
+        'await ensureAppSchema(sql); await runPreMigrationGate(config);',
+      ),
+      'backup_after_schema',
+    ],
+    [
+      'migration before schema',
       GOOD.replace('    await ensureAppSchema(sql);' + NL, '').replace(
         'await migrate(db, { migrationsFolder: "drizzle" });',
         'await migrate(db, { migrationsFolder: "drizzle" }); await ensureAppSchema(sql);',
@@ -351,7 +366,7 @@ describe('Phase 10 hardened — migrate.ts safety-stage ordering invariant (sema
       'schema_after_migrate',
     ],
     [
-      'migrate after RLS',
+      'RLS before migration',
       GOOD.replace('    await migrate(db, { migrationsFolder: "drizzle" });' + NL, '').replace(
         'await sql.unsafe(readFileSync("rls.sql", "utf8"));',
         'await sql.unsafe(readFileSync("rls.sql", "utf8")); await migrate(db, { migrationsFolder: "drizzle" });',
@@ -359,7 +374,7 @@ describe('Phase 10 hardened — migrate.ts safety-stage ordering invariant (sema
       'rls_before_migrate',
     ],
     [
-      'verify before RLS',
+      'verification before RLS',
       GOOD.replace('    await verifyBootstrap(sql);' + NL, '').replace(
         'await ensureAppSchema(sql);',
         'await ensureAppSchema(sql); await verifyBootstrap(sql);',
@@ -367,9 +382,12 @@ describe('Phase 10 hardened — migrate.ts safety-stage ordering invariant (sema
       'verify_before_rls',
     ],
     [
-      'backup after schema',
-      GOOD.replace('  preMigrationBackup();' + NL, '').replace('await ensureAppSchema(sql);', 'await ensureAppSchema(sql); preMigrationBackup();'),
-      'backup_after_schema',
+      'cleanup before verification',
+      GOOD.replace('    await verifyBootstrap(sql);' + NL, '').replace(
+        'await sql`select pg_advisory_unlock(4021)`;',
+        'await sql`select pg_advisory_unlock(4021)`; await verifyBootstrap(sql);',
+      ),
+      'cleanup_before_verify',
     ],
     [
       'swallowed failure (no process.exit(1))',
@@ -384,8 +402,8 @@ describe('Phase 10 hardened — migrate.ts safety-stage ordering invariant (sema
     [
       'unlock before migrate',
       GOOD.replace('    await sql`select pg_advisory_unlock(4021)`;' + NL, '').replace(
-        'await ensureAppSchema(sql);',
-        'await sql`select pg_advisory_unlock(4021)`; await ensureAppSchema(sql);',
+        'await runPreMigrationGate(config);',
+        'await sql`select pg_advisory_unlock(4021)`; await runPreMigrationGate(config);',
       ),
       'unlock_before_migrate',
     ],

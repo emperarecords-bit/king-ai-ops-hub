@@ -73,12 +73,12 @@ export function blankComments(src: string): string {
 export interface MigrateStageIndices {
   readonly backupCall: number;
   readonly advisoryLock: number;
-  /** -1 when the OPTIONAL `ensureAppSchema(` stage is absent (accepted-main). */
+  /** Index of the REQUIRED `ensureAppSchema(` stage (B2a×P1c contract). */
   readonly ensureAppSchema: number;
   readonly migrate: number;
   readonly rlsFile: number;
   readonly rlsApply: number;
-  /** -1 when the OPTIONAL `verifyBootstrap(` stage is absent (accepted-main). */
+  /** Index of the REQUIRED `verifyBootstrap(` stage (B2a×P1c contract). */
   readonly verify: number;
   readonly advisoryUnlock: number;
   readonly sqlEnd: number;
@@ -87,8 +87,7 @@ export interface MigrateStageIndices {
 /**
  * PURE. Verifies `scripts/migrate.ts` source preserves its safety-stage ordering + properties. Throws
  * `MigrateStageOrderError` (with a stable `.code`) on the FIRST violation; returns the located stage indices on
- * success (optional stages are `-1` when absent). Does NOT compare the source to git or to the current branch — it
- * reasons about the source itself.
+ * success. Does NOT compare the source to git or to the current branch — it reasons about the source itself.
  */
 export function assertMigrateStageOrder(rawSource: string): MigrateStageIndices {
   const source = blankComments(rawSource);
@@ -96,10 +95,6 @@ export function assertMigrateStageOrder(rawSource: string): MigrateStageIndices 
     const m = re.exec(source);
     if (!m) throw new MigrateStageOrderError(code, `scripts/migrate.ts is missing ${label}`);
     return m.index;
-  };
-  const optionalIndex = (re: RegExp): number => {
-    const m = re.exec(source);
-    return m ? m.index : -1;
   };
   const firstIndexAny = (res: RegExp[], code: string, label: string): number => {
     let best = -1;
@@ -128,9 +123,11 @@ export function assertMigrateStageOrder(rawSource: string): MigrateStageIndices 
   // (3) RLS apply: the rls.sql read + the sql.unsafe application.
   const rlsFile = firstIndex(/rls\.sql\b/, 'rls_file_missing', 'the rls.sql read');
   const rlsApply = firstIndex(/\bsql\.unsafe\s*\(/, 'rls_apply_missing', 'the RLS apply (sql.unsafe(...))');
-  // (2) OPTIONAL bootstrap prerequisite; (4) OPTIONAL verification — verified in order only when present.
-  const ensureAppSchema = optionalIndex(/\bensureAppSchema\s*\(/);
-  const verify = optionalIndex(/\bverifyBootstrap\s*\(/);
+  // (2) REQUIRED bootstrap prerequisite; (4) REQUIRED verification — the final B2a×P1c contract wires BOTH the
+  // fresh-database `ensureAppSchema` and the opt-in `verifyBootstrap` into scripts/migrate.ts, so their ABSENCE
+  // is a failure (the stage-order check must not pass vacuously when a required P1c stage is missing).
+  const ensureAppSchema = firstIndex(/\bensureAppSchema\s*\(/, 'ensure_app_schema_missing', 'the ensureAppSchema bootstrap prerequisite call');
+  const verify = firstIndex(/\bverifyBootstrap\s*\(/, 'verify_missing', 'the verifyBootstrap verification call');
 
   // (5) failure remains fatal: a top-level main().catch handler that exits nonzero.
   if (!/\bmain\s*\([^)]*\)[\s\S]*?\.catch\s*\(/.test(source)) {
@@ -144,20 +141,21 @@ export function assertMigrateStageOrder(rawSource: string): MigrateStageIndices 
     if (!(a < b)) throw new MigrateStageOrderError(code, message);
   };
 
-  // (1) backup before any schema OR migration write.
-  if (ensureAppSchema >= 0) requireOrder(backupCall, ensureAppSchema, 'backup_after_schema', 'the pre-migration backup must run BEFORE any schema creation (ensureAppSchema)');
-  requireOrder(backupCall, migrate, 'backup_after_migrate', 'the pre-migration backup must run BEFORE migrate()');
+  // (1) the pre-migration safety seam (gate) runs BEFORE any schema creation OR migration write.
+  requireOrder(backupCall, ensureAppSchema, 'backup_after_schema', 'the pre-migration gate must run BEFORE any schema creation (ensureAppSchema)');
+  requireOrder(backupCall, migrate, 'backup_after_migrate', 'the pre-migration gate must run BEFORE migrate()');
   // (6) advisory lock acquired before the schema/migration work.
-  if (ensureAppSchema >= 0) requireOrder(advisoryLock, ensureAppSchema, 'lock_after_schema', 'the advisory lock must be acquired BEFORE the schema/migration work');
+  requireOrder(advisoryLock, ensureAppSchema, 'lock_after_schema', 'the advisory lock must be acquired BEFORE the schema/migration work');
   requireOrder(advisoryLock, migrate, 'lock_after_migrate', 'the advisory lock must be acquired BEFORE migrate()');
-  // (2) ensureAppSchema (when present) after the backup boundary and before migrate.
-  if (ensureAppSchema >= 0) requireOrder(ensureAppSchema, migrate, 'schema_after_migrate', 'ensureAppSchema must run AFTER the backup boundary and BEFORE migrate()');
+  // (2) ensureAppSchema after the gate boundary and before migrate.
+  requireOrder(ensureAppSchema, migrate, 'schema_after_migrate', 'ensureAppSchema must run AFTER the gate and BEFORE migrate()');
   // (3) migrate before RLS apply.
   requireOrder(migrate, rlsApply, 'rls_before_migrate', 'migrate() must run BEFORE the RLS apply (sql.unsafe)');
-  // (4) verification (when present) only after RLS.
-  if (verify >= 0) requireOrder(rlsApply, verify, 'verify_before_rls', 'verification (verifyBootstrap) must run only AFTER the RLS apply');
-  // (6) release + cleanup after the migration work.
+  // (4) verification only after RLS.
+  requireOrder(rlsApply, verify, 'verify_before_rls', 'verification (verifyBootstrap) must run only AFTER the RLS apply');
+  // (6) release + cleanup after ALL operational stages — verification runs BEFORE cleanup.
   requireOrder(migrate, advisoryUnlock, 'unlock_before_migrate', 'the advisory lock must be released AFTER the migration work');
+  requireOrder(verify, advisoryUnlock, 'cleanup_before_verify', 'verification (verifyBootstrap) must run BEFORE cleanup (advisory unlock)');
   requireOrder(advisoryUnlock, sqlEnd, 'end_before_unlock', 'the connection cleanup (sql.end) must run after the advisory unlock');
 
   return { backupCall, advisoryLock, ensureAppSchema, migrate, rlsFile, rlsApply, verify, advisoryUnlock, sqlEnd };
