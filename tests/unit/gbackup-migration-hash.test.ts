@@ -28,13 +28,18 @@ describe('G-Backup-A migration hashing (drizzle 0.45.2 mirror)', () => {
 
   it('computeExpectedMigrations reads the repo journal, ordered, drizzle-compatible hashes', () => {
     const migs = computeExpectedMigrations('drizzle');
-    expect(migs.length).toBe(54);
+    // Migration-count independent: derive the expected count + last tag from the committed journal, so adding a
+    // new migration (0055, …) never needs an absolute-count edit. Ordering + hash checks are unchanged.
+    const journal = JSON.parse(readFileSync('drizzle/meta/_journal.json', 'utf8')) as { entries: { idx: number; tag: string }[] };
+    expect(migs.length).toBe(journal.entries.length);
+    expect(journal.entries.length).toBeGreaterThanOrEqual(54); // never silently shrinks
     // ordered by idx ascending
     for (let i = 1; i < migs.length; i++) expect(migs[i]!.idx).toBeGreaterThan(migs[i - 1]!.idx);
     const last = migs[migs.length - 1]!;
-    expect(last.tag).toBe('0053_pricing_foundations');
+    const lastJournalTag = journal.entries[journal.entries.length - 1]!.tag;
+    expect(last.tag).toBe(lastJournalTag);
     // hash equals sha256 of the raw file (the exact drizzle algorithm)
-    const raw = readFileSync('drizzle/0053_pricing_foundations.sql', 'utf8');
+    const raw = readFileSync(`drizzle/${lastJournalTag}.sql`, 'utf8');
     expect(last.hash).toBe(createHash('sha256').update(raw).digest('hex'));
   });
 
