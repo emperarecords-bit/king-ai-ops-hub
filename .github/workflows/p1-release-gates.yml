@@ -136,6 +136,15 @@ jobs:
           echo "DATABASE_URL=postgres://$PGUSER:$PGPASSWORD@$PGHOST:$PGPORT/$CI_DB" >> "$GITHUB_ENV"
           echo "DATABASE_MIGRATION_URL=postgres://$PGUSER:$PGPASSWORD@$PGHOST:$PGPORT/$CI_DB" >> "$GITHUB_ENV"
           echo "TEST_DATABASE_URL=postgres://$PGUSER:$PGPASSWORD@$PGHOST:$PGPORT/$CI_DB" >> "$GITHUB_ENV"
+          # G-Backup-B2a pre-migration gate: declare this DISPOSABLE CI database as a bootstrap so the enforced gate
+          # (wired into scripts/migrate.ts on the B2a branch) takes its catalog-verified bootstrap_bypass path — no
+          # signed receipt — on this fresh, empty database. This is NOT a gate bypass: GBACKUP_GATE_BYPASS is never
+          # set. The expected identity is derived from the exact generated CI_DB and must equal current_database();
+          # unexplained user objects or an identity mismatch still fail closed, and staging/production (or any Fly
+          # runtime) still require a signed receipt on a non-empty database. Written to $GITHUB_ENV so it reaches the
+          # `npm run db:migrate` process, not just this shell.
+          echo "GBACKUP_DECLARED_BOOTSTRAP=1" >> "$GITHUB_ENV"
+          echo "GBACKUP_EXPECTED_DB_IDENTITY=$CI_DB" >> "$GITHUB_ENV"
       - name: Assert disposable target (accepts CI db, rejects king_ai_hub / staging / production)
         run: node scripts/ci/assert-disposable.mjs
       - name: Prerequisite app schema (idempotent; also works around pre-P1c fresh-bootstrap at <=0053)
