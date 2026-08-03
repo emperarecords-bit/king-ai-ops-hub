@@ -17,7 +17,7 @@ async function main() {
   const result = await runDueSchedules();
   const seconds = ((Date.now() - started) / 1000).toFixed(1);
   console.log(
-    `standing-work tick: ${result.due} due, ${result.started} started, ${result.failures.length} failures in ${seconds}s`,
+    `standing-work tick: ${result.due} due, ${result.started} started, ${result.assignmentRequired} assignment-required, ${result.failures.length} failures in ${seconds}s`,
   );
   for (const f of result.failures) {
     console.warn(`  schedule ${f.scheduleId}: ${f.reason}`);

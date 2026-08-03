@@ -29,6 +29,9 @@ const formSchema = z
     input: z.string().trim().min(1).max(32_000),
     /** The employee performing the work (Sprint 5, assignee-first). */
     assigneeAgentId: z.string().uuid(),
+    /** P1a agent pinning — the exact reviewer employee (present only when cross-check is on). Server-side
+     *  validation of the id happens in createTask (a tampered/stale id ⇒ ValidationError). */
+    reviewerAgentId: z.string().uuid().nullable(),
     reviewEnabled: z.boolean(),
     flagship: z.boolean(),
     flagshipCategory: z.enum(FLAGSHIP_CATEGORIES).nullable(),
@@ -41,12 +44,17 @@ const formSchema = z
 export async function submitTask(_prev: TaskFormState, formData: FormData): Promise<TaskFormState> {
   const rawCategory = formData.get('flagshipCategory');
   const rawObjective = formData.get('objectiveId');
+  const rawReviewer = formData.get('reviewerAgentId');
+  const reviewEnabled = formData.get('reviewEnabled') === 'on';
   const parsed = formSchema.safeParse({
     projectKey: formData.get('projectKey'),
     title: formData.get('title'),
     input: formData.get('input'),
     assigneeAgentId: formData.get('assigneeAgentId'),
-    reviewEnabled: formData.get('reviewEnabled') === 'on',
+    // A reviewer id is only meaningful when cross-check is on; ignore any stale value otherwise so the
+    // "reviewer only when reviewEnabled" refinement in createTask is satisfied.
+    reviewerAgentId: reviewEnabled && rawReviewer ? String(rawReviewer) : null,
+    reviewEnabled,
     flagship: formData.get('flagship') === 'on',
     flagshipCategory: rawCategory ? String(rawCategory) : null,
     objectiveId: rawObjective ? String(rawObjective) : null,
@@ -59,9 +67,15 @@ export async function submitTask(_prev: TaskFormState, formData: FormData): Prom
   try {
     // requireTenant resolves the KEY server-side — the client never names ids.
     const ctx = await requireTenant(parsed.data.projectKey);
+    // Authorization: a read-only viewer cannot create work (the domain re-validates the pinned ids, but the
+    // role gate is the first line and matches runTask below).
+    if (ctx.projectRole === 'viewer') {
+      return { error: 'Viewers cannot create tasks.' };
+    }
     taskId = await withTenant(ctx, async (tx) => {
-      // The assignee determines the leading vendor; the cross-check partner
-      // is derived from it (D-005). The picker is validated server-side.
+      // The assignee is the EXACT employee that will execute (P1a). We still resolve its provider here for
+      // providerSelection, but createTask re-derives + re-validates the pin server-side (a tampered/stale id
+      // ⇒ ValidationError), so a forged provider or id can never take effect.
       const employees = await listAssignableEmployees(tx, ctx);
       const assignee = employees.find((e) => e.id === parsed.data.assigneeAgentId);
       if (!assignee) {
@@ -75,6 +89,8 @@ export async function submitTask(_prev: TaskFormState, formData: FormData): Prom
         modelTier: parsed.data.flagship ? 'flagship' : 'standard',
         flagshipCategory: parsed.data.flagship ? parsed.data.flagshipCategory : null,
         objectiveId: parsed.data.objectiveId,
+        primaryAgentId: parsed.data.assigneeAgentId,
+        reviewerAgentId: parsed.data.reviewerAgentId,
       });
     });
   } catch (err) {
@@ -98,6 +114,10 @@ export async function runTask(_prev: RunActionState, formData: FormData): Promis
 
   try {
     const ctx = await requireTenant(projectKey);
+    // Authorization: a read-only viewer cannot start runs (mirrors submitTask).
+    if (ctx.projectRole === 'viewer') {
+      return { error: 'Viewers cannot start runs.' };
+    }
     // Durable execution (O-21): enqueue a job, then claim + run it inline so the
     // request still gets a result, while the persisted job makes the run
     // recoverable if this process dies mid-run. If a worker already claimed it,

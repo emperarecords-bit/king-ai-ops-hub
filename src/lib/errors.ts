@@ -14,7 +14,8 @@ export type AppErrorCode =
   | 'rate_limited'
   | 'run_invalid_state'
   | 'provider_failure'
-  | 'conflict';
+  | 'conflict'
+  | 'assignment_required';
 
 export class AppError extends Error {
   readonly code: AppErrorCode;
@@ -94,6 +95,26 @@ export class ConflictError extends AppError {
   constructor(publicMessage: string) {
     super('conflict', publicMessage);
     this.name = 'ConflictError';
+  }
+}
+
+/**
+ * P1a agent pinning — a run cannot start because the task/schedule has no valid pinned employee: either
+ * no employee was ever assigned (legacy row), or the pinned employee is no longer an enabled agent of the
+ * required role in this workspace. The runner FAILS CLOSED here (it never substitutes a provider-derived
+ * agent), so this always means "assign an enabled employee before running", never "we picked one for you".
+ */
+export class AssignmentRequiredError extends AppError {
+  /** Machine-readable cause, for audit detail — never the private prompt/config. */
+  readonly reason?: string;
+  constructor(reason?: string) {
+    super(
+      'assignment_required',
+      'This task has no assigned employee. Assign an enabled employee before running it.',
+      reason ? `Assignment required: ${reason}` : undefined,
+    );
+    this.name = 'AssignmentRequiredError';
+    this.reason = reason;
   }
 }
 

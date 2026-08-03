@@ -88,7 +88,7 @@ async function draftObjective(title = 'Ship the thing', project = ctx): Promise<
 }
 async function plainTask(objectiveId: string | null = null): Promise<string> {
   return withTenant(ctx, (tx) =>
-    createTask(tx, ctx, { title: 'Do work', input: 'x', providerSelection: 'openai', reviewEnabled: false, objectiveId }),
+    createTask(tx, ctx, { title: 'Do work', input: 'x', providerSelection: 'openai', reviewEnabled: false, objectiveId, primaryAgentId: seedAgentId }),
   );
 }
 async function fkOf(taskId: string): Promise<string | null> {

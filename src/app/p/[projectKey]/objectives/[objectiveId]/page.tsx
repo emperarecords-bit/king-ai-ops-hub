@@ -5,7 +5,7 @@ import { withTenant } from '@/db/tenant';
 import { getObjective } from '@/domain/objectives/objectives';
 import { assessObjective, describeEvidence } from '@/domain/objectives/assess';
 import { assessTask, assessWorkItem, CONDITION_LABEL } from '@/domain/execution/assess';
-import { listAssignableEmployees } from '@/domain/agents/agents';
+import { listAssignableEmployees, listReviewerEmployees } from '@/domain/agents/agents';
 import { listSchedules } from '@/domain/standing/standing';
 import { NotFoundError } from '@/lib/errors';
 import { formatMoney } from '@/lib/money';
@@ -53,11 +53,13 @@ export default async function ObjectiveDetailPage({
   let o;
   let schedules;
   let employees;
+  let reviewers;
   try {
-    ({ o, schedules, employees } = await withTenant(ctx, async (tx) => ({
+    ({ o, schedules, employees, reviewers } = await withTenant(ctx, async (tx) => ({
       o: await getObjective(tx, ctx, objectiveId, visibility),
       schedules: await listSchedules(tx, ctx, objectiveId),
       employees: await listAssignableEmployees(tx, ctx),
+      reviewers: await listReviewerEmployees(tx, ctx),
     })));
   } catch (err) {
     if (err instanceof NotFoundError) notFound();
@@ -323,6 +325,10 @@ export default async function ObjectiveDetailPage({
             employees={employees.map((e) => ({
               id: e.id,
               name: e.departmentName ? `${e.name} (${e.departmentName})` : e.name,
+            }))}
+            reviewers={reviewers.map((r) => ({
+              id: r.id,
+              name: r.departmentName ? `${r.name} (${r.departmentName}) · ${r.provider} · ${r.model}` : `${r.name} · ${r.provider} · ${r.model}`,
             }))}
           />
         ) : null}

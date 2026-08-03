@@ -16,10 +16,17 @@ const FLAGSHIP_CATEGORY_OPTIONS = [
   ['release_review', 'Final release review'],
 ] as const;
 
+/**
+ * P1a agent pinning — a picker choice is now the EXACT employee that will execute (provider + model shown),
+ * not a vendor hint. Reviewers are pinned the same way when cross-check is on.
+ */
 export interface EmployeeChoice {
   id: string;
   name: string;
   departmentName: string | null;
+  provider: string;
+  model: string;
+  title?: string | null;
 }
 
 export function TaskForm({
@@ -27,14 +34,25 @@ export function TaskForm({
   objectives = [],
   preselectedObjectiveId = null,
   employees = [],
+  reviewers = [],
 }: {
   projectKey: string;
   objectives?: Array<{ id: string; title: string }>;
   preselectedObjectiveId?: string | null;
   employees?: EmployeeChoice[];
+  reviewers?: EmployeeChoice[];
 }) {
   const [state, formAction, pending] = useActionState(submitTask, initialState);
   const [flagship, setFlagship] = useState(false);
+  const [reviewEnabled, setReviewEnabled] = useState(true);
+  const [primaryId, setPrimaryId] = useState<string>(employees[0]?.id ?? '');
+  const [reviewerId, setReviewerId] = useState<string>('');
+
+  // Client guard (server is authoritative): a reviewer must differ from the selected primary. Because
+  // primary and reviewer are disjoint technical roles this practically never fires, but the check keeps the
+  // UI honest if the data ever overlaps.
+  const reviewerSameAsPrimary = reviewEnabled && reviewerId !== '' && reviewerId === primaryId;
+  const noReviewersAvailable = reviewEnabled && reviewers.length === 0;
 
   return (
     <form action={formAction} className="space-y-5">
@@ -53,6 +71,7 @@ export function TaskForm({
                 name="assigneeAgentId"
                 value={e.id}
                 defaultChecked={i === 0}
+                onChange={() => setPrimaryId(e.id)}
                 required
                 className="accent-[var(--accent)]"
               />
@@ -61,6 +80,9 @@ export function TaskForm({
                 {e.departmentName ? (
                   <span className="ml-1 text-xs text-[var(--muted)]">{e.departmentName}</span>
                 ) : null}
+                <span className="block text-xs text-[var(--muted)]">
+                  {e.provider} · {e.model}
+                </span>
               </span>
             </label>
           ))}
@@ -117,16 +139,56 @@ export function TaskForm({
         />
       </div>
 
-      <label className="flex items-center gap-2 text-sm">
-        <input
-          type="checkbox"
-          name="reviewEnabled"
-          defaultChecked
-          className="accent-[var(--accent)]"
-        />
-        Cross-check this work (a second employee from a rival vendor reviews it; one revision
-        allowed)
-      </label>
+      {/* P1a agent pinning — cross-check is now an EXACT reviewer pick, not an automatic opposing-provider
+          reviewer. When on, an explicit reviewer employee is required. */}
+      <div className="rounded-md border border-[var(--border)] p-3">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="reviewEnabled"
+            checked={reviewEnabled}
+            onChange={(e) => setReviewEnabled(e.target.checked)}
+            className="accent-[var(--accent)]"
+          />
+          {reviewEnabled ? 'Cross-check with an exact reviewer' : 'No automated review'}
+        </label>
+        {reviewEnabled ? (
+          <div className="mt-3">
+            <label htmlFor="reviewerAgentId" className="mb-1 block text-sm text-[var(--muted)]">
+              Reviewer employee (required)
+            </label>
+            {reviewers.length > 0 ? (
+              <select
+                id="reviewerAgentId"
+                name="reviewerAgentId"
+                required
+                value={reviewerId}
+                onChange={(e) => setReviewerId(e.target.value)}
+                className="w-full rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]"
+              >
+                <option value="" disabled>
+                  Select a reviewer…
+                </option>
+                {reviewers.map((r) => (
+                  <option key={r.id} value={r.id} disabled={r.id === primaryId}>
+                    {r.name}
+                    {r.departmentName ? ` · ${r.departmentName}` : ''} · {r.provider} · {r.model}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <p className="text-xs text-[var(--danger)]">
+                No reviewer employees are configured. Add one, or turn off automated review.
+              </p>
+            )}
+            {reviewerSameAsPrimary ? (
+              <p className="mt-1 text-xs text-[var(--danger)]">
+                The reviewer must be a different employee than the primary.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
 
       <div className="rounded-md border border-[var(--border)] p-3">
         <label className="flex items-center gap-2 text-sm">
@@ -172,7 +234,7 @@ export function TaskForm({
 
       <button
         type="submit"
-        disabled={pending}
+        disabled={pending || reviewerSameAsPrimary || noReviewersAvailable}
         className="rounded-md bg-[var(--accent)] px-5 py-2 text-sm font-semibold text-[#0b0e14] hover:bg-[var(--accent-strong)] disabled:opacity-50"
       >
         {pending ? 'Creating…' : 'Create task'}
