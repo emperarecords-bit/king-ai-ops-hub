@@ -134,6 +134,14 @@ describe('B1 receipt-v2 verifier — provider evidence + identity', () => {
     expect(codeOf(verifyReceiptV2Parsed(sign(buildSigned()), exp({ databaseApp: 'other-db' })))).toBe('db_identity_mismatch');
     expect(codeOf(verifyReceiptV2Parsed(sign(buildSigned()), exp({ databaseSystemIdentifier: '1' })))).toBe('db_identity_mismatch');
   });
+  it('signs + verifies an EMPTY pending list against an empty expectation (NO_PENDING receipt)', () => {
+    const r = verifyReceiptV2Parsed(sign(buildSigned({ pendingMigrations: [] })), exp({ pendingMigrations: [] }));
+    expect(r.ok).toBe(true);
+  });
+  it('empty-list receipt ⇎ non-empty expectation (both directions rejected)', () => {
+    expect(codeOf(verifyReceiptV2Parsed(sign(buildSigned({ pendingMigrations: [] })), exp()))).toBe('pending_migration_mismatch');
+    expect(codeOf(verifyReceiptV2Parsed(sign(buildSigned()), exp({ pendingMigrations: [] })))).toBe('pending_migration_mismatch');
+  });
   it('nonce / image-ref / source-commit / migration-hash / pending mismatches rejected', () => {
     expect(codeOf(verifyReceiptV2Parsed(sign(buildSigned()), exp({ deploymentNonce: 'cafebabecafebabecafebabecafebabe' })))).toBe('nonce_mismatch');
     expect(codeOf(verifyReceiptV2Parsed(sign(buildSigned()), exp({ targetImageRef: `${REF}-x` })))).toBe('image_ref_mismatch');

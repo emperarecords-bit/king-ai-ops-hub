@@ -441,6 +441,11 @@ describe('P1c standard command (scripts/migrate.ts) — env + exit behavior', ()
       SKIP_PREMIGRATION_BACKUP: '1',
       DATABASE_MIGRATION_URL: disposableUrl(name),
       DATABASE_URL: disposableUrl(name),
+      // The reconciled migrate.ts runs the B2a pre-migration gate BEFORE ensureAppSchema. Declare this fresh
+      // disposable database as a catalog-verified bootstrap (identity == the DB name the gate reads via
+      // current_database()) so the gate takes its bootstrap_bypass path — no signed receipt, no gate bypass.
+      GBACKUP_DECLARED_BOOTSTRAP: '1',
+      GBACKUP_EXPECTED_DB_IDENTITY: name,
     };
     const r = spawnSync('npx', ['tsx', 'scripts/migrate.ts', '--verify'], { env: env as NodeJS.ProcessEnv, encoding: 'utf8', shell: true });
     expect(`${r.stderr}${r.stdout}`).toMatch(/Bootstrap verified/);
