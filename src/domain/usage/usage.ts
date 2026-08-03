@@ -28,27 +28,32 @@ export async function recordUsage(
     model: string;
     usage: TokenUsage;
   },
-): Promise<bigint> {
+): Promise<{ costMicros: bigint; usageEventId: string }> {
   const cost = costForUsage(args.provider, args.model, args.usage);
   // HUB-009 — every NEW usage event gets a stable, non-null classification snapshot at creation (the DB
   // trigger forbids null). A snapshotted run copies its exact value; a legacy null-snapshot run resolves
   // its effective classification now (without touching the run); run-less usage snapshots the project.
   const classification = await classifyUsageAtInsert(tx, ctx, args.runId);
-  await tx.insert(usageEvents).values({
-    orgId: ctx.orgId,
-    projectId: ctx.projectId,
-    taskId: args.taskId,
-    runId: args.runId,
-    runStepId: args.runStepId,
-    provider: args.provider,
-    model: args.model,
-    inputTokens: args.usage.inputTokens,
-    outputTokens: args.usage.outputTokens,
-    costMicros: cost.usdMicros,
-    pricingVersion: PRICING_VERSION,
-    classification,
-  });
-  return cost.usdMicros;
+  const inserted = await tx
+    .insert(usageEvents)
+    .values({
+      orgId: ctx.orgId,
+      projectId: ctx.projectId,
+      taskId: args.taskId,
+      runId: args.runId,
+      runStepId: args.runStepId,
+      provider: args.provider,
+      model: args.model,
+      inputTokens: args.usage.inputTokens,
+      outputTokens: args.usage.outputTokens,
+      costMicros: cost.usdMicros,
+      pricingVersion: PRICING_VERSION,
+      classification,
+    })
+    .returning({ id: usageEvents.id });
+  // Hub P1d — the usage_event id lets a run-step checkpoint bind the ONE billing row it produced, so an
+  // idempotent finalize/resume can prove billing happened exactly once per (run, step).
+  return { costMicros: cost.usdMicros, usageEventId: inserted[0]!.id };
 }
 
 export async function spentThisPeriodMicros(tx: DbTx, projectId: string): Promise<bigint> {
