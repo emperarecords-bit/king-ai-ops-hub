@@ -233,7 +233,10 @@ The identification is fine. The proposed action type is not one I recognize.`,
     name: 'reviewer-outage-degrades-gracefully',
     taskInput: 'List the supported providers.',
     primary: ['OpenAI and Anthropic.'],
-    reviewer: [{ fail: 'overloaded' }, { fail: 'overloaded' }, { fail: 'overloaded' }],
+    // A KNOWN not-executed reviewer outage (429 rejected before processing) that exhausts the bounded retries:
+    // the review degrades gracefully and the run still completes. (An AMBIGUOUS reviewer outage — timeout /
+    // generic 5xx — instead escalates to reconciliation; see provider-outcome-reliability.test.ts.)
+    reviewer: [{ fail: 'rate_limited' }, { fail: 'rate_limited' }, { fail: 'rate_limited' }],
     expect: {
       ok: true,
       stepKinds: ['primary', 'review', 'consolidate'],

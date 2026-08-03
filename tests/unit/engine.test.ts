@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { consolidate, executeRun, MAX_STEPS, type StepRecord } from '@/orchestration/engine';
+import {
+  AmbiguousProviderOutcomeSignal,
+  consolidate,
+  executeRun,
+  MAX_RETRIES_PER_CALL,
+  MAX_STEPS,
+  type StepRecord,
+} from '@/orchestration/engine';
 import { FakeProvider, makeEngineAgent } from '@tests/support/fake-provider';
 
 function collectingSink() {
@@ -143,12 +150,12 @@ describe('executeRun — failure handling', () => {
     expect(steps.map((s) => s.kind)).toEqual(['primary', 'review', 'consolidate']);
   });
 
-  it('revision failure falls back to the primary text', async () => {
+  it('a KNOWN revision failure (pre-processing rejection) falls back to the primary text', async () => {
     const primary = new FakeProvider('openai');
     const reviewer = new FakeProvider('anthropic');
-    primary.reply('Original.').fail('overloaded');
-    // overloaded is retryable, so exhaust the retries too:
-    primary.fail('overloaded').fail('overloaded');
+    // The revision call is cleanly REJECTED before the model ran (invalid_request = provably not executed):
+    // a KNOWN failure, so the engine degrades to the primary text (an AMBIGUOUS failure would escalate).
+    primary.reply('Original.').fail('invalid_request');
     reviewer.reply('VERDICT: revise\nDo better.');
     const { sink } = collectingSink();
 
@@ -156,6 +163,50 @@ describe('executeRun — failure handling', () => {
 
     expect(result.ok).toBe(true);
     expect(result.consolidated).toContain('Original.');
+  });
+});
+
+describe('callWithRetry — ambiguous vs known provider-outcome classification', () => {
+  it('an AMBIGUOUS timeout is NEVER retried and escalates as a reliability signal (call count stays 1)', async () => {
+    const primary = new FakeProvider('openai');
+    // timeout = the request was transmitted but the outcome is unknown (may have executed + charged).
+    primary.fail('timeout').reply('should never be reached');
+    const { sink } = collectingSink();
+
+    await expect(executeRun(input(primary, null), sink)).rejects.toBeInstanceOf(AmbiguousProviderOutcomeSignal);
+    expect(primary.requests).toHaveLength(1); // no in-process retry of an ambiguous outcome
+  });
+
+  it('an AMBIGUOUS generic 5xx (overloaded, no explicit not_executed) escalates and is not retried', async () => {
+    const primary = new FakeProvider('openai');
+    // The fake maps overloaded → remoteOutcome 'unknown' (a generic 5xx may post-date execution).
+    primary.fail('overloaded').reply('should never be reached');
+    const { sink } = collectingSink();
+
+    await expect(executeRun(input(primary, null), sink)).rejects.toBeInstanceOf(AmbiguousProviderOutcomeSignal);
+    expect(primary.requests).toHaveLength(1);
+  });
+
+  it('a KNOWN retryable rejection (rate_limited) retries within bounds, then recovers', async () => {
+    const primary = new FakeProvider('openai');
+    primary.fail('rate_limited').reply('recovered');
+    const { sink } = collectingSink();
+
+    const result = await executeRun(input(primary, null), sink);
+    expect(result.ok).toBe(true);
+    expect(result.consolidated).toContain('recovered');
+    expect(primary.requests).toHaveLength(2); // one retry, bounded
+  });
+
+  it('a KNOWN retryable rejection that exhausts the bounded retries becomes a normal failed step (not reconciliation)', async () => {
+    const primary = new FakeProvider('openai');
+    for (let i = 0; i <= MAX_RETRIES_PER_CALL; i += 1) primary.fail('rate_limited');
+    const { sink } = collectingSink();
+
+    // A KNOWN not-executed failure never escalates to the ambiguous signal — it degrades to a failed step.
+    const result = await executeRun(input(primary, null), sink);
+    expect(result.ok).toBe(false);
+    expect(primary.requests).toHaveLength(MAX_RETRIES_PER_CALL + 1); // bounded, not unbounded
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { executeRun, type RunSink, type StepRecord } from '@/orchestration/engine';
+import { AmbiguousProviderOutcomeSignal, executeRun, type RunSink, type StepRecord } from '@/orchestration/engine';
 import { type StepKind } from '@/types/domain';
 import { type FakeProvider, makeEngineAgent } from '@tests/support/fake-provider';
 import { FakeStreamingProvider } from '@tests/support/fake-streaming-provider';
@@ -78,18 +78,19 @@ describe('engine streaming', () => {
     expect(steps.find((s) => s.kind === 'primary')?.response?.text).toBe('recovered');
   });
 
-  it('a retryable error MID-STREAM does not retry — partial output already reached the observer', async () => {
+  it('a retryable error MID-STREAM does not retry and escalates as AMBIGUOUS — partial output already reached the observer', async () => {
     const primary = new FakeStreamingProvider('openai');
     primary.failMidStream('rate_limited');
     primary.reply('should never be used');
-    const { sink, steps, deltas } = collectingSink();
+    const { sink, deltas } = collectingSink();
 
-    const result = await executeRun(baseInput(primary, null), sink);
-    expect(result.ok).toBe(false);
-    expect(steps.find((s) => s.kind === 'primary')?.succeeded).toBe(false);
+    // The provider BEGAN responding (partial stream) → a started-remote outcome that is AMBIGUOUS regardless of
+    // the error kind: never retried, never a normal failed step. The engine escalates so the run fails closed
+    // to reconciliation (the runner maps this to reconciliation_required).
+    await expect(executeRun(baseInput(primary, null), sink)).rejects.toBeInstanceOf(AmbiguousProviderOutcomeSignal);
     // The two partial deltas arrived, and no retried duplicate followed them.
     expect(deltas.filter((d) => d.kind === 'primary')).toHaveLength(2);
-    // Only the single failed request was made (no retry).
+    // Only the single request was made (no retry).
     expect(primary.requests).toHaveLength(1);
   });
 });
