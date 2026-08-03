@@ -269,6 +269,36 @@ export const RUN_JOB_STATUSES = ['queued', 'running', 'done', 'failed'] as const
 export type RunJobStatus = (typeof RUN_JOB_STATUSES)[number];
 
 /**
+ * Hub P1d — reliable queued runs. The run's reliability lifecycle, distinct from
+ * the coarse `RUN_STATUSES` (running|completed|failed) surfaced to users. This
+ * tracks the durable-dispatch state a worker (Stage 2) advances a run through so
+ * an interrupted attempt can be reconciled deterministically. Stage 1 only
+ * DEFINES + persists the column (nullable: a legacy null derives-as-before from
+ * `runs.status`); Stage 2 wires the actual transitions and idempotent
+ * checkpoint/resume/finalization.
+ */
+export const RELIABILITY_STATES = [
+  'not_dispatched',
+  'dispatching',
+  'result_checkpointed',
+  'finalizing',
+  'completed',
+  'failed',
+  'cancelled',
+  'reconciliation_required',
+] as const;
+export type ReliabilityState = (typeof RELIABILITY_STATES)[number];
+
+/**
+ * Hub P1d — how a run job entered the queue. Metadata only (never changes claim
+ * eligibility): `interactive` = a user started the run inline; `worker` = a
+ * background enqueue; `standing` = produced by the standing-work tick. Nullable
+ * for legacy rows enqueued before the column existed.
+ */
+export const DISPATCH_KINDS = ['interactive', 'worker', 'standing'] as const;
+export type DispatchKind = (typeof DISPATCH_KINDS)[number];
+
+/**
  * Task dependency edge kinds (O-18). Both are FORWARD edges meaning the
  * prerequisite must complete before the dependent — `blocks` is the harder
  * phrasing, `prerequisite` the softer, stored identically as

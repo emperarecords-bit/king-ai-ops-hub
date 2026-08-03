@@ -18,6 +18,8 @@ import {
 } from 'drizzle-orm/pg-core';
 import {
   type ContextManifestEntry,
+  type DispatchKind,
+  type ReliabilityState,
   type RetrievedDocRef,
   type ReviewDetail,
   type RunSourceSnapshot,
@@ -1168,6 +1170,11 @@ export const tasks = pgTable(
     milestoneId: uuid('milestone_id').references(() => milestones.id, { onDelete: 'set null' }),
     /** Set when this task was created by standing work (Sprint 8). */
     scheduleId: uuid('schedule_id').references(() => taskSchedules.id, { onDelete: 'set null' }),
+    /** Hub P1d — the DETERMINISTIC occurrence identity of the schedule tick that produced this task: the
+     *  schedule's due `next_run_at` at dispatch. Paired with `schedule_id` in a partial unique index so two
+     *  concurrent scheduler ticks can never create two tasks for the same occurrence — the second insert
+     *  conflicts and is suppressed. Null for every non-standing task. */
+    scheduleOccurrenceAt: timestamp('schedule_occurrence_at', { withTimezone: true }),
     status: taskStatusEnum('status').notNull().default('pending'),
     /** Slice 1: the employee accountable for this task ("who owns this?"). */
     ownerAgentId: uuid('owner_agent_id').references(() => agents.id, { onDelete: 'set null' }),
@@ -1195,6 +1202,12 @@ export const tasks = pgTable(
     index('tasks_org_project_idx').on(t.orgId, t.projectId),
     index('tasks_project_status_idx').on(t.projectId, t.status),
     index('tasks_project_created_idx').on(t.projectId, t.createdAt),
+    // Hub P1d — deterministic occurrence identity for standing work. One task per (schedule, occurrence):
+    // a partial unique index (only where both are non-null) so ordinary non-standing tasks are unaffected,
+    // and two concurrent scheduler ticks for the same due instant collapse to a single task.
+    uniqueIndex('tasks_schedule_occurrence_uq')
+      .on(t.scheduleId, t.scheduleOccurrenceAt)
+      .where(sql`schedule_id is not null and schedule_occurrence_at is not null`),
     // P1a agent pinning — composite FKs to agents. MATCH SIMPLE: a NULL agent id skips the check (legacy
     // rows are fine); a non-null id must reference an agent in the SAME (org_id, project_id) — a cross-
     // workspace pin is impossible. RESTRICT: a pinned employee cannot be deleted out from under history.
@@ -1419,6 +1432,12 @@ export const runJobs = pgTable(
     maxAttempts: integer('max_attempts').notNull().default(1),
     /** Held by the worker currently executing; expiry allows reclaim. */
     leasedUntil: timestamp('leased_until', { withTimezone: true }),
+    /** Hub P1d — last liveness beat from the executing worker. Stage 1 stamps it at claim; Stage 2 renews it
+     *  during a run so a live-but-slow run is not mistaken for an abandoned lease. Null until first claim. */
+    heartbeatAt: timestamp('heartbeat_at', { withTimezone: true }),
+    /** Hub P1d — how this job entered the queue (DISPATCH_KINDS: interactive|worker|standing). Metadata only;
+     *  never affects claim eligibility. Null for legacy rows enqueued before the column existed. */
+    dispatchKind: text('dispatch_kind').$type<DispatchKind>(),
     lastError: text('last_error'),
     ...timestamps,
   },
@@ -1494,6 +1513,16 @@ export const runs = pgTable(
      *  predating the feature stay untouched; those are resolved by legacy derivation at read time. A later
      *  reclassification of the task/project/agent never rewrites this value. */
     classification: dataClassificationEnum('classification'),
+    /** Hub P1d — the run's durable reliability lifecycle (RELIABILITY_STATES). Nullable: a legacy null
+     *  derives-as-before from `status`. Stage 1 only persists the column; Stage 2 advances the transitions. */
+    reliabilityState: text('reliability_state').$type<ReliabilityState>(),
+    /** Hub P1d — the id of the execution ATTEMPT that produced this run's result. Lets a reconciler tell a
+     *  fresh attempt's checkpoints from a superseded one; correlated with `run_execution_checkpoints`. Null
+     *  until an attempt checkpoints (Stage 2). */
+    executionAttemptId: uuid('execution_attempt_id'),
+    /** Hub P1d — the checkpointed final result text captured before finalization, so an interrupted run can
+     *  be finalized idempotently from the checkpoint rather than re-billed (Stage 2). Null pre-checkpoint. */
+    checkpointedResult: text('checkpointed_result'),
     errorMessage: text('error_message'),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp('finished_at', { withTimezone: true }),
@@ -1547,6 +1576,52 @@ export const runSteps = pgTable(
   (t) => [
     uniqueIndex('run_steps_run_number_uq').on(t.runId, t.stepNumber),
     index('run_steps_org_project_idx').on(t.orgId, t.projectId),
+  ],
+);
+
+/**
+ * Hub P1d — durable per-step execution checkpoints. APPEND-ONLY evidence written as each model step of a run
+ * completes, so an interrupted attempt can be finalized from what already happened rather than re-billing the
+ * provider sequence (the actual checkpoint/resume/idempotent-finalization logic lands in Stage 2; Stage 1
+ * only creates the table so the schema is ready). One row per (run, step_number); `execution_attempt_id`
+ * correlates a row with the attempt that produced it (runs.execution_attempt_id), so a superseded attempt's
+ * checkpoints are distinguishable from a fresh one's. Follows the (org_id, project_id) tenant + append-only
+ * posture of `messages`: INSERT/SELECT only, UPDATE/DELETE blocked by trigger.
+ */
+export const runExecutionCheckpoints = pgTable(
+  'run_execution_checkpoints',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
+    /** The execution attempt that produced this checkpoint (correlates with runs.execution_attempt_id). */
+    executionAttemptId: uuid('execution_attempt_id').notNull(),
+    /** 1-based step position within the run, mirroring run_steps.step_number. */
+    stepNumber: integer('step_number').notNull(),
+    /** The step's kind (primary|review|revision|consolidate); text so this table carries no enum dependency. */
+    stepKind: text('step_kind').notNull(),
+    provider: text('provider'),
+    model: text('model'),
+    /** The model's response text captured at completion — the durable checkpoint the finalizer replays. */
+    responseText: text('response_text'),
+    inputTokens: integer('input_tokens'),
+    outputTokens: integer('output_tokens'),
+    /** The usage_events row this step billed, when one was recorded — so finalization never double-bills. */
+    usageEventId: uuid('usage_event_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // One checkpoint per step of a run: a retry of the same step is idempotent, not a duplicate row.
+    uniqueIndex('run_execution_checkpoints_run_step_uq').on(t.runId, t.stepNumber),
+    index('run_execution_checkpoints_org_project_idx').on(t.orgId, t.projectId),
+    index('run_execution_checkpoints_run_idx').on(t.runId),
   ],
 );
 
