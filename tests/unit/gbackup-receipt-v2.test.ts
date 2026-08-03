@@ -48,6 +48,16 @@ describe('G-Backup-B1 receipt-v2 canonicalization + identity', () => {
     const s = baseSigned();
     expect(deriveReceiptV2Id({ ...s, retentionDays: 8 })).not.toBe(s.receiptId);
   });
+  it('accepts an EMPTY pending list; canonical bytes + receiptId stay stable (NO_PENDING receipt)', () => {
+    const s = finalizeReceiptV2Id({ ...baseSigned(), pendingMigrations: [] });
+    expect(s.pendingMigrations).toEqual([]);
+    expect(signedReceiptV2Schema.safeParse(s).success).toBe(true);
+    const again = JSON.parse(JSON.stringify(s)) as SignedReceiptV2;
+    expect(deriveReceiptV2Id(again)).toBe(s.receiptId);
+    expect(receiptV2CanonicalHash(again)).toBe(receiptV2CanonicalHash(s));
+    // A different pending list yields a different identity — the empty list is content-bound like any other.
+    expect(deriveReceiptV2Id(baseSigned())).not.toBe(s.receiptId);
+  });
 });
 
 describe('G-Backup-B1 deployment nonce (canonical)', () => {

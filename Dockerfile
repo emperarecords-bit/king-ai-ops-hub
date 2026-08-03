@@ -18,6 +18,13 @@ COPY . .
 # A build-time DB is not required; Next builds without touching Postgres.
 RUN npm run build
 
+# G-Backup-B2a — bake the exact source identity into an IMMUTABLE file so the release-machine pre-migration gate
+# can verify it against the signed receipt WITHOUT a runtime build-arg and WITHOUT .git. The controller/CI passes
+# these build args (git-derived); when absent they default to UNKNOWN, which the gate treats as fatal on staging.
+ARG SOURCE_COMMIT=UNKNOWN
+ARG PORTABLE_MIGRATION_SET_HASH=UNKNOWN
+RUN printf '{"sourceCommit":"%s","portableMigrationSetHash":"%s"}\n' "$SOURCE_COMMIT" "$PORTABLE_MIGRATION_SET_HASH" > /app/source-identity.json
+
 # ---- runtime ----
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
@@ -38,6 +45,9 @@ COPY --from=build /app/drizzle ./drizzle
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/tsconfig.json ./tsconfig.json
 COPY --from=build /app/drizzle.config.ts ./drizzle.config.ts
+# G-Backup-B2a — the baked immutable source identity MUST be present in the RUNTIME image (the migrate command runs
+# here), at the exact path scripts/migrate.ts reads: <cwd=/app>/source-identity.json.
+COPY --from=build /app/source-identity.json ./source-identity.json
 
 USER app
 EXPOSE 3000

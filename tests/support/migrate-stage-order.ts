@@ -101,10 +101,24 @@ export function assertMigrateStageOrder(rawSource: string): MigrateStageIndices 
     const m = re.exec(source);
     return m ? m.index : -1;
   };
+  const firstIndexAny = (res: RegExp[], code: string, label: string): number => {
+    let best = -1;
+    for (const re of res) {
+      const m = re.exec(source);
+      if (m && (best < 0 || m.index < best)) best = m.index;
+    }
+    if (best < 0) throw new MigrateStageOrderError(code, `scripts/migrate.ts is missing ${label}`);
+    return best;
+  };
 
-  // (7) the backup CALL must be present (not removed). The `;` terminator distinguishes the invocation
-  // `preMigrationBackup();` from the function DEFINITION `function preMigrationBackup() {`.
-  const backupCall = firstIndex(/\bpreMigrationBackup\s*\(\s*\)\s*;/, 'backup_call_missing', 'the pre-migration backup call (preMigrationBackup();)');
+  // (7) the PRE-MIGRATION SAFETY SEAM must be present (not removed): either the best-effort backup
+  // (`preMigrationBackup();`) OR the G-Backup-B2a verification gate (`runPreMigrationGate(...)`) that replaces it.
+  // The `;` / `(` terminator distinguishes the invocation from the function definition or a bare import specifier.
+  const backupCall = firstIndexAny(
+    [/\bpreMigrationBackup\s*\(\s*\)\s*;/, /\brunPreMigrationGate\s*\(/],
+    'backup_call_missing',
+    'the pre-migration safety seam (preMigrationBackup(); or runPreMigrationGate(...))',
+  );
   // (6) advisory lock + release + connection cleanup must be present.
   const advisoryLock = firstIndex(/pg_advisory_lock\b/, 'advisory_lock_missing', 'the pg_advisory_lock acquisition');
   const advisoryUnlock = firstIndex(/pg_advisory_unlock\b/, 'advisory_unlock_missing', 'the pg_advisory_unlock release');

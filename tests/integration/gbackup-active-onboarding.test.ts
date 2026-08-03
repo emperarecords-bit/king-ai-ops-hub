@@ -270,19 +270,23 @@ describe('Phase 10 hardened — draft exclusion + repository hygiene', () => {
       expect(tracked.includes(forbidden), `${forbidden} must not be tracked`).toBe(false);
     }
   });
-  it('loader + strict-json do not import the signer; migrate.ts preserves its safety-stage ordering', () => {
+  it('loader + strict-json do not import the signer; migrate.ts preserves its safety-stage ordering (B2a gate wired in)', () => {
     for (const f of ['legacy-active-bundle.ts', 'strict-json.ts']) {
       expect(readFileSync(join('scripts', 'backup', f), 'utf8').includes('legacy-attestation-sign')).toBe(false);
     }
-    // SEMANTIC invariant, replacing the old `git diff --name-only main..HEAD -- scripts/migrate.ts` byte-identity
-    // check. That check assumed a local branch named `main` (absent in CI's PR checkout — the failure this fixes)
-    // and never proved SAFETY. assertMigrateStageOrder parses migrate.ts and asserts the required safety-stage
-    // ORDER (backup boundary → [app schema] → migrate → RLS → [verify], advisory lock/cleanup present, failures
-    // fatal): clone-topology independent, no hardcoded hashes, never compares the file against itself.
+    // RECONCILIATION (G-Backup-B2a × current main): main replaced the old `git diff main..HEAD -- scripts/migrate.ts`
+    // byte-identity check (clone-topology dependent, never proved SAFETY) with the semantic assertMigrateStageOrder
+    // checker. B2a intentionally wires the pre-migration VERIFICATION GATE (runPreMigrationGate) into migrate.ts in
+    // place of the old preMigrationBackup seam — the checker recognizes the gate as the pre-migration safety seam,
+    // so it validates gate → migrate → RLS ordering (advisory lock/cleanup present, failures fatal), clone-topology
+    // independent. B2a security invariant retained: this release path is a CONSUMER — migrate.ts imports neither the
+    // legacy loader nor the attestation/receipt signer, and the gate must be present.
     const migrate = readFileSync(join('scripts', 'migrate.ts'), 'utf8');
     expect(() => assertMigrateStageOrder(migrate)).not.toThrow();
     expect(migrate.includes('legacy-active-bundle')).toBe(false);
-    expect(migrate.includes('preMigrationBackup')).toBe(true);
+    expect(migrate.includes('legacy-attestation-sign')).toBe(false);
+    expect(migrate.includes('receipt-v2-sign')).toBe(false);
+    expect(migrate.includes('runPreMigrationGate')).toBe(true); // B2a pre-migration gate is wired in
   });
 });
 
