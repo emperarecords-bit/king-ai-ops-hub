@@ -7,12 +7,10 @@ import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { EXPECTED_DRIZZLE_VERSION, computeExpectedMigrations, installedDrizzleVersion } from '../../scripts/backup/migration-hash';
 import { classifyMigrationState, detectMigrationState } from '../../scripts/backup/migration-detector';
+import { buildSourceManifestFromGit } from '../../scripts/backup/source-manifest';
 import { finalizeAttestationId } from '../../scripts/backup/legacy-attestation-canonical';
 import { signLegacyAttestation } from '../../scripts/backup/legacy-attestation-sign';
 import { type LegacyTrustStore, loadTrustBundle } from '../../scripts/backup/legacy-attestation-verify';
-import { ensureAppSchema } from '../../scripts/bootstrap-prerequisite';
-import { buildDbComparisonManifest } from '../support/db-migration-manifest';
-import { assertDisposableDbForVerification } from '../support/require-disposable-db';
 import {
   LEGACY_0004_SHA256,
   TAG_0004,
@@ -22,10 +20,6 @@ import {
   dropDisposableDb,
   makeIdentityMigrationsFolder,
 } from '../support/bootstrap-db';
-
-// Refuse this G-Backup DB test against the shared `king_ai_hub` when REQUIRE_DISPOSABLE_DB=1 — before the pool
-// below is constructed. No-op without the flag (default suite unchanged).
-assertDisposableDbForVerification('gbackup-detector.test');
 
 const URL = process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL ?? 'postgresql://king:king@localhost:5433/king_ai_hub';
 const sql = postgres(URL, { max: 2, prepare: false });
@@ -56,7 +50,7 @@ describe('G-Backup-A hash mirror — drizzle equivalence + portable source manif
     // Build the portable source from Git, then simulate an applied history where two migrations were applied
     // from CRLF bytes (their recognized variant) — exactly staging's shape. The classifier must return
     // NO_PENDING with 2 recognized variants and 0 unknown mismatches, derived (not hard-coded).
-    const manifest = buildDbComparisonManifest('drizzle');
+    const manifest = buildSourceManifestFromGit('HEAD', 'drizzle');
     const variantIdx = new Set([4, 53]);
     const applied = manifest.entries.map((e) => ({
       hash: variantIdx.has(e.idx) && e.recognizedVariantSha256 ? e.recognizedVariantSha256 : e.committedBlobSha256,
@@ -84,12 +78,12 @@ describe('G-Backup-A hash mirror — drizzle equivalence + portable source manif
 
 // ---------------------------------------------------------------------------
 // Identity policy, tested PURELY (no DB) and DETERMINISTICALLY for BOTH 0004 identities. These replace the old
-// cases that silently assumed the AMBIENT suite DB carried the accepted-legacy irregular 0004 (c2c7463a…): the
-// classifier is a pure function of (source manifest, applied set, attested keys), so both identities are covered
-// with explicit in-memory `applied`/`runtime` sets, independent of whichever identity the ambient DB happens to
-// have.
+// cases that silently assumed the AMBIENT suite DB carried the accepted-legacy irregular 0004 (c2c7463a…) — which
+// fails on a correct fresh-current CI database. The classifier is a pure function of (source manifest, applied
+// set, attested keys), so both identities are covered with explicit in-memory `applied`/`runtime` sets,
+// independent of whichever identity the ambient DB happens to have. Migration-count independent throughout.
 describe('G-Backup-A classifier — 0004 identity policy (pure, both identities)', () => {
-  const manifest = buildDbComparisonManifest('drizzle');
+  const manifest = buildSourceManifestFromGit('HEAD', 'drizzle');
   const e4 = manifest.entries.find((e) => e.tag === TAG_0004)!;
   const runtime = manifest.entries.map((e) => ({ when: e.when, tag: e.tag, rawHash: e.committedBlobSha256 }));
   /** applied history where 0004 carries `applied0004`, every other migration its exact committed blob. */
@@ -172,11 +166,12 @@ describe('G-Backup-A classifier — 0004 identity policy (pure, both identities)
 
 // ---------------------------------------------------------------------------
 // The reader (`detectMigrationState`) exercised against REAL, dedicated disposable databases that each carry a
-// KNOWN 0004 identity, constructed here — NOT read from the ambient `DATABASE_URL`. Each DB is bootstrapped from
-// a temp migrations folder (`makeIdentityMigrationsFolder`) so the applied 0004 hash is deterministic; each is
+// KNOWN 0004 identity, constructed here — NOT read from the ambient `DATABASE_URL`. Each DB is bootstrapped from a
+// temp migrations folder (`makeIdentityMigrationsFolder`) so the applied 0004 hash is deterministic; each is
 // dropped in afterAll. This is the part where a real DB is materially required (verifying the read-only SELECTs +
-// the cryptographic legacy-attestation path end to end).
-const manifest = buildDbComparisonManifest('drizzle');
+// the cryptographic legacy-attestation path end to end). The `app` schema is created inline (CI compatibility for
+// the accepted-main migrate path) rather than importing P1c production code.
+const manifest = buildSourceManifestFromGit('HEAD', 'drizzle');
 const e0004 = manifest.entries.find((e) => e.tag === TAG_0004)!;
 
 /**
@@ -229,7 +224,7 @@ describe('G-Backup-A detector — dedicated disposable DBs, one per 0004 identit
 
   beforeAll(async () => {
     available = await bootstrapDbAvailable();
-    if (!available) { console.warn('[gbackup-detector.test] SELF-PROVISIONED DBs SKIPPED — local Postgres unreachable.'); return; }
+    if (!available) { console.warn('[gbackup-detector.test] SELF-PROVISIONED DBs SKIPPED — Postgres unreachable.'); return; }
     const rnd = Math.random().toString(36).slice(2, 8);
     dbs.clean = `king_ai_hub_p1d_detcln_${rnd}`;
     dbs.legacy = `king_ai_hub_p1d_detleg_${rnd}`;
@@ -239,7 +234,9 @@ describe('G-Backup-A detector — dedicated disposable DBs, one per 0004 identit
       await createDisposableDb(name);
       const s = postgres(disposableUrl(name), { max: 1, onnotice: () => {} });
       try {
-        await ensureAppSchema(s);
+        // CI compatibility for the accepted-main migrate path: migration 0052 references `app` but no migration
+        // creates it (rls.sql does, after migrate). Create it inline here — no P1c production import.
+        await s.unsafe('create schema if not exists app');
         await migrate(drizzle(s), { migrationsFolder: ident.folder });
       } finally { await s.end(); }
     }

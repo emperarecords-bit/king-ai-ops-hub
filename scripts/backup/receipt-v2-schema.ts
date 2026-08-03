@@ -60,9 +60,12 @@ export function validatePendingMigrationsCanonical(entries: readonly PendingMigr
   return { ok: true };
 }
 
+// The list is REQUIRED and CANONICAL but MAY be empty: `pendingMigrations: []` is the valid representation of a
+// non-empty database with no pending Drizzle migration, where the signed snapshot receipt still authorizes the
+// complete protected release-command mutation boundary (e.g. `src/db/rls.sql`). BOOTSTRAP_EMPTY remains the only
+// receipt-free staging path; a non-empty NO_PENDING database still requires this (empty-list) verified receipt.
 const pendingMigrationsSchema = z
   .array(pendingMigrationEntrySchema)
-  .min(1)
   .max(1000)
   .superRefine((arr, ctx) => {
     const v = validatePendingMigrationsCanonical(arr);

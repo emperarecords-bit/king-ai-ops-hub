@@ -4,20 +4,26 @@
  * G-Backup-B1/B2a hygiene concern: the migrate command is the seam where the pre-migration backup boundary and
  * the future enforced backup gate live. A regression that reorders the safety stages — or swallows a failure, or
  * drops the advisory lock — would silently defeat that protection. The OLD onboarding test guarded this with a
- * byte-identity assertion (`git diff --name-only main..HEAD -- scripts/migrate.ts` must be empty), which is too
- * blunt: P1c LEGITIMATELY changed migrate.ts (added the `ensureAppSchema` bootstrap prerequisite + `--verify`
- * wiring), so byte-identity is permanently false and tells us nothing about SAFETY.
+ * byte-identity assertion (`git diff --name-only main..HEAD -- scripts/migrate.ts` must be empty), which was both
+ * WRONG (it assumed a local branch named `main`, absent in a CI PR checkout — the failure that motivated this) and
+ * too blunt (P1c LEGITIMATELY changes migrate.ts, so byte-identity says nothing about SAFETY).
  *
  * This checker replaces that with a SEMANTIC invariant: it parses the migrate.ts source and verifies the required
- * safety-stage ORDER and properties, permitting authorized changes (like P1c's) and rejecting unsafe ones. It is
- * a pure function of the source text, so it can be exercised POSITIVELY against the real committed source and
- * NEGATIVELY against synthetic bad-ordered sources — with no dependency on git history or the current branch.
+ * safety-stage ORDER and properties, permitting authorized changes and rejecting unsafe ones. It is a pure
+ * function of the source text — no git history, no branch name, no hardcoded commit hash, and it never compares
+ * the file to itself — so it can be exercised POSITIVELY against the real committed source and NEGATIVELY against
+ * synthetic bad-ordered sources.
+ *
+ * Branch-aware by design. Two stages are OPTIONAL and verified only WHEN PRESENT, so the SAME checker accepts
+ * accepted-main (which has neither) and the later P1c/P1d migrate.ts (which add them):
+ *   - `ensureAppSchema(` — the P1c fresh-bootstrap prerequisite;
+ *   - `verifyBootstrap(` / `--verify` — the P1d full-bootstrap verification.
  *
  * Required invariants (see scripts/migrate.ts):
  *   1. the pre-migration backup hook (`preMigrationBackup()`) runs BEFORE any schema or migration write;
- *   2. `ensureAppSchema(` runs AFTER the backup boundary and BEFORE `migrate(`;
+ *   2. `ensureAppSchema(` (WHEN PRESENT) runs AFTER the backup boundary and BEFORE `migrate(`;
  *   3. `migrate(` runs BEFORE the RLS apply (`rls.sql` read + `sql.unsafe(`);
- *   4. verification (`verifyBootstrap(` / `--verify`) runs only AFTER RLS;
+ *   4. verification (`verifyBootstrap(` / `--verify`, WHEN PRESENT) runs only AFTER RLS;
  *   5. a migration/RLS/verification failure remains FATAL (top-level `main().catch` → `process.exit(1)`);
  *   6. the advisory lock (`pg_advisory_lock`) + release/cleanup (`pg_advisory_unlock`, `sql.end`) remain present,
  *      lock acquired before the schema/migration work, released and connection closed after it;
@@ -67,10 +73,12 @@ export function blankComments(src: string): string {
 export interface MigrateStageIndices {
   readonly backupCall: number;
   readonly advisoryLock: number;
+  /** Index of the REQUIRED `ensureAppSchema(` stage (B2a×P1c contract). */
   readonly ensureAppSchema: number;
   readonly migrate: number;
   readonly rlsFile: number;
   readonly rlsApply: number;
+  /** Index of the REQUIRED `verifyBootstrap(` stage (B2a×P1c contract). */
   readonly verify: number;
   readonly advisoryUnlock: number;
   readonly sqlEnd: number;
@@ -88,23 +96,38 @@ export function assertMigrateStageOrder(rawSource: string): MigrateStageIndices 
     if (!m) throw new MigrateStageOrderError(code, `scripts/migrate.ts is missing ${label}`);
     return m.index;
   };
+  const firstIndexAny = (res: RegExp[], code: string, label: string): number => {
+    let best = -1;
+    for (const re of res) {
+      const m = re.exec(source);
+      if (m && (best < 0 || m.index < best)) best = m.index;
+    }
+    if (best < 0) throw new MigrateStageOrderError(code, `scripts/migrate.ts is missing ${label}`);
+    return best;
+  };
 
-  // (7) the backup CALL must be present (not removed). The `;` terminator distinguishes the invocation
-  // `preMigrationBackup();` from the function DEFINITION `function preMigrationBackup() {`.
-  const backupCall = firstIndex(/\bpreMigrationBackup\s*\(\s*\)\s*;/, 'backup_call_missing', 'the pre-migration backup call (preMigrationBackup();)');
+  // (7) the PRE-MIGRATION SAFETY SEAM must be present (not removed): either the best-effort backup
+  // (`preMigrationBackup();`) OR the G-Backup-B2a verification gate (`runPreMigrationGate(...)`) that replaces it.
+  // The `;` / `(` terminator distinguishes the invocation from the function definition or a bare import specifier.
+  const backupCall = firstIndexAny(
+    [/\bpreMigrationBackup\s*\(\s*\)\s*;/, /\brunPreMigrationGate\s*\(/],
+    'backup_call_missing',
+    'the pre-migration safety seam (preMigrationBackup(); or runPreMigrationGate(...))',
+  );
   // (6) advisory lock + release + connection cleanup must be present.
   const advisoryLock = firstIndex(/pg_advisory_lock\b/, 'advisory_lock_missing', 'the pg_advisory_lock acquisition');
   const advisoryUnlock = firstIndex(/pg_advisory_unlock\b/, 'advisory_unlock_missing', 'the pg_advisory_unlock release');
   const sqlEnd = firstIndex(/\bsql\.end\s*\(/, 'sql_end_missing', 'the sql.end() connection cleanup');
-  // (2) bootstrap prerequisite.
-  const ensureAppSchema = firstIndex(/\bensureAppSchema\s*\(/, 'ensure_app_schema_missing', 'the ensureAppSchema bootstrap prerequisite call');
   // (2/3) the drizzle migrate call (the import `{ migrate }` has no `(` so it is not matched).
   const migrate = firstIndex(/\bmigrate\s*\(/, 'migrate_missing', 'the migrate() call');
   // (3) RLS apply: the rls.sql read + the sql.unsafe application.
   const rlsFile = firstIndex(/rls\.sql\b/, 'rls_file_missing', 'the rls.sql read');
   const rlsApply = firstIndex(/\bsql\.unsafe\s*\(/, 'rls_apply_missing', 'the RLS apply (sql.unsafe(...))');
-  // (4) verification.
-  const verify = firstIndex(/\bverifyBootstrap\s*\(/, 'verify_missing', 'the verifyBootstrap(...) verification call');
+  // (2) REQUIRED bootstrap prerequisite; (4) REQUIRED verification — the final B2a×P1c contract wires BOTH the
+  // fresh-database `ensureAppSchema` and the opt-in `verifyBootstrap` into scripts/migrate.ts, so their ABSENCE
+  // is a failure (the stage-order check must not pass vacuously when a required P1c stage is missing).
+  const ensureAppSchema = firstIndex(/\bensureAppSchema\s*\(/, 'ensure_app_schema_missing', 'the ensureAppSchema bootstrap prerequisite call');
+  const verify = firstIndex(/\bverifyBootstrap\s*\(/, 'verify_missing', 'the verifyBootstrap verification call');
 
   // (5) failure remains fatal: a top-level main().catch handler that exits nonzero.
   if (!/\bmain\s*\([^)]*\)[\s\S]*?\.catch\s*\(/.test(source)) {
@@ -118,19 +141,21 @@ export function assertMigrateStageOrder(rawSource: string): MigrateStageIndices 
     if (!(a < b)) throw new MigrateStageOrderError(code, message);
   };
 
-  // (1) backup before any schema OR migration write.
-  requireOrder(backupCall, ensureAppSchema, 'backup_after_schema', 'the pre-migration backup must run BEFORE any schema creation (ensureAppSchema)');
-  requireOrder(backupCall, migrate, 'backup_after_migrate', 'the pre-migration backup must run BEFORE migrate()');
+  // (1) the pre-migration safety seam (gate) runs BEFORE any schema creation OR migration write.
+  requireOrder(backupCall, ensureAppSchema, 'backup_after_schema', 'the pre-migration gate must run BEFORE any schema creation (ensureAppSchema)');
+  requireOrder(backupCall, migrate, 'backup_after_migrate', 'the pre-migration gate must run BEFORE migrate()');
   // (6) advisory lock acquired before the schema/migration work.
   requireOrder(advisoryLock, ensureAppSchema, 'lock_after_schema', 'the advisory lock must be acquired BEFORE the schema/migration work');
-  // (2) ensureAppSchema after the backup boundary and before migrate.
-  requireOrder(ensureAppSchema, migrate, 'schema_after_migrate', 'ensureAppSchema must run AFTER the backup boundary and BEFORE migrate()');
+  requireOrder(advisoryLock, migrate, 'lock_after_migrate', 'the advisory lock must be acquired BEFORE migrate()');
+  // (2) ensureAppSchema after the gate boundary and before migrate.
+  requireOrder(ensureAppSchema, migrate, 'schema_after_migrate', 'ensureAppSchema must run AFTER the gate and BEFORE migrate()');
   // (3) migrate before RLS apply.
   requireOrder(migrate, rlsApply, 'rls_before_migrate', 'migrate() must run BEFORE the RLS apply (sql.unsafe)');
   // (4) verification only after RLS.
   requireOrder(rlsApply, verify, 'verify_before_rls', 'verification (verifyBootstrap) must run only AFTER the RLS apply');
-  // (6) release + cleanup after the migration work.
+  // (6) release + cleanup after ALL operational stages — verification runs BEFORE cleanup.
   requireOrder(migrate, advisoryUnlock, 'unlock_before_migrate', 'the advisory lock must be released AFTER the migration work');
+  requireOrder(verify, advisoryUnlock, 'cleanup_before_verify', 'verification (verifyBootstrap) must run BEFORE cleanup (advisory unlock)');
   requireOrder(advisoryUnlock, sqlEnd, 'end_before_unlock', 'the connection cleanup (sql.end) must run after the advisory unlock');
 
   return { backupCall, advisoryLock, ensureAppSchema, migrate, rlsFile, rlsApply, verify, advisoryUnlock, sqlEnd };

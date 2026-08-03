@@ -59,6 +59,7 @@ describe('G-Backup-A import boundary', () => {
         'receipt-v2-encoding.ts',
         'receipt-key-bundle.ts',
         'receipt-v2-controller.ts',
+        'premigration-gate.ts',
       ]),
     );
   });
@@ -81,12 +82,13 @@ describe('G-Backup-A import boundary', () => {
     }
   });
 
-  it('scripts/migrate.ts is NOT modified to import the backup modules (live path untouched by G-Backup-A)', () => {
+  it('scripts/migrate.ts imports ONLY the B2a consumer surface from backup (gate + transport), no other backup module', () => {
+    // Superseded by G-Backup-B2a: migrate.ts now wires the pre-migration verification gate. The ONLY backup
+    // imports permitted are the gate and the transport (the consumer surface). The detailed signer / Fly-authority
+    // exclusions are asserted in the B2a-specific tests below.
     const migrate = readFileSync(join(ROOT, 'scripts', 'migrate.ts'), 'utf8');
-    expect(migrate.includes('scripts/backup')).toBe(false);
-    expect(migrate.includes("from './backup")).toBe(false);
-    // The current (unchanged) behavior: it still calls the old preMigrationBackup().
-    expect(migrate.includes('preMigrationBackup')).toBe(true);
+    const backupImports = [...migrate.matchAll(/from '\.\/backup\/([a-z0-9-]+)'/g)].map((m) => m[1]);
+    expect(new Set(backupImports)).toEqual(new Set(['premigration-gate', 'receipt-transport']));
   });
 
   it('the SIGNER module is NOT imported by the runtime verifier, detector, or migrate.ts (correction 3)', () => {
@@ -120,6 +122,53 @@ describe('G-Backup-A import boundary', () => {
     const v = readFileSync(join(DIR, 'receipt-v2-verify.ts'), 'utf8');
     expect(/\bcryptoSign\b/.test(v)).toBe(false);
     expect(v.includes('sign as')).toBe(false);
+  });
+
+  it('G-Backup-B2a: the gate + migrate.ts import no signer and no Fly snapshot authority', () => {
+    const gate = readFileSync(join(DIR, 'premigration-gate.ts'), 'utf8');
+    const migrate = readFileSync(join(ROOT, 'scripts', 'migrate.ts'), 'utf8');
+    for (const forbidden of ['receipt-v2-sign', 'legacy-attestation-sign', 'cryptoSign', 'flyctl', 'fly deploy', 'FLY_API_TOKEN', 'volumes snapshots']) {
+      expect(gate.includes(forbidden), `premigration-gate must not reference ${forbidden}`).toBe(false);
+      expect(migrate.includes(forbidden), `migrate.ts must not reference ${forbidden}`).toBe(false);
+    }
+    // The gate has no signing primitive of its own.
+    expect(/\bsign\s*\(/.test(gate)).toBe(false);
+  });
+
+  it('G-Backup-B2a: migrate.ts wires the gate before any mutation and drops the Windows-only backup path', () => {
+    const migrate = readFileSync(join(ROOT, 'scripts', 'migrate.ts'), 'utf8');
+    expect(migrate.includes("from './backup/premigration-gate'")).toBe(true);
+    expect(migrate.includes('runPreMigrationGate')).toBe(true);
+    // The Windows-only best-effort path is gone; backup.ps1 itself is intentionally retained on disk.
+    expect(migrate.includes('preMigrationBackup')).toBe(false);
+    expect(migrate.includes('powershell.exe')).toBe(false);
+    expect(readdirSync(join(ROOT, 'scripts')).includes('backup.ps1')).toBe(true);
+    // The gate runs strictly before the two mutation calls.
+    const gateAt = migrate.indexOf('runPreMigrationGate');
+    const migrateAt = migrate.indexOf('await migrate(db');
+    const rlsAt = migrate.indexOf('rls.sql');
+    expect(gateAt).toBeGreaterThan(0);
+    expect(gateAt).toBeLessThan(migrateAt);
+    expect(gateAt).toBeLessThan(rlsAt);
+  });
+
+  it('G-Backup-B2a: the Dockerfile bakes the source identity in build AND copies it into the runtime image at the gate-read path', () => {
+    const dockerfile = readFileSync(join(ROOT, 'Dockerfile'), 'utf8');
+    const migrate = readFileSync(join(ROOT, 'scripts', 'migrate.ts'), 'utf8');
+    // Split into stages on each FROM … so we can assert per-stage.
+    const stages = dockerfile.split(/^FROM /m).slice(1).map((s) => `FROM ${s}`);
+    const buildStage = stages.find((s) => /\bAS build\b/.test(s.split('\n')[0]!))!;
+    const runtimeStage = stages.find((s) => /\bAS runtime\b/.test(s.split('\n')[0]!))!;
+    expect(buildStage).toBeTruthy();
+    expect(runtimeStage).toBeTruthy();
+    // 1. the BUILD stage creates the identity file at /app/source-identity.json.
+    expect(/>\s*\/app\/source-identity\.json/.test(buildStage)).toBe(true);
+    expect(buildStage.includes('source-identity.json')).toBe(true);
+    // 2. the RUNTIME stage copies it FROM the build stage (so the deployed migrate image contains it).
+    expect(runtimeStage.includes('COPY --from=build /app/source-identity.json ./source-identity.json')).toBe(true);
+    // 3. the runtime destination matches the path scripts/migrate.ts reads: <cwd=/app>/source-identity.json.
+    expect(/WORKDIR \/app/.test(runtimeStage)).toBe(true);
+    expect(migrate.includes("join(process.cwd(), 'source-identity.json')")).toBe(true);
   });
 
   it('executor eligibility remains false for every action', () => {

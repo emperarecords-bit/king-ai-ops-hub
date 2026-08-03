@@ -1,0 +1,240 @@
+# Hub P1 release gates — minimum CI to validate the P1 stack + G-Backup-B2a before merge.
+#
+# Review-only at introduction: these check names are intended to become protected-main
+# required checks ONLY after this workflow is reviewed and merged. This file does not change
+# branch protection, run migrations against any shared/staging/production database, or deploy.
+#
+# Branch-aware by design: the two database jobs derive the expected migration count from the
+# CHECKED-OUT branch's committed journal (main ends at 0053; PR #2 at 0054; P1a/b/c at 0055;
+# P1d at 0056; B2a adds no migration). Nothing is hardcoded to 57. All database targets are
+# ephemeral service containers, guarded so the shared `king_ai_hub` name can never be used.
+name: p1-release-gates
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel obsolete runs of THIS workflow for the SAME PR/branch only (never unrelated branches).
+concurrency:
+  group: p1-release-gates-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: read-only. No write, deploy, package-publish, or cloud credentials.
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # A) Static analysis: install from lockfile, typecheck, production build, changed-files lint, whitespace.
+  static-analysis:
+    name: static-analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0 # need the base commit to lint only the CHANGED files (repo baseline semantics)
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Production build
+        run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'
+      - name: Lint changed files (repository accepted-baseline semantics — no NEW violations)
+        run: |
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE" 2>/dev/null; then BASE="$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)"; fi
+          FILES=$(git diff --name-only --diff-filter=ACMR "$BASE"...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs' | tr '\n' ' ')
+          if [ -z "$FILES" ]; then echo "No changed lintable files vs $BASE."; exit 0; fi
+          echo "Linting changed files vs $BASE:"; echo "$FILES"
+          npx eslint $FILES
+      - name: Whitespace / conflict-marker check
+        run: git diff --check
+
+  # B) Migration integrity: offline Drizzle checks + branch-aware manifest (DB-free, deterministic).
+  # The G-Backup migration detector/onboarding tests run in the two database profile jobs (full suite).
+  migration-integrity:
+    name: migration-integrity
+    runs-on: ubuntu-latest
+    env:
+      # drizzle.config requires a non-empty URL; `generate`/`check` are OFFLINE (they do not connect).
+      DATABASE_MIGRATION_URL: postgres://placeholder:placeholder@localhost:5432/placeholder_offline
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Drizzle schema no-drift (generate must produce nothing)
+        run: |
+          npx drizzle-kit generate
+          if [ -n "$(git status --porcelain drizzle/ src/db/)" ]; then
+            echo "::error::Drizzle generate produced changes — schema drift or an unexpected migration/snapshot."
+            git status --porcelain drizzle/ src/db/
+            exit 1
+          fi
+      - name: Drizzle migration consistency
+        run: npx drizzle-kit check
+      - name: Branch-aware migration manifest validation
+        run: node scripts/ci/validate-migration-manifest.mjs
+      - name: Whitespace / conflict-marker check
+        run: git diff --check
+
+  # C) Fresh-current database profile: bootstrap the branch's committed migrations, full sequential suite.
+  database-fresh-current:
+    name: database-fresh-current
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: king
+          POSTGRES_PASSWORD: king
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U king -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      PGHOST: localhost
+      PGPORT: '5432'
+      PGUSER: king
+      PGPASSWORD: king
+      PGDATABASE: postgres # psql maintenance connection; without this psql defaults the db to the username
+      CI_DB: king_ai_hub_ci_fresh_${{ github.run_id }}_${{ github.run_attempt }}
+      REQUIRE_DISPOSABLE_DB: '1'
+      SKIP_PREMIGRATION_BACKUP: '1'
+      OPENAI_API_KEY: test-openai-key
+      ANTHROPIC_API_KEY: test-anthropic-key
+      APP_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      RATE_LIMIT_RUNS_PER_MINUTE: '100000'
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Create isolated disposable database
+        run: psql -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$CI_DB\";"
+      - name: Export ephemeral connection env (password stays in $PGPASSWORD, never logged)
+        run: |
+          echo "DATABASE_URL=postgres://$PGUSER:$PGPASSWORD@$PGHOST:$PGPORT/$CI_DB" >> "$GITHUB_ENV"
+          echo "DATABASE_MIGRATION_URL=postgres://$PGUSER:$PGPASSWORD@$PGHOST:$PGPORT/$CI_DB" >> "$GITHUB_ENV"
+          echo "TEST_DATABASE_URL=postgres://$PGUSER:$PGPASSWORD@$PGHOST:$PGPORT/$CI_DB" >> "$GITHUB_ENV"
+          # G-Backup-B2a pre-migration gate: declare this DISPOSABLE CI database as a bootstrap so the enforced gate
+          # (wired into scripts/migrate.ts on the B2a branch) takes its catalog-verified bootstrap_bypass path — no
+          # signed receipt — on this fresh, empty database. This is NOT a gate bypass: GBACKUP_GATE_BYPASS is never
+          # set. The expected identity is derived from the exact generated CI_DB and must equal current_database();
+          # unexplained user objects or an identity mismatch still fail closed, and staging/production (or any Fly
+          # runtime) still require a signed receipt on a non-empty database. Written to $GITHUB_ENV so it reaches the
+          # `npm run db:migrate` process, not just this shell.
+          echo "GBACKUP_DECLARED_BOOTSTRAP=1" >> "$GITHUB_ENV"
+          echo "GBACKUP_EXPECTED_DB_IDENTITY=$CI_DB" >> "$GITHUB_ENV"
+      - name: Assert disposable target (accepts CI db, rejects king_ai_hub / staging / production)
+        run: node scripts/ci/assert-disposable.mjs
+      # NOTE (P1c): the `app` schema is deliberately NOT pre-created here — this job starts from a genuinely EMPTY
+      # disposable database so `npm run db:migrate` must create the prerequisite schema itself (via P1c's
+      # ensureAppSchema, which runs after the declared-bootstrap gate). This proves the fresh-database bootstrap.
+      - name: Bootstrap from an EMPTY database (declared-bootstrap gate → ensureAppSchema → migrate → RLS → verify)
+        run: npm run db:bootstrap
+      - name: Branch-aware migration count matches committed journal
+        run: node scripts/ci/check-migration-count.mjs
+      - name: Full sequential repository suite (RLS + tenancy included)
+        run: npx vitest run --no-file-parallelism
+      - name: Drop disposable database
+        if: always()
+        run: psql -c "DROP DATABASE IF EXISTS \"$CI_DB\" WITH (FORCE);" || true
+
+  # D) Accepted-legacy 0004 profile: reconstruct the accepted historical 0004 identity, full sequential suite.
+  database-accepted-legacy:
+    name: database-accepted-legacy
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: king
+          POSTGRES_PASSWORD: king
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U king -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      PGHOST: localhost
+      PGPORT: '5432'
+      PGUSER: king
+      PGPASSWORD: king
+      PGDATABASE: postgres # psql maintenance connection; without this psql defaults the db to the username
+      CI_DB: king_ai_hub_ci_legacy_${{ github.run_id }}_${{ github.run_attempt }}
+      REQUIRE_DISPOSABLE_DB: '1'
+      SKIP_PREMIGRATION_BACKUP: '1'
+      OPENAI_API_KEY: test-openai-key
+      ANTHROPIC_API_KEY: test-anthropic-key
+      APP_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      RATE_LIMIT_RUNS_PER_MINUTE: '100000'
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Create isolated disposable database
+        run: psql -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$CI_DB\";"
+      - name: Export ephemeral connection env (password stays in $PGPASSWORD, never logged)
+        run: |
+          echo "DATABASE_URL=postgres://$PGUSER:$PGPASSWORD@$PGHOST:$PGPORT/$CI_DB" >> "$GITHUB_ENV"
+          echo "DATABASE_MIGRATION_URL=postgres://$PGUSER:$PGPASSWORD@$PGHOST:$PGPORT/$CI_DB" >> "$GITHUB_ENV"
+          echo "TEST_DATABASE_URL=postgres://$PGUSER:$PGPASSWORD@$PGHOST:$PGPORT/$CI_DB" >> "$GITHUB_ENV"
+      - name: Assert disposable target (accepts CI db, rejects king_ai_hub / staging / production)
+        run: node scripts/ci/assert-disposable.mjs
+      - name: Bootstrap with reconstructed accepted-legacy 0004 identity (no committed files edited)
+        run: node scripts/ci/bootstrap-legacy-0004.mjs
+      - name: Branch-aware migration count matches committed journal
+        run: node scripts/ci/check-migration-count.mjs
+      - name: Full sequential repository suite (RLS + tenancy included)
+        run: npx vitest run --no-file-parallelism
+      - name: Drop disposable database
+        if: always()
+        run: psql -c "DROP DATABASE IF EXISTS \"$CI_DB\" WITH (FORCE);" || true
+
+  # E) Security review: deterministic repository-native secret scan + PR-scoped dependency review.
+  security-review:
+    name: security-review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Secret scan (repository-native, deterministic, no secrets required)
+        run: node scripts/ci/secret-scan.mjs
+      # Flags newly INTRODUCED high-severity dependency risk on PRs. Requires the dependency graph
+      # (+ GitHub Advanced Security on private repos); best-effort until that is enabled, so a
+      # "not supported" result does not fail the gate. The secret scan above is the hard gate.
+      - name: Dependency review (pull requests only — where supported)
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/dependency-review-action@3b139cfc5fae8b618d3eae3675e383bb1769c019 # v4.5.0
+        with:
+          fail-on-severity: high

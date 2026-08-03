@@ -6,16 +6,17 @@ import { join } from 'node:path';
 import postgres from 'postgres';
 
 /**
- * Test-only helpers for the P1c/P1d fresh-database bootstrap + migration-identity suites. They create and drop
- * DISPOSABLE databases named `king_ai_hub_p1c_*` / `king_ai_hub_p1d_*` on the local Docker Postgres (never the
- * shared `king_ai_hub`), and build migration folders so an "incremental" database (migrated only through an
- * earlier migration) or a specific migration IDENTITY (clean-current vs accepted-legacy 0004) can be constructed
- * WITHOUT editing any committed migration, journal row, or the shared database.
+ * Test-only helpers for the fresh-database bootstrap + migration-identity suites. They create and drop DISPOSABLE
+ * databases named `king_ai_hub_p1c_*` / `king_ai_hub_p1d_*` on the local/CI Postgres (never the shared
+ * `king_ai_hub`), and build migration folders so a specific migration IDENTITY (clean-current vs accepted-legacy
+ * 0004) can be constructed WITHOUT editing any committed migration, journal row, or the shared database. The
+ * expected migration count is read from the checked-out journal, so this is branch-count independent.
  */
 
 const BASE_URL =
   process.env.DATABASE_MIGRATION_URL ??
   process.env.TEST_DATABASE_URL ??
+  process.env.DATABASE_URL ??
   'postgresql://king:king@localhost:5433/king_ai_hub';
 
 /**
@@ -41,7 +42,7 @@ export function disposableUrl(name: string): string {
   return withDb(name);
 }
 
-/** True if the local Postgres is reachable (else the suite skips, matching repo convention). */
+/** True if the maintenance Postgres is reachable (else the suite skips, matching repo convention). */
 export async function bootstrapDbAvailable(): Promise<boolean> {
   const sql = postgres(maintenanceUrl(), { max: 1, connect_timeout: 3, onnotice: () => {} });
   try {
@@ -73,23 +74,6 @@ export async function dropDisposableDb(name: string): Promise<void> {
   } finally {
     await sql.end();
   }
-}
-
-/**
- * Build a temporary migrations folder containing migrations 0000..(0000+count-1) and a `meta/_journal.json`
- * sliced to those entries. Drizzle's runtime migrator reads only the journal + the `.sql` files (no snapshots),
- * so this faithfully migrates a database to an EARLIER point without touching the committed `drizzle/` tree.
- */
-export function makeTruncatedMigrationsFolder(count: number, sourceFolder = 'drizzle'): { folder: string; cleanup: () => void } {
-  const journal = JSON.parse(readFileSync(join(sourceFolder, 'meta', '_journal.json'), 'utf8')) as {
-    entries: { idx: number; tag: string }[];
-  };
-  const kept = journal.entries.slice(0, count);
-  const dir = mkdtempSync(join(tmpdir(), 'p1c-mig-'));
-  cpSync(join(sourceFolder, 'meta'), join(dir, 'meta'), { recursive: true });
-  writeFileSync(join(dir, 'meta', '_journal.json'), JSON.stringify({ ...journal, entries: kept }, null, 2));
-  for (const e of kept) cpSync(join(sourceFolder, `${e.tag}.sql`), join(dir, `${e.tag}.sql`));
-  return { folder: dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 /** The `0004_knowledge_k1` migration tag whose two line-ending identities the detector must distinguish. */
@@ -136,7 +120,7 @@ export function reconstructLegacy0004Bytes(committed: Buffer): Buffer {
  *                     LEGACY_0004_SHA256}), which Drizzle then computes + records NATURALLY on migrate.
  *
  * The journal (meta/) is copied verbatim from the working tree so every `when`/`idx` matches the committed
- * journal, and the folder migrates the DB through the full working-tree set (currently 57 migrations).
+ * journal, and the folder migrates the DB through the full checked-out migration set.
  */
 export function makeIdentityMigrationsFolder(
   kind: 'clean' | 'legacy',
@@ -157,7 +141,7 @@ export function makeIdentityMigrationsFolder(
       bytes = kind === 'legacy' ? legacy0004 : committed0004;
     } else {
       // Committed migrations → exact committed blob (fully deterministic, exact matches). Any uncommitted tail
-      // (e.g. the P1d 0056) has no HEAD blob → use its LF-normalized working-tree form (the committed-equivalent).
+      // has no HEAD blob → use its LF-normalized working-tree form (the committed-equivalent).
       try {
         bytes = gitHeadBlob(sourceFolder, e.tag);
       } catch {
@@ -175,7 +159,25 @@ export function makeIdentityMigrationsFolder(
 }
 
 /**
- * Build a temporary migrations folder whose single migration contains INVALID SQL, to simulate a migration
+ * (P1c) Build a temporary migrations folder containing migrations 0000..(count-1) and a `meta/_journal.json`
+ * sliced to those entries, so an "incremental" database (migrated only through an earlier migration) can be
+ * simulated WITHOUT editing any committed migration. Drizzle's runtime migrator reads only the journal + `.sql`
+ * files (no snapshots), so this faithfully migrates a database to an EARLIER point.
+ */
+export function makeTruncatedMigrationsFolder(count: number, sourceFolder = 'drizzle'): { folder: string; cleanup: () => void } {
+  const journal = JSON.parse(readFileSync(join(sourceFolder, 'meta', '_journal.json'), 'utf8')) as {
+    entries: { idx: number; tag: string }[];
+  };
+  const kept = journal.entries.slice(0, count);
+  const dir = mkdtempSync(join(tmpdir(), 'p1c-mig-'));
+  cpSync(join(sourceFolder, 'meta'), join(dir, 'meta'), { recursive: true });
+  writeFileSync(join(dir, 'meta', '_journal.json'), JSON.stringify({ ...journal, entries: kept }, null, 2));
+  for (const e of kept) cpSync(join(sourceFolder, `${e.tag}.sql`), join(dir, `${e.tag}.sql`));
+  return { folder: dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+/**
+ * (P1c) Build a temporary migrations folder whose single migration contains INVALID SQL, to simulate a migration
  * failure without editing any committed migration.
  */
 export function makeBadMigrationsFolder(): { folder: string; cleanup: () => void } {

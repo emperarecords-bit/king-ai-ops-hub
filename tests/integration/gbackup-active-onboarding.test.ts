@@ -5,9 +5,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import postgres from 'postgres';
 import { afterAll, describe, expect, it } from 'vitest';
+import { buildSourceManifestFromGit } from '../../scripts/backup/source-manifest';
 import { classifyMigrationState, detectMigrationState } from '../../scripts/backup/migration-detector';
-import { buildDbComparisonManifest } from '../support/db-migration-manifest';
-import { assertDisposableDbForVerification } from '../support/require-disposable-db';
 import {
   ActiveBundleError,
   computeActiveIndexSemanticDigest,
@@ -271,117 +270,164 @@ describe('Phase 10 hardened — draft exclusion + repository hygiene', () => {
       expect(tracked.includes(forbidden), `${forbidden} must not be tracked`).toBe(false);
     }
   });
-  it('loader + strict-json do not import the signer; migrate.ts preserves its safety-stage ordering', () => {
+  it('loader + strict-json do not import the signer; migrate.ts preserves its safety-stage ordering (B2a gate wired in)', () => {
     for (const f of ['legacy-active-bundle.ts', 'strict-json.ts']) {
       expect(readFileSync(join('scripts', 'backup', f), 'utf8').includes('legacy-attestation-sign')).toBe(false);
     }
-    // SEMANTIC invariant (was: a `git diff --name-only main..HEAD -- scripts/migrate.ts` byte-identity check).
-    // That byte-identity assertion is now permanently false — P1c LEGITIMATELY changed migrate.ts (added the
-    // `ensureAppSchema` bootstrap prerequisite + `--verify` wiring, commit bf4f897) — and it never proved SAFETY.
-    // Instead, read the real deployment-path source and verify the required safety-stage ORDER and properties:
-    // backup boundary → ensureAppSchema → migrate → RLS → verify, advisory lock/cleanup present, failures fatal,
-    // and the backup seam not bypassed. This PERMITS P1c's authorized change and REJECTS unsafe reorderings.
+    // RECONCILIATION (G-Backup-B2a × P1c): the final production seam wires BOTH the B2a pre-migration gate
+    // (runPreMigrationGate) AND P1c's fresh-database bootstrap (ensureAppSchema + verifyBootstrap) into migrate.ts.
+    // assertMigrateStageOrder (clone-topology independent — no main..HEAD) requires all of them and validates the
+    // full order: gate → ensureAppSchema → migrate → RLS → verify, advisory lock/cleanup bracketing, failures
+    // fatal. B2a security invariant retained: this release path is a CONSUMER — migrate.ts imports neither the
+    // legacy loader nor the attestation/receipt signer.
     const migrate = readFileSync(join('scripts', 'migrate.ts'), 'utf8');
     expect(() => assertMigrateStageOrder(migrate)).not.toThrow();
     expect(migrate.includes('legacy-active-bundle')).toBe(false);
-    expect(migrate.includes('preMigrationBackup')).toBe(true);
+    expect(migrate.includes('legacy-attestation-sign')).toBe(false);
+    expect(migrate.includes('receipt-v2-sign')).toBe(false);
+    expect(migrate.includes('runPreMigrationGate')).toBe(true); // B2a pre-migration gate is wired in
+    expect(migrate.includes('ensureAppSchema')).toBe(true); // P1c fresh-database prerequisite is wired in
+    expect(migrate.includes('verifyBootstrap')).toBe(true); // P1c bootstrap verification is wired in
   });
 });
 
 // ---------------------------------------------------------------------------
-// The safety-stage invariant of the deployment path, exercised positively (the real, authorized P1c migrate.ts
-// passes) AND negatively (synthetic unsafe migrate sources are each rejected). This is the substance behind the
-// replaced byte-identity assertion: it is what B1/B2a actually care about — the DEPLOYMENT PATH keeps its
-// safety-stage ordering and does not bypass the backup integration seam.
+// The safety-stage invariant of the deployment path scripts/migrate.ts, exercised POSITIVELY against the real
+// committed source and NEGATIVELY against synthetic bad-ordered sources. Pure (a function of the source text):
+// no git history, no branch name, no database, no hardcoded hashes, and it never compares the file to itself.
+// The final B2a×P1c contract REQUIRES every stage — gate (runPreMigrationGate) → ensureAppSchema → migrate → RLS
+// → verifyBootstrap → cleanup — so a source MISSING any required stage fails (the check never passes vacuously).
 describe('Phase 10 hardened — migrate.ts safety-stage ordering invariant (semantic)', () => {
   const NL = '\n';
-  // A well-formed synthetic migrate command with every stage in the required order. The checker must accept it;
-  // each mutation below moves exactly one stage out of order (or drops a required property) and must be rejected.
+  // A synthetic, fully-staged GOOD source (the reconciled B2a×P1c shape under one advisory lock).
   const GOOD = [
     'async function main() {',
-    '  preMigrationBackup();',
-    '  await sql`select pg_advisory_lock(1)`;',
-    '  await ensureAppSchema(sql);',
-    '  await migrate(db, { migrationsFolder: "drizzle" });',
-    '  const rls = readFileSync("src/db/rls.sql");',
-    '  await sql.unsafe(rls);',
-    '  if (process.argv.includes("--verify")) await verifyBootstrap(sql);',
-    '  await sql`select pg_advisory_unlock(1)`;',
-    '  await sql.end();',
+    '  await sql`select pg_advisory_lock(4021)`;',
+    '  try {',
+    '    await runPreMigrationGate(config);',
+    '    await ensureAppSchema(sql);',
+    '    await migrate(db, { migrationsFolder: "drizzle" });',
+    '    await sql.unsafe(readFileSync("rls.sql", "utf8"));',
+    '    await verifyBootstrap(sql);',
+    '  } finally {',
+    '    await sql`select pg_advisory_unlock(4021)`;',
+    '    await sql.end();',
+    '  }',
     '}',
     'main().catch((err) => { console.error(err); process.exit(1); });',
+    '',
   ].join(NL);
 
-  it('ACCEPTS the real, authorized P1c scripts/migrate.ts (positive)', () => {
+  it('ACCEPTS the real reconciled scripts/migrate.ts (gate → ensureAppSchema → migrate → RLS → verify)', () => {
     const real = readFileSync(join('scripts', 'migrate.ts'), 'utf8');
     const idx = assertMigrateStageOrder(real);
-    // The located stages are in the required order (proves it read real call sites, not comments).
+    // every required stage is PRESENT (not -1):
+    expect(idx.backupCall).not.toBe(-1); // the B2a pre-migration gate (seam)
+    expect(idx.ensureAppSchema).not.toBe(-1);
+    expect(idx.verify).not.toBe(-1);
+    // full order under the advisory lock:
+    expect(idx.advisoryLock).toBeLessThan(idx.backupCall);
     expect(idx.backupCall).toBeLessThan(idx.ensureAppSchema);
     expect(idx.ensureAppSchema).toBeLessThan(idx.migrate);
     expect(idx.migrate).toBeLessThan(idx.rlsApply);
     expect(idx.rlsApply).toBeLessThan(idx.verify);
-    expect(idx.advisoryLock).toBeLessThan(idx.ensureAppSchema);
+    expect(idx.verify).toBeLessThan(idx.advisoryUnlock);
     expect(idx.advisoryUnlock).toBeLessThan(idx.sqlEnd);
   });
 
-  it('ACCEPTS a well-formed synthetic migrate source (positive control)', () => {
-    expect(() => assertMigrateStageOrder(GOOD)).not.toThrow();
+  it('ACCEPTS the fully-staged synthetic GOOD source', () => {
+    const idx = assertMigrateStageOrder(GOOD);
+    expect(idx.backupCall).toBeLessThan(idx.ensureAppSchema);
+    expect(idx.ensureAppSchema).toBeLessThan(idx.migrate);
+    expect(idx.migrate).toBeLessThan(idx.rlsApply);
+    expect(idx.rlsApply).toBeLessThan(idx.verify);
+    expect(idx.verify).toBeLessThan(idx.advisoryUnlock);
   });
 
-  // Each negative feeds a SYNTHETIC bad-ordered migrate source; the checker must REJECT it.
-  const negatives: { label: string; code: string; src: string }[] = [
-    {
-      label: 'backup AFTER schema creation',
-      code: 'backup_after_schema',
-      src: GOOD.replace('  preMigrationBackup();' + NL, '').replace('await ensureAppSchema(sql);', 'await ensureAppSchema(sql); preMigrationBackup();'),
-    },
-    {
-      label: 'backup AFTER migrate',
-      code: 'backup_after_schema', // (backup after migrate is necessarily after schema too; the ordering check fires here)
-      src: GOOD.replace('  preMigrationBackup();' + NL, '').replace('await migrate(db, { migrationsFolder: "drizzle" });', 'await migrate(db, { migrationsFolder: "drizzle" }); preMigrationBackup();'),
-    },
-    {
-      label: 'RLS BEFORE migrate',
-      code: 'rls_before_migrate',
-      src: GOOD.replace('  await sql.unsafe(rls);' + NL, '').replace('await migrate(db, { migrationsFolder: "drizzle" });', 'await sql.unsafe(rls); await migrate(db, { migrationsFolder: "drizzle" });'),
-    },
-    {
-      label: 'verify BEFORE RLS',
-      code: 'verify_before_rls',
-      src: GOOD.replace('  if (process.argv.includes("--verify")) await verifyBootstrap(sql);' + NL, '').replace('const rls = readFileSync("src/db/rls.sql");', 'await verifyBootstrap(sql); const rls = readFileSync("src/db/rls.sql");'),
-    },
-    {
-      label: 'swallowed (non-fatal) migration/RLS error',
-      code: 'failure_not_fatal',
-      src: GOOD.replace('main().catch((err) => { console.error(err); process.exit(1); });', 'main().catch((err) => { console.error(err); });'),
-    },
-    {
-      label: 'removed advisory lock + cleanup',
-      code: 'advisory_lock_missing',
-      src: GOOD.replace('  await sql`select pg_advisory_lock(1)`;' + NL, '').replace('  await sql`select pg_advisory_unlock(1)`;' + NL, ''),
-    },
-    {
-      label: 'backup seam removed / short-circuited',
-      code: 'backup_call_missing',
-      src: GOOD.replace('  preMigrationBackup();' + NL, ''),
-    },
+  const NEG: [string, string, string][] = [
+    ['gate (seam) removed', GOOD.replace('    await runPreMigrationGate(config);' + NL, ''), 'backup_call_missing'],
+    ['advisory lock removed', GOOD.replace('  await sql`select pg_advisory_lock(4021)`;' + NL, ''), 'advisory_lock_missing'],
+    ['missing ensureAppSchema', GOOD.replace('    await ensureAppSchema(sql);' + NL, ''), 'ensure_app_schema_missing'],
+    ['missing verification', GOOD.replace('    await verifyBootstrap(sql);' + NL, ''), 'verify_missing'],
+    [
+      'schema before gate',
+      GOOD.replace('    await runPreMigrationGate(config);' + NL, '').replace(
+        'await ensureAppSchema(sql);',
+        'await ensureAppSchema(sql); await runPreMigrationGate(config);',
+      ),
+      'backup_after_schema',
+    ],
+    [
+      'migration before schema',
+      GOOD.replace('    await ensureAppSchema(sql);' + NL, '').replace(
+        'await migrate(db, { migrationsFolder: "drizzle" });',
+        'await migrate(db, { migrationsFolder: "drizzle" }); await ensureAppSchema(sql);',
+      ),
+      'schema_after_migrate',
+    ],
+    [
+      'RLS before migration',
+      GOOD.replace('    await migrate(db, { migrationsFolder: "drizzle" });' + NL, '').replace(
+        'await sql.unsafe(readFileSync("rls.sql", "utf8"));',
+        'await sql.unsafe(readFileSync("rls.sql", "utf8")); await migrate(db, { migrationsFolder: "drizzle" });',
+      ),
+      'rls_before_migrate',
+    ],
+    [
+      'verification before RLS',
+      GOOD.replace('    await verifyBootstrap(sql);' + NL, '').replace(
+        'await ensureAppSchema(sql);',
+        'await ensureAppSchema(sql); await verifyBootstrap(sql);',
+      ),
+      'verify_before_rls',
+    ],
+    [
+      'cleanup before verification',
+      GOOD.replace('    await verifyBootstrap(sql);' + NL, '').replace(
+        'await sql`select pg_advisory_unlock(4021)`;',
+        'await sql`select pg_advisory_unlock(4021)`; await verifyBootstrap(sql);',
+      ),
+      'cleanup_before_verify',
+    ],
+    [
+      'swallowed failure (no process.exit(1))',
+      GOOD.replace('main().catch((err) => { console.error(err); process.exit(1); });', 'main().catch((err) => { console.error(err); });'),
+      'failure_not_fatal',
+    ],
+    [
+      'no top-level catch',
+      GOOD.replace('main().catch((err) => { console.error(err); process.exit(1); });', 'main(); process.exit(1);'),
+      'no_top_level_catch',
+    ],
+    [
+      'unlock before migrate',
+      GOOD.replace('    await sql`select pg_advisory_unlock(4021)`;' + NL, '').replace(
+        'await runPreMigrationGate(config);',
+        'await sql`select pg_advisory_unlock(4021)`; await runPreMigrationGate(config);',
+      ),
+      'unlock_before_migrate',
+    ],
   ];
-  for (const { label, code, src } of negatives) {
-    it(`REJECTS: ${label}`, () => {
+  for (const [label, src, code] of NEG) {
+    it(`REJECTS ${label} → ${code}`, () => {
       let thrown: unknown;
-      try { assertMigrateStageOrder(src); } catch (e) { thrown = e; }
+      try {
+        assertMigrateStageOrder(src);
+      } catch (e) {
+        thrown = e;
+      }
       expect(thrown).toBeInstanceOf(MigrateStageOrderError);
       expect((thrown as MigrateStageOrderError).code).toBe(code);
     });
   }
 
   it('does NOT bless every migrate.ts change: mutating the REAL source into an unsafe order is rejected', () => {
-    // Take the real source and move the RLS apply before migrate — an unsafe change the OLD byte-identity check
-    // could only catch as "changed", and the semantic checker rejects for the RIGHT reason.
     const real = readFileSync(join('scripts', 'migrate.ts'), 'utf8');
-    const unsafe = real
-      .replace('await sql.unsafe(rls);', '')
-      .replace('await migrate(db, { migrationsFolder: join(process.cwd(), \'drizzle\') });', 'await sql.unsafe(rls); await migrate(db, { migrationsFolder: join(process.cwd(), \'drizzle\') });');
+    const rlsApply = 'await sql.unsafe(rls);';
+    const migrateCall = "await migrate(db, { migrationsFolder: join(process.cwd(), 'drizzle') });";
+    expect(real.includes(rlsApply) && real.includes(migrateCall)).toBe(true);
+    // Swap migrate() and the RLS apply → migrate now runs AFTER RLS → rejected.
+    const unsafe = real.replace(migrateCall, '__MIG__').replace(rlsApply, migrateCall).replace('__MIG__', rlsApply);
     expect(() => assertMigrateStageOrder(unsafe)).toThrow(MigrateStageOrderError);
   });
 });
@@ -565,13 +611,9 @@ describe('Phase 10 hardened — active-index version + self-integrity digest', (
 });
 
 // ---------------------------------------------------------------------------
-// Refuse this G-Backup DB test against the shared `king_ai_hub` when REQUIRE_DISPOSABLE_DB=1 — before the
-// pool below is constructed. No-op without the flag.
-assertDisposableDbForVerification('gbackup-active-onboarding.test');
-
 const URL = process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL ?? 'postgresql://king:king@localhost:5433/king_ai_hub';
 const sql = postgres(URL, { max: 2, prepare: false });
-const MANIFEST = buildDbComparisonManifest('drizzle');
+const MANIFEST = buildSourceManifestFromGit('HEAD', 'drizzle');
 let dbReady = false;
 try {
   await sql`select 1 as ok`;
@@ -629,10 +671,10 @@ describe('Phase 10 hardened — local-DB detector with the ACTIVE bundle', () =>
     expect(r.lineEndingVariantMatches).toBe(1);
     expect(r.variantDetails[0]!.tag).toBe('0053_pricing_foundations');
     expect(r.legacyAttestedMatches).toBe(1);
-    // Migration-count independent: 0053 is the sole EOL variant and 0004 the sole attested; every OTHER entry
-    // (including any uncommitted tail such as 0055) is an exact committed-blob match. Derive from the manifest
-    // length so adding a migration never needs an absolute-count edit here.
-    expect(r.exactExecutionMatches).toBe(MANIFEST.entries.length - 2);
+    // Migration-count independent (reconciliation): every remaining applied migration is an exact match, so the
+    // exact count is the manifest length minus the one EOL variant (0053) and the one legacy-attested (0004) —
+    // never a hardcoded absolute (was `52`, which assumed exactly 54 migrations; the branch endpoint is now 0054).
+    expect(r.exactExecutionMatches).toBe(MANIFEST.entries.length - r.lineEndingVariantMatches - r.legacyAttestedMatches);
     expect(r.variantDetails.every((v) => v.tag !== TAG)).toBe(true);
   });
 });
