@@ -15,8 +15,8 @@ import { withTenant } from '@/db/tenant';
 import { taskSchedules, tasks, usageEvents } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
 import { getAssignableAgentById } from '@/domain/agents/agents';
-import { createTask } from '@/domain/tasks/tasks';
-import { startRun } from '@/domain/tasks/runner';
+import { createScheduledOccurrenceTask } from '@/domain/tasks/tasks';
+import { enqueueRun } from '@/domain/jobs/jobs';
 import { computeNextRunAt } from './cadence';
 
 export { computeNextRunAt };
@@ -345,8 +345,17 @@ export async function updateSchedule(
 
 export interface TickResult {
   due: number;
-  /** Schedules that dispatched a task + run this tick. */
+  /** Hub P1d — retained for back-compat with the tick's log line. The scheduler no longer STARTS runs
+   *  synchronously (it enqueues a durable job the worker executes), so this stays 0; `enqueued` is the live
+   *  counter. */
   started: number;
+  /** Hub P1d — occurrences that durably created a task + a queued `run_jobs` row this tick (a `standing`
+   *  dispatch the worker will execute). NO provider call happens in the scheduler. */
+  enqueued: number;
+  /** Hub P1d — due schedules whose occurrence was already claimed by a concurrent scheduler tick: the task
+   *  insert conflicted on the occurrence identity, so this tick suppressed it (no duplicate task/job, no clock
+   *  advance here — the winning tick advanced it). Audited `schedule.occurrence_suppressed`. */
+  suppressed: number;
   /** Due schedules left UNTOUCHED because their pinned assignment was missing or invalid: no task, no run,
    *  no clock advance, only an append-only `schedule.assignment_required` audit. They stay due next tick. */
   assignmentRequired: number;
@@ -354,10 +363,17 @@ export interface TickResult {
 }
 
 /**
- * Executes every due schedule. Called by the external tick (scripts/
- * run-standing-work.ts, registered hourly). The author's identity drives the
- * run; if their project membership was revoked since, the schedule is
- * skipped and paused — standing work never outlives its author's authority.
+ * Enqueues a durable run for every due schedule. Called by the external tick (scripts/run-standing-work.ts,
+ * registered hourly). The author's identity drives the work; if their project membership was revoked since,
+ * the schedule is skipped and paused — standing work never outlives its author's authority.
+ *
+ * Hub P1d — the scheduler is now JOB-BACKED: it never calls a provider. For each due schedule it runs ONE
+ * fail-closed transaction that (1) validates the pinned P1a assignment FIRST, (2) creates the occurrence's
+ * task under a DETERMINISTIC occurrence identity (schedule_id + the due next_run_at) with `onConflictDoNothing`
+ * so concurrent ticks collapse to a single task, (3) enqueues a `standing` `run_jobs` row, and (4) advances the
+ * clock optimistically. The worker (claimNextJob → runClaimedJob → startRun) executes the resulting job with
+ * the P1a pins intact. If ANY write throws, the whole transaction rolls back → the occurrence stays due (no
+ * task, no job, no clock advance) and runs once next tick, never N times.
  */
 export async function runDueSchedules(now = new Date()): Promise<TickResult> {
   // Cross-tenant discovery via the SECURITY DEFINER dispatcher (O-22). Under the
@@ -379,7 +395,14 @@ export async function runDueSchedules(now = new Date()): Promise<TickResult> {
     project_role: string | null;
   }>;
 
-  const result: TickResult = { due: dueRows.length, started: 0, assignmentRequired: 0, failures: [] };
+  const result: TickResult = {
+    due: dueRows.length,
+    started: 0,
+    enqueued: 0,
+    suppressed: 0,
+    assignmentRequired: 0,
+    failures: [],
+  };
 
   for (const row of dueRows) {
     const ctx: TenantContext = {
@@ -409,121 +432,205 @@ export async function runDueSchedules(now = new Date()): Promise<TickResult> {
       continue;
     }
 
-    // Read the full schedule row under RLS (ctx matches, so it is visible).
-    const schedule = await withTenant(ctx, async (tx) =>
-      (
-        await tx
-          .select({
-            id: taskSchedules.id,
-            orgId: taskSchedules.orgId,
-            projectId: taskSchedules.projectId,
-            objectiveId: taskSchedules.objectiveId,
-            title: taskSchedules.title,
-            input: taskSchedules.input,
-            providerSelection: taskSchedules.providerSelection,
-            reviewEnabled: taskSchedules.reviewEnabled,
-            assignedPrimaryAgentId: taskSchedules.assignedPrimaryAgentId,
-            assignedReviewerAgentId: taskSchedules.assignedReviewerAgentId,
-            modelTier: taskSchedules.modelTier,
-            flagshipCategory: taskSchedules.flagshipCategory,
-            cadence: taskSchedules.cadence,
-            atHour: taskSchedules.atHour,
-            weekday: taskSchedules.weekday,
-            monthday: taskSchedules.monthday,
-            createdBy: taskSchedules.createdBy,
-          })
-          .from(taskSchedules)
-          .where(eq(taskSchedules.id, row.schedule_id))
-          .limit(1)
-      )[0],
-    );
-    if (!schedule) continue; // vanished between listing and processing
+    // Hub P1d — ONE fail-closed transaction per due schedule. Everything below (the locked schedule read,
+    // assignment validation, occurrence-task insert, job enqueue, clock advance, audit) is atomic: if ANY
+    // write throws, the whole transaction rolls back and the occurrence stays due (no task, no job, no clock
+    // advance) — it runs once next tick, never N times. NO provider call happens here; the worker executes
+    // the enqueued job.
+    //
+    // Concurrency: the schedule row is locked FOR UPDATE and RE-CHECKED as still due INSIDE the tx, so a
+    // second tick that observed the schedule before a concurrent tick advanced it blocks on the lock, then
+    // sees the advanced clock and suppresses (never producing a task for an already-consumed occurrence). The
+    // partial unique index `tasks_schedule_occurrence_uq` collapses the truly-simultaneous same-instant case.
+    // Together: a due occurrence produces exactly one task and one job. Occurrence identity = the schedule's
+    // CURRENT due next_run_at.
+    type Dispatch =
+      | { kind: 'enqueued'; taskId: string }
+      | { kind: 'suppressed' }
+      | { kind: 'assignment_required'; reason: string }
+      | { kind: 'skip' };
 
-    // P1a agent pinning — VALIDATE the pinned assignment BEFORE any clock advance or dispatch. A due schedule
-    // whose assignment is missing OR invalid (no pinned primary; a primary/reviewer that is disabled, deleted,
-    // cross-workspace, or wrong-role per getAssignableAgentById; a review-enabled schedule with no reviewer; or
-    // reviewer == primary) must dispatch NO task and NO run, and leave nextRunAt / lastRunAt / cadence / enabled
-    // and EVERY other column byte-for-byte UNCHANGED — no UPDATE to the row at all. The only side effect is the
-    // append-only schedule.assignment_required audit. Because the clock never advances, the occurrence is
-    // neither consumed nor skipped: the schedule simply stays due each tick until an admin corrects it. Never
-    // provider-substitute; never disable/reschedule/rewrite the schedule. (A schedule authored/edited after P1a
-    // always carries a valid pinned assignment; this path is for legacy/decayed rows only.)
-    const validated = await withTenant(
-      ctx,
-      async (tx): Promise<{ primaryId: string } | { reason: string }> => {
-        if (schedule.assignedPrimaryAgentId == null) return { reason: 'no_assigned_primary' };
-        const primary = await getAssignableAgentById(tx, ctx, schedule.assignedPrimaryAgentId, 'primary');
-        if (!primary) return { reason: 'primary_not_assignable' };
-        if (schedule.reviewEnabled) {
-          if (schedule.assignedReviewerAgentId == null) return { reason: 'review_enabled_without_reviewer' };
-          const reviewer = await getAssignableAgentById(tx, ctx, schedule.assignedReviewerAgentId, 'reviewer');
-          if (!reviewer) return { reason: 'reviewer_not_assignable' };
-          if (reviewer.id === primary.id) return { reason: 'reviewer_equals_primary' };
+    let dispatch: Dispatch;
+    try {
+      dispatch = await withTenant(ctx, async (tx): Promise<Dispatch> => {
+        // Lock the schedule row for the life of the tx (RLS: ctx matches, so it is visible).
+        const schedule = (
+          await tx
+            .select({
+              id: taskSchedules.id,
+              objectiveId: taskSchedules.objectiveId,
+              title: taskSchedules.title,
+              input: taskSchedules.input,
+              providerSelection: taskSchedules.providerSelection,
+              reviewEnabled: taskSchedules.reviewEnabled,
+              assignedPrimaryAgentId: taskSchedules.assignedPrimaryAgentId,
+              assignedReviewerAgentId: taskSchedules.assignedReviewerAgentId,
+              modelTier: taskSchedules.modelTier,
+              flagshipCategory: taskSchedules.flagshipCategory,
+              cadence: taskSchedules.cadence,
+              atHour: taskSchedules.atHour,
+              weekday: taskSchedules.weekday,
+              monthday: taskSchedules.monthday,
+              enabled: taskSchedules.enabled,
+              nextRunAt: taskSchedules.nextRunAt,
+            })
+            .from(taskSchedules)
+            .where(eq(taskSchedules.id, row.schedule_id))
+            .for('update')
+            .limit(1)
+        )[0];
+        if (!schedule) return { kind: 'skip' }; // vanished between listing and processing
+
+        // Occurrence identity = the schedule's CURRENT due next_run_at, observed under the lock.
+        const occurrenceAt = schedule.nextRunAt;
+
+        // Re-check still due UNDER THE LOCK: a concurrent tick may have advanced the clock past `now`, or an
+        // admin may have paused the schedule, between the cross-tenant listing and acquiring this lock. Either
+        // way this occurrence is already owned/void → suppress with no task, no job, no advance.
+        if (!schedule.enabled || schedule.nextRunAt > now) {
+          await writeAudit(tx, ctx, {
+            action: 'schedule.occurrence_suppressed',
+            entityType: 'task_schedule',
+            entityId: schedule.id,
+            detail: {
+              scheduleId: schedule.id,
+              occurrenceAt: occurrenceAt.toISOString(),
+              reason: 'not_due_under_lock',
+            },
+          });
+          return { kind: 'suppressed' };
         }
-        return { primaryId: primary.id };
-      },
-    );
-    if ('reason' in validated) {
-      // Append-only audit ONLY — no UPDATE to the schedule row. Detail carries identity ids + a machine
-      // reason, never the schedule brief or any secret.
-      await withTenant(ctx, (tx) =>
-        writeAudit(tx, ctx, {
-          action: 'schedule.assignment_required',
+
+        // (1) P1a agent pinning — VALIDATE the pinned assignment FIRST, fail closed. A due schedule whose
+        // assignment is missing OR invalid (no pinned primary; a primary/reviewer disabled, deleted,
+        // cross-workspace, or wrong-role per getAssignableAgentById; a review-enabled schedule with no
+        // reviewer; or reviewer == primary) dispatches NO task and NO job and leaves the row byte-for-byte
+        // UNCHANGED — the only side effect is the append-only schedule.assignment_required audit. Because the
+        // clock never advances, the occurrence is neither consumed nor skipped: it stays due until an admin
+        // corrects it. (A schedule authored/edited after P1a always carries a valid pin; this is for
+        // legacy/decayed rows.)
+        if (schedule.assignedPrimaryAgentId == null) {
+          await auditAssignmentRequired(tx, ctx, schedule.id, 'no_assigned_primary');
+          return { kind: 'assignment_required', reason: 'no_assigned_primary' };
+        }
+        const primary = await getAssignableAgentById(tx, ctx, schedule.assignedPrimaryAgentId, 'primary');
+        if (!primary) {
+          await auditAssignmentRequired(tx, ctx, schedule.id, 'primary_not_assignable');
+          return { kind: 'assignment_required', reason: 'primary_not_assignable' };
+        }
+        if (schedule.reviewEnabled) {
+          if (schedule.assignedReviewerAgentId == null) {
+            await auditAssignmentRequired(tx, ctx, schedule.id, 'review_enabled_without_reviewer');
+            return { kind: 'assignment_required', reason: 'review_enabled_without_reviewer' };
+          }
+          const reviewer = await getAssignableAgentById(tx, ctx, schedule.assignedReviewerAgentId, 'reviewer');
+          if (!reviewer) {
+            await auditAssignmentRequired(tx, ctx, schedule.id, 'reviewer_not_assignable');
+            return { kind: 'assignment_required', reason: 'reviewer_not_assignable' };
+          }
+          if (reviewer.id === primary.id) {
+            await auditAssignmentRequired(tx, ctx, schedule.id, 'reviewer_equals_primary');
+            return { kind: 'assignment_required', reason: 'reviewer_equals_primary' };
+          }
+        }
+
+        // (2) Insert the occurrence's task idempotently. A conflict on the occurrence identity means a
+        // concurrent tick already claimed this occurrence → suppress (no task, no job, no advance here).
+        const taskId = await createScheduledOccurrenceTask(
+          tx,
+          ctx,
+          {
+            title: `${schedule.title} — ${now.toISOString().slice(0, 10)}`,
+            input: schedule.input,
+            providerSelection: schedule.providerSelection,
+            reviewEnabled: schedule.reviewEnabled,
+            modelTier: schedule.modelTier,
+            flagshipCategory: schedule.flagshipCategory,
+            objectiveId: schedule.objectiveId,
+            // The tick pins the produced task to the schedule's exact employees (P1a).
+            primaryAgentId: primary.id,
+            reviewerAgentId: schedule.assignedReviewerAgentId,
+          },
+          { scheduleId: schedule.id, scheduleOccurrenceAt: occurrenceAt },
+        );
+        if (taskId == null) {
+          await writeAudit(tx, ctx, {
+            action: 'schedule.occurrence_suppressed',
+            entityType: 'task_schedule',
+            entityId: schedule.id,
+            detail: { scheduleId: schedule.id, occurrenceAt: occurrenceAt.toISOString() },
+          });
+          return { kind: 'suppressed' };
+        }
+
+        // (3) Enqueue the durable STANDING job the worker will execute (no provider call here).
+        await enqueueRun(tx, ctx, taskId, 'standing');
+
+        // (4) Advance the clock OPTIMISTICALLY, guarded on the occurrence we own. In the serialized model
+        // this always matches (the loser suppressed, never advanced); a 0-row result means the occurrence was
+        // advanced out from under us — throw to roll the whole tx back (undoing the task + job) so we never
+        // leave work for an occurrence we did not own. It stays due exactly once.
+        const advanced = await tx
+          .update(taskSchedules)
+          .set({ nextRunAt: computeNextRunAt(schedule, now), lastRunAt: now, updatedAt: new Date() })
+          .where(and(eq(taskSchedules.id, schedule.id), eq(taskSchedules.nextRunAt, occurrenceAt)))
+          .returning({ id: taskSchedules.id });
+        if (advanced.length === 0) {
+          throw new Error('occurrence clock advanced concurrently; rolling back dispatch');
+        }
+
+        // (5) Audit the durable dispatch (identity + occurrence only; never the brief or a secret).
+        await writeAudit(tx, ctx, {
+          action: 'schedule.occurrence_enqueued',
           entityType: 'task_schedule',
           entityId: schedule.id,
-          detail: { scheduleId: schedule.id, reason: validated.reason },
-        }),
-      );
-      result.assignmentRequired += 1;
-      result.failures.push({
-        scheduleId: schedule.id,
-        reason: `assignment required (${validated.reason}); left due, not dispatched`,
+          detail: {
+            scheduleId: schedule.id,
+            taskId,
+            occurrenceAt: occurrenceAt.toISOString(),
+            dispatchKind: 'standing',
+          },
+        });
+        return { kind: 'enqueued', taskId };
       });
+    } catch (err) {
+      // ANY write threw → the transaction rolled back → the occurrence remains due (no task, no job, no clock
+      // advance). Record it and move on; it will be retried next tick.
+      const reason = err instanceof Error ? err.message : 'unknown failure';
+      result.failures.push({ scheduleId: row.schedule_id, reason });
+      log.warn('standing work tick failed for schedule', { scheduleId: row.schedule_id, reason });
       continue;
     }
-    // Validated: the pinned primary (and reviewer, when review is enabled) are enabled agents of the right
-    // role in this workspace. getAssignableAgentById loaded by the exact pinned id, so this equals the pin.
-    const assignedPrimaryAgentId = validated.primaryId;
 
-    // Advance the clock FIRST: a crash below runs once next window, never N.
-    const nextRunAt = computeNextRunAt(schedule, now);
-    await withTenant(ctx, (tx) =>
-      tx
-        .update(taskSchedules)
-        .set({ nextRunAt, lastRunAt: now, updatedAt: new Date() })
-        .where(eq(taskSchedules.id, schedule.id)),
-    );
-
-    try {
-      const taskId = await withTenant(ctx, (tx) =>
-        createTask(tx, ctx, {
-          title: `${schedule.title} — ${now.toISOString().slice(0, 10)}`,
-          input: schedule.input,
-          providerSelection: schedule.providerSelection,
-          reviewEnabled: schedule.reviewEnabled,
-          modelTier: schedule.modelTier,
-          flagshipCategory: schedule.flagshipCategory,
-          objectiveId: schedule.objectiveId,
-          scheduleId: schedule.id,
-          // The tick pins the produced task to the schedule's exact employees.
-          primaryAgentId: assignedPrimaryAgentId,
-          reviewerAgentId: schedule.assignedReviewerAgentId,
-        }),
-      );
-      const outcome = await startRun(ctx, taskId);
-      result.started += 1;
-      if (outcome.status === 'failed') {
-        result.failures.push({
-          scheduleId: schedule.id,
-          reason: outcome.failureReason ?? 'run failed',
-        });
-      }
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : 'unknown failure';
-      result.failures.push({ scheduleId: schedule.id, reason });
-      log.warn('standing work tick failed for schedule', { scheduleId: schedule.id, reason });
+    if (dispatch.kind === 'enqueued') {
+      result.enqueued += 1;
+    } else if (dispatch.kind === 'suppressed') {
+      result.suppressed += 1;
+    } else if (dispatch.kind === 'assignment_required') {
+      result.assignmentRequired += 1;
+      result.failures.push({
+        scheduleId: row.schedule_id,
+        reason: `assignment required (${dispatch.reason}); left due, not dispatched`,
+      });
     }
+    // 'skip' (the schedule vanished between listing and locking) is a no-op: nothing was created.
   }
 
   return result;
+}
+
+/** Append-only `schedule.assignment_required` audit — no UPDATE to the schedule row. Detail carries the
+ *  identity id + a machine reason, never the schedule brief or any secret. */
+function auditAssignmentRequired(
+  tx: DbTx,
+  ctx: TenantContext,
+  scheduleId: string,
+  reason: string,
+): Promise<void> {
+  return writeAudit(tx, ctx, {
+    action: 'schedule.assignment_required',
+    entityType: 'task_schedule',
+    entityId: scheduleId,
+    detail: { scheduleId, reason },
+  });
 }

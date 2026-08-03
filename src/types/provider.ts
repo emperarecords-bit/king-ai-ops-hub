@@ -78,6 +78,28 @@ const RETRYABLE: ReadonlySet<ProviderErrorKind> = new Set([
 ]);
 
 /**
+ * Hub P1d — whether a provider error PROVES the request was not remotely executed.
+ *   * `not_executed` — the request was rejected BEFORE the model ran (auth/validation/rate rejection). No
+ *     model execution, no charge; it is a KNOWN failure that may follow fail-safe/bounded-retry policy.
+ *   * `unknown` — the remote outcome is AMBIGUOUS: the request may have been received, processed, and
+ *     charged (timeout after transmission, transport/connection loss, a generic 5xx that could post-date
+ *     execution, a truncated/partial response, or any error we cannot reason about). Fail closed.
+ */
+export type RemoteOutcome = 'not_executed' | 'unknown';
+
+/**
+ * Kinds that PROVE non-execution (rejected before the model ran). Everything else — timeout, overloaded (a
+ * generic 5xx is lumped here and may post-date execution), unknown — defaults to `unknown` (fail closed).
+ * An adapter that KNOWS a specific error is a clean pre-processing rejection (e.g. Anthropic 529) passes
+ * `remoteOutcome: 'not_executed'` explicitly.
+ */
+const NOT_EXECUTED_KINDS: ReadonlySet<ProviderErrorKind> = new Set([
+  'auth',
+  'rate_limited',
+  'invalid_request',
+]);
+
+/**
  * The single error type the engine sees from any provider. Adapters map SDK
  * errors onto this taxonomy so retry policy is vendor-agnostic.
  */
@@ -85,13 +107,18 @@ export class ProviderError extends Error {
   readonly kind: ProviderErrorKind;
   readonly provider: ProviderId;
   readonly retryable: boolean;
+  /** Hub P1d — whether the request is PROVABLY not remotely executed. Ambiguous outcomes ('unknown') must
+   *  never be silently retried or reported as a clean zero-charge failure. Defaults fail-closed to 'unknown'
+   *  unless the kind proves non-execution or the adapter overrides. */
+  readonly remoteOutcome: RemoteOutcome;
 
-  constructor(provider: ProviderId, kind: ProviderErrorKind, message: string) {
+  constructor(provider: ProviderId, kind: ProviderErrorKind, message: string, remoteOutcome?: RemoteOutcome) {
     super(message);
     this.name = 'ProviderError';
     this.provider = provider;
     this.kind = kind;
     this.retryable = RETRYABLE.has(kind);
+    this.remoteOutcome = remoteOutcome ?? (NOT_EXECUTED_KINDS.has(kind) ? 'not_executed' : 'unknown');
   }
 }
 

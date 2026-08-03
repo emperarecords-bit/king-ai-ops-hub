@@ -207,41 +207,45 @@ export function buildExtractionUserTurn(
 export type ExtractFn = (system: string, user: string) => Promise<string>;
 
 /**
- * Orchestrates one extraction for a completed run. Idempotent (guarded by
- * runs.candidate_extraction_status) and FAIL-SAFE: any error is recorded as a
- * 'failed' status and swallowed so the completed task is never affected.
- * Returns the number of candidates saved.
+ * Hub P1d — apply an ALREADY-OBTAINED extractor output (the durable checkpoint of the decision-extraction
+ * provider step) to a run, idempotently. This is the PROPOSAL half of extraction, split from the provider
+ * call so the runner can checkpoint the provider result FIRST (fenced, at-most-once) and then create
+ * proposals from that checkpoint — a resume re-applies the SAME text without a second provider call. Pure of
+ * any provider call. Idempotent + FAIL-SAFE: guarded by runs.candidate_extraction_status (once per run) and
+ * any parse/insert error is recorded as 'failed' and swallowed so the run is never affected. Deliberately
+ * does NOT require the run to be `completed` (the runner calls it DURING finalization, before the terminal
+ * transition). Returns the number of candidates saved.
  */
-export async function extractCandidatesForRun(
+export async function applyDecisionCandidatesFromText(
   tx: DbTx,
   ctx: TenantContext,
   runId: string,
-  extract: ExtractFn,
+  rawText: string,
+  opts?: { fenceTx?: (tx: DbTx) => Promise<void> },
 ): Promise<number> {
-  const runRows = await tx
-    .select({
-      id: runs.id,
-      taskId: runs.taskId,
-      status: runs.status,
-      consolidatedResult: runs.consolidatedResult,
-      contextManifest: runs.contextManifest,
-      extractionStatus: runs.candidateExtractionStatus,
-      orgId: runs.orgId,
-      projectId: runs.projectId,
-    })
-    .from(runs)
-    .where(and(eq(runs.id, runId), eq(runs.projectId, ctx.projectId), eq(runs.orgId, ctx.orgId)))
-    .limit(1);
-  const run = runRows[0];
+  // Hub P1d — fence FIRST, inside THIS transaction: `fenceTx` acquires the run_jobs row lock and confirms the
+  // current fencing token still owns the job. A stale/reclaimed token throws here, rolling back BEFORE any
+  // read/insert/audit — so only the current owner ever applies proposals, and two concurrent applications
+  // serialize (the second blocks on the lock, then sees the completed status below). Absent for direct
+  // (non-worker) callers, whose ownership is trivially held (no concurrent worker).
+  if (opts?.fenceTx) await opts.fenceTx(tx);
+  const run = (
+    await tx
+      .select({
+        taskId: runs.taskId,
+        contextManifest: runs.contextManifest,
+        extractionStatus: runs.candidateExtractionStatus,
+        projectId: runs.projectId,
+      })
+      .from(runs)
+      .where(and(eq(runs.id, runId), eq(runs.projectId, ctx.projectId), eq(runs.orgId, ctx.orgId)))
+      .limit(1)
+  )[0];
   if (!run || run.projectId !== ctx.projectId) return 0;
-  // Idempotency: only extract once per run, and only for a finished run.
+  // Idempotency key: (run, decision-extraction) — read UNDER the fence lock; a set status means proposals were
+  // already applied (or the step resolved empty/failed) → recognize the completed application, create nothing.
   if (run.extractionStatus != null) return 0;
-  if (run.status !== 'completed' || !run.consolidatedResult) {
-    await tx.update(runs).set({ candidateExtractionStatus: 'empty' }).where(eq(runs.id, runId));
-    return 0;
-  }
 
-  // Accepted decisions available for dedup/supersession (this workspace only).
   const acceptedRows = await tx
     .select({ id: decisions.id, title: decisions.title })
     .from(decisions)
@@ -263,10 +267,7 @@ export async function extractCandidatesForRun(
   };
 
   try {
-    const userTurn = buildExtractionUserTurn(run.consolidatedResult, manifest, acceptedRows);
-    const raw = await extract(EXTRACTION_SYSTEM, userTurn);
-    const { candidates, rejected } = parseAndValidateCandidates(raw, prov);
-
+    const { candidates, rejected } = parseAndValidateCandidates(rawText, prov);
     for (const c of candidates) {
       const refs = c.supersedesDecisionId
         ? [...c.supportingRefs, `supersedes:${c.supersedesDecisionId}`]
@@ -311,6 +312,69 @@ export async function extractCandidatesForRun(
     }
     return candidates.length;
   } catch (err) {
+    log.warn('candidate extraction apply failed (task unaffected)', {
+      runId,
+      err: err instanceof Error ? err.message : err,
+    });
+    await tx.update(runs).set({ candidateExtractionStatus: 'failed' }).where(eq(runs.id, runId));
+    return 0;
+  }
+}
+
+/**
+ * Orchestrates one extraction for a completed run. Idempotent (guarded by
+ * runs.candidate_extraction_status) and FAIL-SAFE: any error is recorded as a
+ * 'failed' status and swallowed so the completed task is never affected.
+ * Returns the number of candidates saved.
+ *
+ * NOTE: the crash-safe run path (Hub P1d) no longer uses this — it checkpoints the extraction provider call
+ * as a reserved reliability step and calls {@link applyDecisionCandidatesFromText} on the checkpointed text.
+ * This remains the single-shot entry point for direct/non-worker callers, delegating its proposal creation
+ * to the shared apply half above.
+ */
+export async function extractCandidatesForRun(
+  tx: DbTx,
+  ctx: TenantContext,
+  runId: string,
+  extract: ExtractFn,
+): Promise<number> {
+  const runRows = await tx
+    .select({
+      status: runs.status,
+      consolidatedResult: runs.consolidatedResult,
+      contextManifest: runs.contextManifest,
+      extractionStatus: runs.candidateExtractionStatus,
+      projectId: runs.projectId,
+    })
+    .from(runs)
+    .where(and(eq(runs.id, runId), eq(runs.projectId, ctx.projectId), eq(runs.orgId, ctx.orgId)))
+    .limit(1);
+  const run = runRows[0];
+  if (!run || run.projectId !== ctx.projectId) return 0;
+  // Idempotency: only extract once per run, and only for a finished run.
+  if (run.extractionStatus != null) return 0;
+  if (run.status !== 'completed' || !run.consolidatedResult) {
+    await tx.update(runs).set({ candidateExtractionStatus: 'empty' }).where(eq(runs.id, runId));
+    return 0;
+  }
+
+  const acceptedRows = await tx
+    .select({ id: decisions.id, title: decisions.title })
+    .from(decisions)
+    .where(
+      and(
+        eq(decisions.projectId, ctx.projectId),
+        eq(decisions.orgId, ctx.orgId),
+        eq(decisions.status, 'accepted'),
+      ),
+    );
+  const manifest = run.contextManifest ?? [];
+
+  let raw: string;
+  try {
+    const userTurn = buildExtractionUserTurn(run.consolidatedResult, manifest, acceptedRows);
+    raw = await extract(EXTRACTION_SYSTEM, userTurn);
+  } catch (err) {
     log.warn('candidate extraction failed (task unaffected)', {
       runId,
       err: err instanceof Error ? err.message : err,
@@ -318,4 +382,5 @@ export async function extractCandidatesForRun(
     await tx.update(runs).set({ candidateExtractionStatus: 'failed' }).where(eq(runs.id, runId));
     return 0;
   }
+  return applyDecisionCandidatesFromText(tx, ctx, runId, raw);
 }

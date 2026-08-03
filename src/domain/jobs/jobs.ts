@@ -1,11 +1,18 @@
 import 'server-only';
-import { and, eq, sql } from 'drizzle-orm';
-import { type ProjectRole, type TenantContext } from '@/types/domain';
+import { and, desc, eq, sql } from 'drizzle-orm';
+import { type DispatchKind, type ProjectRole, type TenantContext } from '@/types/domain';
 import { log } from '@/lib/log';
 import { getDb, type DbTx } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { runJobs, runs, tasks } from '@/db/schema';
-import { startRun, type RunLiveEvents, type RunOutcome } from '@/domain/tasks/runner';
+import {
+  resumeRun,
+  startRun,
+  type RunJobContext,
+  type RunLiveEvents,
+  type RunOutcome,
+} from '@/domain/tasks/runner';
+import { LeaseLostSignal } from '@/orchestration/engine';
 import { writeAudit } from '@/domain/audit/audit';
 
 /**
@@ -38,6 +45,9 @@ export interface ClaimedJob {
   projectId: string;
   createdBy: string;
   projectRole: ProjectRole;
+  /** Hub P1d — the job's `attempts` counter at claim time: the lease OWNERSHIP token. A reclaim increments
+   *  it, so a superseded worker's ownership check fails and it can never overwrite the winner. */
+  attempt: number;
 }
 
 interface ClaimRow {
@@ -66,7 +76,46 @@ function claimedFrom(row: ClaimRow): ClaimedJob {
     projectId: String(row.project_id),
     createdBy: row.created_by ? String(row.created_by) : '',
     projectRole: (row.project_role as ProjectRole) ?? 'viewer',
+    attempt: 0,
   };
+}
+
+/** Read a job's current `attempts` counter (the lease ownership token) via the dispatcher. */
+async function jobAttempt(jobId: string): Promise<number> {
+  const result = await getDb().execute(sql`select app.run_job_attempt(${jobId}) as attempt`);
+  const row = firstRow<{ attempt: number | string | null }>(result);
+  return row && row.attempt != null ? Number(row.attempt) : 0;
+}
+
+/**
+ * Hub P1d — renew the job lease + heartbeat IFF this worker still owns it (status running AND the
+ * `attempts` token unchanged). Returns false once the job was reclaimed by another worker, so a stale
+ * worker's ownership check fails and it defers to the winner. Exposed so the runner's per-run
+ * `RunJobContext.ownsLease()` re-confirms ownership before every provider dispatch and before the terminal
+ * finalize commit.
+ */
+export async function renewRunJobLease(jobId: string, attempt: number): Promise<boolean> {
+  const result = await getDb().execute(
+    sql`select app.renew_run_job_lease(${jobId}, ${attempt}, ${LEASE_MS}) as owned`,
+  );
+  const row = firstRow<{ owned: boolean | string | null }>(result);
+  return row?.owned === true || row?.owned === 't';
+}
+
+/**
+ * Hub P1d — the IN-TRANSACTION lease fence. Same ownership predicate as {@link renewRunJobLease}, but run on
+ * the CALLER's transaction (`tx`) via the SECURITY DEFINER `app.renew_run_job_lease`, which performs an
+ * `UPDATE ... WHERE id AND status='running' AND attempts=<token>` — taking a ROW LOCK on the run_jobs row
+ * that is HELD until the caller's transaction commits/rolls back. That lock is the mutual-exclusion the
+ * proposal-application transaction needs: while it is held no concurrent reclaim can advance `attempts`, and
+ * a second application transaction blocks here until the first commits (then observes the completed state).
+ * Returns true iff THIS token still owns the job. A stale/reclaimed token gets false → the caller must abort
+ * BEFORE any proposal/usage/audit write.
+ */
+export async function renewRunJobLeaseTx(tx: DbTx, jobId: string, attempt: number): Promise<boolean> {
+  const result = await tx.execute(sql`select app.renew_run_job_lease(${jobId}, ${attempt}, ${LEASE_MS}) as owned`);
+  const row = firstRow<{ owned: boolean | string | null }>(result);
+  return row?.owned === true || row?.owned === 't';
 }
 
 function ctxForJob(job: ClaimedJob): TenantContext {
@@ -83,17 +132,25 @@ function ctxForJob(job: ClaimedJob): TenantContext {
 
 /** Enqueue a task for durable execution. Idempotent: the partial unique index
  *  on (task_id) where status in (queued,running) rejects a duplicate live job.
- *  Runs inside the caller's tenant transaction, so RLS validates ownership. */
-export async function enqueueRun(tx: DbTx, ctx: TenantContext, taskId: string): Promise<void> {
+ *  Runs inside the caller's tenant transaction, so RLS validates ownership.
+ *  `dispatchKind` (Hub P1d) records HOW the job entered the queue — metadata
+ *  only, it never changes claim eligibility. Defaults to 'interactive' for the
+ *  inline user-started path; the standing-work tick passes 'standing'. */
+export async function enqueueRun(
+  tx: DbTx,
+  ctx: TenantContext,
+  taskId: string,
+  dispatchKind: DispatchKind = 'interactive',
+): Promise<void> {
   await tx
     .insert(runJobs)
-    .values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId, status: 'queued' })
+    .values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId, status: 'queued', dispatchKind })
     .onConflictDoNothing();
   await writeAudit(tx, ctx, {
     action: 'run_job.enqueued',
     entityType: 'task',
     entityId: taskId,
-    detail: {},
+    detail: { dispatchKind },
   });
 }
 
@@ -108,7 +165,8 @@ export async function claimNextJob(): Promise<ClaimedJob | null> {
     sql`select * from app.claim_next_run_job(${LEASE_MS})`,
   );
   const row = firstRow<ClaimRow>(result);
-  return row ? claimedFrom(row) : null;
+  if (!row) return null;
+  return { ...claimedFrom(row), attempt: await jobAttempt(String(row.job_id)) };
 }
 
 /**
@@ -128,14 +186,21 @@ export async function claimJobForTask(
   if (!row) return null;
   // The acting identity for the interactive path is the caller, not (only) the
   // task creator — preserve their role for the run's authority decisions.
-  return { ...claimedFrom(row), createdBy: ctx.userId, projectRole: ctx.projectRole };
+  return {
+    ...claimedFrom(row),
+    createdBy: ctx.userId,
+    projectRole: ctx.projectRole,
+    attempt: await jobAttempt(String(row.job_id)),
+  };
 }
 
 /**
- * Executes a claimed job. If the task is already `running`, a prior attempt was
- * interrupted mid-run: we do NOT re-execute (that would re-bill the provider
- * sequence). Instead we mark the run failed with a recoverable reason and the
- * job failed — an observable, retryable state.
+ * Executes a claimed job (Hub P1d — crash-safe). If the task is already `running`, a prior attempt was
+ * interrupted mid-run: we RESUME the SAME run row (replaying durable checkpoints, no second provider call,
+ * no re-bill) rather than re-creating a new run — a Stage-2 run continues where it stopped, an uncertain
+ * dispatch resolves to reconciliation_required, and a completed-but-unfinalized run finalizes idempotently.
+ * A fresh (`pending`/`failed`) task starts a new run. The claimed job's ownership token is threaded so a
+ * reclaimed (stale) worker can never overwrite the winner's outcome.
  */
 export async function runClaimedJob(job: ClaimedJob, live?: RunLiveEvents): Promise<RunOutcome | null> {
   const ctx = ctxForJob(job);
@@ -159,22 +224,42 @@ export async function runClaimedJob(job: ClaimedJob, live?: RunLiveEvents): Prom
     await failJob(job.jobId, 'task no longer exists');
     return null;
   }
-  if (task.status === 'running') {
-    // Interrupted mid-run — recover, do not re-run.
-    await recoverInterrupted(ctx, job.taskId, job.jobId);
-    return null;
-  }
-  if (task.status !== 'pending' && task.status !== 'failed') {
-    // Already completed/cancelled/awaiting — nothing to do; close the job.
+  if (task.status !== 'running' && task.status !== 'pending' && task.status !== 'failed') {
+    // Already completed / awaiting_approval / cancelled — nothing to execute; drain the job with ZERO
+    // provider calls (this also cleanly terminates a job left behind by a cancelled-while-queued task).
     await finishJob(job.jobId, 'done');
     return null;
   }
 
+  const jobCtx: RunJobContext = {
+    jobId: job.jobId,
+    attempt: job.attempt,
+    ownsLease: () => renewRunJobLease(job.jobId, job.attempt),
+    ownsLeaseTx: (tx) => renewRunJobLeaseTx(tx, job.jobId, job.attempt),
+  };
+
   try {
-    const outcome = await startRun(ctx, job.taskId, live);
-    await finishJob(job.jobId, outcome.status === 'failed' ? 'failed' : 'done', outcome.failureReason);
+    const outcome =
+      task.status === 'running'
+        ? await resumeRun(ctx, job.taskId, live, jobCtx)
+        : await startRun(ctx, job.taskId, live, jobCtx);
+
+    if (outcome.status === 'failed') {
+      await finishJob(job.jobId, 'failed', outcome.failureReason);
+    } else if (outcome.status === 'reconciliation_required') {
+      await finishJob(job.jobId, 'failed', 'reconciliation_required');
+    } else {
+      // completed / awaiting_approval / cancelled → the job's lifecycle is done.
+      await finishJob(job.jobId, 'done', outcome.status === 'cancelled' ? 'cancelled' : null);
+    }
     return outcome;
   } catch (err) {
+    if (err instanceof LeaseLostSignal) {
+      // The job was reclaimed by another worker mid-run. Back off WITHOUT touching the job or the run — the
+      // reclaiming worker is the winner and owns the terminal outcome.
+      log.warn('run job lease lost; backing off (another worker owns it)', { jobId: job.jobId, taskId: job.taskId });
+      return null;
+    }
     const reason = err instanceof Error ? err.message : 'unknown worker error';
     await failJob(job.jobId, reason);
     log.error('run job execution threw', { jobId: job.jobId, taskId: job.taskId, reason });
@@ -223,10 +308,14 @@ export interface ReconcileResult {
 }
 
 /**
- * Startup reconciliation: reclaim jobs whose lease expired. The cross-tenant
- * scan runs through the SECURITY DEFINER `app.list_stale_run_jobs()`; each
- * job's recovery then runs under its own restored tenant context.
- *   * task still `running` → interrupted mid-run → recover (fail-recoverable).
+ * Startup + periodic reconciliation: reclaim jobs whose lease expired. The cross-tenant scan runs through
+ * the SECURITY DEFINER `app.list_stale_run_jobs()`; each job's recovery then runs under its own restored
+ * tenant context.
+ *   * task `running` with a Stage-2 (durable, checkpointed) run → REQUEUE for RESUME: the next worker
+ *     continues the SAME run from its checkpoints (or resolves an uncertain dispatch to
+ *     reconciliation_required). Its billed work is preserved; no new run is created.
+ *   * task `running` with a LEGACY run (no reliability lifecycle / no checkpoints) → recover
+ *     (fail-recoverable), preserving P1c behavior; a retry then creates a fresh run.
  *   * task `pending` → never started provider work → requeue.
  */
 export async function reconcileStaleJobs(): Promise<ReconcileResult> {
@@ -264,8 +353,26 @@ export async function reconcileStaleJobs(): Promise<ReconcileResult> {
           project_role: s.project_role,
         }),
       );
-      await recoverInterrupted(ctx, String(s.task_id), String(s.job_id));
-      recovered += 1;
+      // Is the in-flight run a Stage-2 (durable, resumable) run? A non-null reliability_state means it
+      // participates in the crash-safe lifecycle and can be RESUMED from its checkpoints.
+      const runState = await withTenant(ctx, (tx) =>
+        tx
+          .select({ state: runs.reliabilityState })
+          .from(runs)
+          .where(and(eq(runs.taskId, String(s.task_id)), eq(runs.status, 'running')))
+          .orderBy(desc(runs.createdAt))
+          .limit(1),
+      ).then((r) => r[0]?.state ?? null);
+
+      if (runState != null) {
+        // Stage-2 run — requeue so the next worker resumes the SAME run (no new run, no re-bill).
+        await getDb().execute(sql`select app.requeue_run_job(${s.job_id})`);
+        requeued += 1;
+      } else {
+        // Legacy interrupted run (no durable checkpoints) — recover to failed-recoverable (P1c behavior).
+        await recoverInterrupted(ctx, String(s.task_id), String(s.job_id));
+        recovered += 1;
+      }
     } else {
       await getDb().execute(sql`select app.requeue_run_job(${s.job_id})`);
       requeued += 1;

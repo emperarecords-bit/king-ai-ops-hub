@@ -233,6 +233,31 @@ create trigger knowledge_verification_events_append_only
   before update or delete on knowledge_verification_events
   for each row execute function app.forbid_mutation();
 
+-- Hub P1d run execution checkpoints — tenant RLS (org_id, project_id) + append-only, applied in ONE guarded
+-- block so rls.sql stays resilient when it is run against a database that has not yet applied migration 0056
+-- (the incremental-bootstrap path applies the CURRENT rls.sql against the penultimate schema). On a real,
+-- fully-migrated database the table always exists, so every statement below runs. Posture matches messages:
+-- INSERT/SELECT only (no UPDATE grant) + a trigger that blocks UPDATE/DELETE for every role — a checkpoint
+-- records what a run's step produced and must never be rewritten or deleted (a re-attempt appends under a new
+-- execution_attempt_id). Does not weaken any existing policy; it only adds this table's.
+do $$
+begin
+  if to_regclass('public.run_execution_checkpoints') is not null then
+    grant select, insert on run_execution_checkpoints to app_server;
+    alter table run_execution_checkpoints enable row level security;
+    alter table run_execution_checkpoints force row level security;
+    drop policy if exists run_execution_checkpoints_tenant on run_execution_checkpoints;
+    create policy run_execution_checkpoints_tenant on run_execution_checkpoints
+      using (org_id = app.current_org_id() and project_id = app.current_project_id())
+      with check (org_id = app.current_org_id() and project_id = app.current_project_id());
+    drop trigger if exists run_execution_checkpoints_append_only on run_execution_checkpoints;
+    create trigger run_execution_checkpoints_append_only
+      before update or delete on run_execution_checkpoints
+      for each row execute function app.forbid_mutation();
+  end if;
+end
+$$;
+
 -- Document VERSIONS are immutable evidence (Documents increment 1). The content-identity facts can
 -- NEVER change after insert; the only permitted mutation is the one-way index transition pending →
 -- indexed | failed (setting indexed_at / error_message). This is the hard backstop under the narrow
@@ -300,6 +325,8 @@ begin
      set status = 'running',
          attempts = j.attempts + 1,
          leased_until = now() + make_interval(secs => p_lease_ms / 1000.0),
+         -- Hub P1d: stamp a liveness beat at claim. Stage 2 renews it during the run.
+         heartbeat_at = now(),
          updated_at = now()
    where j.id = (
      select rj.id from run_jobs rj
@@ -343,6 +370,8 @@ begin
      set status = 'running',
          attempts = j.attempts + 1,
          leased_until = now() + make_interval(secs => p_lease_ms / 1000.0),
+         -- Hub P1d: stamp a liveness beat at claim. Stage 2 renews it during the run.
+         heartbeat_at = now(),
          updated_at = now()
    where j.id = (
      select rj.id from run_jobs rj
@@ -403,6 +432,31 @@ begin
   update run_jobs
      set status = 'queued', leased_until = null, updated_at = now()
    where id = p_id;
+end
+$$;
+
+-- Hub P1d — the lease OWNERSHIP token is the job's `attempts` counter (exact integer, no timestamp-precision
+-- pitfalls). A claim/reclaim increments it, so a superseded worker's token no longer matches. app_server has
+-- no direct cross-tenant read of run_jobs, so the worker reads its token through this definer right after a
+-- claim.
+create or replace function app.run_job_attempt(p_id uuid)
+returns int language sql security definer set search_path = public, pg_temp as $$
+  select attempts from run_jobs where id = p_id;
+$$;
+
+-- Hub P1d — renew the lease + liveness heartbeat IFF this worker still owns the job: it is still `running`
+-- AND its `attempts` token is unchanged (not reclaimed). Returns true when ownership held (lease extended),
+-- false once another worker reclaimed it. Used by the runner to re-confirm ownership before every provider
+-- dispatch and before the terminal finalize commit, so a stale worker can never overwrite the winner.
+create or replace function app.renew_run_job_lease(p_id uuid, p_attempt int, p_lease_ms bigint)
+returns boolean language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  update run_jobs
+     set leased_until = now() + make_interval(secs => p_lease_ms / 1000.0),
+         heartbeat_at = now(),
+         updated_at = now()
+   where id = p_id and status = 'running' and attempts = p_attempt;
+  return found;
 end
 $$;
 
@@ -553,6 +607,8 @@ begin
     'app.list_stale_run_jobs()',
     'app.finish_run_job(uuid, text, text)',
     'app.requeue_run_job(uuid)',
+    'app.run_job_attempt(uuid)',
+    'app.renew_run_job_lease(uuid, int, bigint)',
     'app.claim_next_document_job(bigint)',
     'app.finish_document_job(uuid, text, text)',
     'app.requeue_document_job(uuid)',

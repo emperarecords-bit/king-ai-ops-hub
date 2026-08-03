@@ -188,6 +188,9 @@ export class AnthropicProvider implements AIProvider {
         return new ProviderError('anthropic', 'rate_limited', 'Anthropic rate limit hit.');
       }
       if (status === 529) {
+        // 529 overloaded is a temporary-overload signal, but Anthropic does NOT guarantee the request was
+        // rejected before the model ran — so it stays AMBIGUOUS (remoteOutcome defaults to 'unknown'): never
+        // auto-retried, the run fails closed to reconciliation. Same treatment as a generic 5xx below.
         return new ProviderError('anthropic', 'overloaded', 'Anthropic is overloaded.');
       }
       if (status === 400 || status === 404 || status === 422) {

@@ -221,36 +221,39 @@ export function buildKnowledgeExtractionUserTurn(consolidatedResult: string, cit
 export type ExtractFn = (system: string, user: string) => Promise<string>;
 
 /**
- * Orchestrate one Knowledge extraction for a completed run. Idempotent (guarded by
- * runs.knowledge_extraction_status) and FAIL-SAFE: any error is recorded and swallowed so the completed
- * task is never affected. Cites against the run's frozen source snapshot. Returns proposals saved.
+ * Hub P1d — apply an ALREADY-OBTAINED extractor output (the durable checkpoint of the knowledge-extraction
+ * provider step) to a run, idempotently. The PROPOSAL half of Knowledge extraction, split from the provider
+ * call so the runner can checkpoint the provider result FIRST (fenced, at-most-once) and then create
+ * proposals from that checkpoint — a resume re-applies the SAME text with no second provider call. Pure of
+ * any provider call. Idempotent + FAIL-SAFE: guarded by runs.knowledge_extraction_status (once per run) and
+ * any error is recorded and swallowed. Cites against the run's frozen source snapshot. Deliberately does NOT
+ * require the run to be `completed` (the runner calls it DURING finalization). Returns proposals saved.
  */
-export async function extractKnowledgeForRun(
+export async function applyKnowledgeCandidatesFromText(
   tx: DbTx,
   ctx: TenantContext,
   runId: string,
-  extract: ExtractFn,
+  rawText: string,
   meta: { provider: string; model: string },
+  opts?: { fenceTx?: (tx: DbTx) => Promise<void> },
 ): Promise<number> {
-  const runRows = await tx
-    .select({
-      id: runs.id,
-      taskId: runs.taskId,
-      status: runs.status,
-      consolidatedResult: runs.consolidatedResult,
-      retrievedSources: runs.retrievedSources,
-      knowledgeExtractionStatus: runs.knowledgeExtractionStatus,
-    })
-    .from(runs)
-    .where(and(eq(runs.id, runId), eq(runs.projectId, ctx.projectId), eq(runs.orgId, ctx.orgId)))
-    .limit(1);
-  const run = runRows[0];
+  // Hub P1d — fence FIRST, inside THIS transaction (see applyDecisionCandidatesFromText): acquire the
+  // run_jobs row lock + confirm current-token ownership; a stale token throws before any read/insert/audit,
+  // and concurrent applications serialize. Absent for direct (non-worker) callers.
+  if (opts?.fenceTx) await opts.fenceTx(tx);
+  const run = (
+    await tx
+      .select({
+        taskId: runs.taskId,
+        retrievedSources: runs.retrievedSources,
+        knowledgeExtractionStatus: runs.knowledgeExtractionStatus,
+      })
+      .from(runs)
+      .where(and(eq(runs.id, runId), eq(runs.projectId, ctx.projectId), eq(runs.orgId, ctx.orgId)))
+      .limit(1)
+  )[0];
   if (!run) return 0;
-  if (run.knowledgeExtractionStatus != null) return 0; // idempotent — once per run
-  if (run.status !== 'completed' || !run.consolidatedResult) {
-    await tx.update(runs).set({ knowledgeExtractionStatus: 'empty' }).where(eq(runs.id, runId));
-    return 0;
-  }
+  if (run.knowledgeExtractionStatus != null) return 0; // idempotent — recognized under the fence lock
 
   // The citable evidence is the run's IMMUTABLE snapshot — never a live document read. Multiple chunks
   // of one document collapse into one path entry keyed by the version the run saw (chunks share it).
@@ -276,9 +279,7 @@ export async function extractKnowledgeForRun(
   });
 
   try {
-    const userTurn = buildKnowledgeExtractionUserTurn(run.consolidatedResult, [...sourceByPath.keys()]);
-    const raw = await extract(KNOWLEDGE_EXTRACTION_SYSTEM, userTurn);
-    const { candidates, rejected } = parseAndValidateKnowledgeCandidates(raw, prov);
+    const { candidates, rejected } = parseAndValidateKnowledgeCandidates(rawText, prov);
 
     for (const c of candidates) {
       const inserted = await tx
@@ -348,11 +349,60 @@ export async function extractKnowledgeForRun(
     }
     return candidates.length;
   } catch (err) {
-    log.warn('knowledge extraction failed (task unaffected)', { runId, err: err instanceof Error ? err.message : err });
+    log.warn('knowledge extraction apply failed (task unaffected)', { runId, err: err instanceof Error ? err.message : err });
     await failAiOperation(tx, ctx, opId, err instanceof Error ? err.message : String(err));
     await tx.update(runs).set({ knowledgeExtractionStatus: 'failed' }).where(eq(runs.id, runId));
     return 0;
   }
+}
+
+/**
+ * Orchestrate one Knowledge extraction for a completed run. Idempotent (guarded by
+ * runs.knowledge_extraction_status) and FAIL-SAFE: any error is recorded and swallowed so the completed
+ * task is never affected. Cites against the run's frozen source snapshot. Returns proposals saved.
+ *
+ * NOTE: the crash-safe run path (Hub P1d) no longer uses this — it checkpoints the extraction provider call
+ * as a reserved reliability step and calls {@link applyKnowledgeCandidatesFromText} on the checkpointed text.
+ * This remains the single-shot entry point for direct/non-worker callers, delegating proposal creation to the
+ * shared apply half above.
+ */
+export async function extractKnowledgeForRun(
+  tx: DbTx,
+  ctx: TenantContext,
+  runId: string,
+  extract: ExtractFn,
+  meta: { provider: string; model: string },
+): Promise<number> {
+  const run = (
+    await tx
+      .select({
+        status: runs.status,
+        consolidatedResult: runs.consolidatedResult,
+        retrievedSources: runs.retrievedSources,
+        knowledgeExtractionStatus: runs.knowledgeExtractionStatus,
+      })
+      .from(runs)
+      .where(and(eq(runs.id, runId), eq(runs.projectId, ctx.projectId), eq(runs.orgId, ctx.orgId)))
+      .limit(1)
+  )[0];
+  if (!run) return 0;
+  if (run.knowledgeExtractionStatus != null) return 0; // idempotent — once per run
+  if (run.status !== 'completed' || !run.consolidatedResult) {
+    await tx.update(runs).set({ knowledgeExtractionStatus: 'empty' }).where(eq(runs.id, runId));
+    return 0;
+  }
+
+  const citablePaths = [...new Set((run.retrievedSources ?? []).map((s) => s.relativePath))];
+  let raw: string;
+  try {
+    const userTurn = buildKnowledgeExtractionUserTurn(run.consolidatedResult, citablePaths);
+    raw = await extract(KNOWLEDGE_EXTRACTION_SYSTEM, userTurn);
+  } catch (err) {
+    log.warn('knowledge extraction failed (task unaffected)', { runId, err: err instanceof Error ? err.message : err });
+    await tx.update(runs).set({ knowledgeExtractionStatus: 'failed' }).where(eq(runs.id, runId));
+    return 0;
+  }
+  return applyKnowledgeCandidatesFromText(tx, ctx, runId, raw, meta);
 }
 
 // ---------------------------------------------------------------------------

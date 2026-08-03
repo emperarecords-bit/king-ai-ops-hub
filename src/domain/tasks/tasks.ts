@@ -92,11 +92,22 @@ export const createTaskSchema = z
 
 export type CreateTaskInput = z.input<typeof createTaskSchema>;
 
-export async function createTask(
+/**
+ * Shared preflight for both task-creation paths (interactive `createTask` and standing-work
+ * `createScheduledOccurrenceTask`): validate the input, resolve the objective in-workspace, validate the P1a
+ * pinned employees fail-closed, derive the provider from the pinned primary, and assemble the insert values +
+ * the audit detail payloads. It performs NO write — the caller owns the exact INSERT (plain vs.
+ * occurrence-idempotent) so the two paths differ only in conflict handling, never in validation.
+ */
+async function prepareTaskInsert(
   tx: DbTx,
   ctx: TenantContext,
   input: CreateTaskInput,
-): Promise<string> {
+): Promise<{
+  values: typeof tasks.$inferInsert;
+  createdDetail: Record<string, unknown>;
+  assignmentDetail: Record<string, unknown>;
+}> {
   const parsed = createTaskSchema.safeParse(input);
   if (!parsed.success) {
     throw new ValidationError(parsed.error.issues.map((i) => i.message));
@@ -139,9 +150,8 @@ export async function createTask(
   const providerSelection = primaryAgent.provider;
   const assignedReviewerAgentId = reviewEnabled ? reviewerAgent!.id : null;
 
-  const inserted = await tx
-    .insert(tasks)
-    .values({
+  return {
+    values: {
       orgId: ctx.orgId,
       projectId: ctx.projectId,
       title: parsed.data.title,
@@ -156,16 +166,8 @@ export async function createTask(
       assignedReviewerAgentId,
       status: 'pending',
       createdBy: ctx.userId,
-    })
-    .returning({ id: tasks.id });
-
-  const taskId = inserted[0]!.id;
-
-  await writeAudit(tx, ctx, {
-    action: 'task.created',
-    entityType: 'task',
-    entityId: taskId,
-    detail: {
+    },
+    createdDetail: {
       title: parsed.data.title,
       providerSelection,
       reviewEnabled,
@@ -173,16 +175,9 @@ export async function createTask(
       flagshipCategory: parsed.data.flagshipCategory,
       objectiveId: parsed.data.objectiveId,
     },
-  });
-
-  // P1a — a DISTINCT event records the exact pinning decision (identity only: ids / names / provider /
-  // model). NO systemPrompt, NO secrets. This is the durable "who was pinned, and to what execution
-  // profile" record; run.assignment_confirmed later proves the run executed exactly these.
-  await writeAudit(tx, ctx, {
-    action: 'task.assignment_created',
-    entityType: 'task',
-    entityId: taskId,
-    detail: {
+    // P1a — the exact pinning decision (identity only: ids / names / provider / model). NO systemPrompt,
+    // NO secrets. The durable "who was pinned, and to what execution profile" record.
+    assignmentDetail: {
       requestedPrimaryAgentId: primaryAgent.id,
       primaryAgentName: primaryAgent.name,
       primaryProvider: primaryAgent.provider,
@@ -191,8 +186,75 @@ export async function createTask(
       reviewerName: reviewerAgent?.name ?? null,
       reviewerProvider: reviewerAgent?.provider ?? null,
     },
-  });
+  };
+}
 
+/** Write the two P1a task-creation audits (task.created + task.assignment_created). Shared so both creation
+ *  paths record identical provenance. */
+async function writeTaskCreationAudits(
+  tx: DbTx,
+  ctx: TenantContext,
+  taskId: string,
+  prep: { createdDetail: Record<string, unknown>; assignmentDetail: Record<string, unknown> },
+): Promise<void> {
+  await writeAudit(tx, ctx, {
+    action: 'task.created',
+    entityType: 'task',
+    entityId: taskId,
+    detail: prep.createdDetail,
+  });
+  // A DISTINCT event records the pinning decision; run.assignment_confirmed later proves the run executed it.
+  await writeAudit(tx, ctx, {
+    action: 'task.assignment_created',
+    entityType: 'task',
+    entityId: taskId,
+    detail: prep.assignmentDetail,
+  });
+}
+
+export async function createTask(
+  tx: DbTx,
+  ctx: TenantContext,
+  input: CreateTaskInput,
+): Promise<string> {
+  const prep = await prepareTaskInsert(tx, ctx, input);
+  const inserted = await tx.insert(tasks).values(prep.values).returning({ id: tasks.id });
+  const taskId = inserted[0]!.id;
+  await writeTaskCreationAudits(tx, ctx, taskId, prep);
+  return taskId;
+}
+
+/**
+ * Hub P1d — create the task for one standing-work OCCURRENCE, idempotently. Identical validation and audit to
+ * `createTask`, but the INSERT carries the deterministic occurrence identity (`scheduleId` +
+ * `scheduleOccurrenceAt`) and uses `onConflictDoNothing`, so two concurrent scheduler ticks for the same due
+ * instant collapse to a single task: the loser's insert conflicts on `tasks_schedule_occurrence_uq` and this
+ * returns `null` (no task row, no audit). Returns the new task id when THIS call won the occurrence.
+ *
+ * `scheduleId` is passed explicitly (not read from `input.scheduleId`) so the occurrence identity always
+ * matches the row the caller advances.
+ */
+export async function createScheduledOccurrenceTask(
+  tx: DbTx,
+  ctx: TenantContext,
+  input: CreateTaskInput,
+  occurrence: { scheduleId: string; scheduleOccurrenceAt: Date },
+): Promise<string | null> {
+  const prep = await prepareTaskInsert(tx, ctx, {
+    ...input,
+    scheduleId: occurrence.scheduleId,
+  });
+  const inserted = await tx
+    .insert(tasks)
+    .values({ ...prep.values, scheduleOccurrenceAt: occurrence.scheduleOccurrenceAt })
+    // No conflict target: the only unique key a fresh (random-id) standing task can violate is the partial
+    // occurrence index, so a bare DO NOTHING is precise and simplest. An empty returning ⇒ the occurrence
+    // was already claimed by a concurrent tick ⇒ suppress.
+    .onConflictDoNothing()
+    .returning({ id: tasks.id });
+  if (inserted.length === 0) return null;
+  const taskId = inserted[0]!.id;
+  await writeTaskCreationAudits(tx, ctx, taskId, prep);
   return taskId;
 }
 
@@ -353,6 +415,47 @@ export async function cancelTask(
     entityId: taskId,
     detail: { title: task.title, from: task.status, reason: r },
   });
+}
+
+/**
+ * Hub P1d — cooperative cancellation across the run lifecycle. `cancelTask` (the hard cancel) still refuses
+ * a running task; this is the cooperative path the runner honors at each provider-dispatch boundary:
+ *   - QUEUED (pending) / already-failed work → hard-cancel now (zero provider calls): task → cancelled and
+ *     its pending approvals withdrawn. Any queued job drains to `done` with NO provider call when a worker
+ *     next claims it.
+ *   - RUNNING work → set the cancel-request MARKER (`cancelReason`) WITHOUT changing status, so resume
+ *     detection stays intact. The runner sees the marker at the next provider-dispatch boundary and stops
+ *     with zero further provider calls; a CHECKPOINTED completed result is finalized, never discarded.
+ *   - COMPLETED / awaiting-approval / cancelled → refused: a late cancel can never discard a finished
+ *     (checkpointed) result — only one terminal outcome wins.
+ */
+export async function requestCancellation(
+  tx: DbTx,
+  ctx: TenantContext,
+  taskId: string,
+  reason?: string,
+): Promise<'cancelled_queued' | 'cancel_requested'> {
+  const task = await getTask(tx, ctx, taskId);
+  if (task.status === 'pending' || task.status === 'failed') {
+    await cancelTask(tx, ctx, taskId, reason);
+    return 'cancelled_queued';
+  }
+  if (task.status === 'running') {
+    const r = (reason ?? '').trim() || 'Cancellation requested.';
+    await tx
+      .update(tasks)
+      .set({ cancelReason: r, updatedAt: new Date() })
+      .where(and(eq(tasks.id, taskId), eq(tasks.projectId, ctx.projectId), eq(tasks.orgId, ctx.orgId)));
+    await writeAudit(tx, ctx, {
+      action: 'task.cancellation_requested',
+      entityType: 'task',
+      entityId: taskId,
+      detail: { reason: r },
+    });
+    return 'cancel_requested';
+  }
+  // completed / awaiting_approval / cancelled
+  throw new ConflictError('This task has already finished; its result cannot be cancelled.');
 }
 
 /**

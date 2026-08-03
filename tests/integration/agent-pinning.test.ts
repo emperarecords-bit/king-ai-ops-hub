@@ -25,6 +25,7 @@ import { setProviderOverrideForTests } from '@/providers/registry';
 import { findAgentForRole } from '@/domain/agents/agents';
 import { createTask } from '@/domain/tasks/tasks';
 import { startRun } from '@/domain/tasks/runner';
+import { claimJobForTask, runClaimedJob } from '@/domain/jobs/jobs';
 import { createSchedule, runDueSchedules } from '@/domain/standing/standing';
 
 /**
@@ -107,6 +108,14 @@ function fakeBoth() {
 
 async function runRow(taskId: string) {
   return (await db.select().from(runs).where(eq(runs.taskId, taskId)))[0];
+}
+
+/** Hub P1d — the standing tick now ENQUEUES a durable job instead of running inline. Drive the produced task
+ *  through the ordinary worker path (claim → execute) so the run + its pins are exercised end to end. */
+async function executeStandingTask(ctx: TenantContext, taskId: string) {
+  const claimed = await claimJobForTask(ctx, taskId);
+  expect(claimed).not.toBeNull();
+  return runClaimedJob(claimed!);
 }
 
 beforeAll(async () => {
@@ -379,13 +388,15 @@ describe.skipIf(!available)('P1a standing work pins exact employees', () => {
     // Make it due, then run the tick (fake provider so nothing bills).
     fakeBoth();
     await db.update(taskSchedules).set({ nextRunAt: new Date(Date.now() - 60_000) }).where(eq(taskSchedules.id, scheduleId));
-    await runDueSchedules(new Date());
+    const result = await runDueSchedules(new Date());
+    expect(result.enqueued).toBeGreaterThanOrEqual(1); // Hub P1d — the tick enqueues, it no longer runs inline.
 
     const produced = (await db.select().from(tasks).where(eq(tasks.scheduleId, scheduleId)))[0];
     expect(produced).toBeDefined();
     expect(produced!.assignedPrimaryAgentId).toBe(w.tomBrown);
     expect(produced!.assignedReviewerAgentId).toBe(w.reviewer);
-    // And its run executed the pinned pair.
+    // The durable standing job executes through the worker path — and its run executed the pinned pair.
+    await executeStandingTask(w.ctx, produced!.id);
     const run = (await db.select().from(runs).where(eq(runs.taskId, produced!.id)))[0];
     expect(run!.primaryAgentId).toBe(w.tomBrown);
     expect(run!.reviewerAgentId).toBe(w.reviewer);
@@ -503,10 +514,12 @@ describe.skipIf(!available)('P1a standing work pins exact employees', () => {
     expect(produced.length).toBe(1);
     expect(produced[0]!.assignedPrimaryAgentId).toBe(w.tomBrown);
     expect(produced[0]!.assignedReviewerAgentId).toBe(w.reviewer);
+    // Hub P1d — the tick enqueued a durable job; execute it through the worker path and assert the run's pins.
+    expect(result.enqueued).toBeGreaterThanOrEqual(1);
+    await executeStandingTask(w.ctx, produced[0]!.id);
     const run = (await db.select().from(runs).where(eq(runs.taskId, produced[0]!.id)))[0]!;
     expect(run.primaryAgentId).toBe(w.tomBrown);
     expect(run.reviewerAgentId).toBe(w.reviewer);
-    expect(result.started).toBeGreaterThanOrEqual(1);
     // The clock advanced this time (nextRunAt moved into the future; lastRunAt was set).
     const after = await fullRow(scheduleId);
     expect(after.nextRunAt.getTime()).toBeGreaterThan(beforeFix.nextRunAt.getTime());

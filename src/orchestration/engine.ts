@@ -8,6 +8,7 @@ import {
   type AgentRequest,
   type AgentResponse,
   type AIProvider,
+  type ProviderId,
   ProviderError,
   type Turn,
 } from '@/types/provider';
@@ -38,6 +39,97 @@ export const MAX_STEPS = 4;
 export const MAX_REVISIONS = 1;
 export const MAX_RETRIES_PER_CALL = 2;
 
+/**
+ * Hub P1d — reliability signals. These are NOT provider failures: they abort the whole attempt so the
+ * RUNNER can resolve them durably, and must never be recorded as a failed step or degrade the run. The
+ * base class lets the engine's per-call catch tell them apart from a `ProviderError` (a real, retryable
+ * provider fault) and re-throw them unchanged.
+ */
+export class RunReliabilitySignal extends Error {}
+
+/** A prior attempt recorded a dispatch INTENT for this step but no result checkpoint (dispatched, outcome
+ *  unknown after a crash). We must NOT auto-call the provider again — a human reconciles. */
+export class ReconciliationRequiredSignal extends RunReliabilitySignal {
+  constructor(readonly stepNumber: number) {
+    super(`reconciliation_required (step ${stepNumber})`);
+    this.name = 'ReconciliationRequiredSignal';
+  }
+}
+
+/** A cooperative cancel was requested at a dispatch boundary BEFORE this step dispatched — stop with zero
+ *  provider calls; no result is fabricated. */
+export class RunCancelledSignal extends RunReliabilitySignal {
+  constructor(readonly stepNumber: number) {
+    super(`run_cancelled (step ${stepNumber})`);
+    this.name = 'RunCancelledSignal';
+  }
+}
+
+/** The worker no longer owns the job lease (it was reclaimed) or the pinned agent identity no longer holds.
+ *  A stale worker must NOT advance or finalize — the reclaiming worker is the winner. */
+export class LeaseLostSignal extends RunReliabilitySignal {
+  constructor(readonly reason: 'lease_lost' | 'identity_changed' = 'lease_lost') {
+    super(reason);
+    this.name = 'LeaseLostSignal';
+  }
+}
+
+/**
+ * Hub P1d — a provider call ended with an AMBIGUOUS remote outcome (timeout/transport loss after the request
+ * was transmitted, a generic 5xx that may post-date execution, or a partially-streamed response): the request
+ * may have been received, processed, and CHARGED. It must NEVER be silently retried or downgraded to a normal
+ * failed step; the durable dispatch intent stays intact and the runner fails the run closed to
+ * `reconciliation_required` (no rebill, no fabricated cost, provider call count stays exactly one). Distinct
+ * from a KNOWN pre-processing rejection (`ProviderError` with `remoteOutcome==='not_executed'`), which may
+ * follow fail-safe / bounded-retry policy. `stepNumber` is filled in by the engine (or the extraction path)
+ * for the reconciliation audit.
+ */
+export class AmbiguousProviderOutcomeSignal extends RunReliabilitySignal {
+  stepNumber = 0;
+  constructor(
+    readonly providerKind: string,
+    readonly startedStreaming = false,
+  ) {
+    super(`ambiguous_provider_outcome (${providerKind}${startedStreaming ? ', partial-stream' : ''})`);
+    this.name = 'AmbiguousProviderOutcomeSignal';
+  }
+}
+
+/** The durable checkpoint of a step's provider result, replayed on resume so the provider is not called
+ *  (or billed) a second time. */
+export interface CheckpointedStepResult {
+  readonly provider: ProviderId | null;
+  readonly model: string | null;
+  readonly text: string;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+}
+
+/**
+ * Hub P1d — the resume + checkpoint boundary. Injected by the runner so the engine stays persistence-free
+ * and tests drive it with fakes. `loadCheckpoint` returns a prior attempt's durable result for a step (so
+ * the provider is skipped on resume); `guardDispatch` runs the fail-closed boundary BEFORE a real provider
+ * call — lease-ownership + agent-identity re-check, uncertain-outcome (reconciliation) detection,
+ * cancellation, and recording the durable dispatch intent. It THROWS a RunReliabilitySignal to abort.
+ */
+export interface ResumeHooks {
+  loadCheckpoint(stepNumber: number): Promise<CheckpointedStepResult | null>;
+  guardDispatch(stepNumber: number, kind: StepKind): Promise<void>;
+}
+
+/** Reconstruct an AgentResponse from a durable checkpoint so downstream consolidation/verdict parsing is
+ *  byte-identical to the original attempt, with NO provider call. */
+function responseFromCheckpoint(cp: CheckpointedStepResult): AgentResponse {
+  return {
+    provider: (cp.provider ?? 'openai') as ProviderId,
+    model: cp.model ?? '',
+    text: cp.text,
+    usage: { inputTokens: cp.inputTokens, outputTokens: cp.outputTokens },
+    stopReason: 'stop',
+    latencyMs: 0,
+  };
+}
+
 export interface EngineAgent {
   readonly agentId: string;
   readonly provider: AIProvider;
@@ -60,6 +152,9 @@ export interface EngineInput {
   readonly reviewer: EngineAgent | null;
   readonly perCallTimeoutMs: number;
   readonly runDeadline: number; // epoch ms; the whole run must finish by this
+  /** Hub P1d — resume + checkpoint boundary. Absent ⇒ legacy single-attempt behavior (no checkpoints,
+   *  no dispatch guard): the engine runs exactly as before. */
+  readonly resume?: ResumeHooks | null;
 }
 
 export interface StepRecord {
@@ -170,6 +265,9 @@ async function callWithRetry(
       }
       return await agent.provider.execute(request);
     } catch (err) {
+      // A reliability signal is never a provider fault — propagate unchanged (defensive; execute/stream throw
+      // ProviderError, not signals).
+      if (err instanceof RunReliabilitySignal) throw err;
       const providerError =
         err instanceof ProviderError
           ? err
@@ -179,7 +277,17 @@ async function callWithRetry(
               err instanceof Error ? err.message : 'Unknown provider failure.',
             );
       lastError = providerError;
-      if (emitted || !providerError.retryable || attempt === MAX_RETRIES_PER_CALL) {
+      // AMBIGUOUS outcome — the request may have been received, processed, and CHARGED: a timeout/transport
+      // loss after transmission, a generic 5xx that may post-date execution, OR any partial stream already
+      // surfaced (the provider began responding). NEVER retry it in-process and NEVER downgrade it to a normal
+      // failed step: escalate so the runner fails the run closed to reconciliation, with the provider call
+      // count frozen at exactly this one attempt.
+      if (emitted || providerError.remoteOutcome === 'unknown') {
+        throw new AmbiguousProviderOutcomeSignal(providerError.kind, emitted);
+      }
+      // KNOWN pre-processing rejection (provably not executed): bounded retry per the existing policy, else
+      // surface the ProviderError as a normal failed step.
+      if (!providerError.retryable || attempt === MAX_RETRIES_PER_CALL) {
         throw providerError;
       }
       const backoff = Math.min(2 ** attempt * 1_000, 8_000) * (0.5 + Math.random() * 0.5);
@@ -260,34 +368,51 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
   const primaryStepHash = stepEffectivePromptHash(primarySystem, primaryTurns);
 
   let primaryResponse: AgentResponse;
-  try {
-    primaryResponse = await callWithRetry(
-      input.primary,
-      primaryTurns,
-      primarySystem,
-      input.perCallTimeoutMs,
-      input.runDeadline,
-      sink.onDelta && ((text) => sink.onDelta!('primary', text)),
-    );
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Primary call failed.';
-    await record({
-      kind: 'primary',
-      agentId: input.primary.agentId,
-      response: null,
-      verdict: null,
-      verdictDetail: null,
-      succeeded: false,
-      errorMessage: message,
-      effectivePromptHash: primaryStepHash,
-    });
-    return {
-      ok: false,
-      consolidated: '',
-      proposedActions: [],
-      steps,
-      failureReason: `Primary model call failed: ${message}`,
-    };
+  // Hub P1d — a prior attempt may have already checkpointed the primary result; replay it with NO provider
+  // call (and NO re-bill). Otherwise run the fail-closed dispatch boundary, then the provider.
+  const primaryCheckpoint = input.resume ? await input.resume.loadCheckpoint(1) : null;
+  if (primaryCheckpoint) {
+    primaryResponse = responseFromCheckpoint(primaryCheckpoint);
+  } else {
+    try {
+      if (input.resume) await input.resume.guardDispatch(1, 'primary');
+      primaryResponse = await callWithRetry(
+        input.primary,
+        primaryTurns,
+        primarySystem,
+        input.perCallTimeoutMs,
+        input.runDeadline,
+        sink.onDelta && ((text) => sink.onDelta!('primary', text)),
+      );
+    } catch (err) {
+      // AMBIGUOUS provider outcome → escalate (tag the step) so the run fails closed to reconciliation; NEVER
+      // a "failed primary" (the request may have executed + charged).
+      if (err instanceof AmbiguousProviderOutcomeSignal) {
+        err.stepNumber = stepNumber + 1;
+        throw err;
+      }
+      // A reliability signal (reconciliation / cancellation / lease loss) or an injected crash is NOT a
+      // provider fault: propagate it so the runner resolves the attempt durably, never a "failed primary".
+      if (!(err instanceof ProviderError)) throw err;
+      const message = err.message;
+      await record({
+        kind: 'primary',
+        agentId: input.primary.agentId,
+        response: null,
+        verdict: null,
+        verdictDetail: null,
+        succeeded: false,
+        errorMessage: message,
+        effectivePromptHash: primaryStepHash,
+      });
+      return {
+        ok: false,
+        consolidated: '',
+        proposedActions: [],
+        steps,
+        failureReason: `Primary model call failed: ${message}`,
+      };
+    }
   }
   await record({
     kind: 'primary',
@@ -321,18 +446,52 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
     const reviewSystem = reviewAssembled.system;
     const reviewTurns: Turn[] = [{ role: 'user', content: reviewAssembled.userTurn }];
     const reviewStepHash = stepEffectivePromptHash(reviewSystem, reviewTurns);
-    try {
-      reviewResponse = await callWithRetry(
-        input.reviewer,
-        reviewTurns,
-        reviewSystem,
-        input.perCallTimeoutMs,
-        input.runDeadline,
-        sink.onDelta && ((text) => sink.onDelta!('review', text)),
-      );
+    const reviewStepNo = stepNumber + 1; // the number record() will assign to this step
+    const reviewCheckpoint = input.resume ? await input.resume.loadCheckpoint(reviewStepNo) : null;
+    if (reviewCheckpoint) {
+      // Resume: the reviewer already ran and was checkpointed — replay it (no provider call, no re-bill).
+      reviewResponse = responseFromCheckpoint(reviewCheckpoint);
+    } else {
+      try {
+        if (input.resume) await input.resume.guardDispatch(reviewStepNo, 'review');
+        reviewResponse = await callWithRetry(
+          input.reviewer,
+          reviewTurns,
+          reviewSystem,
+          input.perCallTimeoutMs,
+          input.runDeadline,
+          sink.onDelta && ((text) => sink.onDelta!('review', text)),
+        );
+      } catch (err) {
+        // AMBIGUOUS reviewer outcome → escalate to reconciliation (the reviewer may have executed + charged);
+        // do NOT degrade the run as if the review cleanly failed.
+        if (err instanceof AmbiguousProviderOutcomeSignal) {
+          err.stepNumber = reviewStepNo;
+          throw err;
+        }
+        // Reliability signal / injected crash → propagate (never a "failed review").
+        if (!(err instanceof ProviderError)) throw err;
+        // A failed review degrades the run, it does not destroy the primary work.
+        const message = err.message;
+        await record({
+          kind: 'review',
+          agentId: input.reviewer.agentId,
+          response: null,
+          verdict: null,
+          verdictDetail: null,
+          succeeded: false,
+          errorMessage: message,
+          effectivePromptHash: reviewStepHash,
+        });
+        reviewResponse = null;
+        verdict = null;
+      }
+    }
+    if (reviewResponse) {
       const parsedReview = parseReviewDetail(reviewResponse.text);
       verdict = parsedReview.detail.verdict;
-      if (parsedReview.malformedReasons.length > 0) {
+      // Only report malformed output on a FRESH review — a replayed checkpoint must not re-audit it.
+      if (!reviewCheckpoint && parsedReview.malformedReasons.length > 0) {
         // stepNumber not yet advanced for this step; report against the next.
         await sink.onMalformedOutput(stepNumber + 1, parsedReview.malformedReasons);
       }
@@ -346,21 +505,6 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
         errorMessage: null,
         effectivePromptHash: reviewStepHash,
       });
-    } catch (err) {
-      // A failed review degrades the run, it does not destroy the primary work.
-      const message = err instanceof Error ? err.message : 'Review call failed.';
-      await record({
-        kind: 'review',
-        agentId: input.reviewer.agentId,
-        response: null,
-        verdict: null,
-        verdictDetail: null,
-        succeeded: false,
-        errorMessage: message,
-        effectivePromptHash: reviewStepHash,
-      });
-      reviewResponse = null;
-      verdict = null;
     }
 
     // --- Step 3: REVISION (exactly one, only on 'revise') -------------------
@@ -373,15 +517,10 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
       // The revision's identity is NOT the initial primary request — it includes the reviewer feedback
       // and the prior primary response, so it gets its own per-step hash over the full three-turn request.
       const revisionStepHash = stepEffectivePromptHash(primarySystem, revisionTurns);
-      try {
-        revisionResponse = await callWithRetry(
-          input.primary,
-          revisionTurns,
-          primarySystem,
-          input.perCallTimeoutMs,
-          input.runDeadline,
-          sink.onDelta && ((text) => sink.onDelta!('revision', text)),
-        );
+      const revisionStepNo = stepNumber + 1;
+      const revisionCheckpoint = input.resume ? await input.resume.loadCheckpoint(revisionStepNo) : null;
+      if (revisionCheckpoint) {
+        revisionResponse = responseFromCheckpoint(revisionCheckpoint);
         await record({
           kind: 'revision',
           agentId: input.primary.agentId,
@@ -392,19 +531,48 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
           errorMessage: null,
           effectivePromptHash: revisionStepHash,
         });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Revision call failed.';
-        await record({
-          kind: 'revision',
-          agentId: input.primary.agentId,
-          response: null,
-          verdict: null,
-          verdictDetail: null,
-          succeeded: false,
-          errorMessage: message,
-          effectivePromptHash: revisionStepHash,
-        });
-        revisionResponse = null; // fall back to the primary response
+      } else {
+        try {
+          if (input.resume) await input.resume.guardDispatch(revisionStepNo, 'revision');
+          revisionResponse = await callWithRetry(
+            input.primary,
+            revisionTurns,
+            primarySystem,
+            input.perCallTimeoutMs,
+            input.runDeadline,
+            sink.onDelta && ((text) => sink.onDelta!('revision', text)),
+          );
+          await record({
+            kind: 'revision',
+            agentId: input.primary.agentId,
+            response: revisionResponse,
+            verdict: null,
+            verdictDetail: null,
+            succeeded: true,
+            errorMessage: null,
+            effectivePromptHash: revisionStepHash,
+          });
+        } catch (err) {
+          // AMBIGUOUS revision outcome → escalate to reconciliation (may have executed + charged); do NOT
+          // fall back to the primary as if the revision cleanly failed.
+          if (err instanceof AmbiguousProviderOutcomeSignal) {
+            err.stepNumber = revisionStepNo;
+            throw err;
+          }
+          if (!(err instanceof ProviderError)) throw err;
+          const message = err.message;
+          await record({
+            kind: 'revision',
+            agentId: input.primary.agentId,
+            response: null,
+            verdict: null,
+            verdictDetail: null,
+            succeeded: false,
+            errorMessage: message,
+            effectivePromptHash: revisionStepHash,
+          });
+          revisionResponse = null; // fall back to the primary response
+        }
       }
     }
   }
