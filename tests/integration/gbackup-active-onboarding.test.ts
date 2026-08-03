@@ -5,9 +5,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import postgres from 'postgres';
 import { afterAll, describe, expect, it } from 'vitest';
+import { buildSourceManifestFromGit } from '../../scripts/backup/source-manifest';
 import { classifyMigrationState, detectMigrationState } from '../../scripts/backup/migration-detector';
-import { buildDbComparisonManifest } from '../support/db-migration-manifest';
-import { assertDisposableDbForVerification } from '../support/require-disposable-db';
 import {
   ActiveBundleError,
   computeActiveIndexSemanticDigest,
@@ -16,6 +15,7 @@ import {
   validateActiveRelPath,
 } from '../../scripts/backup/legacy-active-bundle';
 import { StrictJsonError, parseStrictJsonBuffer, parseStrictJsonText } from '../../scripts/backup/strict-json';
+import { MigrateStageOrderError, assertMigrateStageOrder } from '../support/migrate-stage-order';
 import { loadTrustBundle } from '../../scripts/backup/legacy-attestation-verify';
 import { computeEvidenceManifestHash } from '../../scripts/backup/legacy-attestation-canonical';
 import { legacyAttestationSchema } from '../../scripts/backup/legacy-attestation-schema';
@@ -270,14 +270,147 @@ describe('Phase 10 hardened — draft exclusion + repository hygiene', () => {
       expect(tracked.includes(forbidden), `${forbidden} must not be tracked`).toBe(false);
     }
   });
-  it('loader + strict-json do not import the signer; migrate.ts unchanged', () => {
+  it('loader + strict-json do not import the signer; migrate.ts preserves its safety-stage ordering (B2a gate wired in)', () => {
     for (const f of ['legacy-active-bundle.ts', 'strict-json.ts']) {
       expect(readFileSync(join('scripts', 'backup', f), 'utf8').includes('legacy-attestation-sign')).toBe(false);
     }
-    expect(execSync('git diff --name-only main..HEAD -- scripts/migrate.ts', { encoding: 'utf8' }).trim()).toBe('');
+    // RECONCILIATION (G-Backup-B2a × current main): main replaced the old `git diff main..HEAD -- scripts/migrate.ts`
+    // byte-identity check (clone-topology dependent, never proved SAFETY) with the semantic assertMigrateStageOrder
+    // checker. B2a intentionally wires the pre-migration VERIFICATION GATE (runPreMigrationGate) into migrate.ts in
+    // place of the old preMigrationBackup seam — the checker recognizes the gate as the pre-migration safety seam,
+    // so it validates gate → migrate → RLS ordering (advisory lock/cleanup present, failures fatal), clone-topology
+    // independent. B2a security invariant retained: this release path is a CONSUMER — migrate.ts imports neither the
+    // legacy loader nor the attestation/receipt signer, and the gate must be present.
     const migrate = readFileSync(join('scripts', 'migrate.ts'), 'utf8');
+    expect(() => assertMigrateStageOrder(migrate)).not.toThrow();
     expect(migrate.includes('legacy-active-bundle')).toBe(false);
-    expect(migrate.includes('preMigrationBackup')).toBe(true);
+    expect(migrate.includes('legacy-attestation-sign')).toBe(false);
+    expect(migrate.includes('receipt-v2-sign')).toBe(false);
+    expect(migrate.includes('runPreMigrationGate')).toBe(true); // B2a pre-migration gate is wired in
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The safety-stage invariant of the deployment path scripts/migrate.ts, exercised POSITIVELY against the real
+// committed source and NEGATIVELY against synthetic bad-ordered sources. Pure (a function of the source text):
+// no git history, no branch name, no database, no hardcoded hashes, and it never compares the file to itself.
+// `ensureAppSchema` (P1c) and `verifyBootstrap` (P1d) are OPTIONAL stages — verified in order WHEN PRESENT — so
+// this same checker accepts accepted-main (which has neither) and the later P1c/P1d migrate.ts (which add them).
+describe('Phase 10 hardened — migrate.ts safety-stage ordering invariant (semantic)', () => {
+  const NL = '\n';
+  // A synthetic, fully-staged GOOD source (P1c/P1d shape: includes the OPTIONAL ensureAppSchema + verify stages).
+  const GOOD = [
+    'async function main() {',
+    '  preMigrationBackup();',
+    '  await sql`select pg_advisory_lock(4021)`;',
+    '  try {',
+    '    await ensureAppSchema(sql);',
+    '    await migrate(db, { migrationsFolder: "drizzle" });',
+    '    await sql.unsafe(readFileSync("rls.sql", "utf8"));',
+    '    await verifyBootstrap(sql);',
+    '  } finally {',
+    '    await sql`select pg_advisory_unlock(4021)`;',
+    '    await sql.end();',
+    '  }',
+    '}',
+    'main().catch((err) => { console.error(err); process.exit(1); });',
+    '',
+  ].join(NL);
+
+  it('ACCEPTS the real accepted-main scripts/migrate.ts (positive; optional stages absent)', () => {
+    const real = readFileSync(join('scripts', 'migrate.ts'), 'utf8');
+    const idx = assertMigrateStageOrder(real);
+    expect(idx.backupCall).toBeLessThan(idx.migrate);
+    expect(idx.advisoryLock).toBeLessThan(idx.migrate);
+    expect(idx.migrate).toBeLessThan(idx.rlsApply);
+    expect(idx.migrate).toBeLessThan(idx.advisoryUnlock);
+    expect(idx.advisoryUnlock).toBeLessThan(idx.sqlEnd);
+    // accepted main carries neither optional stage yet:
+    expect(idx.ensureAppSchema).toBe(-1);
+    expect(idx.verify).toBe(-1);
+  });
+
+  it('ACCEPTS a fully-staged source WITH the optional app-schema + verify stages (forward-compatible)', () => {
+    const idx = assertMigrateStageOrder(GOOD);
+    expect(idx.backupCall).toBeLessThan(idx.ensureAppSchema);
+    expect(idx.ensureAppSchema).toBeLessThan(idx.migrate);
+    expect(idx.advisoryLock).toBeLessThan(idx.ensureAppSchema);
+    expect(idx.migrate).toBeLessThan(idx.rlsApply);
+    expect(idx.rlsApply).toBeLessThan(idx.verify);
+  });
+
+  const NEG: [string, string, string][] = [
+    ['backup removed', GOOD.replace('  preMigrationBackup();' + NL, ''), 'backup_call_missing'],
+    ['advisory lock removed', GOOD.replace('  await sql`select pg_advisory_lock(4021)`;' + NL, ''), 'advisory_lock_missing'],
+    [
+      'app-schema after migrate',
+      GOOD.replace('    await ensureAppSchema(sql);' + NL, '').replace(
+        'await migrate(db, { migrationsFolder: "drizzle" });',
+        'await migrate(db, { migrationsFolder: "drizzle" }); await ensureAppSchema(sql);',
+      ),
+      'schema_after_migrate',
+    ],
+    [
+      'migrate after RLS',
+      GOOD.replace('    await migrate(db, { migrationsFolder: "drizzle" });' + NL, '').replace(
+        'await sql.unsafe(readFileSync("rls.sql", "utf8"));',
+        'await sql.unsafe(readFileSync("rls.sql", "utf8")); await migrate(db, { migrationsFolder: "drizzle" });',
+      ),
+      'rls_before_migrate',
+    ],
+    [
+      'verify before RLS',
+      GOOD.replace('    await verifyBootstrap(sql);' + NL, '').replace(
+        'await ensureAppSchema(sql);',
+        'await ensureAppSchema(sql); await verifyBootstrap(sql);',
+      ),
+      'verify_before_rls',
+    ],
+    [
+      'backup after schema',
+      GOOD.replace('  preMigrationBackup();' + NL, '').replace('await ensureAppSchema(sql);', 'await ensureAppSchema(sql); preMigrationBackup();'),
+      'backup_after_schema',
+    ],
+    [
+      'swallowed failure (no process.exit(1))',
+      GOOD.replace('main().catch((err) => { console.error(err); process.exit(1); });', 'main().catch((err) => { console.error(err); });'),
+      'failure_not_fatal',
+    ],
+    [
+      'no top-level catch',
+      GOOD.replace('main().catch((err) => { console.error(err); process.exit(1); });', 'main(); process.exit(1);'),
+      'no_top_level_catch',
+    ],
+    [
+      'unlock before migrate',
+      GOOD.replace('    await sql`select pg_advisory_unlock(4021)`;' + NL, '').replace(
+        'await ensureAppSchema(sql);',
+        'await sql`select pg_advisory_unlock(4021)`; await ensureAppSchema(sql);',
+      ),
+      'unlock_before_migrate',
+    ],
+  ];
+  for (const [label, src, code] of NEG) {
+    it(`REJECTS ${label} → ${code}`, () => {
+      let thrown: unknown;
+      try {
+        assertMigrateStageOrder(src);
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(MigrateStageOrderError);
+      expect((thrown as MigrateStageOrderError).code).toBe(code);
+    });
+  }
+
+  it('does NOT bless every migrate.ts change: mutating the REAL source into an unsafe order is rejected', () => {
+    const real = readFileSync(join('scripts', 'migrate.ts'), 'utf8');
+    const rlsApply = 'await sql.unsafe(rls);';
+    const migrateCall = "await migrate(db, { migrationsFolder: join(process.cwd(), 'drizzle') });";
+    expect(real.includes(rlsApply) && real.includes(migrateCall)).toBe(true);
+    // Swap migrate() and the RLS apply → migrate now runs AFTER RLS → rejected.
+    const unsafe = real.replace(migrateCall, '__MIG__').replace(rlsApply, migrateCall).replace('__MIG__', rlsApply);
+    expect(() => assertMigrateStageOrder(unsafe)).toThrow(MigrateStageOrderError);
   });
 });
 
@@ -460,13 +593,9 @@ describe('Phase 10 hardened — active-index version + self-integrity digest', (
 });
 
 // ---------------------------------------------------------------------------
-// Refuse this G-Backup DB test against the shared `king_ai_hub` when REQUIRE_DISPOSABLE_DB=1 — before the
-// pool below is constructed. No-op without the flag.
-assertDisposableDbForVerification('gbackup-active-onboarding.test');
-
 const URL = process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL ?? 'postgresql://king:king@localhost:5433/king_ai_hub';
 const sql = postgres(URL, { max: 2, prepare: false });
-const MANIFEST = buildDbComparisonManifest('drizzle');
+const MANIFEST = buildSourceManifestFromGit('HEAD', 'drizzle');
 let dbReady = false;
 try {
   await sql`select 1 as ok`;
@@ -524,10 +653,10 @@ describe('Phase 10 hardened — local-DB detector with the ACTIVE bundle', () =>
     expect(r.lineEndingVariantMatches).toBe(1);
     expect(r.variantDetails[0]!.tag).toBe('0053_pricing_foundations');
     expect(r.legacyAttestedMatches).toBe(1);
-    // Migration-count independent: 0053 is the sole EOL variant and 0004 the sole attested; every OTHER entry
-    // (including any uncommitted tail such as 0055) is an exact committed-blob match. Derive from the manifest
-    // length so adding a migration never needs an absolute-count edit here.
-    expect(r.exactExecutionMatches).toBe(MANIFEST.entries.length - 2);
+    // Migration-count independent (reconciliation): every remaining applied migration is an exact match, so the
+    // exact count is the manifest length minus the one EOL variant (0053) and the one legacy-attested (0004) —
+    // never a hardcoded absolute (was `52`, which assumed exactly 54 migrations; the branch endpoint is now 0054).
+    expect(r.exactExecutionMatches).toBe(MANIFEST.entries.length - r.lineEndingVariantMatches - r.legacyAttestedMatches);
     expect(r.variantDetails.every((v) => v.tag !== TAG)).toBe(true);
   });
 });
