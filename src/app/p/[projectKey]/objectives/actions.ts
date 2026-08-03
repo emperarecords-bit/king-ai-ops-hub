@@ -123,6 +123,11 @@ export interface MutationState {
 async function objectiveMutation(
   formData: FormData,
   fn: (ctx: Awaited<ReturnType<typeof requireTenant>>, objectiveId: string) => Promise<void>,
+  // P1b standing-work authorization. When true, a non-admin caller is refused AFTER requireTenant but BEFORE
+  // withTenant/the fn, so NO task, run, audit proposal, provider request, or schedule write occurs on denial —
+  // the schedule row is left untouched. Defaults false so the other objectiveMutation callers (objective
+  // status, criteria, milestones) are unaffected.
+  requireAdmin = false,
 ): Promise<MutationState> {
   const projectKey = String(formData.get('projectKey') ?? '');
   const objectiveId = String(formData.get('objectiveId') ?? '');
@@ -131,6 +136,9 @@ async function objectiveMutation(
   }
   try {
     const ctx = await requireTenant(projectKey);
+    if (requireAdmin && ctx.projectRole !== 'admin') {
+      return { error: 'Only workspace admins can manage standing work.' };
+    }
     await fn(ctx, objectiveId);
   } catch (err) {
     if (!(err instanceof AppError)) log.error('objective mutation failed', { err, objectiveId });
@@ -213,6 +221,7 @@ export async function submitSchedule(
         monthday: monthdayRaw != null && monthdayRaw !== '' ? Number(monthdayRaw) : null,
       });
     }),
+    true,
   );
 }
 
@@ -223,8 +232,10 @@ export async function toggleSchedule(
   const scheduleId = String(formData.get('scheduleId') ?? '');
   const enabled = String(formData.get('enabled') ?? '') === 'true';
   if (!z.string().uuid().safeParse(scheduleId).success) return { error: 'Invalid request.' };
-  return objectiveMutation(formData, (ctx) =>
-    withTenant(ctx, (tx) => setScheduleEnabled(tx, ctx, scheduleId, enabled)),
+  return objectiveMutation(
+    formData,
+    (ctx) => withTenant(ctx, (tx) => setScheduleEnabled(tx, ctx, scheduleId, enabled)),
+    true,
   );
 }
 
@@ -320,6 +331,7 @@ export async function editSchedule(
         monthday: monthdayRaw != null && monthdayRaw !== '' ? Number(monthdayRaw) : null,
       });
     }),
+    true,
   );
 }
 

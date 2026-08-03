@@ -304,18 +304,27 @@ export default async function EmployeesPage({
                       </details>
                     ) : null}
 
-                    <details>
-                      <summary className="cursor-pointer text-xs text-[var(--muted)] hover:text-[var(--foreground)]">
-                        Configure AI <ProviderBadge provider={agent.provider} />
-                      </summary>
-                      <div className="mt-3">
-                        <AgentForm
-                          projectKey={projectKey}
-                          agent={agent}
-                          models={modelsForProvider(agent.provider as ProviderId)}
-                        />
-                      </div>
-                    </details>
+                    {/* P1b — the enabled Configure AI controls (saveAgent) are admin-only. Non-admins see the
+                        provider read-only, with a short note; the server gate in saveAgent is authoritative. */}
+                    {canEdit ? (
+                      <details>
+                        <summary className="cursor-pointer text-xs text-[var(--muted)] hover:text-[var(--foreground)]">
+                          Configure AI <ProviderBadge provider={agent.provider} />
+                        </summary>
+                        <div className="mt-3">
+                          <AgentForm
+                            projectKey={projectKey}
+                            agent={agent}
+                            models={modelsForProvider(agent.provider as ProviderId)}
+                          />
+                        </div>
+                      </details>
+                    ) : (
+                      <p className="text-xs text-[var(--muted)]">
+                        AI configuration <ProviderBadge provider={agent.provider} /> · read-only. Only workspace
+                        admins can change employee configuration.
+                      </p>
+                    )}
                   </Card>
                 );
               })}
