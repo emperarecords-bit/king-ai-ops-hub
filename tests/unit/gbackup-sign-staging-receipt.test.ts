@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,11 +27,14 @@ import { verifyReceiptV2Parsed } from '../../scripts/backup/receipt-v2-verify';
 
 const BASE = process.cwd();
 const kp = generateKeyPairSync('ed25519');
+// The migration facts are derived from a REAL commit (the portable hash reads git blobs at sourceCommit), so the
+// tests bind the actual checked-out HEAD — the same code path the workflow runs against the selected source commit.
+const HEAD_SHA = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 function goodInputs(over: Partial<StagingReceiptInputs> = {}): StagingReceiptInputs {
   return {
-    sourceCommit: 'd2805ffab69bb83926a50d0422d65823b521138f',
+    sourceCommit: HEAD_SHA,
     targetImageRef: `registry.fly.io/king-ai-ops-hub-staging@${DIGEST}`,
     targetImageDigest: DIGEST,
     deploymentNonce: 'deadbeefdeadbeefdeadbeefdeadbeef',
@@ -159,7 +163,7 @@ describe('G-Backup staging-receipt CLI (fixture key via env) — writes only pub
       NODE_ENV: 'test',
       GBACKUP_SIGNING_KEY_PEM_B64: keyB64,
       OUTPUT_DIR: outDir,
-      SOURCE_COMMIT: 'd2805ffab69bb83926a50d0422d65823b521138f',
+      SOURCE_COMMIT: HEAD_SHA,
       TARGET_IMAGE_REF: `registry.fly.io/king-ai-ops-hub-staging@${DIGEST}`,
       TARGET_IMAGE_DIGEST: DIGEST,
       DEPLOYMENT_NONCE: 'deadbeefdeadbeefdeadbeefdeadbeef',

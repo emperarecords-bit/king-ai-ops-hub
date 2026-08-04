@@ -92,11 +92,16 @@ export function inputsFromEnv(env: NodeJS.ProcessEnv): StagingReceiptInputs {
   };
 }
 
-export function runCli(env: NodeJS.ProcessEnv, baseDir: string, log: (m: string) => void = console.log): void {
-  const outDir = env.OUTPUT_DIR ?? join(baseDir, 'receipt-out');
+export function runCli(env: NodeJS.ProcessEnv, trustedDir: string, log: (m: string) => void = console.log): void {
+  const outDir = env.OUTPUT_DIR ?? join(trustedDir, 'receipt-out');
+  // The SELECTED application source is a DATA-ONLY checkout (SOURCE_DIR). We read only its migration files from it;
+  // the reviewed signer/verifier code runs from the trusted workspace (this process's cwd = trustedDir), and the
+  // portable Git-blob hash is read from inputs.sourceCommit in the trusted workspace's git. Default to trustedDir so
+  // local/test invocation (where the trusted checkout IS the selected source) still works.
+  const sourceDir = env.SOURCE_DIR && env.SOURCE_DIR.trim().length > 0 ? env.SOURCE_DIR : trustedDir;
   const privateKey = loadPrivateKeyFromEnv(env);
   const inputs = inputsFromEnv(env);
-  const out = produceStagingReceipt(inputs, privateKey, baseDir);
+  const out = produceStagingReceipt(inputs, privateKey, sourceDir);
 
   const receiptJson = JSON.stringify(out.receipt, null, 2);
   const trustBundleJson = JSON.stringify([out.publicTrustEntry], null, 2);

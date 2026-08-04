@@ -118,22 +118,37 @@ jobs:
     environment: staging
     timeout-minutes: 15
     steps:
-      - name: Checkout the exact selected source commit
+      # 1. TRUSTED checkout: the reviewed signer + CLI from the WORKFLOW's own revision (not the selected source).
+      #    This is the ONLY code executed with the signing secret. No secret is available in this or any step below
+      #    except the single signing step. Full history so the selected source commit (an ancestor of main) is present.
+      - name: Checkout trusted workflow code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ inputs.source_commit }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify the selected commit is an ancestor of protected main
+      - name: Validate source_commit + verify it is an ancestor of protected main
         env:
           SRC: ${{ inputs.source_commit }}
         run: |
+          if ! printf '%s' "$SRC" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::source_commit must be a full 40-hex commit SHA"; exit 1
+          fi
           git fetch --no-tags origin main
           if ! git merge-base --is-ancestor "$SRC" origin/main; then
             echo "::error::source_commit is not an ancestor of protected main"; exit 1
           fi
           echo "source_commit $SRC is an ancestor of protected main"
+
+      # 2. DATA-ONLY checkout of the SELECTED source into a separate directory. We read ONLY its migration files;
+      #    we NEVER run npm, package lifecycle scripts, repository scripts, or binaries from it. A git worktree
+      #    (from the trusted checkout's already-fetched history) avoids a second network fetch.
+      - name: Materialize selected source (data only — no code executed from it)
+        env:
+          SRC: ${{ inputs.source_commit }}
+        run: |
+          git worktree add --detach selected-source "$SRC"
+          echo "selected-source checked out at $SRC (drizzle files only will be read)"
 
       - name: Setup Node
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4
@@ -141,15 +156,19 @@ jobs:
           node-version: '20'
           cache: npm
 
-      - name: Install dependencies (from lockfile)
+      # Install deps from the TRUSTED lockfile only (never from the selected source).
+      - name: Install dependencies (from trusted lockfile)
         run: npm ci
 
       - name: Sign + self-verify the staging receipt (no Fly / snapshot / migration / deploy)
         env:
           # Private signing key — materialized from the staging Environment secret, base64-encoded PKCS#8 PEM.
-          # Used only to sign; never printed, written, or uploaded.
+          # Referenced ONLY by this single first-party step; used only to sign; never printed, written, or uploaded.
           GBACKUP_SIGNING_KEY_PEM_B64: ${{ secrets.GBACKUP_RECEIPT_SIGNING_KEY_B64 }}
           OUTPUT_DIR: ${{ github.workspace }}/receipt-out
+          # The reviewed signer runs from the trusted workspace (cwd) and reads migration FILES from SOURCE_DIR; the
+          # portable Git-blob hash is read from SOURCE_COMMIT in the trusted workspace's git.
+          SOURCE_DIR: ${{ github.workspace }}/selected-source
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           TARGET_IMAGE_REF: ${{ inputs.target_image_ref }}
           TARGET_IMAGE_DIGEST: ${{ inputs.target_image_digest }}

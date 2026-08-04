@@ -125,9 +125,20 @@ export interface DerivedMigrationFacts {
   readonly endpointTag: string;
 }
 
-/** Derive the portable + runtime migration-set hashes and the canonical pending set from the checked-out source. */
-export function deriveMigrationFacts(baseDir: string, appliedCount: number): DerivedMigrationFacts {
-  const runtime = readRuntimeMigrationSet(baseDir, 'drizzle');
+/**
+ * Where the SELECTED application source is read from. The runtime migration files come from a DATA-ONLY checkout
+ * of the selected commit (`runtimeDir`); the portable Git-blob hash is read from that commit's blobs via the
+ * TRUSTED workspace's git (`gitCommitish`, which the trusted checkout has in history as an ancestor of main). The
+ * signer code itself always runs from the trusted workflow checkout — never from `runtimeDir`.
+ */
+export interface SourceLocation {
+  readonly runtimeDir: string;
+  readonly gitCommitish: string;
+}
+
+/** Derive the portable + runtime migration-set hashes and the canonical pending set from the selected source. */
+export function deriveMigrationFacts(source: SourceLocation, appliedCount: number): DerivedMigrationFacts {
+  const runtime = readRuntimeMigrationSet(source.runtimeDir, 'drizzle');
   const sorted = [...runtime.entries].sort((a, b) => a.migrationIndex - b.migrationIndex);
   const committedCount = sorted.length;
   const endpointTag = sorted[committedCount - 1]?.migrationTag ?? '';
@@ -186,10 +197,15 @@ export function derivePublicTrustEntry(privateKey: KeyObject, keyId: string): Re
   return { keyId, algorithm: 'ed25519', publicKeyPem, purpose: RECEIPT_KEY_PURPOSE, status: 'active' };
 }
 
-/** Assemble + schema-validate + finalize the receipt id (PURE; no signing, no key). */
-export function buildStagingSignedReceipt(inputs: StagingReceiptInputs, baseDir: string): { signed: SignedReceiptV2; derived: DerivedMigrationFacts } {
+/**
+ * Assemble + schema-validate + finalize the receipt id (PURE; no signing, no key). The migration facts are derived
+ * from the SELECTED source: runtime files from `runtimeDir` (a data-only checkout of `inputs.sourceCommit`) and the
+ * portable Git-blob hash from `inputs.sourceCommit` in the trusted workspace's git — so the receipt binds the exact
+ * selected application source, and the commit used for derivation is identical to the commit written into the receipt.
+ */
+export function buildStagingSignedReceipt(inputs: StagingReceiptInputs, runtimeDir: string): { signed: SignedReceiptV2; derived: DerivedMigrationFacts } {
   validateStagingInputs(inputs);
-  const derived = deriveMigrationFacts(baseDir, inputs.appliedCount);
+  const derived = deriveMigrationFacts({ runtimeDir, gitCommitish: inputs.sourceCommit }, inputs.appliedCount);
   if (inputs.assertPortableMigrationSetHash && inputs.assertPortableMigrationSetHash !== derived.portableMigrationSetHash) {
     reject('portableMigrationSetHash', 'operator-provided value does not match the source-derived value');
   }
@@ -306,9 +322,9 @@ export function buildSelfVerifyExpectation(
 }
 
 /** Build → sign → self-verify. Returns ONLY public material. Throws if verification does not pass. */
-export function produceStagingReceipt(inputs: StagingReceiptInputs, privateKey: KeyObject, baseDir: string): StagingReceiptOutput {
+export function produceStagingReceipt(inputs: StagingReceiptInputs, privateKey: KeyObject, runtimeDir: string): StagingReceiptOutput {
   const publicTrustEntry = derivePublicTrustEntry(privateKey, inputs.keyId);
-  const { signed, derived } = buildStagingSignedReceipt(inputs, baseDir);
+  const { signed, derived } = buildStagingSignedReceipt(inputs, runtimeDir);
   const receipt = signReceiptV2(signed, privateKey);
   const canonicalHash = receiptV2CanonicalHash(signed);
 

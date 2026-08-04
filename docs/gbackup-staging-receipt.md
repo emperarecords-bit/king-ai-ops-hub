@@ -83,9 +83,13 @@ Public material may appear in workflow artifacts/summaries. Private material may
 
 ## 4. What the workflow does (and does not)
 
-1. checks out the exact `source_commit`; **fails if it is not an ancestor of protected `main`**;
-2. `npm ci`; runs `scripts/ci/sign-staging-receipt.ts` (the CLI wrapper over the pure producer in
-   `scripts/backup/sign-staging-receipt.ts`), which:
+1. checks out the **trusted workflow revision** (the reviewed signer + CLI — *not* `source_commit`); validates
+   `source_commit` is a full 40-hex SHA and **an ancestor of protected `main`**; then materializes the selected
+   source as a **data-only** `git worktree` (`selected-source/`) from which only migration files are read — no npm,
+   package lifecycle scripts, repository scripts, or binaries are ever executed from it;
+2. `npm ci` (trusted lockfile); runs `scripts/ci/sign-staging-receipt.ts` (the CLI wrapper over the pure producer in
+   `scripts/backup/sign-staging-receipt.ts`) **from the trusted workspace**, reading migration files from
+   `SOURCE_DIR=selected-source` and the portable Git-blob hash from `source_commit` in the trusted git, which:
    - rejects placeholder (`UNKNOWN`) source/image, validates the **digest-bound** image ref, canonical nonce,
      nonzero uint64 DB system id, `vs_…` snapshot id, retention ≥ 7;
    - **derives** `portableMigrationSetHash`, `runtimeMigrationSetHash`, and the canonical **pending set** from the
@@ -110,6 +114,9 @@ It does **not** call Fly, create a snapshot, run a migration, deploy, or publish
   runs with the signing secret; the `staging` **Environment** adds required-reviewer approval.
 - Third-party actions pinned to immutable commit SHAs (`actions/checkout`, `actions/setup-node`,
   `actions/upload-artifact`).
+- **Trusted signer vs selected data:** the signing secret is referenced by exactly one first-party step; the
+  reviewed signer/CLI runs from the trusted workflow checkout, while the operator-selected `source_commit` is a
+  data-only worktree read for migration files only — selected-source code is never executed, and never with the key.
 - No arbitrary shell fragments are built from inputs; inputs are passed as `env:` values, never interpolated into a
   shell command.
 - Artifacts contain no credentials or database URLs; the receipt carries only the non-secret release facts.

@@ -86,6 +86,39 @@ describe('sign-staging-receipt workflow — secret handling + artifact hygiene',
   });
 });
 
+describe('sign-staging-receipt workflow — signer/selected-source separation + secret step-scoping', () => {
+  it('does NOT check out the selected source commit over the trusted workspace', () => {
+    // The trusted checkout has no `ref:` (so it uses the workflow revision = reviewed signer). The selected source
+    // is never checked out as the primary workspace ref.
+    expect(wfCode).not.toContain('ref: ${{ inputs.source_commit }}');
+  });
+  it('materializes the selected source as a separate DATA-ONLY worktree', () => {
+    expect(wfCode).toContain('git worktree add');
+    expect(wfCode).toContain('selected-source');
+    // No dependency install or script execution happens inside the selected-source checkout.
+    expect(wfCode).not.toMatch(/cd\s+selected-source/);
+    expect(wfCode).not.toMatch(/selected-source[^\n]*npm|npm[^\n]*selected-source/);
+  });
+  it('runs the reviewed signer from the trusted workspace against SOURCE_DIR', () => {
+    expect(wfCode).toContain('npx tsx scripts/ci/sign-staging-receipt.ts');
+    expect(wfCode).toMatch(/SOURCE_DIR:\s+\$\{\{\s*github\.workspace\s*\}\}\/selected-source/);
+  });
+  it('the signing secret appears exactly once, only in the signing step', () => {
+    const secretRefs = wfCode.match(/secrets\.GBACKUP_RECEIPT_SIGNING_KEY_B64/g) ?? [];
+    expect(secretRefs.length).toBe(1);
+    const keyEnvRefs = wfCode.match(/GBACKUP_SIGNING_KEY_PEM_B64:/g) ?? [];
+    expect(keyEnvRefs.length).toBe(1);
+    // Not at workflow-level or job-level env: the only occurrence follows the signing step's name.
+    const idx = wfCode.indexOf('GBACKUP_SIGNING_KEY_PEM_B64:');
+    const signStepIdx = wfCode.indexOf('Sign + self-verify the staging receipt');
+    expect(signStepIdx).toBeGreaterThan(0);
+    expect(idx).toBeGreaterThan(signStepIdx);
+  });
+  it('npm ci (trusted deps) runs before the signing step', () => {
+    expect(wfCode.indexOf('npm ci')).toBeLessThan(wfCode.indexOf('GBACKUP_SIGNING_KEY_PEM_B64:'));
+  });
+});
+
 describe('sign-staging-receipt workflow — required non-secret inputs are present', () => {
   const required = ['source_commit', 'target_image_ref', 'target_image_digest', 'deployment_nonce', 'database_system_identifier', 'snapshot_id', 'snapshot_created_at', 'key_id'];
   for (const r of required) {
