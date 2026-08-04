@@ -16,7 +16,7 @@ The signer/verifier contract is the already-reviewed G-Backup-B1 library
 
 | | Format |
 |---|---|
-| **Private signing key** | Ed25519 **PKCS#8 PEM** (`-----BEGIN PRIVATE KEY-----`). Loaded with `crypto.createPrivateKey`; signing is `crypto.sign(null, bytes, key)` (Ed25519). |
+| **Private signing key** | Ed25519 **PKCS#8 PEM** (the standard unencrypted private-key PEM armor). Loaded with `crypto.createPrivateKey`; signing is `crypto.sign(null, bytes, key)` (Ed25519). |
 | **Public / trust-bundle key** | Ed25519 **SPKI PEM** (`-----BEGIN PUBLIC KEY-----`), DER SubjectPublicKeyInfo length **44**. Loaded with `crypto.createPublicKey`. |
 | **Key ID** | `^[A-Za-z0-9._-]{1,128}$` (e.g. `staging-dbr-2026-08`). |
 | **Fingerprint** | `sha256(DER SPKI)` hex — the canonical identity used for duplicate detection. |
