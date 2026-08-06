@@ -1,0 +1,3 @@
+# Migration SQL must be LF so raw-byte runtime-migration-set hashing is deterministic
+# across Windows (core.autocrlf=true) and Linux/CI. See scripts/backup/runtime-migration-set.ts.
+drizzle/**/*.sql text eol=lf
