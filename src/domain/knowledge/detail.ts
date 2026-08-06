@@ -1,3 +1,7 @@
+// Server/worker-only: this loader sits on the extraction import path (it reads knowledge proposals from
+// `@/domain/knowledge/extraction`, a `server-only` module that owns the provider-facing extraction calls). The
+// explicit guard keeps the whole chain out of any client bundle even if the transitive import later changes.
+import 'server-only';
 import { type TenantContext } from '@/types/domain';
 import { type DbTx } from '@/db/client';
 import {
