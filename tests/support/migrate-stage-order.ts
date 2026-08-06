@@ -1,39 +1,76 @@
 /**
- * TEST-ONLY, PURE checker for the deployment path `scripts/migrate.ts`.
+ * TEST-ONLY, PURE **structural tripwire** over the SOURCE TEXT of `scripts/migrate.ts`.
  *
- * G-Backup-B1/B2a hygiene concern: the migrate command is the seam where the pre-migration backup boundary and
- * the future enforced backup gate live. A regression that reorders the safety stages — or swallows a failure, or
- * drops the advisory lock — would silently defeat that protection. The OLD onboarding test guarded this with a
- * byte-identity assertion (`git diff --name-only main..HEAD -- scripts/migrate.ts` must be empty), which was both
- * WRONG (it assumed a local branch named `main`, absent in a CI PR checkout — the failure that motivated this) and
- * too blunt (P1c LEGITIMATELY changes migrate.ts, so byte-identity says nothing about SAFETY).
+ * WHAT THIS IS. A static, pure string check: it parses the migrate.ts source and asserts that a fixed set of
+ * stage MARKERS are present and appear in the expected TEXTUAL ORDER. It is a CI shape-guard — an expected-shape
+ * assertion that trips when the migrate.ts source is edited into an unexpected shape — nothing more. It runs no
+ * code, opens no database, and reasons only about the characters of the source string it is handed.
  *
- * This checker replaces that with a SEMANTIC invariant: it parses the migrate.ts source and verifies the required
- * safety-stage ORDER and properties, permitting authorized changes and rejecting unsafe ones. It is a pure
- * function of the source text — no git history, no branch name, no hardcoded commit hash, and it never compares
- * the file to itself — so it can be exercised POSITIVELY against the real committed source and NEGATIVELY against
- * synthetic bad-ordered sources.
+ * WHAT A FAILURE MEANS. Someone changed `scripts/migrate.ts` so that an expected stage marker is missing or out of
+ * the expected textual order. That is a signal to STOP and have a human read the migrate.ts diff before it lands —
+ * it catches an accidental structural regression (a reordered/removed stage) at review time. A failure is a
+ * prompt to inspect, not a proof of danger.
  *
- * Branch-aware by design. Two stages are OPTIONAL and verified only WHEN PRESENT, so the SAME checker accepts
+ * WHAT A PASS MEANS — AND ALL IT MEANS. The expected markers were found in the expected textual order in the
+ * source string. That is the entire claim. A green tripwire is a static shape match, not a safety verdict.
+ *
+ * WHAT A PASS DOES **NOT** ESTABLISH (do not read any of these into a green result):
+ *   - that the stages EXECUTE in that order on every runtime code path (this reads text, not behavior);
+ *   - that a migration is transactionally safe, reversible, or rollback-able;
+ *   - that the database is compatible or that migrations will apply cleanly;
+ *   - that the pre-migration receipt gate will verify, or that a release/deploy will succeed;
+ *   - that the schema, journal, or SQL is semantically correct or production-ready.
+ * This check is a structural tripwire only; it does not validate migration safety or deployment readiness.
+ *
+ * WHERE THE REAL AUTHORIZATION LIVES. Deployment is authorized at RUNTIME by the G-Backup pre-migration receipt
+ * gate — `runPreMigrationGate(...)` in `scripts/migrate.ts`, implemented in `scripts/backup/premigration-gate.ts`
+ * — and migrations execute only via the release command. This tripwire is never imported by app/worker/deploy or
+ * CI-workflow runtime code, and its result must never be used to bypass or stand in for that runtime gate.
+ * Operators and future maintainers MUST NOT treat a green tripwire as a manual GO decision.
+ *
+ * WHY A TRIPWIRE (not the old byte check). The prior onboarding guard asserted byte-identity of migrate.ts against
+ * `main` (`git diff --name-only main..HEAD -- scripts/migrate.ts` empty), which was WRONG (it assumed a local
+ * `main`, absent in a CI PR checkout — the failure that motivated this) and too blunt (P1c LEGITIMATELY edits
+ * migrate.ts). This replaces it with a pure source-shape assertion: no git history, no branch name, no hardcoded
+ * commit hash, and it never compares the file to itself — so it can be exercised POSITIVELY against the real
+ * committed source and NEGATIVELY against synthetic bad-ordered sources.
+ *
+ * Branch-aware by design. Two stages are OPTIONAL and checked only WHEN PRESENT, so the SAME tripwire accepts
  * accepted-main (which has neither) and the later P1c/P1d migrate.ts (which add them):
  *   - `ensureAppSchema(` — the P1c fresh-bootstrap prerequisite;
  *   - `verifyBootstrap(` / `--verify` — the P1d full-bootstrap verification.
  *
- * Required invariants (see scripts/migrate.ts):
- *   1. the pre-migration backup hook (`preMigrationBackup()`) runs BEFORE any schema or migration write;
- *   2. `ensureAppSchema(` (WHEN PRESENT) runs AFTER the backup boundary and BEFORE `migrate(`;
- *   3. `migrate(` runs BEFORE the RLS apply (`rls.sql` read + `sql.unsafe(`);
- *   4. verification (`verifyBootstrap(` / `--verify`, WHEN PRESENT) runs only AFTER RLS;
- *   5. a migration/RLS/verification failure remains FATAL (top-level `main().catch` → `process.exit(1)`);
- *   6. the advisory lock (`pg_advisory_lock`) + release/cleanup (`pg_advisory_unlock`, `sql.end`) remain present,
- *      lock acquired before the schema/migration work, released and connection closed after it;
- *   7. the migrate command does not bypass the backup seam (the backup call is not removed/short-circuited).
+ * Expected source-shape markers checked (see scripts/migrate.ts):
+ *   1. the pre-migration seam (`preMigrationBackup()` / `runPreMigrationGate(`) appears BEFORE any schema or
+ *      migration write marker;
+ *   2. `ensureAppSchema(` (WHEN PRESENT) appears AFTER the seam and BEFORE `migrate(`;
+ *   3. `migrate(` appears BEFORE the RLS apply markers (`rls.sql` read + `sql.unsafe(`);
+ *   4. verification (`verifyBootstrap(` / `--verify`, WHEN PRESENT) appears only AFTER RLS;
+ *   5. the fatal-failure markers are present (top-level `main().catch` → `process.exit(1)`);
+ *   6. the advisory lock (`pg_advisory_lock`) + release/cleanup (`pg_advisory_unlock`, `sql.end`) markers are
+ *      present, the lock marker before the schema/migration markers, release/cleanup markers after them;
+ *   7. the pre-migration seam marker is not removed.
+ * These are TEXTUAL-ORDER expectations over the source, not runtime guarantees.
  */
 
+/**
+ * Fail-closed disclaimer surfaced in every tripwire failure message and available to CI/test output. Passing this
+ * check is NOT deployment authorization — the runtime receipt gate (`runPreMigrationGate`) is.
+ */
+export const MIGRATE_STAGE_ORDER_TRIPWIRE_NOTE =
+  'This check is a structural tripwire only; it does not validate migration safety or deployment readiness. ' +
+  'Deployment is authorized at runtime by the G-Backup pre-migration receipt gate (runPreMigrationGate), not by this check.';
+
+/**
+ * Thrown when the structural tripwire trips (a stage marker is missing or out of the expected textual order).
+ * The stable `.code` identifies which expectation failed. The message is suffixed with
+ * {@link MIGRATE_STAGE_ORDER_TRIPWIRE_NOTE} so a CI failure states plainly that this is a shape check, not a
+ * deployment-safety verdict.
+ */
 export class MigrateStageOrderError extends Error {
   readonly code: string;
   constructor(code: string, message: string) {
-    super(message);
+    super(`${message} — ${MIGRATE_STAGE_ORDER_TRIPWIRE_NOTE}`);
     this.name = 'MigrateStageOrderError';
     this.code = code;
   }
@@ -85,9 +122,11 @@ export interface MigrateStageIndices {
 }
 
 /**
- * PURE. Verifies `scripts/migrate.ts` source preserves its safety-stage ordering + properties. Throws
- * `MigrateStageOrderError` (with a stable `.code`) on the FIRST violation; returns the located stage indices on
- * success. Does NOT compare the source to git or to the current branch — it reasons about the source itself.
+ * PURE structural tripwire. Asserts the `scripts/migrate.ts` source has the expected stage MARKERS in the expected
+ * TEXTUAL ORDER. Throws `MigrateStageOrderError` (with a stable `.code`) on the FIRST unmet expectation; returns
+ * the located marker indices on success. Does NOT compare the source to git or to the current branch, and does NOT
+ * execute anything — it reads only the characters of `rawSource`. A pass is a static shape match, NOT a
+ * migration-safety or deployment-readiness verdict (see the file header and {@link MIGRATE_STAGE_ORDER_TRIPWIRE_NOTE}).
  */
 export function assertMigrateStageOrder(rawSource: string): MigrateStageIndices {
   const source = blankComments(rawSource);

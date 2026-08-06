@@ -270,15 +270,17 @@ describe('Phase 10 hardened — draft exclusion + repository hygiene', () => {
       expect(tracked.includes(forbidden), `${forbidden} must not be tracked`).toBe(false);
     }
   });
-  it('loader + strict-json do not import the signer; migrate.ts preserves its safety-stage ordering (B2a gate wired in)', () => {
+  it('loader + strict-json do not import the signer; migrate.ts source passes the stage-order structural tripwire (B2a gate wired in)', () => {
     for (const f of ['legacy-active-bundle.ts', 'strict-json.ts']) {
       expect(readFileSync(join('scripts', 'backup', f), 'utf8').includes('legacy-attestation-sign')).toBe(false);
     }
     // RECONCILIATION (G-Backup-B2a × P1c): the final production seam wires BOTH the B2a pre-migration gate
     // (runPreMigrationGate) AND P1c's fresh-database bootstrap (ensureAppSchema + verifyBootstrap) into migrate.ts.
-    // assertMigrateStageOrder (clone-topology independent — no main..HEAD) requires all of them and validates the
-    // full order: gate → ensureAppSchema → migrate → RLS → verify, advisory lock/cleanup bracketing, failures
-    // fatal. B2a security invariant retained: this release path is a CONSUMER — migrate.ts imports neither the
+    // assertMigrateStageOrder (clone-topology independent — no main..HEAD) is a STRUCTURAL TRIPWIRE: it asserts all
+    // of these markers are present in the expected textual order (gate → ensureAppSchema → migrate → RLS → verify,
+    // advisory lock/cleanup bracketing, fatal-failure markers). A pass is a source-shape match, NOT proof the
+    // migration is safe or the deploy will succeed. B2a security invariant retained: this release path is a
+    // CONSUMER — migrate.ts imports neither the
     // legacy loader nor the attestation/receipt signer.
     const migrate = readFileSync(join('scripts', 'migrate.ts'), 'utf8');
     expect(() => assertMigrateStageOrder(migrate)).not.toThrow();
@@ -292,12 +294,14 @@ describe('Phase 10 hardened — draft exclusion + repository hygiene', () => {
 });
 
 // ---------------------------------------------------------------------------
-// The safety-stage invariant of the deployment path scripts/migrate.ts, exercised POSITIVELY against the real
+// The stage-order STRUCTURAL TRIPWIRE over the source of scripts/migrate.ts, exercised POSITIVELY against the real
 // committed source and NEGATIVELY against synthetic bad-ordered sources. Pure (a function of the source text):
-// no git history, no branch name, no database, no hardcoded hashes, and it never compares the file to itself.
-// The final B2a×P1c contract REQUIRES every stage — gate (runPreMigrationGate) → ensureAppSchema → migrate → RLS
-// → verifyBootstrap → cleanup — so a source MISSING any required stage fails (the check never passes vacuously).
-describe('Phase 10 hardened — migrate.ts safety-stage ordering invariant (semantic)', () => {
+// no git history, no branch name, no database, no hardcoded hashes, and it never compares the file to itself. It
+// is a static source-shape check — a pass means the expected markers are present in the expected textual order,
+// NOT that a migration is safe or a deploy will succeed (the runtime receipt gate authorizes deployment).
+// The final B2a×P1c contract REQUIRES every stage marker — gate (runPreMigrationGate) → ensureAppSchema → migrate
+// → RLS → verifyBootstrap → cleanup — so a source MISSING any required marker fails (it never passes vacuously).
+describe('Phase 10 hardened — migrate.ts stage-order structural tripwire (static source check; not deployment validation)', () => {
   const NL = '\n';
   // A synthetic, fully-staged GOOD source (the reconciled B2a×P1c shape under one advisory lock).
   const GOOD = [
