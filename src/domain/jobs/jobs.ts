@@ -262,7 +262,12 @@ export async function runClaimedJob(job: ClaimedJob, live?: RunLiveEvents): Prom
     }
     const reason = err instanceof Error ? err.message : 'unknown worker error';
     await failJob(job.jobId, reason);
-    log.error('run job execution threw', { jobId: job.jobId, taskId: job.taskId, reason });
+    log.error('run job execution threw', {
+      jobId: job.jobId,
+      taskId: job.taskId,
+      errorClass: err instanceof Error ? err.name : 'unknown',
+      recoverable: true,
+    });
     return null;
   }
 }
