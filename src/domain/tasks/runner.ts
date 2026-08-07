@@ -1125,7 +1125,7 @@ async function executeAndFinalize(
         await withTenant(ctx, (tx) => applyDecisionCandidatesFromText(tx, ctx, runId, decisionRaw, { fenceTx: extractionFenceTx }));
       } catch (err) {
         if (err instanceof LeaseLostSignal) throw err;
-        log.warn('decision proposal apply failed (run unaffected)', { runId, err: err instanceof Error ? err.message : err });
+        log.warn('decision proposal apply failed (run unaffected)', { runId, errorClass: err instanceof Error ? err.name : 'unknown', recoverable: true });
       }
     }
 
@@ -1145,7 +1145,7 @@ async function executeAndFinalize(
         );
       } catch (err) {
         if (err instanceof LeaseLostSignal) throw err;
-        log.warn('knowledge proposal apply failed (run unaffected)', { runId, err: err instanceof Error ? err.message : err });
+        log.warn('knowledge proposal apply failed (run unaffected)', { runId, errorClass: err instanceof Error ? err.name : 'unknown', recoverable: true });
       }
     }
   };
@@ -1414,7 +1414,7 @@ async function finalizeFailed(
       .where(eq(runs.id, runId));
     await tx.update(tasks).set({ status: 'failed', updatedAt: new Date() }).where(eq(tasks.id, taskId));
     await writeAudit(tx, ctx, { action: 'run.failed', entityType: 'run', entityId: runId, detail: { reason } });
-    log.warn('Run failed', { runId, reason });
+    log.warn('Run failed', { runId, failureClass: reason.split(/[\s(:]/, 1)[0] || 'unknown', recoverable: true });
     return { runId, status: 'failed', failureReason: reason };
   });
 }
