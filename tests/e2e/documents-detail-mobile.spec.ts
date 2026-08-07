@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 /**
  * Documents Detail — authenticated MOBILE acceptance (P2 Blocker 1). Signs in as the E2E owner, opens
@@ -17,7 +17,7 @@ test.use({ viewport: { width: 390, height: 844 } });
 test.describe('documents detail — mobile', () => {
   test.skip(!email || !password, 'E2E_EMAIL / E2E_PASSWORD not configured');
 
-  async function signIn(page: import('@playwright/test').Page) {
+  async function signIn(page: Page) {
     await page.goto('/login');
     await page.getByLabel('Email').fill(email!);
     await page.getByLabel('Password').fill(password!);
@@ -25,7 +25,7 @@ test.describe('documents detail — mobile', () => {
     await page.waitForURL(/\/projects|\/p\//);
   }
 
-  async function assertNoHorizontalOverflow(page: import('@playwright/test').Page) {
+  async function assertNoHorizontalOverflow(page: Page) {
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     expect(overflow, 'page-level horizontal overflow (px)').toBeLessThanOrEqual(1);
   }

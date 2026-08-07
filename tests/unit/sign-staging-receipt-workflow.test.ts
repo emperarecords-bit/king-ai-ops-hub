@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
  */
 
 const WF_PATH = join(process.cwd(), '.github', 'workflows', 'sign-staging-receipt.yml');
-const wf = readFileSync(WF_PATH, 'utf8');
+const wf = readFileSync(WF_PATH, 'utf8').replaceAll('\r\n', '\n');
 /** The workflow with `#` comment lines removed — documentation legitimately names forbidden tokens. */
 const wfCode = wf
   .split('\n')

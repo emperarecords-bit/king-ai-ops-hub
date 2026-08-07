@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 /**
  * Documents Detail — restricted DOWNLOAD is release-safe (P2 final blocker). Authenticated, against the
@@ -15,7 +15,7 @@ const base = process.env.APP_URL ?? 'http://localhost:3000';
 test.describe('documents detail — restricted download', () => {
   test.skip(!email || !password, 'E2E_EMAIL / E2E_PASSWORD not configured');
 
-  async function signIn(page: import('@playwright/test').Page) {
+  async function signIn(page: Page) {
     await page.goto('/login');
     await page.getByLabel('Email').fill(email!);
     await page.getByLabel('Password').fill(password!);
@@ -23,7 +23,7 @@ test.describe('documents detail — restricted download', () => {
     await page.waitForURL(/\/projects|\/p\//);
   }
 
-  async function openFixture(page: import('@playwright/test').Page, name: string): Promise<string> {
+  async function openFixture(page: Page, name: string): Promise<string> {
     await page.goto('/p/e2e-sandbox/documents');
     await page.getByRole('link', { name }).click();
     await page.waitForURL(/\/documents\/[0-9a-f-]{36}/);

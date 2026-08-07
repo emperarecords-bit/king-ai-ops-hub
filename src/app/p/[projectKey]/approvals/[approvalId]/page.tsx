@@ -5,6 +5,7 @@ import { withTenant } from '@/db/tenant';
 import { getApprovalDetail } from '@/domain/approvals/approvals';
 import { assessConsequence, readConsequence } from '@/domain/approvals/consequence';
 import { NotFoundError } from '@/lib/errors';
+import { currentEpochMs } from '@/lib/clock';
 import { Card, PageHeader } from '@/components/ui';
 import { Breadcrumb } from '../../breadcrumb';
 import { ConsequenceReadPanel, ConsequenceLevelChip } from '../consequence-view';
@@ -49,7 +50,7 @@ export default async function ApprovalDetailPage({
   const profile = assessConsequence({ type: a.actionType, summary: a.summary, payload });
   const readout = readConsequence(profile);
   const pending = a.status === 'pending';
-  const expired = pending && a.expiresAt.getTime() < Date.now();
+  const expired = pending && a.expiresAt.getTime() < currentEpochMs();
 
   // Three distinct lifecycles — the operator must never infer whether the action actually happened.
   const aiWork = a.taskStatus === 'completed' ? 'Finished' : a.taskStatus.replaceAll('_', ' ');
