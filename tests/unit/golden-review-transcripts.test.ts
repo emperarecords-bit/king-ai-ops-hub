@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { executeRun, type EngineInput, type StepRecord } from '@/orchestration/engine';
 import type { ReviewVerdict, StepKind } from '@/types/domain';
 import { FakeProvider } from '@tests/support/fake-provider';
+import { anchorReviewClaims } from '@/orchestration/prompts';
 
 interface GoldenTranscript {
   name: string;
@@ -36,7 +37,8 @@ describe('golden cross-provider review transcripts', () => {
     it(transcript.name, async () => {
       const primary = new FakeProvider('openai').reply(transcript.primary);
       if (transcript.revision) primary.reply(transcript.revision);
-      const reviewer = new FakeProvider('anthropic').reply(transcript.review);
+      const anchor = anchorReviewClaims(transcript.primary)[0]!.anchor;
+      const reviewer = new FakeProvider('anthropic').reply(transcript.review.replaceAll('$CLAIM_1', anchor));
       const recorded: StepRecord[] = [];
 
       const result = await executeRun(input(primary, reviewer), {

@@ -1,73 +1,78 @@
 import { describe, expect, it } from 'vitest';
-import { parseReviewDetail, stripIssuesBlock } from '@/orchestration/prompts';
+import { anchorReviewClaims, parseReviewDetail, stripIssuesBlock } from '@/orchestration/prompts';
 
-const issuesBlock = (json: string) => '```review-issues\n' + json + '\n```';
+const primary = 'Revenue is $42,000. Growth cannot be assessed without a comparison period.';
+const claims = anchorReviewClaims(primary);
+const provenance = { reviewerAgentId: 'reviewer-1', provider: 'anthropic' as const, model: 'review-model' };
+const block = (value: unknown) => `\`\`\`review-result\n${JSON.stringify(value)}\n\`\`\``;
+const finding = (anchor = claims[0]!.anchor) => ({
+  claimAnchor: anchor,
+  severity: 'major',
+  rationale: 'The claim lacks supporting evidence.',
+  requestedRevision: 'Limit the statement to supported evidence.',
+});
 
-describe('parseReviewDetail', () => {
-  it('parses verdict and a valid issues block', () => {
-    const text = `VERDICT: revise\n\nTwo problems.\n\n${issuesBlock(
-      JSON.stringify([
-        { severity: 'major', summary: 'Off-by-one in pagination', detail: 'limit+1 rows returned' },
-        { severity: 'minor', summary: 'Typo in error message' },
-      ]),
-    )}`;
-    const { detail, malformedReasons } = parseReviewDetail(text);
-    expect(detail.verdict).toBe('revise');
-    expect(detail.issues).toHaveLength(2);
-    expect(detail.issues[0]!.severity).toBe('major');
-    expect(malformedReasons).toEqual([]);
+describe('claim anchors', () => {
+  it('are deterministic and combine structural position with a content digest', () => {
+    expect(anchorReviewClaims(primary)).toEqual(claims);
+    expect(claims.map((claim) => claim.anchor)).toEqual([
+      expect.stringMatching(/^claim-v1:p1:s1:[0-9a-f]{12}$/),
+      expect.stringMatching(/^claim-v1:p1:s2:[0-9a-f]{12}$/),
+    ]);
+  });
+});
+
+describe('strict review-result parsing', () => {
+  it('accepts a fully valid approval with trusted provenance', () => {
+    const parsed = parseReviewDetail(`Prose before.\n${block({ verdict: 'approve', findings: [] })}\nProse after.`, primary, provenance);
+    expect(parsed.malformedReasons).toEqual([]);
+    expect(parsed.detail).toMatchObject({ contractVersion: '2', verdict: 'approve', issues: [], provenance });
   });
 
-  it('approve with no block → empty issues, no complaints', () => {
-    const { detail, malformedReasons } = parseReviewDetail('VERDICT: approve\n\nAll good.');
-    expect(detail.verdict).toBe('approve');
-    expect(detail.issues).toEqual([]);
-    expect(malformedReasons).toEqual([]);
+  it.each(['revise', 'reject'] as const)('accepts a valid %s with per-claim severity and rationale', (verdict) => {
+    const value = { verdict, findings: [verdict === 'reject' ? { ...finding(), requestedRevision: undefined } : finding()] };
+    const parsed = parseReviewDetail(block(value), primary, provenance);
+    expect(parsed.malformedReasons).toEqual([]);
+    expect(parsed.detail.issues[0]).toMatchObject({ claimAnchor: claims[0]!.anchor, severity: 'major' });
   });
 
-  it('invalid JSON degrades to zero issues and reports, never throws', () => {
-    const text = `VERDICT: revise\n${issuesBlock('[{severity: major}]')}`;
-    const { detail, malformedReasons } = parseReviewDetail(text);
-    expect(detail.verdict).toBe('revise');
-    expect(detail.issues).toEqual([]);
-    expect(malformedReasons).toHaveLength(1);
+  it('accepts multiple distinct claim findings', () => {
+    const parsed = parseReviewDetail(block({ verdict: 'revise', findings: [finding(claims[0]!.anchor), finding(claims[1]!.anchor)] }), primary, provenance);
+    expect(parsed.detail.issues).toHaveLength(2);
+    expect(parsed.malformedReasons).toEqual([]);
   });
 
-  it('schema-invalid issues degrade to zero issues and report', () => {
-    const text = `VERDICT: reject\n${issuesBlock(
-      JSON.stringify([{ severity: 'catastrophic', summary: 'nope' }]),
-    )}`;
-    const { detail, malformedReasons } = parseReviewDetail(text);
-    expect(detail.verdict).toBe('reject');
-    expect(detail.issues).toEqual([]);
-    expect(malformedReasons.length).toBeGreaterThan(0);
+  it.each([
+    ['duplicate anchors', { verdict: 'revise', findings: [finding(), finding()] }],
+    ['unknown anchor', { verdict: 'revise', findings: [finding('claim-v1:p99:s99:000000000000')] }],
+    ['malformed severity', { verdict: 'revise', findings: [{ ...finding(), severity: 'catastrophic' }] }],
+    ['malformed verdict', { verdict: 'maybe', findings: [] }],
+  ])('fails closed for %s', (_name, value) => {
+    const parsed = parseReviewDetail(block(value), primary, provenance);
+    expect(parsed.detail.verdict).toBe('reject');
+    expect(parsed.detail.issues).toEqual([]);
+    expect(parsed.malformedReasons.length).toBeGreaterThan(0);
   });
 
-  it('missing verdict line defaults to revise (conservative middle)', () => {
-    const { detail } = parseReviewDetail('Looks fine I guess.');
-    expect(detail.verdict).toBe('revise');
+  it('fails closed when trusted provenance is missing', () => {
+    const parsed = parseReviewDetail(block({ verdict: 'approve', findings: [] }), primary);
+    expect(parsed.detail.verdict).toBe('reject');
+    expect(parsed.malformedReasons).toContain('trusted reviewer provenance is missing');
   });
 
-  it('caps issues at 20 via schema rejection', () => {
-    const many = Array.from({ length: 21 }, (_, i) => ({
-      severity: 'minor' as const,
-      summary: `issue ${i}`,
-    }));
-    const { detail, malformedReasons } = parseReviewDetail(
-      `VERDICT: revise\n${issuesBlock(JSON.stringify(many))}`,
-    );
-    expect(detail.issues).toEqual([]);
-    expect(malformedReasons.length).toBeGreaterThan(0);
+  it('rejects a hallucinated claim and a truncated provider result', () => {
+    expect(parseReviewDetail(block({ verdict: 'reject', findings: [finding('invented')] }), primary, provenance).malformedReasons[0]).toContain('unknown claim');
+    expect(parseReviewDetail('```review-result\n{"verdict":"approve"', primary, provenance).detail.verdict).toBe('reject');
+  });
+
+  it('never coerces missing or malformed structured output into approval', () => {
+    expect(parseReviewDetail('VERDICT: approve\nLooks good.', primary, provenance).detail.verdict).toBe('reject');
   });
 });
 
 describe('stripIssuesBlock', () => {
-  it('removes the block for human display', () => {
-    const text = `VERDICT: revise\nReasoning here.\n\n${issuesBlock('[]')}`;
-    expect(stripIssuesBlock(text)).toBe('VERDICT: revise\nReasoning here.');
-  });
-
-  it('leaves text without a block untouched', () => {
-    expect(stripIssuesBlock('VERDICT: approve\nFine.')).toBe('VERDICT: approve\nFine.');
+  it('removes current and legacy structured blocks for human display', () => {
+    expect(stripIssuesBlock(`Reasoning\n${block({ verdict: 'approve', findings: [] })}`)).toBe('Reasoning');
+    expect(stripIssuesBlock('Reasoning\n```review-issues\n[]\n```')).toBe('Reasoning');
   });
 });

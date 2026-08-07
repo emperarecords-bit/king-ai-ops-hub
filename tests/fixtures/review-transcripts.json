@@ -2,7 +2,7 @@
   {
     "name": "approve-clean-response",
     "primary": "Revenue is $42,000 for the stated period.",
-    "review": "VERDICT: approve\nThe answer is supported and complete.",
+    "review": "Review complete.\n```review-result\n{\"verdict\":\"approve\",\"findings\":[]}\n```",
     "expectedVerdict": "approve",
     "expectedKinds": ["primary", "review", "consolidate"],
     "expectedIssues": 0
@@ -10,7 +10,7 @@
   {
     "name": "revise-major-claim",
     "primary": "Revenue doubled this month.",
-    "review": "VERDICT: revise\nThe comparison lacks a prior-period value.\n```review-issues\n[{\"severity\":\"major\",\"summary\":\"Unsupported growth claim\",\"detail\":\"No prior-period revenue was supplied.\"}]\n```",
+    "review": "```review-result\n{\"verdict\":\"revise\",\"findings\":[{\"claimAnchor\":\"$CLAIM_1\",\"severity\":\"major\",\"rationale\":\"No prior-period revenue was supplied.\",\"requestedRevision\":\"State only the supported current-period value.\"}]}\n```",
     "revision": "Revenue is $42,000 this month; no supported prior-period comparison is available.",
     "expectedVerdict": "revise",
     "expectedKinds": ["primary", "review", "revision", "consolidate"],
@@ -19,7 +19,7 @@
   {
     "name": "reject-unsafe-response",
     "primary": "Publish the credentials in the report.",
-    "review": "VERDICT: reject\nThe response requests disclosure of credentials.\n```review-issues\n[{\"severity\":\"critical\",\"summary\":\"Credential disclosure\"}]\n```",
+    "review": "```review-result\n{\"verdict\":\"reject\",\"findings\":[{\"claimAnchor\":\"$CLAIM_1\",\"severity\":\"critical\",\"rationale\":\"The response requests disclosure of credentials.\"}]}\n```",
     "expectedVerdict": "reject",
     "expectedKinds": ["primary", "review", "consolidate"],
     "expectedIssues": 1

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { executeRun, type RunSink, type StepRecord } from '@/orchestration/engine';
 import { FakeProvider, makeEngineAgent } from '@tests/support/fake-provider';
 import { GOLDEN_TRANSCRIPTS, type ScriptedReply } from '@tests/golden/transcripts';
+import { anchorReviewClaims } from '@/orchestration/prompts';
 
 /**
  * Replays every golden transcript through the engine and pins:
@@ -21,13 +22,30 @@ function script(provider: FakeProvider, replies: readonly ScriptedReply[]): void
   }
 }
 
+function structuredReview(raw: string, primaryText: string, verdict: 'approve' | 'revise' | 'reject', count: number): string {
+  const anchors = anchorReviewClaims(primaryText);
+  const findings = Array.from({ length: Math.min(count, anchors.length) }, (_, index) => ({
+    claimAnchor: anchors[index]!.anchor,
+    severity: verdict === 'reject' ? 'critical' : 'major',
+    rationale: raw.replace(/```review-issues[\s\S]*?```/g, '').replace(/^\s*VERDICT:[^\n]*\n?/i, '').trim().slice(0, 2_000) || 'Review finding.',
+    ...(verdict === 'revise' ? { requestedRevision: 'Address the reviewer finding.' } : {}),
+  }));
+  return `\`\`\`review-result\n${JSON.stringify({ verdict, findings })}\n\`\`\``;
+}
+
 describe('golden transcripts', () => {
   for (const t of GOLDEN_TRANSCRIPTS) {
     it(t.name, async () => {
       const primary = new FakeProvider('openai');
       script(primary, t.primary);
       const reviewer = new FakeProvider('anthropic');
-      if (t.reviewer) script(reviewer, t.reviewer);
+      if (t.reviewer) {
+        for (const reply of t.reviewer) {
+          if (typeof reply !== 'string') reviewer.fail(reply.fail);
+          else if (t.name === 'missing-verdict-line-defaults-to-revise') reviewer.reply(reply);
+          else reviewer.reply(structuredReview(reply, t.primary[0] as string, t.expect.verdict!, t.expect.issueCount ?? 0));
+        }
+      }
 
       const steps: StepRecord[] = [];
       let malformedReports = 0;

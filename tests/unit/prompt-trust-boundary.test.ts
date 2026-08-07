@@ -77,7 +77,8 @@ describe('HUB-008 canonical assembler', () => {
   });
   it('reviewer variant carries the same priorities + reviewer verdict protocol', () => {
     const a = assembleEffectivePrompt({ variant: 'review', agentSystemPrompt: 'You are the reviewer.', taskInput: 'Do X', primaryResponse: 'answer', operatingPriorities: priorities });
-    expect(a.system).toContain('VERDICT: approve | revise | reject');
+    expect(a.system).toContain('"verdict":"approve|revise|reject"');
+    expect(a.userTurn).toContain('claim-v1:p1:s1:');
     expect(a.userTurn).toContain('CURRENT OPERATING PRIORITIES'); // parity
     expect((a.userTurn.match(/CURRENT OPERATING PRIORITIES/g) ?? []).length).toBe(1);
   });

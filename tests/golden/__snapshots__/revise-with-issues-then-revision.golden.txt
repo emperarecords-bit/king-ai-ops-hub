@@ -3,8 +3,6 @@ function sum(a){let s=0;for(let i=0;i<a.length;i++)s+=a[i];return s}
 ---
 **Review summary** (verdict: revise)
 
-VERDICT: revise
 
-Two real bugs.
 
 *The result above incorporates one revision addressing this review.*

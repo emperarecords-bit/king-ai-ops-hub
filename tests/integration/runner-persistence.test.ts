@@ -23,6 +23,7 @@ import { withTenant } from '@/db/tenant';
 import { createObjective, setObjectiveStatus } from '@/domain/objectives/objectives';
 import { agentExecutionFingerprint, updateEmployeePrompt } from '@/domain/agents/agents';
 import { setProviderOverrideForTests } from '@/providers/registry';
+import { anchorReviewClaims } from '@/orchestration/prompts';
 import { startRun } from '@/domain/tasks/runner';
 import { ASSEMBLER_VERSION } from '@/orchestration/prompts';
 import { sha256Hex } from '@/lib/crypto';
@@ -71,13 +72,7 @@ const TASK_MARKER = 'TASK_DECISION_MARKER_INCLUDED';
 const UNRELATED_MARKER = 'UNRELATED_DECISION_MARKER_EXCLUDED';
 const PROPOSED_MARKER = 'PROPOSED_DECISION_MARKER_EXCLUDED';
 
-const REVIEWER_REVISE = `VERDICT: revise
-
-One issue to address.
-
-\`\`\`review-issues
-[{"severity":"minor","summary":"Add a Stripe-connection verification step","detail":"The checklist should require the contractor to connect their own Stripe account before activation."}]
-\`\`\``;
+const REVIEWER_REVISE = `\`\`\`review-result\n${JSON.stringify({ verdict: 'revise', findings: [{ claimAnchor: anchorReviewClaims('Primary draft checklist.')[0]!.anchor, severity: 'minor', rationale: 'The checklist should require the contractor to connect their own Stripe account before activation.', requestedRevision: 'Add a Stripe-connection verification step.' }] })}\n\`\`\``;
 
 async function freshWorkspace() {
   const pid = (await db.insert(projects).values({ orgId, key: fixtureKey('rp'), name: 'W' }).returning({ id: projects.id }))[0]!.id;
