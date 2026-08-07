@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
 import {
   type Freshness,
   type FreshnessComparison,
@@ -183,22 +184,36 @@ export function buildPrimaryUserTurn(
   return `${prioritiesBlock}${objectiveBlock}${contextBlock}\n\n${wrapUntrusted('Task', taskInput)}\n\nComplete the task.`;
 }
 
-export const ISSUES_BLOCK_OPEN = '```review-issues';
+export const ISSUES_BLOCK_OPEN = '```review-result';
 export const ISSUES_BLOCK_CLOSE = '```';
 
 export function buildReviewSystem(agentSystemPrompt: string): string {
   return `${agentSystemPrompt}\n${SHARED_RULES}
-You are reviewing another model's response. Start your reply with exactly one line:
-VERDICT: approve | revise | reject
-- approve: the response is correct and complete as-is.
-- revise: the response is salvageable but has specific problems the author should fix. List them.
-- reject: the response is fundamentally wrong or unsafe. Explain why.
-Then give your reasoning in prose.
-Finally, if you found concrete problems, end your reply with a single fenced block listing them:
+You are reviewing another model's response. Return exactly one structured result block (brief prose may surround it):
 ${ISSUES_BLOCK_OPEN}
-[{"severity": "critical|major|minor", "summary": "<one line>", "detail": "<optional specifics>"}]
+{"verdict":"approve|revise|reject","findings":[{"claimAnchor":"<exact supplied anchor>","severity":"critical|major|minor","rationale":"<why the claim is problematic>","requestedRevision":"<required for revise findings; optional for reject>"}]}
 ${ISSUES_BLOCK_CLOSE}
-List at most 20 issues. If the verdict is approve and there are no issues, omit the block.`;
+- approve: the response is correct and complete as-is.
+- revise: the response is salvageable but has specific problems the author should fix.
+- reject: the response is fundamentally wrong or unsafe. Explain why.
+Use only claim anchors supplied in the response under review. Never invent or duplicate an anchor.
+Approve requires zero findings. Revise and reject require at least one finding. List at most 20 findings.`;
+}
+
+export interface ReviewableClaim { readonly anchor: string; readonly text: string }
+
+/** Stable structural claim identity: protocol version + paragraph/sentence position + bounded content digest. */
+export function anchorReviewClaims(text: string): readonly ReviewableClaim[] {
+  const claims: ReviewableClaim[] = [];
+  const paragraphs = text.replace(/\r\n?/g, '\n').split(/\n\s*\n/);
+  paragraphs.forEach((paragraph, paragraphIndex) => {
+    const sentences = paragraph.trim().split(/(?<=[.!?])\s+|\n+/).map((v) => v.trim()).filter(Boolean);
+    sentences.forEach((claim, sentenceIndex) => {
+      const digest = createHash('sha256').update(claim.normalize('NFKC'), 'utf8').digest('hex').slice(0, 12);
+      claims.push({ anchor: `claim-v1:p${paragraphIndex + 1}:s${sentenceIndex + 1}:${digest}`, text: claim });
+    });
+  });
+  return claims;
 }
 
 export function buildReviewUserTurn(
@@ -226,9 +241,12 @@ ${approvedPolicies.map((p) => p.content.trim()).join('\n\n')}
     approvedPolicies.length > 0
       ? 'Review the response against the task and the Approved Organizational Policies above.'
       : 'Review the response against the task.';
+  const anchored = anchorReviewClaims(primaryResponse)
+    .map((claim) => `[${claim.anchor}] ${claim.text}`)
+    .join('\n');
   return `${prioritiesBlock}${policyBlock}${wrapUntrusted('Original task', taskInput)}\n\n${wrapUntrusted(
     'Response under review',
-    primaryResponse,
+    anchored,
   )}\n\n${closing}`;
 }
 
@@ -284,12 +302,16 @@ export function parseVerdict(reviewText: string): ReviewVerdict {
   return match[1]!.toLowerCase() as ReviewVerdict;
 }
 
-const reviewIssueSchema = z.object({
+const reviewFindingSchema = z.object({
+  claimAnchor: z.string().min(1).max(100),
   severity: z.enum(REVIEW_SEVERITIES),
-  summary: z.string().trim().min(1).max(500),
-  detail: z.string().trim().max(2_000).optional(),
-});
-const issuesArraySchema = z.array(reviewIssueSchema).max(20);
+  rationale: z.string().trim().min(1).max(2_000),
+  requestedRevision: z.string().trim().min(1).max(2_000).optional(),
+}).strict();
+const reviewResultSchema = z.object({
+  verdict: z.enum(['approve', 'revise', 'reject']),
+  findings: z.array(reviewFindingSchema).max(20),
+}).strict();
 
 export interface ParsedReview {
   readonly detail: ReviewDetail;
@@ -302,32 +324,57 @@ export interface ParsedReview {
  * issues block. Model output is untrusted (SECURITY.md T2): a malformed block
  * degrades to zero issues and is reported, never thrown.
  */
-export function parseReviewDetail(reviewText: string): ParsedReview {
-  const verdict = parseVerdict(reviewText);
-  const block = reviewText.match(/```review-issues\s*\n([\s\S]*?)\n?```/);
-  if (!block) {
-    return { detail: { verdict, issues: [] }, malformedReasons: [] };
-  }
+export function parseReviewDetail(
+  reviewText: string,
+  primaryText: string,
+  provenance?: ReviewDetail['provenance'],
+): ParsedReview {
+  const invalid = (reasons: readonly string[]): ParsedReview => ({
+    detail: { contractVersion: '2', verdict: 'reject', issues: [], ...(provenance ? { provenance } : {}) },
+    malformedReasons: reasons,
+  });
+  if (!provenance) return invalid(['trusted reviewer provenance is missing']);
+  const blocks = [...reviewText.matchAll(/```review-result\s*\n([\s\S]*?)\n?```/g)];
+  if (blocks.length !== 1) return invalid([`expected exactly one review-result block; found ${blocks.length}`]);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(block[1]!);
+    parsed = JSON.parse(blocks[0]![1]!);
   } catch {
-    return {
-      detail: { verdict, issues: [] },
-      malformedReasons: ['review-issues block is not valid JSON'],
-    };
+    return invalid(['review-result block is not valid JSON']);
   }
-  const validated = issuesArraySchema.safeParse(parsed);
+  const validated = reviewResultSchema.safeParse(parsed);
   if (!validated.success) {
-    return {
-      detail: { verdict, issues: [] },
-      malformedReasons: validated.error.issues.map((i) => `review-issues: ${i.path.join('.')}: ${i.message}`),
-    };
+    return invalid(validated.error.issues.map((i) => `review-result: ${i.path.join('.')}: ${i.message}`));
   }
-  return { detail: { verdict, issues: validated.data }, malformedReasons: [] };
+  const { verdict, findings } = validated.data;
+  if (verdict === 'approve' && findings.length !== 0) return invalid(['approve verdict must not contain findings']);
+  if (verdict !== 'approve' && findings.length === 0) return invalid([`${verdict} verdict requires at least one finding`]);
+  const known = new Set(anchorReviewClaims(primaryText).map((claim) => claim.anchor));
+  const seen = new Set<string>();
+  for (const finding of findings) {
+    if (!known.has(finding.claimAnchor)) return invalid([`unknown claim anchor: ${finding.claimAnchor}`]);
+    if (seen.has(finding.claimAnchor)) return invalid([`duplicate claim anchor: ${finding.claimAnchor}`]);
+    seen.add(finding.claimAnchor);
+    if (verdict === 'revise' && !finding.requestedRevision) {
+      return invalid([`revise finding ${finding.claimAnchor} requires requestedRevision`]);
+    }
+  }
+  return {
+    detail: {
+      contractVersion: '2', verdict, provenance,
+      issues: findings.map((finding) => ({
+        claimAnchor: finding.claimAnchor,
+        severity: finding.severity,
+        rationale: finding.rationale,
+        requestedRevision: finding.requestedRevision,
+        summary: finding.rationale,
+      })),
+    },
+    malformedReasons: [],
+  };
 }
 
 /** Remove the issues block for human-facing rendering of the review text. */
 export function stripIssuesBlock(text: string): string {
-  return text.replace(/```review-issues\s*\n[\s\S]*?\n?```/g, '').trimEnd();
+  return text.replace(/```(?:review-result|review-issues)\s*\n[\s\S]*?\n?```/g, '').trimEnd();
 }

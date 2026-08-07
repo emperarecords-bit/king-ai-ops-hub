@@ -490,7 +490,11 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
       }
     }
     if (reviewResponse) {
-      const parsedReview = parseReviewDetail(reviewResponse.text);
+      const parsedReview = parseReviewDetail(reviewResponse.text, primaryResponse.text, {
+        reviewerAgentId: input.reviewer.agentId,
+        provider: reviewResponse.provider,
+        model: reviewResponse.model,
+      });
       verdict = parsedReview.detail.verdict;
       // Only report malformed output on a FRESH review — a replayed checkpoint must not re-audit it.
       if (!reviewCheckpoint && parsedReview.malformedReasons.length > 0) {

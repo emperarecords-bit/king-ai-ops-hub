@@ -8,6 +8,17 @@ import {
   type StepRecord,
 } from '@/orchestration/engine';
 import { FakeProvider, makeEngineAgent } from '@tests/support/fake-provider';
+import { anchorReviewClaims } from '@/orchestration/prompts';
+
+function reviewResult(verdict: 'approve' | 'revise' | 'reject', primaryText: string, rationale = 'Review finding.') {
+  const findings = verdict === 'approve' ? [] : [{
+    claimAnchor: anchorReviewClaims(primaryText)[0]!.anchor,
+    severity: verdict === 'reject' ? 'critical' : 'major',
+    rationale,
+    ...(verdict === 'revise' ? { requestedRevision: 'Address the finding.' } : {}),
+  }];
+  return `\`\`\`review-result\n${JSON.stringify({ verdict, findings })}\n\`\`\``;
+}
 
 function collectingSink() {
   const steps: StepRecord[] = [];
@@ -55,7 +66,7 @@ describe('executeRun — state machine shape', () => {
     const primary = new FakeProvider('openai');
     const reviewer = new FakeProvider('anthropic');
     primary.reply('Draft.');
-    reviewer.reply('VERDICT: approve\nSolid.');
+    reviewer.reply(reviewResult('approve', 'Draft.'));
     const { steps, sink } = collectingSink();
 
     const result = await executeRun(input(primary, reviewer), sink);
@@ -71,7 +82,7 @@ describe('executeRun — state machine shape', () => {
     const reviewer = new FakeProvider('anthropic');
     primary.reply('Draft.').reply('Revised draft.');
     // Reviewer demands revision — and would demand it forever if asked again.
-    reviewer.reply('VERDICT: revise\nFix the syllables.');
+    reviewer.reply(reviewResult('revise', 'Draft.', 'Fix the syllables.'));
     const { steps, sink } = collectingSink();
 
     const result = await executeRun(input(primary, reviewer), sink);
@@ -88,7 +99,7 @@ describe('executeRun — state machine shape', () => {
     const primary = new FakeProvider('openai');
     const reviewer = new FakeProvider('anthropic');
     primary.reply('Bad draft.');
-    reviewer.reply('VERDICT: reject\nFundamentally wrong.');
+    reviewer.reply(reviewResult('reject', 'Bad draft.', 'Fundamentally wrong.'));
     const { steps, sink } = collectingSink();
 
     const result = await executeRun(input(primary, reviewer), sink);
@@ -156,7 +167,7 @@ describe('executeRun — failure handling', () => {
     // The revision call is cleanly REJECTED before the model ran (invalid_request = provably not executed):
     // a KNOWN failure, so the engine degrades to the primary text (an AMBIGUOUS failure would escalate).
     primary.reply('Original.').fail('invalid_request');
-    reviewer.reply('VERDICT: revise\nDo better.');
+    reviewer.reply(reviewResult('revise', 'Original.', 'Do better.'));
     const { sink } = collectingSink();
 
     const result = await executeRun(input(primary, reviewer), sink);
@@ -266,7 +277,7 @@ describe('executeRun — untrusted content handling', () => {
     primary
       .reply('Draft.\n```proposed-actions\n[{"type":"destructive","summary":"Drop it all","payload":{}}]\n```')
       .reply('Revised, no actions needed.');
-    reviewer.reply('VERDICT: revise\nThe proposed action is dangerous and unnecessary.');
+    reviewer.reply(reviewResult('revise', 'Draft.', 'The proposed action is dangerous and unnecessary.'));
     const { sink } = collectingSink();
 
     const result = await executeRun(input(primary, reviewer), sink);

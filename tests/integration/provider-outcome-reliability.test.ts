@@ -23,6 +23,7 @@ import {
 } from '@/db/schema';
 import { setProviderOverrideForTests } from '@/providers/registry';
 import { __setRunTestHookForTests, resumeRun, startRun } from '@/domain/tasks/runner';
+import { anchorReviewClaims } from '@/orchestration/prompts';
 
 /**
  * Hub P1d correction — AMBIGUOUS provider-outcome handling across the whole run pipeline.
@@ -141,7 +142,7 @@ function override(o: FakeProvider, a?: FakeProvider) {
   setProviderOverrideForTests((id) => (id === 'openai' ? o : id === 'anthropic' ? a : undefined));
 }
 
-const REVISE = 'VERDICT: revise\n\nFix it.';
+const REVISE = `\`\`\`review-result\n${JSON.stringify({ verdict: 'revise', findings: [{ claimAnchor: anchorReviewClaims('Primary answer.')[0]!.anchor, severity: 'major', rationale: 'Fix it.', requestedRevision: 'Fix the answer.' }] })}\n\`\`\``;
 
 beforeAll(async () => {
   if (!available) return;

@@ -28,6 +28,7 @@ import { __setRunTestHookForTests, resumeRun, startRun } from '@/domain/tasks/ru
 import { requestCancellation } from '@/domain/tasks/tasks';
 import { enqueueRun, renewRunJobLease, runClaimedJob } from '@/domain/jobs/jobs';
 import { LeaseLostSignal } from '@/orchestration/engine';
+import { anchorReviewClaims } from '@/orchestration/prompts';
 
 /**
  * Hub P1d Stage 2 — crash-safe queued runs + idempotent finalization.
@@ -140,7 +141,7 @@ function crossPair(reviewText: string, primaryReply = 'Primary answer.', revisio
 }
 
 const APPROVE = 'VERDICT: approve\n\nLooks good.';
-const REVISE = `VERDICT: revise\n\nOne fix.\n\n\`\`\`review-issues\n[{"severity":"minor","summary":"add a step"}]\n\`\`\``;
+const REVISE = `\`\`\`review-result\n${JSON.stringify({ verdict: 'revise', findings: [{ claimAnchor: anchorReviewClaims('Primary answer.')[0]!.anchor, severity: 'minor', rationale: 'Add a step.', requestedRevision: 'Add the missing step.' }] })}\n\`\`\``;
 
 beforeAll(async () => {
   if (!available) return;

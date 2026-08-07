@@ -34,12 +34,23 @@ export interface ReviewIssue {
   readonly severity: ReviewSeverity;
   readonly summary: string;
   readonly detail?: string;
+  /** Deterministic, pre-persistence anchor into the primary response. */
+  readonly claimAnchor?: string;
+  readonly rationale?: string;
+  readonly requestedRevision?: string;
 }
 
 /** Structured review outcome stored on the review step (run_steps.verdict_detail). */
 export interface ReviewDetail {
+  readonly contractVersion?: '2';
   readonly verdict: ReviewVerdict;
   readonly issues: readonly ReviewIssue[];
+  /** Trusted execution provenance; never accepted from model-authored JSON. */
+  readonly provenance?: {
+    readonly reviewerAgentId: string;
+    readonly provider: 'openai' | 'anthropic';
+    readonly model: string;
+  };
 }
 
 /**
