@@ -79,7 +79,7 @@ export async function middleware(request: NextRequest) {
   // /api/health is an unauthenticated liveness probe for the load balancer
   // (O-21) — it exposes only aggregate up/down, never tenant data.
   const isPublic =
-    pathname === '/login' || pathname.startsWith('/auth') || pathname === '/api/health';
+    pathname === '/login' || pathname.startsWith('/auth') || pathname === '/api/health' || pathname === '/api/live';
 
   if (!user && !isPublic) {
     // API callers get a JSON 401 (a login-page redirect would arrive as a 200

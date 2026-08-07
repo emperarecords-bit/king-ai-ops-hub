@@ -10,6 +10,7 @@ import {
   reconcileStaleDocumentJobs,
   runClaimedDocumentJob,
 } from '../src/domain/documents/document-jobs';
+import { log } from '../src/lib/log';
 
 /**
  * Durable run worker (O-21). The process that actually executes queued runs in
@@ -39,16 +40,14 @@ async function reconcileOnce(reason: 'boot' | 'periodic'): Promise<void> {
   const recon = await reconcileStaleJobs();
   const docRecon = await reconcileStaleDocumentJobs();
   if (recon.requeued || recon.recovered || docRecon.requeued) {
-    console.log(
-      `worker: reconcile (${reason}) — ${recon.requeued} run requeued, ${recon.recovered} recovered, ${docRecon.requeued} doc requeued`,
-    );
+    log.info('worker.reconciled', { reason, runJobsRequeued: recon.requeued, runsRecovered: recon.recovered, documentJobsRequeued: docRecon.requeued });
   }
 }
 
 async function loop(): Promise<void> {
   await reconcileOnce('boot');
   let lastReconcile = Date.now();
-  console.log('worker: ready, polling for run + document jobs');
+  log.info('worker.ready', { idlePollMs: IDLE_MS, reconcileIntervalMs: RECONCILE_INTERVAL_MS });
 
   while (!stopping) {
     let claimed = false;
@@ -63,24 +62,24 @@ async function loop(): Promise<void> {
       const job = await claimNextJob();
       if (job) {
         claimed = true;
-        console.log(`worker: claimed run job ${job.jobId} (task ${job.taskId})`);
+        log.info('worker.run_job.claimed', { jobId: job.jobId, taskId: job.taskId, attempt: job.attempt });
         const outcome = await runClaimedJob(job);
-        console.log(`worker: run job ${job.jobId} → ${outcome?.status ?? 'recovered/failed'}`);
+        log.info('worker.run_job.finished', { jobId: job.jobId, taskId: job.taskId, status: outcome?.status ?? 'recovered_or_failed' });
       }
       // Document-index jobs share the same worker; claim one per idle pass too.
       const docJob = await claimNextDocumentJob();
       if (docJob) {
         claimed = true;
-        console.log(`worker: claimed document job ${docJob.jobId} (document ${docJob.documentId})`);
+        log.info('worker.document_job.claimed', { jobId: docJob.jobId, documentId: docJob.documentId });
         await runClaimedDocumentJob(docJob);
-        console.log(`worker: document job ${docJob.jobId} → done`);
+        log.info('worker.document_job.finished', { jobId: docJob.jobId, documentId: docJob.documentId, status: 'completed' });
       }
     } catch (err) {
-      console.error('worker: loop error', err instanceof Error ? err.message : err);
+      log.error('worker.loop_error', { errorClass: err instanceof Error ? err.name : 'unknown', recoverable: true });
     }
     if (!claimed && !stopping) await sleep(IDLE_MS);
   }
-  console.log('worker: stopped');
+  log.info('worker.stopped');
 }
 
 function sleep(ms: number): Promise<void> {
@@ -89,7 +88,7 @@ function sleep(ms: number): Promise<void> {
 
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, () => {
-    console.log(`worker: ${sig} received, finishing current job then exiting`);
+    log.info('worker.shutdown_requested', { signal: sig });
     stopping = true;
   });
 }
@@ -97,6 +96,6 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
 loop()
   .then(() => process.exit(0))
   .catch((err) => {
-    console.error('worker crashed:', err);
+    log.error('worker.fatal', { errorClass: err instanceof Error ? err.name : 'unknown', recoverable: false });
     process.exit(1);
   });

@@ -27,7 +27,8 @@ export async function GET() {
     await db.execute(sql`select 1`);
     checks.database = { ok: true };
   } catch (err) {
-    checks.database = { ok: false, detail: err instanceof Error ? err.message.slice(0, 120) : 'unreachable' };
+    void err;
+    checks.database = { ok: false, detail: 'unreachable' };
   }
 
   // Migration state: the latest expected table exists.
@@ -39,7 +40,8 @@ export async function GET() {
       const row = (r as unknown as { rows?: Array<{ present: boolean }> }).rows?.[0] ?? (Array.isArray(r) ? r[0] : undefined);
       checks.migrations = { ok: !!row?.present, detail: row?.present ? undefined : `missing ${LATEST_EXPECTED_TABLE}` };
     } catch (err) {
-      checks.migrations = { ok: false, detail: err instanceof Error ? err.message.slice(0, 120) : 'unknown' };
+      void err;
+      checks.migrations = { ok: false, detail: 'check_failed' };
     }
   }
 
@@ -72,7 +74,8 @@ export async function GET() {
     await store.head('__health_probe__');
     checks.storage = { ok: true, detail: `driver=${store.driver}` };
   } catch (err) {
-    checks.storage = { ok: false, detail: err instanceof Error ? err.message.slice(0, 120) : 'unreachable' };
+    void err;
+    checks.storage = { ok: false, detail: 'unreachable' };
   }
 
   const healthy = Object.values(checks).every((c) => c.ok);
