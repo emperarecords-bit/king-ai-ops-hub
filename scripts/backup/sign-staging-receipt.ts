@@ -151,7 +151,7 @@ export function deriveMigrationFacts(source: SourceLocation, appliedCount: numbe
   if (!Number.isInteger(appliedCount) || appliedCount < 0 || appliedCount > committedCount) {
     reject('appliedCount', `must be an integer in [0, ${committedCount}]`);
   }
-  const portableMigrationSetHash = buildSourceManifestFromGit('HEAD', 'drizzle').sourceMigrationSetHash;
+  const portableMigrationSetHash = buildSourceManifestFromGit(source.gitCommitish, 'drizzle').sourceMigrationSetHash;
   const pendingMigrations: PendingMigrationEntry[] = sorted
     .filter((e) => e.migrationIndex >= appliedCount)
     .map((e) => ({

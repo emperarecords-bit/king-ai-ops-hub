@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { runCli } from '../../scripts/ci/sign-staging-receipt';
 import {
   type StagingReceiptInputs,
@@ -25,16 +25,32 @@ import { verifyReceiptV2Parsed } from '../../scripts/backup/receipt-v2-verify';
  * checked-out drizzle tree, so this proves the assembler binds to the real 0000–0056 source set.
  */
 
-const BASE = process.cwd();
 const kp = generateKeyPairSync('ed25519');
 // The migration facts are derived from a REAL commit (the portable hash reads git blobs at sourceCommit), so the
 // tests bind the actual checked-out HEAD — the same code path the workflow runs against the selected source commit.
-const HEAD_SHA = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+// Staging v125 remains pinned to 0056. A moving HEAD must not redefine that staged source identity.
+const STAGING_SOURCE_COMMIT = execFileSync(
+  'git', ['rev-parse', '76e4464d20aa81f872d88a26ef130ab0dcf47929^{commit}'], { encoding: 'utf8' },
+).trim();
+const STAGING_RUNTIME_DIR = mkdtempSync(join(tmpdir(), 'staging-source-0056-'));
+const stagingJournalText = execFileSync(
+  'git', ['show', `${STAGING_SOURCE_COMMIT}:drizzle/meta/_journal.json`], { encoding: 'utf8' },
+);
+mkdirSync(join(STAGING_RUNTIME_DIR, 'drizzle', 'meta'), { recursive: true });
+writeFileSync(join(STAGING_RUNTIME_DIR, 'drizzle', 'meta', '_journal.json'), stagingJournalText, 'utf8');
+const stagingJournal = JSON.parse(stagingJournalText) as { entries: Array<{ tag: string }> };
+for (const entry of stagingJournal.entries) {
+  writeFileSync(
+    join(STAGING_RUNTIME_DIR, 'drizzle', `${entry.tag}.sql`),
+    execFileSync('git', ['show', `${STAGING_SOURCE_COMMIT}:drizzle/${entry.tag}.sql`]),
+  );
+}
+afterAll(() => rmSync(STAGING_RUNTIME_DIR, { recursive: true, force: true }));
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 function goodInputs(over: Partial<StagingReceiptInputs> = {}): StagingReceiptInputs {
   return {
-    sourceCommit: HEAD_SHA,
+    sourceCommit: STAGING_SOURCE_COMMIT,
     targetImageRef: `registry.fly.io/king-ai-ops-hub-staging@${DIGEST}`,
     targetImageDigest: DIGEST,
     deploymentNonce: 'deadbeefdeadbeefdeadbeefdeadbeef',
@@ -56,7 +72,7 @@ function goodInputs(over: Partial<StagingReceiptInputs> = {}): StagingReceiptInp
 
 describe('G-Backup staging-receipt producer — happy path (fixture keys)', () => {
   it('signs + self-verifies; pending is exactly 0054–0056 derived from source', () => {
-    const out = produceStagingReceipt(goodInputs(), kp.privateKey, BASE);
+    const out = produceStagingReceipt(goodInputs(), kp.privateKey, STAGING_RUNTIME_DIR);
     expect(receiptV2Schema.safeParse(out.receipt).success).toBe(true);
     expect(out.receipt.environment).toBe('staging');
     expect(out.receipt.targetApplication).toBe('king-ai-ops-hub-staging');
@@ -101,18 +117,18 @@ describe('G-Backup staging-receipt producer — required-input enforcement + pla
   ];
   for (const [label, over] of cases) {
     it(`rejects ${label}`, () => {
-      expect(() => buildStagingSignedReceipt(goodInputs(over), BASE)).toThrow(StagingReceiptInputError);
+      expect(() => buildStagingSignedReceipt(goodInputs(over), STAGING_RUNTIME_DIR)).toThrow(StagingReceiptInputError);
     });
   }
 });
 
 describe('G-Backup staging-receipt producer — hash cross-check + tamper', () => {
   it('rejects an operator-provided portable hash that disagrees with source', () => {
-    expect(() => buildStagingSignedReceipt(goodInputs({ assertPortableMigrationSetHash: 'f'.repeat(64) }), BASE)).toThrow(StagingReceiptInputError);
+    expect(() => buildStagingSignedReceipt(goodInputs({ assertPortableMigrationSetHash: 'f'.repeat(64) }), STAGING_RUNTIME_DIR)).toThrow(StagingReceiptInputError);
   });
 
   it('a tampered signature fails verification', () => {
-    const out = produceStagingReceipt(goodInputs(), kp.privateKey, BASE);
+    const out = produceStagingReceipt(goodInputs(), kp.privateKey, STAGING_RUNTIME_DIR);
     const flipped = out.receipt.signature[0] === 'A' ? 'B' : 'A';
     const tampered = { ...out.receipt, signature: flipped + out.receipt.signature.slice(1) };
     const load = loadReceiptKeyBundle([out.publicTrustEntry]);
@@ -125,7 +141,7 @@ describe('G-Backup staging-receipt producer — hash cross-check + tamper', () =
   });
 
   it('a receipt signed by a DIFFERENT key is not trusted', () => {
-    const out = produceStagingReceipt(goodInputs(), kp.privateKey, BASE);
+    const out = produceStagingReceipt(goodInputs(), kp.privateKey, STAGING_RUNTIME_DIR);
     const other = generateKeyPairSync('ed25519');
     const otherTrust = derivePublicTrustEntry(other.privateKey, out.receipt.keyId);
     const load = loadReceiptKeyBundle([otherTrust]);
@@ -140,7 +156,7 @@ describe('G-Backup staging-receipt producer — hash cross-check + tamper', () =
 
 describe('G-Backup staging-receipt producer — no private material can leak into the artifact', () => {
   it('the receipt, trust bundle, and metadata contain no PRIVATE KEY material', () => {
-    const out = produceStagingReceipt(goodInputs(), kp.privateKey, BASE);
+    const out = produceStagingReceipt(goodInputs(), kp.privateKey, STAGING_RUNTIME_DIR);
     for (const [label, v] of [
       ['receipt', out.receipt],
       ['trustEntry', out.publicTrustEntry],
@@ -163,7 +179,8 @@ describe('G-Backup staging-receipt CLI (fixture key via env) — writes only pub
       NODE_ENV: 'test',
       GBACKUP_SIGNING_KEY_PEM_B64: keyB64,
       OUTPUT_DIR: outDir,
-      SOURCE_COMMIT: HEAD_SHA,
+      SOURCE_DIR: STAGING_RUNTIME_DIR,
+      SOURCE_COMMIT: STAGING_SOURCE_COMMIT,
       TARGET_IMAGE_REF: `registry.fly.io/king-ai-ops-hub-staging@${DIGEST}`,
       TARGET_IMAGE_DIGEST: DIGEST,
       DEPLOYMENT_NONCE: 'deadbeefdeadbeefdeadbeefdeadbeef',
