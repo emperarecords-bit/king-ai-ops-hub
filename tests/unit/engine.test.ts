@@ -5,6 +5,7 @@ import {
   executeRun,
   MAX_RETRIES_PER_CALL,
   MAX_STEPS,
+  type EngineInput,
   type StepRecord,
 } from '@/orchestration/engine';
 import { FakeProvider, makeEngineAgent } from '@tests/support/fake-provider';
@@ -37,7 +38,7 @@ function collectingSink() {
   };
 }
 
-function input(primary: FakeProvider, reviewer: FakeProvider | null) {
+function input(primary: FakeProvider, reviewer: FakeProvider | null): EngineInput {
   return {
     taskInput: 'Write a haiku about databases.',
     contextItems: [{ title: 'Charter', content: 'This project loves Postgres.' }],
@@ -75,6 +76,32 @@ describe('executeRun — state machine shape', () => {
     expect(result.consolidated).toContain('Draft.');
     expect(result.consolidated).toContain('approve');
     expect(primary.requests).toHaveLength(1); // no revision call
+  });
+
+  it('snapshots immutable reviewer identity, rubric, hash, and run timestamp', async () => {
+    const primary = new FakeProvider('openai');
+    const reviewer = new FakeProvider('anthropic');
+    primary.reply('Draft.');
+    reviewer.reply(reviewResult('approve', 'Draft.'));
+    const { steps, sink } = collectingSink();
+    const base = input(primary, reviewer);
+    const runInput: EngineInput = {
+      ...base,
+      reviewer: { ...base.reviewer!, displayName: 'Policy Reviewer', reviewRubric: 'Check evidence.\r\nCheck safety.' },
+      provenanceExecutedAt: '2026-08-07T12:34:56.000Z',
+    };
+
+    await executeRun(runInput, sink);
+
+    expect(steps.find((step) => step.kind === 'review')?.verdictDetail?.provenance).toMatchObject({
+      reviewerAgentId: 'reviewer-1',
+      reviewerDisplayName: 'Policy Reviewer',
+      provider: 'anthropic',
+      model: 'fake-model',
+      rubricSnapshot: 'Check evidence.\nCheck safety.',
+      executedAt: '2026-08-07T12:34:56.000Z',
+    });
+    expect(steps.find((step) => step.kind === 'review')?.verdictDetail?.provenance?.rubricHash).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('revise verdict: exactly one revision — 4 steps, never more', async () => {

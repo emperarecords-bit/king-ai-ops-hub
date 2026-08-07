@@ -75,9 +75,11 @@ export class FakeProvider implements AIProvider {
 export function makeEngineAgent(provider: FakeProvider, agentId = 'agent-1') {
   return {
     agentId,
+    displayName: agentId === 'reviewer-1' ? 'Review Sentinel' : 'Primary Agent',
     provider,
     model: 'fake-model',
     systemPrompt: 'You are a test agent.',
+    reviewRubric: null,
     temperature: 0.7,
     maxOutputTokens: 1024,
   };

@@ -21,6 +21,7 @@ import {
   parseReviewDetail,
   stripIssuesBlock,
 } from './prompts';
+import { canonicalReviewRubric, reviewRubricHash } from '@/domain/agents/reviewer-rubric';
 import { extractProposedActions, type ProposedAction, stripActionBlock } from './actions';
 import { sha256Hex } from '@/lib/crypto';
 
@@ -133,9 +134,11 @@ function responseFromCheckpoint(cp: CheckpointedStepResult): AgentResponse {
 
 export interface EngineAgent {
   readonly agentId: string;
+  readonly displayName?: string;
   readonly provider: AIProvider;
   readonly model: string;
   readonly systemPrompt: string;
+  readonly reviewRubric?: string | null;
   readonly temperature: number;
   readonly maxOutputTokens: number;
 }
@@ -153,6 +156,8 @@ export interface EngineInput {
   readonly reviewer: EngineAgent | null;
   readonly perCallTimeoutMs: number;
   readonly runDeadline: number; // epoch ms; the whole run must finish by this
+  /** Stable run timestamp used for immutable reviewer provenance, including checkpoint replay. */
+  readonly provenanceExecutedAt?: string;
   /** Hub P1d — resume + checkpoint boundary. Absent ⇒ legacy single-attempt behavior (no checkpoints,
    *  no dispatch guard): the engine runs exactly as before. */
   readonly resume?: ResumeHooks | null;
@@ -444,6 +449,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
       primaryResponse: primaryResponse.text,
       approvedPolicies,
       operatingPriorities: input.operatingPriorities,
+      reviewerRubric: input.reviewer.reviewRubric,
     });
     const reviewSystem = reviewAssembled.system;
     const reviewTurns: Turn[] = [{ role: 'user', content: reviewAssembled.userTurn }];
@@ -492,8 +498,12 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
     if (reviewResponse) {
       const parsedReview = parseReviewDetail(reviewResponse.text, primaryResponse.text, {
         reviewerAgentId: input.reviewer.agentId,
+        reviewerDisplayName: input.reviewer.displayName ?? input.reviewer.agentId,
         provider: reviewResponse.provider,
         model: reviewResponse.model,
+        rubricHash: reviewRubricHash(input.reviewer.reviewRubric),
+        rubricSnapshot: canonicalReviewRubric(input.reviewer.reviewRubric) || null,
+        executedAt: input.provenanceExecutedAt ?? new Date().toISOString(),
       });
       verdict = parsedReview.detail.verdict;
       // Only report malformed output on a FRESH review — a replayed checkpoint must not re-audit it.

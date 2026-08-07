@@ -144,10 +144,12 @@ export interface RunLiveEvents {
 function toEngineAgent(row: AgentRow, tier: ModelTier): EngineAgent {
   return {
     agentId: row.id,
+    displayName: row.name,
     provider: getProvider(row.provider),
     // D-014: flagship tier overrides the configured model per provider.
     model: resolveModelForTier(tier, row.provider, row.model),
     systemPrompt: row.systemPrompt,
+    reviewRubric: row.reviewRubric,
     temperature: row.temperatureMilli / 1000,
     maxOutputTokens: row.maxOutputTokens,
   };
@@ -396,7 +398,7 @@ async function assembleRunContext(
   });
   const approvedPolicies = contextItems.filter((i) => i.kind === 'Decision memory');
   const reviewerAssembled = reviewerRow
-    ? assembleEffectivePrompt({ variant: 'review', agentSystemPrompt: reviewerRow.systemPrompt, taskInput: task.input, primaryResponse: '', approvedPolicies, operatingPriorities })
+    ? assembleEffectivePrompt({ variant: 'review', agentSystemPrompt: reviewerRow.systemPrompt, taskInput: task.input, primaryResponse: '', approvedPolicies, operatingPriorities, reviewerRubric: reviewerRow.reviewRubric })
     : null;
   const linkedActiveObjective = task.objectiveId
     ? priorities.objectives.find((o) => o.id === task.objectiveId)
@@ -458,6 +460,7 @@ interface RunExecParams {
   primaryRow: AgentRow;
   reviewerRow: AgentRow | null;
   assembled: AssembledRunContext;
+  provenanceExecutedAt: string;
 }
 
 export async function startRun(
@@ -656,6 +659,7 @@ export async function startRun(
       primaryRow: preflight.primaryRow,
       reviewerRow: preflight.reviewerRow,
       assembled: preflight.assembled,
+      provenanceExecutedAt: nowIso,
     },
     live,
     jobCtx,
@@ -726,6 +730,7 @@ export async function resumeRun(
       primaryRow: prep.primaryRow,
       reviewerRow: prep.reviewerRow,
       assembled: prep.assembled,
+      provenanceExecutedAt: prep.run.createdAt.toISOString(),
     },
     live,
     jobCtx,
@@ -743,7 +748,7 @@ async function executeAndFinalize(
   jobCtx: RunJobContext | undefined,
 ): Promise<RunOutcome> {
   const env = serverEnv();
-  const { task, runId, executionAttemptId, primaryRow, reviewerRow, assembled } = params;
+  const { task, runId, executionAttemptId, primaryRow, reviewerRow, assembled, provenanceExecutedAt } = params;
   const taskId = task.id;
 
   // Per-step persistence, IDEMPOTENT + checkpoint-writing. The run_steps insert is guarded by the
@@ -1158,6 +1163,7 @@ async function executeAndFinalize(
         reviewer: reviewerRow ? toEngineAgent(reviewerRow, task.modelTier) : null,
         perCallTimeoutMs: env.PROVIDER_TIMEOUT_MS,
         runDeadline: Date.now() + env.RUN_TIMEOUT_MS,
+        provenanceExecutedAt,
         resume,
       },
       {
