@@ -47,6 +47,10 @@ project's context.
 
 ## Phase 2 — Cross-provider review hardening
 
+**Status: complete (2026-08-07).** The exit criteria are covered by recorded cross-provider transcripts,
+strict claim-anchor parsing, immutable reviewer/rubric provenance, the side-by-side comparison UI, and
+green fresh-current plus accepted-legacy database matrices.
+
 The engine already runs the review workflow; this phase makes it trustworthy.
 
 - Structured reviewer verdicts (`approve` / `revise` / `reject`) with per-claim

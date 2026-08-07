@@ -1,6 +1,16 @@
 # Phase 2 — Cross-provider review hardening
 
-Status: planned from protected main `622777df1c723a46e5026db3bc35bbdfc70b2162`.
+Status: complete on protected main after PRs #13–#21 (2026-08-07).
+
+## Completion evidence
+
+- Recorded approve/revise/reject/malformed/ambiguous transcripts pin the fixed state machine and deterministic consolidation.
+- Strict v2 review parsing validates bounded, unique claim anchors and fails malformed output closed.
+- The task view renders primary, findings, optional revision, immutable reviewer identity, and execution-time rubric provenance side by side; legacy records disclose unavailable provenance.
+- Migration `0057_reviewer_rubric` adds nullable `agents.review_rubric` plus the PostgreSQL `octet_length(review_rubric) <= 8192` check, with no data rewrite.
+- Rubrics are admin-only, reviewer-only, byte-bounded, canonicalized for LF line endings, and SHA-256 domain-separated with `review-rubric/v1\0`.
+- Exit verification: typecheck and production build passed; repository-native secret scan passed; 96 focused Phase 2 tests passed; required CI security, migration-integrity, static, fresh-current DB, and accepted-legacy DB gates passed on each final implementation PR.
+- No staging/production deployment, persistent database migration, cloud infrastructure mutation, secret change, receipt/snapshot creation, or paid-provider call was performed.
 
 ## Goal and user-visible outcome
 
@@ -15,11 +25,11 @@ The fixed workflow remains `primary → review → at most one revision → dete
 - OpenAI and Anthropic streaming is wired through the engine and an authenticated SSE route; persisted results do not depend on the observational stream.
 - Revision is capped at one and consolidation is deterministic.
 
-## Remaining architecture
+## Delivered architecture
 
 1. **Golden transcript contract.** Replay checked-in, inert provider transcripts through the real engine and pin step order, verdict, issue parsing, revision count, and consolidated output. Fixtures contain no credentials and make no network calls.
 2. **Claim anchors.** Extend the internal review issue value object with bounded primary-response anchors and a stable claim identifier. Validate all model-provided anchors; an absent or invalid anchor remains visibly unlinked rather than guessed.
-3. **Reviewer rubric.** Add a bounded, server-controlled rubric to reviewer configuration and the canonical effective-prompt identity. This requires a database migration and therefore stops for explicit owner review before implementation.
+3. **Reviewer rubric.** A bounded, server-controlled rubric is part of reviewer configuration and canonical effective-prompt identity; owner-approved migration 0057 implements storage and the byte constraint.
 4. **Comparison/provenance view.** Render primary, review, and revision side by side. Link issues to claim anchors and label each surviving sentence as unchanged-primary or revised. Never imply semantic authorship that cannot be deterministically established.
 
 ## Data and API impact
@@ -57,4 +67,4 @@ The fixed workflow remains `primary → review → at most one revision → dete
 5. **Reviewer rubric configuration** — owner-reviewed schema migration, server actions, prompt identity, authorization, and UI.
 6. **Phase 2 exit suite/docs** — end-to-end recorded flow, accessibility/security review, and roadmap status.
 
-Owner decisions required before PR 5: rubric storage shape, maximum length, whether rubrics are reviewer-only or reusable, and which workspace roles may edit them. No migration should be authored until those decisions are explicit.
+The owner approved dedicated reviewer-only storage, an 8192 UTF-8 byte limit, and workspace-admin-only editing before migration 0057 was authored.
