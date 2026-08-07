@@ -7,7 +7,7 @@ import { type DbTx } from '@/db/client';
 import { agents, departments } from '@/db/schema';
 import { knownModel } from '@/providers/pricing';
 import { writeAudit } from '@/domain/audit/audit';
-import { canonicalReviewRubric } from './reviewer-rubric';
+import { canonicalReviewRubric, validateReviewRubric } from './reviewer-rubric';
 
 /**
  * The one shared maximum length for an employee's system prompt, enforced identically by BOTH the
@@ -265,11 +265,13 @@ export async function updateAgent(
   patch: {
     model?: string;
     systemPrompt?: string;
+    reviewRubric?: string | null;
     temperatureMilli?: number;
     maxOutputTokens?: number;
     enabled?: boolean;
   },
 ): Promise<void> {
+  if (ctx.projectRole !== 'admin') throw new AppError('forbidden', 'Only a project admin can change employee configuration.');
   if (patch.model !== undefined && !knownModel(patch.model)) {
     throw new ValidationError([`Unknown model '${patch.model}'.`]);
   }
@@ -278,6 +280,17 @@ export async function updateAgent(
     (patch.temperatureMilli < 0 || patch.temperatureMilli > 1000)
   ) {
     throw new ValidationError(['temperatureMilli must be between 0 and 1000.']);
+  }
+
+  if (patch.reviewRubric !== undefined) {
+    patch.reviewRubric = validateReviewRubric(patch.reviewRubric);
+    const current = await tx
+      .select({ role: agents.role })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.projectId, ctx.projectId), eq(agents.orgId, ctx.orgId)))
+      .limit(1);
+    if (!current[0]) throw new NotFoundError('Agent');
+    if (current[0].role !== 'reviewer') throw new ValidationError(['Reviewer rubrics can only be set on reviewer employees.']);
   }
   if (
     patch.maxOutputTokens !== undefined &&

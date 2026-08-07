@@ -1,6 +1,6 @@
 'use client';
 
-import { useActionState } from 'react';
+import { useActionState, useState } from 'react';
 import { saveAgent, type AgentFormState } from './actions';
 
 const initialState: AgentFormState = { error: null, saved: false };
@@ -12,6 +12,7 @@ export interface AgentFormData {
   provider: string;
   model: string;
   systemPrompt: string;
+  reviewRubric: string | null;
   temperatureMilli: number;
   maxOutputTokens: number;
   enabled: boolean;
@@ -27,6 +28,7 @@ export function AgentForm({
   models: readonly { id: string; displayName: string }[];
 }) {
   const [state, formAction, pending] = useActionState(saveAgent, initialState);
+  const [rubricBytes, setRubricBytes] = useState(() => new TextEncoder().encode(agent.reviewRubric ?? '').length);
 
   return (
     <form action={formAction} className="space-y-3">
@@ -83,6 +85,26 @@ export function AgentForm({
         />
       </label>
 
+      {agent.role === 'reviewer' ? (
+        <label className="block text-sm">
+          <span className="mb-1 flex justify-between gap-3 text-[var(--muted)]">
+            <span>Reviewer rubric</span>
+            <span aria-live="polite" className={rubricBytes > 8192 ? 'text-[var(--danger)]' : ''}>{rubricBytes} / 8192 UTF-8 bytes</span>
+          </span>
+          <textarea
+            name="reviewRubric"
+            rows={6}
+            defaultValue={agent.reviewRubric ?? ''}
+            onChange={(event) => setRubricBytes(new TextEncoder().encode(event.currentTarget.value).length)}
+            aria-describedby={`review-rubric-help-${agent.id}`}
+            className="w-full rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 font-mono text-xs"
+          />
+          <span id={`review-rubric-help-${agent.id}`} className="mt-1 block text-xs text-[var(--muted)]">
+            Evaluation criteria only. Platform safety and authorization rules always take precedence.
+          </span>
+        </label>
+      ) : null}
+
       <div className="flex items-center gap-4">
         <label className="flex items-center gap-2 text-sm">
           <input
@@ -95,7 +117,7 @@ export function AgentForm({
         </label>
         <button
           type="submit"
-          disabled={pending}
+          disabled={pending || rubricBytes > 8192}
           className="rounded-md bg-[var(--accent)] px-4 py-1.5 text-sm font-semibold text-[#0b0e14] disabled:opacity-50"
         >
           {pending ? 'Saving…' : 'Save'}

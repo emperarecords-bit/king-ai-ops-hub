@@ -46,6 +46,8 @@ export function ReviewComparison({
   const detail = reviewStep.verdictDetail;
   const issues = detail?.issues ?? [];
   const provenance = detail?.provenance;
+  const historicalReviewerName = provenance?.reviewerDisplayName ?? reviewerName;
+  const hasImmutableProvenance = Boolean(provenance?.reviewerDisplayName && provenance?.rubricHash && provenance?.executedAt);
 
   return (
     <section aria-labelledby="review-comparison-heading" className="mb-6">
@@ -54,10 +56,22 @@ export function ReviewComparison({
         <StatusBadge status={detail?.verdict ?? reviewStep.verdict ?? 'unavailable'} />
         {reviewStep.provider ? <ProviderBadge provider={reviewStep.provider} /> : null}
         <span className="text-sm text-[var(--muted)]">
-          {reviewerName ?? 'Reviewer'}
+          {historicalReviewerName ?? 'Reviewer'}
           {provenance?.model ? ` · ${provenance.model}` : reviewStep.model ? ` · ${reviewStep.model}` : ''}
         </span>
+        {!hasImmutableProvenance ? <span className="text-xs text-[var(--muted)]">Legacy record — immutable reviewer metadata was not recorded.</span> : null}
       </div>
+
+      {hasImmutableProvenance ? (
+        <details className="mb-3 rounded border border-[var(--border)] bg-[var(--surface)] p-3 text-sm">
+          <summary className="cursor-pointer font-medium">Execution-time reviewer rubric</summary>
+          <dl className="mt-3 grid gap-2 sm:grid-cols-2">
+            <div><dt className="text-xs text-[var(--muted)]">Executed</dt><dd>{provenance!.executedAt}</dd></div>
+            <div><dt className="text-xs text-[var(--muted)]">Rubric hash</dt><dd><code className="break-all text-xs">{provenance!.rubricHash}</code></dd></div>
+          </dl>
+          <pre className="mt-3 whitespace-pre-wrap break-words rounded bg-[var(--background)] p-3 text-xs">{provenance!.rubricSnapshot ?? 'No additional reviewer rubric.'}</pre>
+        </details>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
         <ResponsePanel title="Primary response" message={messageFor(primaryStep)} />
