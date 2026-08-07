@@ -509,6 +509,7 @@ export async function supersedeTask(
 
 export interface MessageRow {
   id: string;
+  runStepId: string | null;
   role: MessageRole;
   provider: ProviderId | null;
   model: string | null;
@@ -524,6 +525,7 @@ export async function listMessages(
   return tx
     .select({
       id: messages.id,
+      runStepId: messages.runStepId,
       role: messages.role,
       provider: messages.provider,
       model: messages.model,
