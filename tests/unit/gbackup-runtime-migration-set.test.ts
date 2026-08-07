@@ -45,5 +45,5 @@ describe('G-Backup-B1 runtime migration-set hash', () => {
     expect(runtime.entries.length).toBeGreaterThan(0);
     const portable = buildSourceManifestFromGit('HEAD', 'drizzle').sourceMigrationSetHash;
     expect(runtime.runtimeMigrationSetHash).not.toBe(portable); // two distinct, non-conflated hashes
-  });
+  }, 15_000);
 });

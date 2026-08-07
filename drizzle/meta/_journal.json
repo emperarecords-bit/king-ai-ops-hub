@@ -400,6 +400,13 @@
       "when": 1785707843645,
       "tag": "0056_milky_goliath",
       "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1786110001551,
+      "tag": "0057_reviewer_rubric",
+      "breakpoints": true
     }
   ]
 }

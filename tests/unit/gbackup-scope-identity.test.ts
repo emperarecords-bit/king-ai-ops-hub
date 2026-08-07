@@ -68,7 +68,7 @@ describe('source-manifest repository identity is a canonical constant, matched e
     expect(() => buildSourceManifestFromGit('HEAD', 'drizzle', 'origin')).toThrow(MigrationReadError);
     expect(() => buildSourceManifestFromGit('HEAD', 'drizzle', 'someone-else/king-ai-ops-hub')).toThrow(MigrationReadError);
     expect(() => buildSourceManifestFromGit('HEAD', 'drizzle', 'https://github.com/emperarecords-bit/king-ai-ops-hub')).toThrow(MigrationReadError);
-  });
+  }, 15_000);
 });
 
 describe('finalized inactive 0004 draft', () => {

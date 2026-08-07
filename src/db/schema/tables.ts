@@ -237,6 +237,8 @@ export const agents = pgTable(
     provider: providerIdEnum('provider').notNull(),
     model: text('model').notNull(),
     systemPrompt: text('system_prompt').notNull(),
+    /** Optional reviewer-specific criteria. Application + DB enforce an 8192 UTF-8 byte ceiling. */
+    reviewRubric: text('review_rubric'),
     /** Stored x1000 to keep it integral: 700 = 0.7 */
     temperatureMilli: integer('temperature_milli').notNull().default(700),
     maxOutputTokens: integer('max_output_tokens').notNull().default(4096),
@@ -254,6 +256,7 @@ export const agents = pgTable(
     // primary key (globally unique), so this is additive/safe; its purpose is to make an agent reference
     // enforce SAME-workspace by construction (a non-null agent id can never point across tenants).
     unique('agents_tenant_id_uq').on(t.orgId, t.projectId, t.id),
+    check('agents_review_rubric_bytes_ck', sql`${t.reviewRubric} is null or octet_length(${t.reviewRubric}) <= 8192`),
   ],
 );
 
