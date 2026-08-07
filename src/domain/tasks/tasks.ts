@@ -14,6 +14,7 @@ import {
   type TaskStatus,
   type TenantContext,
 } from '@/types/domain';
+import { normalizeHistoricalReviewDetail } from './review-history';
 import { PROVIDER_SELECTIONS, type ProviderId, type ProviderSelection } from '@/types/provider';
 import { ConflictError, NotFoundError, ValidationError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
@@ -604,7 +605,7 @@ export interface RunStepRow {
 }
 
 export async function listRunSteps(tx: DbTx, ctx: TenantContext, runId: string): Promise<RunStepRow[]> {
-  return tx
+  const rows = await tx
     .select({
       id: runSteps.id,
       stepNumber: runSteps.stepNumber,
@@ -627,4 +628,8 @@ export async function listRunSteps(tx: DbTx, ctx: TenantContext, runId: string):
       ),
     )
     .orderBy(runSteps.stepNumber);
+  return rows.map((row) => ({
+    ...row,
+    verdictDetail: normalizeHistoricalReviewDetail(row.verdictDetail),
+  }));
 }

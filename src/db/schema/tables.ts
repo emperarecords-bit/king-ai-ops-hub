@@ -1558,7 +1558,7 @@ export const runSteps = pgTable(
     provider: providerIdEnum('provider'),
     model: text('model'),
     verdict: reviewVerdictEnum('verdict'),
-    /** Structured review outcome: { verdict, issues: [{severity, summary, detail?}] } */
+    /** Versioned structured review JSON. Runtime readers normalize legacy/v2 shapes and reject invalid data. */
     verdictDetail: jsonb('verdict_detail').$type<ReviewDetail>(),
     succeeded: boolean('succeeded').notNull(),
     errorMessage: text('error_message'),
