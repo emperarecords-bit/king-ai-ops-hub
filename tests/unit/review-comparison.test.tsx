@@ -19,7 +19,10 @@ describe('ReviewComparison', () => {
   it('renders primary, trusted reviewer provenance, anchored findings, revision, and timestamp', () => {
     const detail = {
       contractVersion: '2' as const, verdict: 'revise' as const,
-      provenance: { reviewerAgentId: 'reviewer-1', provider: 'anthropic' as const, model: 'claude-review' },
+      provenance: {
+        reviewerAgentId: 'reviewer-1', reviewerDisplayName: 'Original Reviewer', provider: 'anthropic' as const, model: 'claude-review',
+        rubricHash: 'a'.repeat(64), rubricSnapshot: 'Require evidence.', executedAt: '2026-08-07T11:59:00.000Z',
+      },
       issues: [{ severity: 'major' as const, summary: 'Unsupported claim', claimAnchor: 'claim-v1:p1:s1:0123456789ab', rationale: 'Evidence is absent.', requestedRevision: 'Qualify the claim.' }],
     };
     const html = renderToStaticMarkup(<ReviewComparison
@@ -28,7 +31,10 @@ describe('ReviewComparison', () => {
       messages={[message('m1', 'p', 'Primary claim.', 'assistant'), message('m2', 'r', 'Review.', 'reviewer'), message('m3', 'v', 'Qualified claim.', 'assistant')]}
     />);
     expect(html).toContain('Primary claim.');
-    expect(html).toContain('Risk Reviewer');
+    expect(html).toContain('Original Reviewer');
+    expect(html).not.toContain('Risk Reviewer');
+    expect(html).toContain('Require evidence.');
+    expect(html).toContain('2026-08-07T11:59:00.000Z');
     expect(html).toContain('claim-v1:p1:s1:0123456789ab');
     expect(html).toContain('Evidence is absent.');
     expect(html).toContain('Qualify the claim.');
@@ -46,6 +52,7 @@ describe('ReviewComparison', () => {
     />);
     expect(html).toContain('Legacy finding — no claim anchor');
     expect(html).toContain('Not recorded for this historical run.');
+    expect(html).toContain('Legacy record');
     expect(html).toContain('&lt;script&gt;');
     expect(html).not.toContain('<script>');
   });

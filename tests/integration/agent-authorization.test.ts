@@ -125,6 +125,7 @@ function agentForm(agentId: string, over: Partial<Record<string, string>> = {}):
   fd.set('systemPrompt', over.systemPrompt ?? 'CHANGED_PROMPT');
   fd.set('temperatureMilli', over.temperatureMilli ?? '900');
   fd.set('maxOutputTokens', over.maxOutputTokens ?? '1024');
+  if (over.reviewRubric !== undefined) fd.set('reviewRubric', over.reviewRubric);
   if (over.enabled !== 'unset') fd.set('enabled', over.enabled ?? 'on');
   return fd;
 }
@@ -167,6 +168,29 @@ describe.skipIf(!available)('P1b agent-config authorization', () => {
     expect(after.enabled).toBe(false); // checkbox omitted => disabled
     // The admin path DID write the ordinary agent.updated audit.
     expect((await agentUpdateAudits(w.tomBrown)).some((a) => a.action === 'agent.updated')).toBe(true);
+  });
+
+  it('an admin can set a bounded rubric only on a reviewer employee', async () => {
+    const w = await freshWorkspace();
+    const res = await callSaveAgent(w.ctx, agentForm(w.reviewer, { reviewRubric: 'Require cited evidence.' }));
+    expect(res).toEqual({ error: null, saved: true });
+    expect((await fullAgent(w.reviewer)).reviewRubric).toBe('Require cited evidence.');
+    const primary = await callSaveAgent(w.ctx, agentForm(w.tomBrown, { reviewRubric: 'Not allowed.' }));
+    expect(primary.saved).toBe(false);
+    expect(primary.error).toBe('Invalid input.');
+    expect((await fullAgent(w.tomBrown)).reviewRubric).toBeNull();
+  });
+
+  it('a member cannot mutate a reviewer rubric and an oversized UTF-8 rubric is rejected', async () => {
+    const w = await freshWorkspace();
+    const before = await fullAgent(w.reviewer);
+    const denied = await callSaveAgent(member(w), agentForm(w.reviewer, { reviewRubric: 'Bypass review.' }));
+    expect(denied.saved).toBe(false);
+    expect(await fullAgent(w.reviewer)).toEqual(before);
+    const oversized = await callSaveAgent(w.ctx, agentForm(w.reviewer, { reviewRubric: 'é'.repeat(4097) }));
+    expect(oversized.saved).toBe(false);
+    expect(oversized.error).toBe('Invalid input.');
+    expect((await fullAgent(w.reviewer)).reviewRubric).toBeNull();
   });
 
   it('a MEMBER cannot change model / prompt / temperature / enabled — row byte-unchanged, no audit', async () => {

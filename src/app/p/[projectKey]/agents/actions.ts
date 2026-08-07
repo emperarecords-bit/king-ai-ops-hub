@@ -111,6 +111,7 @@ const patchSchema = z.object({
   agentId: z.string().uuid(),
   model: z.string().min(1).max(100),
   systemPrompt: z.string().min(1).max(8000),
+  reviewRubric: z.string().optional(),
   temperatureMilli: z.coerce.number().int().min(0).max(1000),
   maxOutputTokens: z.coerce.number().int().min(1).max(65_536),
   enabled: z.boolean(),
@@ -122,6 +123,7 @@ export async function saveAgent(_prev: AgentFormState, formData: FormData): Prom
     agentId: formData.get('agentId'),
     model: formData.get('model'),
     systemPrompt: formData.get('systemPrompt'),
+    reviewRubric: formData.has('reviewRubric') ? formData.get('reviewRubric') : undefined,
     temperatureMilli: formData.get('temperatureMilli'),
     maxOutputTokens: formData.get('maxOutputTokens'),
     enabled: formData.get('enabled') === 'on',
@@ -142,6 +144,7 @@ export async function saveAgent(_prev: AgentFormState, formData: FormData): Prom
       updateAgent(tx, ctx, parsed.data.agentId, {
         model: parsed.data.model,
         systemPrompt: parsed.data.systemPrompt,
+        ...(parsed.data.reviewRubric !== undefined ? { reviewRubric: parsed.data.reviewRubric } : {}),
         temperatureMilli: parsed.data.temperatureMilli,
         maxOutputTokens: parsed.data.maxOutputTokens,
         enabled: parsed.data.enabled,
