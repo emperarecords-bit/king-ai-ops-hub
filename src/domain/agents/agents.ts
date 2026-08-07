@@ -7,6 +7,7 @@ import { type DbTx } from '@/db/client';
 import { agents, departments } from '@/db/schema';
 import { knownModel } from '@/providers/pricing';
 import { writeAudit } from '@/domain/audit/audit';
+import { canonicalReviewRubric } from './reviewer-rubric';
 
 /**
  * The one shared maximum length for an employee's system prompt, enforced identically by BOTH the
@@ -22,6 +23,7 @@ export interface AgentRow {
   provider: ProviderId;
   model: string;
   systemPrompt: string;
+  reviewRubric: string | null;
   temperatureMilli: number;
   maxOutputTokens: number;
   enabled: boolean;
@@ -41,15 +43,18 @@ export function agentExecutionFingerprint(a: {
   provider: string;
   model: string;
   systemPrompt: string;
+  reviewRubric?: string | null;
   temperatureMilli: number;
   maxOutputTokens: number;
   role: string;
 }): string {
+  const reviewRubric = canonicalReviewRubric(a.reviewRubric);
   return sha256Hex(
     JSON.stringify({
       provider: a.provider,
       model: a.model,
       systemPrompt: a.systemPrompt,
+      ...(reviewRubric ? { reviewRubric } : {}),
       temperatureMilli: a.temperatureMilli,
       maxOutputTokens: a.maxOutputTokens,
       role: a.role,
@@ -75,6 +80,7 @@ export async function loadAgentExecutionIdentities(tx: DbTx, ctx: TenantContext,
       provider: agents.provider,
       model: agents.model,
       systemPrompt: agents.systemPrompt,
+      reviewRubric: agents.reviewRubric,
       temperatureMilli: agents.temperatureMilli,
       maxOutputTokens: agents.maxOutputTokens,
       role: agents.role,
@@ -96,6 +102,7 @@ export async function listAgents(tx: DbTx, ctx: TenantContext): Promise<AgentRow
       provider: agents.provider,
       model: agents.model,
       systemPrompt: agents.systemPrompt,
+      reviewRubric: agents.reviewRubric,
       temperatureMilli: agents.temperatureMilli,
       maxOutputTokens: agents.maxOutputTokens,
       enabled: agents.enabled,
@@ -124,6 +131,7 @@ const AGENT_ROW_COLUMNS = {
   provider: agents.provider,
   model: agents.model,
   systemPrompt: agents.systemPrompt,
+  reviewRubric: agents.reviewRubric,
   temperatureMilli: agents.temperatureMilli,
   maxOutputTokens: agents.maxOutputTokens,
   enabled: agents.enabled,

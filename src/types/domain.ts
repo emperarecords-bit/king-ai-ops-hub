@@ -48,8 +48,12 @@ export interface ReviewDetail {
   /** Trusted execution provenance; never accepted from model-authored JSON. */
   readonly provenance?: {
     readonly reviewerAgentId: string;
+    readonly reviewerDisplayName?: string;
     readonly provider: 'openai' | 'anthropic';
     readonly model: string;
+    readonly rubricHash?: string;
+    readonly rubricSnapshot?: string | null;
+    readonly executedAt?: string;
   };
 }
 

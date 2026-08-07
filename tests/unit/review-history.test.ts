@@ -33,6 +33,28 @@ describe('historical review-detail compatibility', () => {
     expect(normalizeHistoricalReviewDetail({ verdict: 'approve' })).toEqual({ verdict: 'approve', issues: [] });
   });
 
+  it('loads new immutable provenance and strips unknown metadata', () => {
+    const value = {
+      contractVersion: '2', verdict: 'approve', issues: [],
+      provenance: {
+        reviewerAgentId: 'reviewer-1', reviewerDisplayName: 'Original Name', provider: 'anthropic', model: 'claude-review',
+        rubricHash: 'a'.repeat(64), rubricSnapshot: 'Evidence first.', executedAt: '2026-08-07T12:34:56.000Z',
+        injected: 'ignored',
+      },
+    };
+    expect(normalizeHistoricalReviewDetail(value)?.provenance).toEqual({
+      reviewerAgentId: 'reviewer-1', reviewerDisplayName: 'Original Name', provider: 'anthropic', model: 'claude-review',
+      rubricHash: 'a'.repeat(64), rubricSnapshot: 'Evidence first.', executedAt: '2026-08-07T12:34:56.000Z',
+    });
+  });
+
+  it('fails malformed new provenance safely without crashing historical reads', () => {
+    expect(normalizeHistoricalReviewDetail({
+      contractVersion: '2', verdict: 'approve', issues: [],
+      provenance: { reviewerAgentId: 'r', provider: 'anthropic', model: 'm', rubricHash: 'not-a-hash' },
+    })).toBeNull();
+  });
+
   it.each([
     ['unknown verdict', { verdict: 'maybe', issues: [] }],
     ['invalid legacy issue', { verdict: 'revise', issues: [{ severity: 'huge', summary: 'x' }] }],

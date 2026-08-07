@@ -18,8 +18,12 @@ const v2Issue = z.object({
 
 const provenance = z.object({
   reviewerAgentId: z.string().min(1).max(100),
+  reviewerDisplayName: z.string().trim().min(1).max(500).optional(),
   provider: z.enum(['openai', 'anthropic']),
   model: z.string().min(1).max(500),
+  rubricHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  rubricSnapshot: z.string().max(8_192).nullable().optional(),
+  executedAt: z.string().datetime({ offset: true }).optional(),
 }).strip();
 
 const v2 = z.object({
