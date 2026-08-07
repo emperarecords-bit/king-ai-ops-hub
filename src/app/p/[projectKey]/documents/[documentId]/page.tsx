@@ -6,6 +6,7 @@ import { loadDocumentDetail } from '@/domain/documents/detail';
 import { loadInspectableVersion } from '@/domain/documents/viewer-access';
 import { loadLivePurgeOperation } from '@/domain/documents/purge';
 import { Card, PageHeader } from '@/components/ui';
+import { currentEpochMs } from '@/lib/clock';
 import {
   AiOperationsSection,
   ClassBadge,
@@ -52,7 +53,7 @@ export default async function DocumentDetailPage({
     const inspection = await loadInspectableVersion(tx, ctx, store, { kind: 'versionId', versionId: detail.selected.versionId }, { accessType: 'preview', purpose: 'documents detail preview' });
     return { detail, inspection, livePurge };
   });
-  const purgeRetentionElapsed = !!livePurge?.retentionUntil && Date.parse(livePurge.retentionUntil) <= Date.now();
+  const purgeRetentionElapsed = !!livePurge?.retentionUntil && Date.parse(livePurge.retentionUntil) <= currentEpochMs();
 
   const back = (
     <div className="mb-3">
