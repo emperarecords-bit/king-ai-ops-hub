@@ -17,6 +17,7 @@ import { costForUsage, modelsForProvider } from './pricing';
  */
 export class OpenAIProvider implements AIProvider {
   readonly id = 'openai' as const;
+  readonly authoritativeNotExecuted = { support: 'unsupported' } as const;
   private readonly client: OpenAI;
 
   constructor(apiKey: string) {

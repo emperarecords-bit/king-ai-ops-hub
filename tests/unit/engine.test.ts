@@ -198,6 +198,15 @@ describe('callWithRetry — ambiguous vs known provider-outcome classification',
     expect(primary.requests).toHaveLength(2); // one retry, bounded
   });
 
+  it('an unsupported not_executed claim fails closed to reconciliation and is never retried', async () => {
+    const primary = new FakeProvider('openai').withoutAuthoritativeNotExecutedProof();
+    primary.fail('rate_limited').reply('duplicate effect if reached');
+    const { sink } = collectingSink();
+
+    await expect(executeRun(input(primary, null), sink)).rejects.toBeInstanceOf(AmbiguousProviderOutcomeSignal);
+    expect(primary.requests).toHaveLength(1);
+  });
+
   it('a KNOWN retryable rejection that exhausts the bounded retries becomes a normal failed step (not reconciliation)', async () => {
     const primary = new FakeProvider('openai');
     for (let i = 0; i <= MAX_RETRIES_PER_CALL; i += 1) primary.fail('rate_limited');

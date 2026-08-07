@@ -88,6 +88,30 @@ const RETRYABLE: ReadonlySet<ProviderErrorKind> = new Set([
 export type RemoteOutcome = 'not_executed' | 'unknown';
 
 /**
+ * Machine-enforced provider capability for authoritative non-execution proof.
+ * A status/error mapping alone is never a guarantee. Production adapters must
+ * declare `unsupported` until the provider contract documents that the listed
+ * errors prove the request was rejected before any remote execution or charge.
+ */
+export type AuthoritativeNotExecutedGuarantee =
+  | { readonly support: 'unsupported' }
+  | {
+      readonly support: 'error_kinds';
+      readonly errorKinds: ReadonlySet<ProviderErrorKind>;
+      /** Stable provider-contract reference; never inferred from response text. */
+      readonly basis: string;
+    };
+
+/** Complete execution assessment vocabulary used at the reliability boundary. */
+export type RemoteExecutionAssessment =
+  | { readonly status: 'executed' }
+  | { readonly status: 'not_executed'; readonly basis: string }
+  | {
+      readonly status: 'unknown';
+      readonly reason: 'ambiguous_outcome' | 'unsupported_non_execution_proof' | 'provider_mismatch';
+    };
+
+/**
  * Kinds that PROVE non-execution (rejected before the model ran). Everything else — timeout, overloaded (a
  * generic 5xx is lumped here and may post-date execution), unknown — defaults to `unknown` (fail closed).
  * An adapter that KNOWS a specific error is a clean pre-processing rejection (e.g. Anthropic 529) passes
@@ -122,8 +146,25 @@ export class ProviderError extends Error {
   }
 }
 
+/**
+ * Convert an adapter's claimed outcome into the only assessment the retry and
+ * reconciliation layers may trust. Unsupported, mismatched, malformed, timeout,
+ * transport, cancellation, partial, and generic server-failure claims all fail
+ * closed to `unknown`.
+ */
+export function assessProviderErrorOutcome(provider: AIProvider, error: ProviderError): RemoteExecutionAssessment {
+  if (error.provider !== provider.id) return { status: 'unknown', reason: 'provider_mismatch' };
+  if (error.remoteOutcome !== 'not_executed') return { status: 'unknown', reason: 'ambiguous_outcome' };
+  const guarantee = provider.authoritativeNotExecuted;
+  if (guarantee.support !== 'error_kinds' || !guarantee.errorKinds.has(error.kind)) {
+    return { status: 'unknown', reason: 'unsupported_non_execution_proof' };
+  }
+  return { status: 'not_executed', basis: guarantee.basis };
+}
+
 export interface AIProvider {
   readonly id: ProviderId;
+  readonly authoritativeNotExecuted: AuthoritativeNotExecutedGuarantee;
   execute(request: AgentRequest): Promise<AgentResponse>;
   stream?(request: AgentRequest): AsyncIterable<AgentEvent>;
   estimateCost?(model: string, usage: TokenUsage): Money;
