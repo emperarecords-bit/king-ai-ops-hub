@@ -251,6 +251,27 @@ describe.skipIf(!available)('Hub P1d — extraction inside the reliability bound
     expect((await auditRows(done.id)).map((a) => a.action)).toContain('run.uncertain_outcome_detected');
   });
 
+  it('unsupported not_executed proof during extraction preserves intent and requires reconciliation', async () => {
+    const w = await makeWorkspace();
+    const taskId = await mkTask(w);
+    const p = new FakeProvider('openai')
+      .withoutAuthoritativeNotExecutedProof()
+      .reply('Primary answer.')
+      .fail('rate_limited')
+      .reply('duplicate extraction if retried');
+    setProviderOverrideForTests((id) => (id === 'openai' ? p : undefined));
+
+    const outcome = await startRun(w.ctx, taskId);
+    expect(outcome.status).toBe('reconciliation_required');
+    const run = await runFor(taskId);
+    expect(run.reliabilityState).toBe('reconciliation_required');
+    expect(decisionCalls(p)).toBe(1); // unsupported claim never permits a duplicate retry
+    expect((await extractionCheckpoints(run.id)).length).toBe(0);
+    expect((await extractionUsage(run.id)).length).toBe(0);
+    expect(await decisionProposals(run.id)).toHaveLength(0);
+    expect((await auditRows(run.id)).map((a) => a.action)).toContain('run.uncertain_outcome_detected');
+  });
+
   it('crash AFTER the extraction checkpoint → resumes proposal creation with NO second provider call', async () => {
     const w = await makeWorkspace();
     const taskId = await mkTask(w);

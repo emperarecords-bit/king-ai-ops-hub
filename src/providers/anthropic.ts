@@ -17,6 +17,7 @@ import { costForUsage, modelsForProvider } from './pricing';
  */
 export class AnthropicProvider implements AIProvider {
   readonly id = 'anthropic' as const;
+  readonly authoritativeNotExecuted = { support: 'unsupported' } as const;
   private readonly client: Anthropic;
   /**
    * Models that rejected `temperature` as deprecated (Claude 5 family).

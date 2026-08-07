@@ -2,6 +2,7 @@ import {
   type AgentRequest,
   type AgentResponse,
   type AIProvider,
+  type AuthoritativeNotExecutedGuarantee,
   type ModelDescriptor,
   ProviderError,
   type ProviderErrorKind,
@@ -20,6 +21,11 @@ type Behavior =
 
 export class FakeProvider implements AIProvider {
   readonly id: ProviderId;
+  authoritativeNotExecuted: AuthoritativeNotExecutedGuarantee = {
+    support: 'error_kinds',
+    errorKinds: new Set(['auth', 'rate_limited', 'invalid_request']),
+    basis: 'fake-provider scripted rejection occurs before execute returns',
+  };
   readonly requests: AgentRequest[] = [];
   private readonly queue: Behavior[] = [];
   defaultReply = 'ok';
@@ -35,6 +41,11 @@ export class FakeProvider implements AIProvider {
 
   fail(errorKind: ProviderErrorKind): this {
     this.queue.push({ kind: 'error', errorKind });
+    return this;
+  }
+
+  withoutAuthoritativeNotExecutedProof(): this {
+    this.authoritativeNotExecuted = { support: 'unsupported' };
     return this;
   }
 

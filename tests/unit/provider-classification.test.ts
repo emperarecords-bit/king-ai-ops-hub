@@ -1,7 +1,15 @@
 import { APIError } from '@anthropic-ai/sdk';
 import { describe, expect, it } from 'vitest';
-import { ProviderError, type ProviderErrorKind } from '@/types/provider';
+import {
+  assessProviderErrorOutcome,
+  ProviderError,
+  type AIProvider,
+  type AuthoritativeNotExecutedGuarantee,
+  type ProviderErrorKind,
+  type ProviderId,
+} from '@/types/provider';
 import { AnthropicProvider } from '@/providers/anthropic';
+import { OpenAIProvider } from '@/providers/openai';
 
 /**
  * Provider-error CLASSIFICATION — the structured `remoteOutcome` the whole run pipeline (engine + extraction)
@@ -33,6 +41,65 @@ describe('ProviderError.remoteOutcome — the shared classification model', () =
     const e = new ProviderError('anthropic', 'rate_limited', 'x');
     expect(e.retryable).toBe(true);
     expect(e.remoteOutcome).toBe('not_executed');
+  });
+});
+
+function provider(id: ProviderId, authoritativeNotExecuted: AuthoritativeNotExecutedGuarantee): AIProvider {
+  return {
+    id,
+    authoritativeNotExecuted,
+    execute: async () => { throw new Error('not used'); },
+    listModels: () => [],
+  };
+}
+
+describe('authoritative non-execution guarantee boundary', () => {
+  const guaranteed = provider('openai', {
+    support: 'error_kinds',
+    errorKinds: new Set(['rate_limited']),
+    basis: 'test contract: scripted rejection occurs before dispatch',
+  });
+  const unsupported = provider('openai', { support: 'unsupported' });
+
+  it('accepts not_executed only when the adapter capability covers the exact error kind', () => {
+    const e = new ProviderError('openai', 'rate_limited', 'rejected');
+    expect(assessProviderErrorOutcome(guaranteed, e)).toEqual({
+      status: 'not_executed', basis: 'test contract: scripted rejection occurs before dispatch',
+    });
+  });
+
+  it('fails closed when the adapter does not support authoritative proof', () => {
+    const e = new ProviderError('openai', 'rate_limited', 'claimed rejection');
+    expect(assessProviderErrorOutcome(unsupported, e)).toEqual({
+      status: 'unknown', reason: 'unsupported_non_execution_proof',
+    });
+  });
+
+  it.each(['timeout', 'overloaded', 'unknown'] as const)('%s remains ambiguous even with a bounded guarantee', (kind) => {
+    expect(assessProviderErrorOutcome(guaranteed, new ProviderError('openai', kind, 'x')).status).toBe('unknown');
+  });
+
+  it('treats a generic network failure as an ambiguous unknown outcome', () => {
+    const e = new ProviderError('openai', 'unknown', 'ECONNRESET after request transmission');
+    expect(assessProviderErrorOutcome(guaranteed, e)).toEqual({
+      status: 'unknown', reason: 'ambiguous_outcome',
+    });
+  });
+
+  it('requires production adapters to opt in explicitly; OpenAI currently fails closed', () => {
+    const e = new ProviderError('openai', 'rate_limited', 'claimed rejection');
+    expect(assessProviderErrorOutcome(new OpenAIProvider('test-key'), e)).toEqual({
+      status: 'unknown', reason: 'unsupported_non_execution_proof',
+    });
+  });
+
+  it('rejects provider mismatch and malformed outcomes', () => {
+    expect(assessProviderErrorOutcome(guaranteed, new ProviderError('anthropic', 'rate_limited', 'x'))).toEqual({
+      status: 'unknown', reason: 'provider_mismatch',
+    });
+    const malformed = new ProviderError('openai', 'rate_limited', 'x') as ProviderError & { remoteOutcome: string };
+    Object.defineProperty(malformed, 'remoteOutcome', { value: 'not-a-real-outcome' });
+    expect(assessProviderErrorOutcome(guaranteed, malformed).status).toBe('unknown');
   });
 });
 
@@ -79,6 +146,9 @@ describe('Anthropic adapter — HTTP status → structured classification', () =
     const e = await classifyAnthropic(429);
     expect(e.kind).toBe('rate_limited');
     expect(e.remoteOutcome).toBe('not_executed');
+    expect(assessProviderErrorOutcome(new AnthropicProvider('test-key'), e)).toEqual({
+      status: 'unknown', reason: 'unsupported_non_execution_proof',
+    });
   });
 
   it('401 remains a KNOWN not-executed rejection (auth)', async () => {

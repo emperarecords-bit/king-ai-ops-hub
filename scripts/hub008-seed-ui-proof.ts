@@ -20,6 +20,7 @@ const DEMO_KEY = 'hub008-uiproof';
 
 class Fake implements AIProvider {
   readonly id: ProviderId;
+  readonly authoritativeNotExecuted = { support: 'unsupported' } as const;
   private q: string[];
   constructor(id: ProviderId, replies: string[]) { this.id = id; this.q = [...replies]; }
   async execute(r: AgentRequest): Promise<AgentResponse> {

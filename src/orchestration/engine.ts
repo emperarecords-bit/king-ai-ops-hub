@@ -5,6 +5,7 @@ import {
   type StepKind,
 } from '@/types/domain';
 import {
+  assessProviderErrorOutcome,
   type AgentRequest,
   type AgentResponse,
   type AIProvider,
@@ -282,7 +283,8 @@ async function callWithRetry(
       // surfaced (the provider began responding). NEVER retry it in-process and NEVER downgrade it to a normal
       // failed step: escalate so the runner fails the run closed to reconciliation, with the provider call
       // count frozen at exactly this one attempt.
-      if (emitted || providerError.remoteOutcome === 'unknown') {
+      const remoteAssessment = assessProviderErrorOutcome(agent.provider, providerError);
+      if (emitted || remoteAssessment.status !== 'not_executed') {
         throw new AmbiguousProviderOutcomeSignal(providerError.kind, emitted);
       }
       // KNOWN pre-processing rejection (provably not executed): bounded retry per the existing policy, else

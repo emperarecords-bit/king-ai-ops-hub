@@ -2,7 +2,7 @@ import 'server-only';
 import { randomUUID } from 'node:crypto';
 import { eq, and, desc, sql } from 'drizzle-orm';
 import { type ReliabilityState, type TenantContext } from '@/types/domain';
-import { ProviderError, type ProviderId } from '@/types/provider';
+import { assessProviderErrorOutcome, ProviderError, type ProviderId } from '@/types/provider';
 import { AppError, AssignmentRequiredError, ConflictError } from '@/lib/errors';
 import { serverEnv } from '@/lib/env.server';
 import { log } from '@/lib/log';
@@ -996,7 +996,8 @@ async function executeAndFinalize(
       // closed to reconciliation (the remote may have executed + charged); the provider call count stays
       // exactly one and no usage is fabricated. (A process CRASH is a separate path — the test hooks below
       // throw AFTER the provider returned, also leaving state='dispatching'.)
-      if (err instanceof ProviderError && err.remoteOutcome === 'not_executed') {
+      const extractionProvider = getProvider(meta.provider);
+      if (err instanceof ProviderError && assessProviderErrorOutcome(extractionProvider, err).status === 'not_executed') {
         await withTenant(ctx, async (tx) => {
           await tx
             .update(runs)
