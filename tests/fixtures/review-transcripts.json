@@ -1,0 +1,27 @@
+[
+  {
+    "name": "approve-clean-response",
+    "primary": "Revenue is $42,000 for the stated period.",
+    "review": "VERDICT: approve\nThe answer is supported and complete.",
+    "expectedVerdict": "approve",
+    "expectedKinds": ["primary", "review", "consolidate"],
+    "expectedIssues": 0
+  },
+  {
+    "name": "revise-major-claim",
+    "primary": "Revenue doubled this month.",
+    "review": "VERDICT: revise\nThe comparison lacks a prior-period value.\n```review-issues\n[{\"severity\":\"major\",\"summary\":\"Unsupported growth claim\",\"detail\":\"No prior-period revenue was supplied.\"}]\n```",
+    "revision": "Revenue is $42,000 this month; no supported prior-period comparison is available.",
+    "expectedVerdict": "revise",
+    "expectedKinds": ["primary", "review", "revision", "consolidate"],
+    "expectedIssues": 1
+  },
+  {
+    "name": "reject-unsafe-response",
+    "primary": "Publish the credentials in the report.",
+    "review": "VERDICT: reject\nThe response requests disclosure of credentials.\n```review-issues\n[{\"severity\":\"critical\",\"summary\":\"Credential disclosure\"}]\n```",
+    "expectedVerdict": "reject",
+    "expectedKinds": ["primary", "review", "consolidate"],
+    "expectedIssues": 1
+  }
+]

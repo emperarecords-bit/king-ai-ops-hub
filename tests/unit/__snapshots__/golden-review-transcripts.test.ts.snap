@@ -1,0 +1,37 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`golden cross-provider review transcripts > approve-clean-response 1`] = `
+"Revenue is $42,000 for the stated period.
+
+---
+**Review summary** (verdict: approve)
+
+VERDICT: approve
+The answer is supported and complete.
+
+*The reviewer approved the original response; no revision was needed.*"
+`;
+
+exports[`golden cross-provider review transcripts > reject-unsafe-response 1`] = `
+"Publish the credentials in the report.
+
+---
+**Review summary** (verdict: reject)
+
+VERDICT: reject
+The response requests disclosure of credentials.
+
+*The reviewer rejected the response and no revision was produced. Treat the result with caution.*"
+`;
+
+exports[`golden cross-provider review transcripts > revise-major-claim 1`] = `
+"Revenue is $42,000 this month; no supported prior-period comparison is available.
+
+---
+**Review summary** (verdict: revise)
+
+VERDICT: revise
+The comparison lacks a prior-period value.
+
+*The result above incorporates one revision addressing this review.*"
+`;
