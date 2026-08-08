@@ -36,6 +36,17 @@ const SYSTEM_ACTOR_ID = '00000000-0000-0000-0000-000000000000';
 const AUDIT_CHAIN_LOCK_SEED = 1094929985; // fixed, stable seed for the 'audit-chain' namespace
 
 /**
+ * Acquire the per-org append lock without writing. Execution dispatch uses this to make its
+ * idempotency lookup and subsequent intent event one atomic, serial decision. The lock is
+ * transaction-scoped and re-entrant, so the following writeAudit call is safe.
+ */
+export async function acquireAuditWriteLock(tx: DbTx, orgId: string): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended('audit-chain:' || ${orgId}, ${AUDIT_CHAIN_LOCK_SEED}::bigint))`,
+  );
+}
+
+/**
  * Recognized PRE-EXISTING audit-chain concurrency forks on staging (documented 2026-07, from the O-23
  * document-ingestion bursts, before the per-org write lock existed). These historical rows are NEVER
  * rewritten/resequenced/repaired; the validator reports them as recognized exceptions, distinct from any
@@ -60,9 +71,7 @@ export async function writeAudit(
   // two concurrent writers cannot read the same head and fork the chain. Acquired BEFORE reading the head;
   // released automatically at commit/rollback. The 64-bit key is namespaced ('audit-chain:') and keyed per
   // org, so unrelated orgs never contend (see AUDIT_CHAIN_LOCK_SEED).
-  await tx.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended('audit-chain:' || ${ctx.orgId}, ${AUDIT_CHAIN_LOCK_SEED}::bigint))`,
-  );
+  await acquireAuditWriteLock(tx, ctx.orgId);
 
   // Chain head for this org. The org-scoped chain means cross-project events
   // (org settings changes) still chain; project attribution lives in its column.
