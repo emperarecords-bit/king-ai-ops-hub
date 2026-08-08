@@ -44,12 +44,13 @@ describe('0058 executor lifecycle migration contract', () => {
       /executor_executions|executor_execution_attempts/i.test(statement),
     );
 
-    expect(rls).toContain("'executor_executions', 'executor_execution_attempts'");
-    expect(rls).toMatch(/approvals, executor_executions, executor_execution_attempts,/);
-    expect(lifecycleGrants).toHaveLength(1);
-    expect(lifecycleGrants[0]).toMatch(/grant select, insert, update on/i);
-    expect(lifecycleGrants[0]).toMatch(/to app_server/i);
-    expect(lifecycleGrants[0]).not.toMatch(/delete|app_system/i);
+    expect(rls).toContain("array['executor_executions', 'executor_execution_attempts']");
+    expect(rls).toContain("to_regclass('public.' || t) is not null");
+    expect(rls).toContain("execute format('alter table %I force row level security', t)");
+    expect(rls).toContain("execute format('grant select, insert, update on %I to app_server', t)");
+    expect(lifecycleGrants).toHaveLength(0);
+    expect(rls).not.toContain("execute format('grant delete on %I");
+    expect(rls).not.toContain("executor_execution_attempts to app_system");
   });
 
   it('does not weaken the dry-run-only dispatch boundary or add filesystem writes', () => {

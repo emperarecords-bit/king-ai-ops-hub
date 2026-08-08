@@ -61,6 +61,12 @@ describe.skipIf(!available)('executor lifecycle storage', { timeout: 20_000 }, (
     const row = await insertExecution(values(`key-${randomUUID()}`));
     expect(row).toHaveLength(1);
     expect((await app`select id from executor_executions where id=${row[0]!.id}`)).toHaveLength(0);
+    const crossTenant = await asTenant(
+      app,
+      { userId: ids.user, orgId: randomUUID(), projectId: randomUUID() },
+      (tx) => tx`select id from executor_executions where id=${row[0]!.id}`,
+    );
+    expect(crossTenant).toHaveLength(0);
   });
 
   it('enforces scoped idempotency, single-use confirmation, and one active target', async () => {
