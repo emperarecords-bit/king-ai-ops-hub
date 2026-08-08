@@ -710,6 +710,32 @@ begin
 end
 $$;
 
+-- Phase 3 executor lifecycle storage is introduced by migration 0058. The incremental-bootstrap
+-- test deliberately applies the CURRENT rls.sql to the penultimate schema before migrating 0058,
+-- so absence at that exact point is expected. Once either table exists, every grant and tenant
+-- policy statement remains mandatory and any SQL failure propagates (fail closed).
+do $$
+declare
+  t text;
+begin
+  foreach t in array array['executor_executions', 'executor_execution_attempts']
+  loop
+    if to_regclass('public.' || t) is not null then
+      execute format('grant select, insert, update on %I to app_server', t);
+      execute format('alter table %I enable row level security', t);
+      execute format('alter table %I force row level security', t);
+      execute format('drop policy if exists %I on %I', t || '_tenant', t);
+      execute format(
+        'create policy %I on %I
+           using (org_id = app.current_org_id() and project_id = app.current_project_id())
+           with check (org_id = app.current_org_id() and project_id = app.current_project_id())',
+        t || '_tenant', t
+      );
+    end if;
+  end loop;
+end
+$$;
+
 -- Provisioning INSERT policies (Sprint 5, "The Front Door") -------------------
 -- Workspace/org creation happens BEFORE the row being created has members, so
 -- the membership-based USING predicates above can never admit these inserts.

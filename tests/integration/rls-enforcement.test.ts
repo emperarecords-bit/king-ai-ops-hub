@@ -128,7 +128,7 @@ afterAll(async () => {
 // The protected tenant tables named by the sprint's policy audit.
 const TENANT_TABLES = [
   'agents', 'project_context_items', 'integration_secrets', 'tasks', 'runs',
-  'run_steps', 'messages', 'artifacts', 'approvals', 'usage_events',
+  'run_steps', 'messages', 'artifacts', 'approvals', 'executor_executions', 'executor_execution_attempts', 'usage_events',
   'spend_limits', 'objectives', 'milestones', 'knowledge_items',
   'task_schedules', 'documents', 'document_chunks', 'task_dependencies',
   'decisions', 'knowledge_disclosure_grants', 'run_jobs',
