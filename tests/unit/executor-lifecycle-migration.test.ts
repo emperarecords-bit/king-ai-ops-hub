@@ -16,6 +16,20 @@ describe('0058 executor lifecycle migration contract', () => {
     expect(migration).toContain('executor_execution_attempts_execution_tenant_fk');
   });
 
+  it('creates referenced tenant uniqueness before each dependent lifecycle foreign key', () => {
+    for (const [uniqueConstraint, foreignKey] of [
+      ['approvals_tenant_id_uq', 'executor_executions_approval_tenant_fk'],
+      ['tasks_tenant_id_uq', 'executor_executions_task_tenant_fk'],
+      ['runs_tenant_id_uq', 'executor_executions_run_tenant_fk'],
+    ]) {
+      const uniquePosition = migration.indexOf(`ADD CONSTRAINT "${uniqueConstraint}"`);
+      const foreignKeyPosition = migration.indexOf(`ADD CONSTRAINT "${foreignKey}"`);
+
+      expect(uniquePosition).toBeGreaterThan(-1);
+      expect(foreignKeyPosition).toBeGreaterThan(uniquePosition);
+    }
+  });
+
   it('enforces idempotency, confirmation single-use, active target, active attempt, hashes, and ambiguity', () => {
     for (const required of [
       'executor_executions_idempotency_uq', 'executor_executions_confirmation_uq',

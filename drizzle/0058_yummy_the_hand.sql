@@ -82,6 +82,9 @@ CREATE TABLE "executor_executions" (
 	CONSTRAINT "executor_executions_ambiguity_ck" CHECK ("executor_executions"."state" <> 'ambiguous' or "executor_executions"."reconciliation_state" in ('required','in_progress','manual_required'))
 );
 --> statement-breakpoint
+ALTER TABLE "approvals" ADD CONSTRAINT "approvals_tenant_id_uq" UNIQUE("org_id","project_id","id");--> statement-breakpoint
+ALTER TABLE "runs" ADD CONSTRAINT "runs_tenant_id_uq" UNIQUE("org_id","project_id","id");--> statement-breakpoint
+ALTER TABLE "tasks" ADD CONSTRAINT "tasks_tenant_id_uq" UNIQUE("org_id","project_id","id");--> statement-breakpoint
 ALTER TABLE "executor_execution_attempts" ADD CONSTRAINT "executor_execution_attempts_org_id_organizations_id_fk" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "executor_execution_attempts" ADD CONSTRAINT "executor_execution_attempts_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "executor_execution_attempts" ADD CONSTRAINT "executor_execution_attempts_execution_tenant_fk" FOREIGN KEY ("org_id","project_id","execution_id") REFERENCES "public"."executor_executions"("org_id","project_id","id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
@@ -103,7 +106,4 @@ CREATE UNIQUE INDEX "executor_executions_live_target_uq" ON "executor_executions
 CREATE INDEX "executor_executions_state_reconcile_idx" ON "executor_executions" USING btree ("state","reconcile_after");--> statement-breakpoint
 CREATE INDEX "executor_executions_project_created_idx" ON "executor_executions" USING btree ("org_id","project_id","created_at");--> statement-breakpoint
 CREATE INDEX "executor_executions_approval_idx" ON "executor_executions" USING btree ("approval_id");--> statement-breakpoint
-CREATE INDEX "executor_executions_target_idx" ON "executor_executions" USING btree ("workspace_storage_id","target_collision_key");--> statement-breakpoint
-ALTER TABLE "approvals" ADD CONSTRAINT "approvals_tenant_id_uq" UNIQUE("org_id","project_id","id");--> statement-breakpoint
-ALTER TABLE "runs" ADD CONSTRAINT "runs_tenant_id_uq" UNIQUE("org_id","project_id","id");--> statement-breakpoint
-ALTER TABLE "tasks" ADD CONSTRAINT "tasks_tenant_id_uq" UNIQUE("org_id","project_id","id");
+CREATE INDEX "executor_executions_target_idx" ON "executor_executions" USING btree ("workspace_storage_id","target_collision_key");
