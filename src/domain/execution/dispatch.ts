@@ -7,13 +7,9 @@ import { acquireAuditWriteLock, writeAudit } from '@/domain/audit/audit';
 import { canonicalJson } from '@/orchestration/actions';
 import { sha256Hex } from '@/lib/crypto';
 import { type TenantContext } from '@/types/domain';
-import {
-  EXECUTION_MODES,
-  type ExecutorAction,
-  type ExecutorResult,
-  type ExecutorRiskClass,
-} from './executor-contract';
+import { EXECUTION_MODES, validateExecutorResult, type ExecutorAction, type ExecutorResult } from './executor-contract';
 import { NoopDryRunExecutor } from './noop-executor';
+import { EXECUTOR_RISK_BY_ACTION } from './executor-policy';
 
 const dispatchRequestSchema = z.object({
   approvalId: z.string().uuid(),
@@ -36,21 +32,7 @@ export interface DispatchPolicy {
   readonly now?: Date;
 }
 
-const RISK_BY_ACTION = Object.freeze({
-  file_write: 'reversible_internal_write',
-  git_commit: 'external_reversible',
-  git_push: 'external_reversible',
-  git_pr: 'external_reversible',
-  deployment: 'destructive_irreversible',
-  db_mutation: 'destructive_irreversible',
-  email_send: 'external_reversible',
-  social_publish: 'external_reversible',
-  financial: 'financial_regulated',
-  destructive: 'destructive_irreversible',
-  external_http: 'external_reversible',
-} as const satisfies Record<string, ExecutorRiskClass>);
-
-const FOUNDATION_ALLOWED_RISKS: ReadonlySet<ExecutorRiskClass> = new Set(['reversible_internal_write']);
+const FOUNDATION_ALLOWED_RISKS = new Set(['reversible_internal_write']);
 const noop = new NoopDryRunExecutor();
 
 function blocked(message: string, reconciliation: ExecutorResult['reconciliation'] = 'not_required'): ExecutorResult {
@@ -130,7 +112,7 @@ export async function executeApprovedAction(
   const payload = row.payload && typeof row.payload === 'object' && !Array.isArray(row.payload) ? row.payload as Record<string, unknown> : null;
   if (!payload || sha256Hex(canonicalJson(payload)) !== row.payloadSha256) return writeBlocked(tx, ctx, row.id, 'Approved payload integrity check failed.');
 
-  const riskClass = RISK_BY_ACTION[row.actionType];
+  const riskClass = EXECUTOR_RISK_BY_ACTION[row.actionType];
   if (!FOUNDATION_ALLOWED_RISKS.has(riskClass)) return writeBlocked(tx, ctx, row.id, 'This risk class is prohibited in the Phase 3 foundation.', { actionType: row.actionType, riskClass });
   if (!noop.capability.actionTypes.includes(row.actionType as 'file_write')) return writeBlocked(tx, ctx, row.id, 'No executor declares this action type.', { actionType: row.actionType });
   if (!(policy.enabledExecutorIds ?? []).includes(noop.capability.executorId)) return writeBlocked(tx, ctx, row.id, 'The executor is disabled.');
@@ -158,7 +140,7 @@ export async function executeApprovedAction(
 
   await writeAudit(tx, ctx, { action: 'execution.intent', entityType: 'approval', entityId: row.id, detail: auditDetail(action) });
   try {
-    const result = await noop.execute(action);
+    const result = validateExecutorResult(action, noop.capability, await noop.execute(action));
     await writeAudit(tx, ctx, { action: 'execution.result', entityType: 'approval', entityId: row.id, detail: auditDetail(action, result) });
     return result;
   } catch {
