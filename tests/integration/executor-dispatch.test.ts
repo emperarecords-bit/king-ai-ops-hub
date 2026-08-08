@@ -81,5 +81,10 @@ describe.skipIf(!available)('trusted executor dispatch', { timeout: 15_000 }, ()
   it('audits malformed input without dispatching', async () => {
     const result = await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, { approvalId: 'forged', mode: 'live' }, { enabledExecutorIds: ['noop_dry_run'] }));
     expect(result).toMatchObject({ outcome: 'blocked', message: 'Malformed execution request.' });
+    const a = await approved();
+    const unknownExecutor = await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, request(a.approvalId, a.hash, { executorId: 'attacker_executor' }), { enabledExecutorIds: ['noop_dry_run'] }));
+    expect(unknownExecutor).toMatchObject({ outcome: 'blocked', message: 'Malformed execution request.' });
+    const missingConfirmation = await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, request(a.approvalId, a.hash, { confirmation: null }), { enabledExecutorIds: ['noop_dry_run'] }));
+    expect(missingConfirmation).toMatchObject({ outcome: 'blocked', message: 'A fresh payload-bound confirmation is required.' });
   });
 });

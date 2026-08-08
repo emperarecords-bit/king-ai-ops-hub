@@ -11,6 +11,7 @@ import { Breadcrumb } from '../../breadcrumb';
 import { ConsequenceReadPanel, ConsequenceLevelChip } from '../consequence-view';
 import { AuthorizeForm } from '../authorize-form';
 import { WithdrawForm } from '../withdraw-form';
+import { ExecutorFoundationStatus } from '../executor-status';
 
 const AUTHORIZATION_LABEL: Record<string, string> = {
   pending: 'Proposed — awaiting your decision',
@@ -55,8 +56,7 @@ export default async function ApprovalDetailPage({
   // Three distinct lifecycles — the operator must never infer whether the action actually happened.
   const aiWork = a.taskStatus === 'completed' ? 'Finished' : a.taskStatus.replaceAll('_', ' ');
   const authorizationState = AUTHORIZATION_LABEL[a.status] ?? a.status;
-  const executionState =
-    a.status === 'approved' ? 'Not implemented — no executor yet (authorization records intent)' : 'Not started';
+  const executionState = a.status === 'approved' ? 'Authorized, not executed — live execution disabled' : 'Not started';
 
   return (
     <div className="mx-auto max-w-3xl">
@@ -137,6 +137,10 @@ export default async function ApprovalDetailPage({
         </dl>
       </Card>
 
+      <Card title="Executor boundary" className="mb-6">
+        <ExecutorFoundationStatus actionType={a.actionType} />
+      </Card>
+
       {/* §5 — Integrity & validity. */}
       <Card title="Integrity & validity" className="mb-6">
         <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
@@ -198,8 +202,8 @@ export default async function ApprovalDetailPage({
           ) : null}
           {a.status === 'approved' ? (
             <p className="mt-2 text-xs text-[var(--muted)]">
-              Authorized, not executed — no executor runs the action yet. The record will show execution
-              once one exists.
+              Authorized, not executed — the Phase 3 foundation permits validation and preview only. No
+              live executor capability is enabled.
             </p>
           ) : null}
           <p className="mt-3 text-xs text-[var(--muted)]">

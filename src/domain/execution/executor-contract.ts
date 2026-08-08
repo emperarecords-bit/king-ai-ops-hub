@@ -107,3 +107,25 @@ export interface Executor {
   execute(action: ExecutorAction): Promise<ExecutorResult>;
 }
 
+/** Validate a registered executor's result before the trusted path may audit or return it. */
+export function validateExecutorResult(
+  action: ExecutorAction,
+  capability: ExecutorCapability,
+  result: ExecutorResult,
+): ExecutorResult {
+  const p = result.provenance;
+  const bound = p.executorId === capability.executorId && p.actionType === action.actionType &&
+    p.actorId === action.authorization.actorId && p.orgId === action.orgId && p.projectId === action.projectId &&
+    p.approvalId === action.approvalId && p.taskId === action.taskId && p.runId === action.runId &&
+    p.correlationId === action.correlationId && p.idempotencyKey === action.idempotencyKey &&
+    p.payloadSha256 === action.payloadSha256 && p.mode === action.mode && p.riskClass === action.riskClass;
+  if (!bound) throw new Error('Executor result provenance does not match the trusted action.');
+  if (result.outcome === 'ambiguous' && (result.reconciliation !== 'required' || result.retryAllowed)) {
+    throw new Error('Ambiguous outcomes require reconciliation and prohibit retry.');
+  }
+  if (result.outcome === 'not_executed' && (action.mode !== 'dry_run' || capability.externalSideEffects)) {
+    throw new Error('A not_executed result is valid only for a side-effect-free dry run.');
+  }
+  return result;
+}
+
