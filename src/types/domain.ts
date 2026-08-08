@@ -77,6 +77,23 @@ export const ACTION_TYPES = [
 ] as const;
 export type ActionType = (typeof ACTION_TYPES)[number];
 
+/** Durable lifecycle vocabulary for consequential executor attempts. No value enables execution. */
+export const EXECUTOR_EXECUTION_STATES = [
+  'proposed', 'confirmed', 'claimed', 'sandbox_starting', 'precondition_verified', 'writing', 'verifying',
+  'succeeded', 'blocked', 'definitely_not_executed', 'failed', 'ambiguous', 'reconciling',
+  'reconciled_succeeded', 'reconciled_not_executed', 'manual_resolution_required',
+] as const;
+export type ExecutorExecutionState = (typeof EXECUTOR_EXECUTION_STATES)[number];
+
+export const EXECUTOR_ATTEMPT_STATES = [
+  'claimed', 'sandbox_starting', 'precondition_verified', 'writing', 'verifying', 'succeeded',
+  'definitely_not_executed', 'failed', 'ambiguous', 'cancelled',
+] as const;
+export type ExecutorAttemptState = (typeof EXECUTOR_ATTEMPT_STATES)[number];
+
+export const EXECUTOR_RECONCILIATION_STATES = ['not_required', 'required', 'in_progress', 'resolved', 'manual_required'] as const;
+export type ExecutorReconciliationState = (typeof EXECUTOR_RECONCILIATION_STATES)[number];
+
 export const APPROVAL_STATUSES = [
   'pending',
   'approved',

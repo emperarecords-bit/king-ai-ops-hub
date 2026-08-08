@@ -93,7 +93,7 @@ grant usage on schema app to app_server;
 grant select, insert, update on
   organizations, memberships, projects, project_members,
   agents, departments, project_context_items, integration_secrets,
-  tasks, runs, run_steps, artifacts, approvals,
+  tasks, runs, run_steps, artifacts, approvals, executor_executions, executor_execution_attempts,
   objectives, milestones, knowledge_items, task_schedules,
   documents, document_versions, document_chunks, document_version_tombstones, object_cleanup_operations, document_purge_operations, run_document_versions, task_dependencies, decisions, decision_injections, knowledge_injections, knowledge_sources, knowledge_verification_events, knowledge_disclosure_grants, document_disclosure_grants, knowledge_proposals, ai_operations, run_jobs, document_jobs,
   work_items,
@@ -687,7 +687,7 @@ begin
   foreach t in array array[
     'agents', 'project_context_items', 'integration_secrets',
     'tasks', 'runs', 'run_steps', 'messages',
-    'artifacts', 'approvals', 'usage_events', 'spend_limits',
+    'artifacts', 'approvals', 'executor_executions', 'executor_execution_attempts', 'usage_events', 'spend_limits',
     'objectives', 'milestones', 'knowledge_items', 'task_schedules',
     'documents', 'document_versions', 'document_chunks', 'document_version_tombstones', 'object_cleanup_operations', 'document_purge_operations', 'run_document_versions', 'task_dependencies', 'decisions', 'decision_injections', 'knowledge_injections', 'knowledge_sources', 'knowledge_verification_events', 'knowledge_disclosure_grants', 'document_disclosure_grants', 'knowledge_proposals', 'ai_operations', 'run_jobs',
     'document_jobs', 'work_items',
