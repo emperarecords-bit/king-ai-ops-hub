@@ -1,0 +1,17 @@
+{
+  "fixtureVersion": 1,
+  "workspaceIdentity": "synthetic-firecracker-rehearsal-only",
+  "initialFiles": [
+    {
+      "path": "plans/existing.md",
+      "utf8Content": "synthetic precondition\n"
+    }
+  ],
+  "createTarget": "plans/created.md",
+  "replaceTarget": "plans/existing.md",
+  "forbiddenTargets": [
+    "../escape.md",
+    ".git/config",
+    "link-outside/escape.md"
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "entrypoint": "/sbin/king-file-write-v1",
+  "entrypointSha256": "__PINNED_ENTRYPOINT_SHA256__",
+  "kernelSha256": "__PINNED_KERNEL_SHA256__",
+  "rootfsSha256": "__PINNED_ROOTFS_SHA256__",
+  "workspaceGuestPath": "/workspace",
+  "network": "none",
+  "environmentAllowlist": [],
+  "limits": {
+    "wallClockMs": 10000,
+    "filesystemCriticalSectionMs": 3000,
+    "memoryMiB": 128,
+    "vcpuCount": 1,
+    "cpuMillis": 2000,
+    "pids": 8,
+    "maxPayloadBytes": 262144,
+    "maxOutputBytes": 65536,
+    "automaticWriteRetries": 0
+  }
+}
