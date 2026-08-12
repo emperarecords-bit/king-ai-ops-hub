@@ -1,11 +1,61 @@
 {
-  "entrypoint": "/sbin/king-file-write-v1",
-  "entrypointSha256": "__PINNED_ENTRYPOINT_SHA256__",
-  "kernelSha256": "__PINNED_KERNEL_SHA256__",
-  "rootfsSha256": "__PINNED_ROOTFS_SHA256__",
-  "workspaceGuestPath": "/workspace",
-  "network": "none",
-  "environmentAllowlist": [],
+  "manifestVersion": 2,
+  "architecture": "__PINNED_ARCHITECTURE__",
+  "artifacts": {
+    "firecracker": {
+      "version": "__PINNED_FIRECRACKER_VERSION__",
+      "source": "__PINNED_FIRECRACKER_SOURCE__",
+      "sha256": "__PINNED_FIRECRACKER_SHA256__"
+    },
+    "jailer": {
+      "version": "__PINNED_FIRECRACKER_VERSION__",
+      "source": "__PINNED_JAILER_SOURCE__",
+      "sha256": "__PINNED_JAILER_SHA256__"
+    },
+    "kernel": {
+      "version": "__PINNED_KERNEL_VERSION__",
+      "format": "__PINNED_KERNEL_FORMAT__",
+      "source": "__PINNED_KERNEL_SOURCE__",
+      "configSha256": "__PINNED_KERNEL_CONFIG_SHA256__",
+      "sha256": "__PINNED_KERNEL_SHA256__"
+    },
+    "rootfs": {
+      "filesystem": "ext4",
+      "source": "__PINNED_ROOTFS_SOURCE__",
+      "buildRecipeSha256": "__PINNED_ROOTFS_RECIPE_SHA256__",
+      "sha256": "__PINNED_ROOTFS_SHA256__"
+    },
+    "entrypoint": {
+      "path": "/sbin/king-file-write-v1",
+      "source": "__PINNED_ENTRYPOINT_SOURCE__",
+      "sha256": "__PINNED_ENTRYPOINT_SHA256__"
+    }
+  },
+  "guest": {
+    "entrypoint": "/sbin/king-file-write-v1",
+    "entrypointRunsAsPid1": true,
+    "bootstrapUid": 0,
+    "executionUid": 10000,
+    "executionGid": 10000,
+    "pid1Responsibilities": [
+      "mount-workspace",
+      "verify-workspace-device-and-filesystem",
+      "drop-all-capabilities-and-privileges",
+      "forward-signals",
+      "reap-children",
+      "emit-bounded-structured-result",
+      "sync-and-unmount-workspace"
+    ],
+    "workspace": {
+      "device": "/dev/vdb",
+      "guestPath": "/workspace",
+      "filesystem": "ext4",
+      "mountOptions": ["rw", "nodev", "nosuid", "noexec"],
+      "expectedIdentity": "__PINNED_SYNTHETIC_WORKSPACE_IDENTITY__"
+    },
+    "network": "none",
+    "environmentAllowlist": []
+  },
   "limits": {
     "wallClockMs": 10000,
     "filesystemCriticalSectionMs": 3000,
