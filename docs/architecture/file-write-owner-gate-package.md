@@ -29,7 +29,7 @@ Recommendation: approve a disposable Linux Firecracker microVM proof in an isola
 
 ## Proposed limits and isolation
 
-- One execution per fresh microVM; 1 vCPU, 128 MiB memory, 15-second wall timeout, 2 CPU-seconds, and 64 KiB combined structured output.
+- One execution per fresh microVM; 1 vCPU, 128 MiB memory, **10-second wall timeout**, 2 CPU-seconds, and 64 KiB combined structured output, matching the accepted owner decision and rehearsal manifest.
 - No network device; read-only root image pinned by digest; no credentials or metadata service available to the guest.
 - One explicitly identified `/workspace` volume; no host root or control socket; non-root guest UID; minimal capabilities.
 - Kill means stop the microVM, preserve only bounded lifecycle/evidence records, detach/quarantine the workspace, then destroy ephemeral resources. Cleanup failure becomes reconciliation-required.

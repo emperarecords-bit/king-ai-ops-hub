@@ -6,14 +6,17 @@
 
 Use a dedicated disposable Linux host with working KVM access. It must contain no staging/production credentials, customer data, Hub repository mount, home-directory mount, SSH keys, cloud credentials, or network path from the guest. Firecracker, the kernel, rootfs, and guest entrypoint must come from trusted pinned releases/builds with recorded SHA-256 digests.
 
-Run `KING_REHEARSAL_DISPOSABLE=true scripts/firecracker/check-host-readiness.sh`. This read-only checker launches nothing. A passing result is necessary but not sufficient; record the host image identity, kernel version, Firecracker version, executing user, `/dev/kvm` ownership/mode, and the explicit owner authorization.
+Run `scripts/firecracker/check-host-readiness.sh` only with the disposable acknowledgement, artifact paths, and owner-approved expected SHA-256 values described below. The checker performs discovery and hashing only: it never executes Firecracker, jailer, the kernel, rootfs, or entrypoint and never creates a VM API socket. A passing result means **ready for owner artifact-pin review**, not ready to launch. Record the host image identity, kernel version, architecture, executing user, `/dev/kvm` ownership/mode, artifact paths/hashes, and explicit owner authorization.
+
+Required environment inputs are `KING_REHEARSAL_DISPOSABLE=true`, absolute paths in `KING_FIRECRACKER_PATH`, `KING_JAILER_PATH`, `KING_KERNEL_PATH`, `KING_ROOTFS_PATH`, and `KING_ENTRYPOINT_PATH`, corresponding `KING_*_EXPECTED_SHA256` pins, and an absolute future `KING_SYNTHETIC_WORKSPACE_PATH` outside the repository and home directory. Values remain host-local and must not be committed. A missing or mismatched pin is `BLOCKED`.
 
 ## Artifact preparation
 
-1. Build or obtain a minimal Linux kernel and read-only rootfs compatible with the pinned Firecracker release. The rootfs contains only the fixed `/sbin/king-file-write-v1` entrypoint and its runtime dependencies; it contains no shell, package manager, SSH service, credentials, or Hub application source.
-2. Record and independently verify the kernel, rootfs, and entrypoint SHA-256 digests in an evidence copy of `config/firecracker/guest-entrypoint.manifest.json`. Do not commit populated host paths or credentials.
+1. Build or obtain a minimal Linux kernel and read-only ext4 rootfs compatible with the owner-pinned Firecracker release and host architecture. The rootfs contains only the fixed `/sbin/king-file-write-v1` entrypoint and its runtime dependencies; it contains no shell, package manager, SSH service, credentials, or Hub application source.
+2. Pin Firecracker and jailer from the same trusted release, plus kernel, kernel configuration, rootfs build recipe, rootfs, and entrypoint source/version and SHA-256 in an untracked evidence copy of `config/firecracker/guest-entrypoint.manifest.json`. Do not execute either host binary until an owner has approved those exact pins. Do not commit populated host paths or credentials.
 3. Materialize `tests/fixtures/firecracker/synthetic-workspace.json` into a new disposable filesystem image. Never use the repository directory as the workspace backing path.
-4. Resolve the three path placeholders in `config/firecracker/rehearsal-machine.template.json` in an untracked, host-local copy. The API configuration must retain an empty `network-interfaces` list, read-only rootfs, and exactly one writable synthetic workspace drive.
+4. Resolve the three path placeholders in `config/firecracker/rehearsal-machine.template.json` in an untracked, host-local copy. The API configuration must retain an empty `network-interfaces` list, read-only rootfs, and exactly one writable synthetic ext4 workspace drive at `/dev/vdb`.
+5. The fixed entrypoint runs as PID 1 only for bootstrap: it verifies and mounts `/dev/vdb` at `/workspace` with `rw,nodev,nosuid,noexec`, then drops all capabilities and changes to UID/GID 10000 before processing the request. It must forward signals, reap children, bound structured output, sync/unmount the workspace, and fail closed if any step or identity check is unsupported.
 
 ## Disposable database
 
@@ -25,7 +28,7 @@ Required database evidence: fresh bootstrap success, endpoint/count, executor li
 
 The exact launch and write commands are intentionally absent until the launch gate is approved. The next authorization must identify the disposable host and authorize: Firecracker launch; synthetic workspace attachment; isolated create and preconditioned replace; crash/fault injection; traversal/link escape attempts; lifecycle persistence and reconciliation; kill-switch behavior; and teardown.
 
-Before that authorization, only run the host checker, JSON/template tests, checksums, and read-only inspection. Do not start Firecracker, create a VM API socket, invoke the guest entrypoint, or mutate the synthetic workspace.
+Before that authorization, only run the discovery/hash checker, JSON/template tests, checksums, and read-only inspection. Post-approval binary version checks and all launch commands belong to the separately authorized execution phase and are intentionally absent here. Do not start Firecracker, create a VM API socket, invoke the guest entrypoint, or mutate the synthetic workspace.
 
 ## Teardown procedure
 
