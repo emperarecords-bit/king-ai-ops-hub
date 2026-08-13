@@ -70,7 +70,7 @@ static int allowed_target(const char *target) {
   const char *segment = target;
   for (const char *cursor = target;; cursor++) {
     unsigned char c = (unsigned char)*cursor;
-    if (c == '\\' || c < 0x20 || c == 0x7f) return 0;
+    if (c != '\0' && (c == '\\' || c < 0x20 || c == 0x7f)) return 0;
     if (c == '/' || c == '\0') {
       unsigned char delimiter = c;
       size_t segment_length = (size_t)(cursor - segment);
