@@ -1051,6 +1051,42 @@ export const apiTokens = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// GitHub repository links (Phase 6). The per-project binding of a GitHub App
+// INSTALLATION to exactly one repository. Contains NO secret — the App
+// credentials are owner-gated platform secrets that never enter the database
+// (docs/architecture/github-integration-decision.md). `defaultBranch` is
+// recorded at link time because the write policy must reject any write
+// targeting it (branch + PR only, never a default-branch push).
+// ---------------------------------------------------------------------------
+
+export const githubRepoLinks = pgTable(
+  'github_repo_links',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    /** GitHub App installation id for this org/repo — an opaque number, not a secret. */
+    installationId: bigint('installation_id', { mode: 'bigint' }).notNull(),
+    /** Canonical `owner/repo`. */
+    repoFullName: text('repo_full_name').notNull(),
+    /** The branch writes must never target (checked by the git write policy). */
+    defaultBranch: text('default_branch').notNull(),
+    linkedBy: uuid('linked_by')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'cascade' }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('github_repo_links_project_repo_uq').on(t.projectId, t.repoFullName),
+    index('github_repo_links_org_project_idx').on(t.orgId, t.projectId),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Work hierarchy (OBJECTIVES.md, D-010/D-015) — dark in Sprint 3, UI Sprint 4.
 // Containment: Project → Objective → Milestone → Task. Department/Employee is
 // an ASSIGNMENT dimension (sponsoring_department_id, accountable_agent_id),
