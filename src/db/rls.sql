@@ -791,6 +791,25 @@ begin
 end
 $$;
 
+-- Phase 6 GitHub repo links are introduced by migration 0060. to_regclass-guarded like the executor/api_tokens
+-- blocks above so the incremental-bootstrap test (which applies the CURRENT rls.sql to the PENULTIMATE schema)
+-- tolerates the newest table's absence. The row is ordinary tenant-scoped configuration — no secret, no definer
+-- function; unlink is a hard delete of the config row (the audit trail lives in audit_logs, not here).
+do $$
+begin
+  if to_regclass('public.github_repo_links') is not null then
+    grant select, insert, update, delete on github_repo_links to app_server;
+    alter table github_repo_links enable row level security;
+    alter table github_repo_links force row level security;
+    drop policy if exists github_repo_links_tenant on github_repo_links;
+    execute
+      'create policy github_repo_links_tenant on github_repo_links
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+  end if;
+end
+$$;
+
 -- Provisioning INSERT policies (Sprint 5, "The Front Door") -------------------
 -- Workspace/org creation happens BEFORE the row being created has members, so
 -- the membership-based USING predicates above can never admit these inserts.
