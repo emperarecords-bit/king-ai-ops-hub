@@ -98,7 +98,7 @@ static int open_parent(int root, const char *target, char leaf[101]) {
   }
   *slash = '\0';
   memcpy(leaf, slash + 1, strlen(slash + 1) + 1);
-  struct open_how how = {.flags = O_PATH | O_DIRECTORY | O_CLOEXEC, .resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV};
+  struct open_how how = {.flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC, .resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV};
   return (int)syscall(SYS_openat2, root, path, &how, sizeof(how));
 }
 
@@ -161,7 +161,7 @@ static int worker(const char *operation, const char *target, const char *expecte
   if (strcmp(operation, "create") && strcmp(operation, "replace")) { result("blocked", "invalid_operation"); return 2; }
   if (!strcmp(operation, "replace") && !valid_sha256(expected)) { result("blocked", "invalid_precondition"); return 2; }
   if (!valid_sha256(desired)) { result("blocked", "invalid_desired_hash"); return 2; }
-  int root = open(workspace, O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  int root = open(workspace, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
   if (root < 0) { result("failed", "workspace_unavailable"); return 3; }
   char leaf[101];
   int parent = open_parent(root, target, leaf);
