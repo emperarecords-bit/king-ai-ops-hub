@@ -174,7 +174,10 @@ static int worker(const char *operation, const char *target, const char *expecte
     int current = openat(parent, leaf, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     char hash[65];
     if (current < 0 || fstat(current, &before) < 0 || !S_ISREG(before.st_mode) || before.st_nlink != 1 || sha256_fd(current, hash) < 0 || strcmp(hash, expected)) {
-      if (current >= 0) close(current); close(parent); result("blocked", "replace_precondition_failed"); return 2;
+      if (current >= 0) close(current);
+      close(parent);
+      result("blocked", "replace_precondition_failed");
+      return 2;
     }
     close(current);
   }
@@ -192,7 +195,10 @@ static int worker(const char *operation, const char *target, const char *expecte
     struct stat observed;
     char hash[65];
     if (current < 0 || fstat(current, &observed) < 0 || observed.st_dev != before.st_dev || observed.st_ino != before.st_ino || observed.st_nlink != 1 || sha256_fd(current, hash) < 0 || strcmp(hash, expected)) {
-      if (current >= 0) close(current); result("blocked", "replace_race_detected"); rc = 2; goto cleanup;
+      if (current >= 0) close(current);
+      result("blocked", "replace_race_detected");
+      rc = 2;
+      goto cleanup;
     }
     close(current);
   }
@@ -204,7 +210,10 @@ static int worker(const char *operation, const char *target, const char *expecte
     struct stat verified;
     char final_hash[65];
     if (final < 0 || fstat(final, &verified) < 0 || !S_ISREG(verified.st_mode) || verified.st_nlink != 1 || sha256_fd(final, final_hash) < 0 || strcmp(final_hash, desired)) {
-      if (final >= 0) close(final); result("ambiguous", "postcondition_unverified"); rc = 4; goto done;
+      if (final >= 0) close(final);
+      result("ambiguous", "postcondition_unverified");
+      rc = 4;
+      goto done;
     }
     close(final);
   }
