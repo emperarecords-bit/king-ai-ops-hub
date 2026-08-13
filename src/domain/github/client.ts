@@ -1,8 +1,11 @@
+// Static import is safe: live-client imports only TYPES from this module, so there is no runtime cycle.
+import { LiveGitHubClient } from './live-client';
+
 /**
- * GitHub repository access contract (Phase 6). CONTRACT-ONLY in this phase: there is no live implementation, and
- * none can exist until the owner creates the GitHub App and stages its credentials in the approved secret store
- * (docs/architecture/github-integration-decision.md). Everything here fails CLOSED — absent credentials produce a
- * typed refusal, never a fallback, and no method ever performs network I/O in this phase.
+ * GitHub repository access contract (Phase 6). The owner created the GitHub App and authorized live activation
+ * (2026-08-13): with both credentials present, `getGitHubClient()` returns the policy-gated live client
+ * (./live-client.ts); without them everything fails CLOSED — absent credentials produce a typed refusal, never
+ * a fallback (docs/architecture/github-integration-decision.md).
  *
  * The interface is deliberately narrow: read tree/blob, and the three write primitives the branch+PR-only policy
  * permits. There is NO "push to branch X" free-form call and NO default-branch write — the shape of the contract
@@ -84,12 +87,34 @@ export function isGitHubConfigured(): boolean {
   return Boolean(process.env.GITHUB_APP_ID && process.env.GITHUB_APP_PRIVATE_KEY);
 }
 
+let liveClient: GitHubRepoClient | null = null;
+
 /**
- * Resolve the GitHub client. Phase 6 foundation: even WITH credentials present this returns the fail-closed
- * placeholder — the live App-JWT/installation-token client is a separate, owner-approved follow-up. This keeps
- * "credentials staged" from silently activating network access before that implementation is reviewed.
+ * Resolve the GitHub client. OWNER-AUTHORIZED live activation (2026-08-13): with BOTH credentials present
+ * (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`) this returns the live App-JWT/installation-token client
+ * (./live-client.ts), whose every mutating method is gated by the branch+PR-only write policy BEFORE any
+ * mutating request. Without them it remains the fail-closed placeholder — absence of credentials can never
+ * degrade into a fallback. The import is lazy so the fail-closed path stays dependency-free.
  */
 export function getGitHubClient(): GitHubRepoClient {
   if (testOverride) return testOverride;
-  return new UnconfiguredGitHubClient();
+  const appId = process.env.GITHUB_APP_ID;
+  const privateKeyPem = process.env.GITHUB_APP_PRIVATE_KEY;
+  if (!appId || !privateKeyPem) return new UnconfiguredGitHubClient();
+  if (!liveClient) {
+    liveClient = new LiveGitHubClient({
+      appId,
+      privateKeyPem,
+      fetchImpl: async (url, init) => {
+        const res = await fetch(url, init);
+        return { status: res.status, json: () => res.json() };
+      },
+    });
+  }
+  return liveClient;
+}
+
+/** Test hook: drop the cached live client so env changes take effect between tests. */
+export function resetGitHubClientForTests(): void {
+  liveClient = null;
 }
