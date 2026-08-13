@@ -1,0 +1,49 @@
+{
+  "manifestVersion": 1,
+  "status": "BLOCKED_WHILE_ANY_EXECUTION_CRITICAL_FIELD_IS_PENDING",
+  "pendingExecutionCriticalFields": [
+    "firecracker.binarySha256",
+    "firecracker.jailerSha256",
+    "kernel.generatedConfigurationSha256",
+    "kernel.vmlinuxSha256",
+    "rootfs.imageSha256",
+    "entrypoint.binarySha256"
+  ],
+  "architecture": "x86_64",
+  "firecracker": {
+    "version": "v1.16.1",
+    "tagCommit": "2038188f145fb81b8d098147a10e9d9f392fd22f",
+    "archiveUrl": "https://github.com/firecracker-microvm/firecracker/releases/download/v1.16.1/firecracker-v1.16.1-x86_64.tgz",
+    "archiveSha256": "382a02a869e4d6d5cb14c40577f9545e8458021ea8b0b2d3fc10ec14d9c242e6",
+    "binarySha256": "PENDING_AFTER_AUTHORIZED_EXTRACTION",
+    "jailerSha256": "PENDING_AFTER_AUTHORIZED_EXTRACTION"
+  },
+  "kernel": {
+    "sourceRepository": "https://github.com/amazonlinux/linux.git",
+    "sourceTag": "microvm-kernel-6.18.25-57.115.amzn2023",
+    "sourceTagObject": "239ab80f9197c3f77f0530e51aecf5f471d03a8b",
+    "sourceCommit": "003a7905ac5f07e7f0e213951258d5bb80ea31e5",
+    "tagSignatureStatus": "signed-but-github-reports-unknown-key",
+    "configurationSha256": "f1253550bbe4adf42be6d9568a32e35fa1f9721fab8406ccb5f93e5d1f6f0863",
+    "generatedConfigurationSha256": "PENDING_AFTER_AUTHORIZED_BUILD",
+    "vmlinuxSha256": "PENDING_AFTER_AUTHORIZED_BUILD"
+  },
+  "rootfs": {
+    "base": "scratch",
+    "packageInventory": [],
+    "buildSpecificationSha256": "a28ce718481f08942c183468732b68bbbe1274464a0730dff799cf58b9c53ecb",
+    "imageSha256": "PENDING_AFTER_AUTHORIZED_BUILD"
+  },
+  "entrypoint": {
+    "sourcePath": "guest/king-file-write-v1/king-file-write-v1.c",
+    "sourceSha256": "834979ba975ff4b62e3ed062aac3bdf071cf9f79385d221d385e3f1f72c8a2df",
+    "binarySha256": "PENDING_AFTER_AUTHORIZED_BUILD"
+  },
+  "workspace": {
+    "device": "/dev/vdb",
+    "guestPath": "/workspace",
+    "filesystem": "ext4",
+    "identity": "synthetic-firecracker-rehearsal-only"
+  },
+  "executionAuthorized": false
+}

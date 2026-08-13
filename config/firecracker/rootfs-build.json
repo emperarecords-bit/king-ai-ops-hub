@@ -1,0 +1,32 @@
+{
+  "rootfsFormat": "ext4",
+  "rootfsSizeMiB": 32,
+  "base": "scratch",
+  "distributionSnapshot": "none",
+  "runtimePackages": [],
+  "entrypoint": "/sbin/king-file-write-v1",
+  "entrypointOwner": "0:0",
+  "entrypointMode": "0555",
+  "executionUid": 10000,
+  "executionGid": 10000,
+  "requiredDirectories": ["/dev", "/proc", "/run", "/sbin", "/sys", "/workspace"],
+  "environment": [],
+  "networkConfiguration": "absent",
+  "ssh": "absent",
+  "shell": "absent",
+  "packageManager": "absent",
+  "buildToolchain": {
+    "host": "Ubuntu 24.04",
+    "muslToolsPackage": "musl-tools=1.2.4-2",
+    "e2fsprogsPackage": "e2fsprogs=1.47.0-2.4~exp1ubuntu4.1"
+  },
+  "recipe": [
+    "compile helper statically with musl-gcc and approved hardening flags",
+    "verify file reports a static x86-64 ELF and no dynamic interpreter",
+    "create zeroed 32 MiB image and mkfs.ext4 with lazy initialization disabled",
+    "populate only required directories and /sbin/king-file-write-v1",
+    "set deterministic timestamps, ownership, and modes",
+    "run e2fsck -fn and hash the image"
+  ],
+  "status": "PENDING_ENTRYPOINT_AND_ROOTFS_SHA256"
+}

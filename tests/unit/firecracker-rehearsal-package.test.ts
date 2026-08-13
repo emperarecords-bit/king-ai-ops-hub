@@ -28,6 +28,11 @@ const entrypoint = JSON.parse(readFileSync(join(repositoryRoot, 'config/firecrac
 const checker = readFileSync(join(repositoryRoot, 'scripts/firecracker/check-host-readiness.sh'), 'utf8');
 const ownerGate = readFileSync(join(repositoryRoot, 'docs/architecture/file-write-owner-gate-package.md'), 'utf8');
 const runbook = readFileSync(join(repositoryRoot, 'docs/runbooks/firecracker-disposable-rehearsal.md'), 'utf8');
+const acquisitionManifest = JSON.parse(readFileSync(join(repositoryRoot, 'config/firecracker/artifact-acquisition.manifest.json'), 'utf8')) as Record<string, unknown>;
+const kernelFragment = readFileSync(join(repositoryRoot, 'config/firecracker/kernel-x86_64-6.18.fragment'));
+const rootfsBuild = readFileSync(join(repositoryRoot, 'config/firecracker/rootfs-build.json'));
+const guestSource = readFileSync(join(repositoryRoot, 'guest/king-file-write-v1/king-file-write-v1.c'));
+const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 
 describe('Firecracker rehearsal package', () => {
   it('has no network and exposes only a synthetic writable workspace drive', () => {
@@ -112,6 +117,25 @@ describe('Firecracker rehearsal package', () => {
     expect(ownerGate).toContain('10-second wall timeout');
     expect(ownerGate).not.toContain('15-second wall timeout');
     expect(runbook).not.toMatch(/15[- ]second wall|15000/);
+  });
+
+  it('pins repository provenance while keeping produced artifacts fail-closed', () => {
+    const rendered = JSON.stringify(acquisitionManifest);
+    expect(rendered).toContain(digest(kernelFragment));
+    expect(rendered).toContain(digest(rootfsBuild));
+    expect(rendered).toContain(digest(guestSource));
+    expect(rendered).toContain('003a7905ac5f07e7f0e213951258d5bb80ea31e5');
+    expect(rendered).toContain('PENDING_AFTER_AUTHORIZED_BUILD');
+    expect(acquisitionManifest).toEqual(expect.objectContaining({ executionAuthorized: false }));
+    const pending = acquisitionManifest.pendingExecutionCriticalFields as string[];
+    expect(pending).toEqual([
+      'firecracker.binarySha256',
+      'firecracker.jailerSha256',
+      'kernel.generatedConfigurationSha256',
+      'kernel.vmlinuxSha256',
+      'rootfs.imageSha256',
+      'entrypoint.binarySha256',
+    ]);
   });
 
   it('contains placeholders rather than credentials or host paths', () => {

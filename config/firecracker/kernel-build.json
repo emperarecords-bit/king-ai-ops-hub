@@ -1,0 +1,29 @@
+{
+  "architecture": "x86_64",
+  "sourceRepository": "https://github.com/amazonlinux/linux.git",
+  "sourceTag": "microvm-kernel-6.18.25-57.115.amzn2023",
+  "sourceTagObject": "239ab80f9197c3f77f0530e51aecf5f471d03a8b",
+  "sourceCommit": "003a7905ac5f07e7f0e213951258d5bb80ea31e5",
+  "tagSignatureStatus": "signed-but-github-reports-unknown-key",
+  "configurationSource": "config/firecracker/kernel-x86_64-6.18.fragment",
+  "configurationSha256": "f1253550bbe4adf42be6d9568a32e35fa1f9721fab8406ccb5f93e5d1f6f0863",
+  "outputFormat": "vmlinux",
+  "build": [
+    "make x86_64_defconfig",
+    "scripts/kconfig/merge_config.sh -m .config kernel-x86_64-6.18.fragment",
+    "make olddefconfig",
+    "make -j1 vmlinux"
+  ],
+  "toolchain": {
+    "distribution": "Ubuntu 24.04",
+    "compiler": "gcc-13",
+    "binutils": "2.42",
+    "make": "4.3",
+    "bc": "1.07.1",
+    "bison": "3.8.2",
+    "flex": "2.6.4",
+    "libelfDev": "0.190-1.1build4",
+    "libsslDev": "3.0.13-0ubuntu3.5"
+  },
+  "status": "PENDING_BUILD_AND_OUTPUT_SHA256"
+}
