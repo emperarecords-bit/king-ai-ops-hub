@@ -72,13 +72,14 @@ static int allowed_target(const char *target) {
     unsigned char c = (unsigned char)*cursor;
     if (c == '\\' || c < 0x20 || c == 0x7f) return 0;
     if (c == '/' || c == '\0') {
+      unsigned char delimiter = c;
       size_t segment_length = (size_t)(cursor - segment);
       if (segment_length == 0 || segment_length > 100 || segment[0] == '.' || denied_segment(segment, segment_length) || ++depth > 12) return 0;
       for (size_t i = 0; i < segment_length; i++) {
         c = (unsigned char)segment[i];
         if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')) return 0;
       }
-      if (c == '\0') break;
+      if (delimiter == '\0') break;
       segment = cursor + 1;
     }
   }

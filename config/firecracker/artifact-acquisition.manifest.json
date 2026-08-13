@@ -36,7 +36,7 @@
   },
   "entrypoint": {
     "sourcePath": "guest/king-file-write-v1/king-file-write-v1.c",
-    "sourceSha256": "777d7bdbe35b95e12c96384902017e9793d1b35526a5616232f4d43c874a93d5",
+    "sourceSha256": "e92d85071a3b863c1e099f20459b4a6a23c91b1c617de2a2a2add215661136bb",
     "binarySha256": "PENDING_AFTER_AUTHORIZED_BUILD"
   },
   "workspace": {
