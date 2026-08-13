@@ -1010,6 +1010,47 @@ export const integrationSecrets = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// MCP API tokens (Phase 5). A bearer credential scoped to exactly one (org,
+// project), minted by a project admin. Only the SHA-256 HASH of the secret is
+// stored — never the plaintext. `prefix`/`last_four` are non-secret display
+// aids. Identity binds to `created_by` (see docs/architecture/mcp-server-decision.md).
+// ---------------------------------------------------------------------------
+
+export const apiTokens = pgTable(
+  'api_tokens',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    /** SHA-256 hex of the wire secret. The plaintext is shown once at mint and never stored. */
+    tokenHash: text('token_hash').notNull(),
+    /** Non-secret identifier shown in listings (the characters after `kmcp_`, truncated). */
+    prefix: text('prefix').notNull(),
+    lastFour: text('last_four').notNull(),
+    /** Allowed MCP tool names (subset of the known tools). Empty ⇒ no tool permitted. */
+    scopes: jsonb('scopes').$type<string[]>().notNull().default([]),
+    /** The project member this token acts as; a token can never exceed their access. */
+    createdBy: uuid('created_by')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'cascade' }),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('api_tokens_token_hash_uq').on(t.tokenHash),
+    uniqueIndex('api_tokens_project_name_uq').on(t.projectId, t.name),
+    index('api_tokens_org_project_idx').on(t.orgId, t.projectId),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Work hierarchy (OBJECTIVES.md, D-010/D-015) — dark in Sprint 3, UI Sprint 4.
 // Containment: Project → Objective → Milestone → Task. Department/Employee is
 // an ASSIGNMENT dimension (sponsoring_department_id, accountable_agent_id),

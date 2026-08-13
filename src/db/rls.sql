@@ -736,6 +736,61 @@ begin
 end
 $$;
 
+-- Phase 5 MCP API tokens are introduced by migration 0059. Like the executor tables above, this block is
+-- to_regclass-guarded so the incremental-bootstrap test (which applies the CURRENT rls.sql to the PENULTIMATE
+-- schema, before 0059) tolerates the table's absence at that exact point. Once it exists, every grant and the
+-- tenant policy remain mandatory and any SQL failure propagates (fail closed).
+do $$
+begin
+  if to_regclass('public.api_tokens') is not null then
+    -- Runtime role: read/create/soft-revoke tokens within its own tenant. NO delete — revocation is a soft
+    -- update (revoked_at), so a token's audit trail is never destroyed.
+    grant select, insert, update on api_tokens to app_server;
+    -- The definer owner (app_system) needs table access to resolve a presented token before a tenant exists.
+    grant select, update on api_tokens to app_system;
+    alter table api_tokens enable row level security;
+    alter table api_tokens force row level security;
+    drop policy if exists api_tokens_tenant on api_tokens;
+    execute
+      'create policy api_tokens_tenant on api_tokens
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+  end if;
+end
+$$;
+
+-- The ONLY sanctioned read of api_tokens outside tenant scope: resolve a presented token HASH to the bound
+-- (org, project, user) so a TenantContext can be built BEFORE one exists — mirrors app.adopt_placeholder_profile.
+-- It also stamps last_used_at so an idle/leaked token is observable. plpgsql is late-binding, so this create is
+-- tolerated even in the penultimate-schema bootstrap where api_tokens does not yet exist (it is simply never
+-- called there). Ownership by app_system (BYPASSRLS) + EXECUTE-only exposure is asserted below.
+create or replace function app.resolve_api_token(p_token_hash text)
+returns table (token_id uuid, org_id uuid, project_id uuid, created_by uuid, scopes jsonb)
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  return query
+    update api_tokens t
+       set last_used_at = now()
+     where t.token_hash = p_token_hash
+       and t.revoked_at is null
+       and (t.expires_at is null or t.expires_at > now())
+    returning t.id, t.org_id, t.project_id, t.created_by, t.scopes;
+end
+$$;
+
+-- Own the resolver with app_system (BYPASSRLS) so it sees the row under FORCE RLS without org/project GUCs, and
+-- expose it to the runtime role by EXECUTE only. Guarded because the grant/owner target a function whose body
+-- depends on api_tokens; only assert once the table (and thus the meaningful function) exists.
+do $$
+begin
+  if to_regclass('public.api_tokens') is not null then
+    alter function app.resolve_api_token(text) owner to app_system;
+    revoke all on function app.resolve_api_token(text) from public;
+    grant execute on function app.resolve_api_token(text) to app_server;
+  end if;
+end
+$$;
+
 -- Provisioning INSERT policies (Sprint 5, "The Front Door") -------------------
 -- Workspace/org creation happens BEFORE the row being created has members, so
 -- the membership-based USING predicates above can never admit these inserts.
