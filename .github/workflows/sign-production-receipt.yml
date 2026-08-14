@@ -1,0 +1,218 @@
+# Sign PRODUCTION backup receipt — MANUAL, off-machine producer of a G-Backup receipt-v2 for the production
+# release gate (Gate 3, owner-approved 2026-08-14). A parameter-for-parameter mirror of the proven
+# sign-staging-receipt.yml, differing ONLY in: the protected `production` Environment (required reviewer),
+# production defaults, and the artifact/file naming. It reuses the SAME reviewed signer CLI unchanged.
+#
+# This workflow ONLY signs + self-verifies a receipt from operator-supplied release facts and uploads the signed
+# receipt as an artifact. It performs NO Fly, snapshot, migration, or deployment action, and it never publishes to
+# the final HTTPS receipt endpoint. The private signing key is materialized from a GitHub Environment secret, used
+# only to sign, and is never printed, written to disk, or uploaded (a static test + a runtime scan enforce this).
+#
+# Trigger: workflow_dispatch ONLY (never push / pull_request / schedule / repository_dispatch / pull_request_target).
+
+name: Sign production backup receipt
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: 'Exact source commit to check out and sign (must be an ancestor of protected main).'
+        required: true
+        type: string
+      target_image_ref:
+        description: 'Digest-bound image reference (…@sha256:<64hex>) the release will run.'
+        required: true
+        type: string
+      target_image_digest:
+        description: 'The sha256:<64hex> image digest (must match the digest bound into target_image_ref).'
+        required: true
+        type: string
+      deployment_nonce:
+        description: 'Canonical 128-bit deployment nonce (hex32 or unpadded base64url22).'
+        required: true
+        type: string
+      database_system_identifier:
+        description: 'PostgreSQL system identifier (pg_control_system) of the PRODUCTION DB — nonzero uint64 decimal.'
+        required: true
+        type: string
+      snapshot_id:
+        description: 'Fly volume snapshot id (vs_…) established by the external controller.'
+        required: true
+        type: string
+      snapshot_requested_at:
+        description: 'Snapshot request time (canonical UTC YYYY-MM-DDTHH:mm:ss.sssZ).'
+        required: true
+        type: string
+      snapshot_created_at:
+        description: 'Snapshot creation time (canonical UTC).'
+        required: true
+        type: string
+      provider_observed_at:
+        description: 'Provider-observed time (canonical UTC); requested ≤ created ≤ observed.'
+        required: true
+        type: string
+      receipt_created_at:
+        description: 'Receipt creation time (canonical UTC); observed ≤ created.'
+        required: true
+        type: string
+      expires_at:
+        description: 'Receipt expiry (canonical UTC); must be after the intended migration start.'
+        required: true
+        type: string
+      retention_days:
+        description: 'Snapshot retention in days (integer, ≥ 7). Production policy: 30 (Gate 1 D5).'
+        required: true
+        default: '30'
+        type: string
+      snapshot_discovery_method:
+        description: 'How the snapshot was identified.'
+        required: true
+        type: choice
+        options:
+          - create-response-id
+          - unambiguous-list-diff
+      create_response_snapshot_id:
+        description: '(create-response-id) the snapshot id returned by the create call (vs_…). Leave blank otherwise.'
+        required: false
+        type: string
+      pre_request_set_digest:
+        description: '(unambiguous-list-diff) sha256 of the pre-request snapshot-id set. Leave blank otherwise.'
+        required: false
+        type: string
+      post_request_set_digest:
+        description: '(unambiguous-list-diff) sha256 of the post-request snapshot-id set. Leave blank otherwise.'
+        required: false
+        type: string
+      stored_size_bytes:
+        description: 'Optional snapshot stored size in bytes (integer). Leave blank for null.'
+        required: false
+        type: string
+      key_id:
+        description: 'Trusted deployment-receipt key id (matches the production trust-bundle entry, e.g. prod-dbr-2026-08).'
+        required: true
+        type: string
+      applied_count:
+        description: 'Migrations already applied to the PRODUCTION DB (0 for the fresh first release). Pending = the rest.'
+        required: false
+        default: '0'
+        type: string
+      receipt_mode:
+        description: 'artifact-only: this workflow never publishes to the HTTPS endpoint.'
+        required: true
+        default: artifact-only
+        type: choice
+        options:
+          - artifact-only
+
+# Least privilege: read-only repository token. No packages, deployments, or id-token.
+permissions:
+  contents: read
+
+concurrency:
+  group: sign-production-receipt-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sign:
+    name: sign-production-receipt
+    runs-on: ubuntu-latest
+    # Only ever run in the canonical repository (never a fork), and bind the signing secret to the production
+    # Environment so its required-reviewer protection (configured in repo settings) gates every run.
+    if: github.repository == 'emperarecords-bit/king-ai-ops-hub'
+    environment: production
+    timeout-minutes: 15
+    steps:
+      # 1. TRUSTED checkout: the reviewed signer + CLI from the WORKFLOW's own revision (not the selected source).
+      #    This is the ONLY code executed with the signing secret. No secret is available in this or any step below
+      #    except the single signing step. Full history so the selected source commit (an ancestor of main) is present.
+      - name: Checkout trusted workflow code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate source_commit + verify it is an ancestor of protected main
+        env:
+          SRC: ${{ inputs.source_commit }}
+        run: |
+          if ! printf '%s' "$SRC" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::source_commit must be a full 40-hex commit SHA"; exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$SRC" origin/main; then
+            echo "::error::source_commit is not an ancestor of protected main"; exit 1
+          fi
+          echo "source_commit $SRC is an ancestor of protected main"
+
+      # 2. DATA-ONLY checkout of the SELECTED source into a separate directory. We read ONLY its migration files;
+      #    we NEVER run npm, package lifecycle scripts, repository scripts, or binaries from it. A git worktree
+      #    (from the trusted checkout's already-fetched history) avoids a second network fetch.
+      - name: Materialize selected source (data only — no code executed from it)
+        env:
+          SRC: ${{ inputs.source_commit }}
+        run: |
+          git worktree add --detach selected-source "$SRC"
+          echo "selected-source checked out at $SRC (drizzle files only will be read)"
+
+      - name: Setup Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      # Install deps from the TRUSTED lockfile only (never from the selected source).
+      - name: Install dependencies (from trusted lockfile)
+        run: npm ci
+
+      - name: Sign + self-verify the production receipt (no Fly / snapshot / migration / deploy)
+        env:
+          # Private signing key — materialized from the production Environment secret, base64-encoded PKCS#8 PEM.
+          # Referenced ONLY by this single first-party step; used only to sign; never printed, written, or uploaded.
+          GBACKUP_SIGNING_KEY_PEM_B64: ${{ secrets.GBACKUP_RECEIPT_SIGNING_KEY_B64 }}
+          OUTPUT_DIR: ${{ github.workspace }}/receipt-out
+          # The reviewed signer runs from the trusted workspace (cwd) and reads migration FILES from SOURCE_DIR; the
+          # portable Git-blob hash is read from SOURCE_COMMIT in the trusted workspace's git.
+          SOURCE_DIR: ${{ github.workspace }}/selected-source
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          TARGET_IMAGE_REF: ${{ inputs.target_image_ref }}
+          TARGET_IMAGE_DIGEST: ${{ inputs.target_image_digest }}
+          DEPLOYMENT_NONCE: ${{ inputs.deployment_nonce }}
+          DATABASE_SYSTEM_IDENTIFIER: ${{ inputs.database_system_identifier }}
+          SNAPSHOT_ID: ${{ inputs.snapshot_id }}
+          SNAPSHOT_REQUESTED_AT: ${{ inputs.snapshot_requested_at }}
+          SNAPSHOT_CREATED_AT: ${{ inputs.snapshot_created_at }}
+          PROVIDER_OBSERVED_AT: ${{ inputs.provider_observed_at }}
+          RECEIPT_CREATED_AT: ${{ inputs.receipt_created_at }}
+          EXPIRES_AT: ${{ inputs.expires_at }}
+          RETENTION_DAYS: ${{ inputs.retention_days }}
+          SNAPSHOT_DISCOVERY_METHOD: ${{ inputs.snapshot_discovery_method }}
+          CREATE_RESPONSE_SNAPSHOT_ID: ${{ inputs.create_response_snapshot_id }}
+          PRE_REQUEST_SET_DIGEST: ${{ inputs.pre_request_set_digest }}
+          POST_REQUEST_SET_DIGEST: ${{ inputs.post_request_set_digest }}
+          STORED_SIZE_BYTES: ${{ inputs.stored_size_bytes }}
+          KEY_ID: ${{ inputs.key_id }}
+          APPLIED_COUNT: ${{ inputs.applied_count }}
+        run: npx tsx scripts/ci/sign-staging-receipt.ts
+
+      # The reviewed CLI names its output staging-receipt.v2.json; rename for unambiguous production artifacts.
+      # Content is untouched — this is a file rename only, after signing and self-verification.
+      - name: Rename receipt for production artifact clarity
+        run: mv receipt-out/staging-receipt.v2.json receipt-out/production-receipt.v2.json
+
+      - name: Assert no private-key material in the outputs
+        run: |
+          if grep -rlZ "PRIVATE KEY" receipt-out 2>/dev/null | grep -qz .; then
+            echo "::error::private-key material found in receipt-out"; exit 1
+          fi
+          echo "no private-key material in receipt-out"
+
+      - name: Upload signed receipt + public trust bundle (public material only)
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: production-receipt-v2
+          path: |
+            receipt-out/production-receipt.v2.json
+            receipt-out/trust-bundle.public.json
+            receipt-out/verification-metadata.json
+          if-no-files-found: error
+          retention-days: 7
