@@ -275,6 +275,9 @@ function buildReceiptExpectation(deps: GateDeps, source: ReleaseSourceInputs, sy
   }
   const exp: ReceiptV2Expectation = {
     environment: deps.config.environment === 'production' ? 'production' : 'staging',
+    // Gate 3: the runtime gate accepts a production receipt ONLY when it is itself explicitly configured as the
+    // production environment — staging/local gates keep rejecting production receipts fail-closed.
+    allowProductionEnvironment: deps.config.environment === 'production',
     targetApplication,
     databaseApp,
     sourceVolumeId,

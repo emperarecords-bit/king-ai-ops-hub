@@ -36,8 +36,8 @@ describe('sign-production-receipt workflow — least privilege + manual-only + p
     expect(wf).not.toMatch(/inputs\.[a-z_]*key[a-z_]*_b64/i);
   });
 
-  it('reuses the reviewed staging signer CLI unchanged and scans outputs for private material', () => {
-    expect(wf).toContain('npx tsx scripts/ci/sign-staging-receipt.ts');
+  it('invokes the production CLI (shared reviewed producer, production pins) and scans outputs for private material', () => {
+    expect(wf).toContain('npx tsx scripts/ci/sign-production-receipt.ts');
     expect(wf).toContain('grep -rlZ "PRIVATE KEY" receipt-out');
   });
 

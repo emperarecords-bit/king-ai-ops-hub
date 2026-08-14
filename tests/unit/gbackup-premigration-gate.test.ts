@@ -353,9 +353,16 @@ describe('B2a gate — receipt + key + mismatch failures carry the verifier code
     expect(await verifyCode(deps({ f: fetcher(signedReceiptBytes({ runtimeMigrationSetHash: 'c'.repeat(64) })).f }))).toBe('migration_set_mismatch');
     expect(await verifyCode(deps({ now: new Date('2026-08-01T12:40:00.000Z') }))).toBe('snapshot_time_invalid'); // > 30 min old
   });
-  it('production receipt is categorically rejected', async () => {
+  // Gate 3 (owner-approved 2026-08-14): the categorical production exclusion became an explicit double-switch —
+  // a production receipt verifies ONLY when the gate itself is explicitly production-configured; every other
+  // configuration still rejects it fail-closed (environment mismatch fires before the step-18 policy).
+  it('production receipt VERIFIES when the gate is explicitly production-configured (Gate 3)', async () => {
     const c = await verifyCode(deps({ config: { environment: 'production' }, f: fetcher(signedReceiptBytes({ environment: 'production' })).f }));
-    expect(c).toBe('production_rejected');
+    expect(c).toBeUndefined(); // no failure code — full verification succeeded
+  });
+  it('a STAGING-configured gate still rejects a production receipt fail-closed', async () => {
+    const c = await verifyCode(deps({ f: fetcher(signedReceiptBytes({ environment: 'production' })).f }));
+    expect(c).toBe('environment_mismatch');
   });
 });
 

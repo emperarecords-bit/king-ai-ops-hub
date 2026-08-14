@@ -192,12 +192,7 @@ jobs:
           STORED_SIZE_BYTES: ${{ inputs.stored_size_bytes }}
           KEY_ID: ${{ inputs.key_id }}
           APPLIED_COUNT: ${{ inputs.applied_count }}
-        run: npx tsx scripts/ci/sign-staging-receipt.ts
-
-      # The reviewed CLI names its output staging-receipt.v2.json; rename for unambiguous production artifacts.
-      # Content is untouched — this is a file rename only, after signing and self-verification.
-      - name: Rename receipt for production artifact clarity
-        run: mv receipt-out/staging-receipt.v2.json receipt-out/production-receipt.v2.json
+        run: npx tsx scripts/ci/sign-production-receipt.ts
 
       - name: Assert no private-key material in the outputs
         run: |

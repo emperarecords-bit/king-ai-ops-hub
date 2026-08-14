@@ -65,6 +65,13 @@ export type ReceiptV2VerifyResult =
 
 export interface ReceiptV2Expectation {
   readonly environment: ReceiptV2Environment;
+  /**
+   * Gate 3 (owner-approved 2026-08-14): production receipts verify ONLY when the verifying side EXPLICITLY opts
+   * in. Absent/false (every pre-Gate-3 caller) preserves the original hard exclusion, and the environment-equality
+   * check (step 8) still requires the expectation itself to be production — two independent switches, both
+   * explicit, before a production receipt can pass.
+   */
+  readonly allowProductionEnvironment?: boolean;
   readonly targetApplication: string;
   readonly databaseApp: string;
   readonly sourceVolumeId: string;
@@ -219,8 +226,10 @@ export function verifyReceiptV2Parsed(input: unknown, exp: ReceiptV2Expectation)
   // 17. receipt expiry relative to migration execution
   if (!(migStart < expires)) return fail(17, 'receipt_expired', 'receipt expired at migration start');
 
-  // 18. production policy
-  if (r.environment === 'production') return fail(18, 'production_rejected', 'production is excluded by policy');
+  // 18. production policy — excluded unless the verifying side explicitly opted in (Gate 3).
+  if (r.environment === 'production' && exp.allowProductionEnvironment !== true) {
+    return fail(18, 'production_rejected', 'production is excluded by policy');
+  }
 
   return { ok: true, receiptCanonicalHash: canonicalHash, imageTrust: IMAGE_TRUST };
 }
