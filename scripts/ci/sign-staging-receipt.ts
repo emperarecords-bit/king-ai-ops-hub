@@ -2,6 +2,7 @@ import { type KeyObject, createPrivateKey } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  type ReleasePins,
   type SnapshotDiscoveryInput,
   type StagingReceiptInputs,
   SELF_VERIFY_MIN_RETENTION_DAYS,
@@ -25,7 +26,7 @@ function requireEnv(name: string, v: string | undefined): string {
   return v.trim();
 }
 
-function loadPrivateKeyFromEnv(env: NodeJS.ProcessEnv): KeyObject {
+export function loadPrivateKeyFromEnv(env: NodeJS.ProcessEnv): KeyObject {
   const b64 = env.GBACKUP_SIGNING_KEY_PEM_B64;
   const raw = env.GBACKUP_SIGNING_KEY_PEM;
   let pem: string;
@@ -51,7 +52,7 @@ function optInt(v: string | undefined): number | undefined {
   return Number.isFinite(n) ? n : NaN;
 }
 
-export function inputsFromEnv(env: NodeJS.ProcessEnv): StagingReceiptInputs {
+export function inputsFromEnv(env: NodeJS.ProcessEnv, pins: ReleasePins = STAGING_PINS): StagingReceiptInputs {
   const method = requireEnv('SNAPSHOT_DISCOVERY_METHOD', env.SNAPSHOT_DISCOVERY_METHOD);
   let discovery: SnapshotDiscoveryInput;
   if (method === 'create-response-id') {
@@ -86,13 +87,28 @@ export function inputsFromEnv(env: NodeJS.ProcessEnv): StagingReceiptInputs {
     expiresAt: env.EXPIRES_AT ?? '',
     keyId: env.KEY_ID ?? '',
     discovery,
-    appliedCount: applied === undefined ? STAGING_PINS.defaultAppliedCount : applied,
+    appliedCount: applied === undefined ? pins.defaultAppliedCount : applied,
     assertPortableMigrationSetHash: env.ASSERT_PORTABLE_MIGRATION_SET_HASH || undefined,
     assertRuntimeMigrationSetHash: env.ASSERT_RUNTIME_MIGRATION_SET_HASH || undefined,
   };
 }
 
-export function runCli(env: NodeJS.ProcessEnv, trustedDir: string, log: (m: string) => void = console.log): void {
+/** Per-environment CLI options. Defaults preserve the accepted staging behavior byte-for-byte. */
+export interface RunCliOptions {
+  readonly pins: ReleasePins;
+  /** Output filename for the signed receipt. */
+  readonly receiptBasename: string;
+  /** Log/label prefix, e.g. `staging` | `production`. */
+  readonly label: string;
+}
+const STAGING_CLI_OPTIONS: RunCliOptions = { pins: STAGING_PINS, receiptBasename: 'staging-receipt.v2.json', label: 'staging' };
+
+export function runCli(
+  env: NodeJS.ProcessEnv,
+  trustedDir: string,
+  log: (m: string) => void = console.log,
+  options: RunCliOptions = STAGING_CLI_OPTIONS,
+): void {
   const outDir = env.OUTPUT_DIR ?? join(trustedDir, 'receipt-out');
   // The SELECTED application source is a DATA-ONLY checkout (SOURCE_DIR). We read only its migration files from it;
   // the reviewed signer/verifier code runs from the trusted workspace (this process's cwd = trustedDir), and the
@@ -100,8 +116,8 @@ export function runCli(env: NodeJS.ProcessEnv, trustedDir: string, log: (m: stri
   // local/test invocation (where the trusted checkout IS the selected source) still works.
   const sourceDir = env.SOURCE_DIR && env.SOURCE_DIR.trim().length > 0 ? env.SOURCE_DIR : trustedDir;
   const privateKey = loadPrivateKeyFromEnv(env);
-  const inputs = inputsFromEnv(env);
-  const out = produceStagingReceipt(inputs, privateKey, sourceDir);
+  const inputs = inputsFromEnv(env, options.pins);
+  const out = produceStagingReceipt(inputs, privateKey, sourceDir, options.pins);
 
   const receiptJson = JSON.stringify(out.receipt, null, 2);
   const trustBundleJson = JSON.stringify([out.publicTrustEntry], null, 2);
@@ -113,11 +129,11 @@ export function runCli(env: NodeJS.ProcessEnv, trustedDir: string, log: (m: stri
   assertNoPrivateMaterial('metadata', metadata);
 
   mkdirSync(outDir, { recursive: true });
-  writeFileSync(join(outDir, 'staging-receipt.v2.json'), receiptJson + '\n', 'utf8');
+  writeFileSync(join(outDir, options.receiptBasename), receiptJson + '\n', 'utf8');
   writeFileSync(join(outDir, 'trust-bundle.public.json'), trustBundleJson + '\n', 'utf8');
   writeFileSync(join(outDir, 'verification-metadata.json'), JSON.stringify(metadata, null, 2) + '\n', 'utf8');
 
-  log(`Signed + self-verified staging receipt ${out.receipt.receiptId}`);
+  log(`Signed + self-verified ${options.label} receipt ${out.receipt.receiptId}`);
   log(`  canonicalHash=${out.canonicalHash}`);
   log(`  keyId=${out.receipt.keyId} pending=[${out.derived.pendingMigrations.map((p) => p.migrationTag).join(', ')}] endpoint=${out.derived.endpointTag}`);
   log(`  wrote receipt + public trust bundle + metadata to ${outDir} (private key NOT written)`);

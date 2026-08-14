@@ -2,6 +2,7 @@ import { type KeyObject, createPublicKey } from 'node:crypto';
 import {
   type PendingMigrationEntry,
   type ReceiptV2,
+  type RECEIPT_V2_ENVIRONMENTS,
   type SignedReceiptV2,
   signedReceiptV2Schema,
 } from './receipt-v2-schema';
@@ -41,7 +42,25 @@ import { buildSourceManifestFromGit } from './source-manifest';
  * digest, source commit) is an input and is rejected if placeholder/malformed.
  */
 
-export const STAGING_PINS = {
+/**
+ * The immutable per-environment release facts a receipt binds (Gate 3). Every producer entry point takes a pins
+ * argument DEFAULTING to {@link STAGING_PINS}, so the accepted staging path is byte-identical; the production CLI
+ * passes PRODUCTION_PINS (scripts/backup/production-pins.ts) explicitly.
+ */
+export interface ReleasePins {
+  readonly environment: (typeof RECEIPT_V2_ENVIRONMENTS)[number];
+  readonly targetApplication: string;
+  readonly databaseApp: string;
+  readonly sourceVolumeId: string;
+  readonly databaseIdentity: string;
+  readonly snapshotProvider: typeof FLY_VOLUMES_PROVIDER;
+  readonly providerAdapterVersion: typeof FLY_VOLUMES_ADAPTER_VERSION;
+  readonly expectedMigrationEndpoint: string;
+  readonly expectedCommittedMigrationCount: number;
+  readonly defaultAppliedCount: number;
+}
+
+export const STAGING_PINS: ReleasePins = {
   environment: 'staging',
   targetApplication: 'king-ai-ops-hub-staging',
   databaseApp: 'king-ai-hub-db-staging',
@@ -137,16 +156,16 @@ export interface SourceLocation {
 }
 
 /** Derive the portable + runtime migration-set hashes and the canonical pending set from the selected source. */
-export function deriveMigrationFacts(source: SourceLocation, appliedCount: number): DerivedMigrationFacts {
+export function deriveMigrationFacts(source: SourceLocation, appliedCount: number, pins: ReleasePins = STAGING_PINS): DerivedMigrationFacts {
   const runtime = readRuntimeMigrationSet(source.runtimeDir, 'drizzle');
   const sorted = [...runtime.entries].sort((a, b) => a.migrationIndex - b.migrationIndex);
   const committedCount = sorted.length;
   const endpointTag = sorted[committedCount - 1]?.migrationTag ?? '';
-  if (endpointTag !== STAGING_PINS.expectedMigrationEndpoint) {
-    reject('source', `migration endpoint ${JSON.stringify(endpointTag)} != pinned ${STAGING_PINS.expectedMigrationEndpoint}`);
+  if (endpointTag !== pins.expectedMigrationEndpoint) {
+    reject('source', `migration endpoint ${JSON.stringify(endpointTag)} != pinned ${pins.expectedMigrationEndpoint}`);
   }
-  if (committedCount !== STAGING_PINS.expectedCommittedMigrationCount) {
-    reject('source', `committed migration count ${committedCount} != pinned ${STAGING_PINS.expectedCommittedMigrationCount}`);
+  if (committedCount !== pins.expectedCommittedMigrationCount) {
+    reject('source', `committed migration count ${committedCount} != pinned ${pins.expectedCommittedMigrationCount}`);
   }
   if (!Number.isInteger(appliedCount) || appliedCount < 0 || appliedCount > committedCount) {
     reject('appliedCount', `must be an integer in [0, ${committedCount}]`);
@@ -203,9 +222,9 @@ export function derivePublicTrustEntry(privateKey: KeyObject, keyId: string): Re
  * portable Git-blob hash from `inputs.sourceCommit` in the trusted workspace's git — so the receipt binds the exact
  * selected application source, and the commit used for derivation is identical to the commit written into the receipt.
  */
-export function buildStagingSignedReceipt(inputs: StagingReceiptInputs, runtimeDir: string): { signed: SignedReceiptV2; derived: DerivedMigrationFacts } {
+export function buildStagingSignedReceipt(inputs: StagingReceiptInputs, runtimeDir: string, pins: ReleasePins = STAGING_PINS): { signed: SignedReceiptV2; derived: DerivedMigrationFacts } {
   validateStagingInputs(inputs);
-  const derived = deriveMigrationFacts({ runtimeDir, gitCommitish: inputs.sourceCommit }, inputs.appliedCount);
+  const derived = deriveMigrationFacts({ runtimeDir, gitCommitish: inputs.sourceCommit }, inputs.appliedCount, pins);
   if (inputs.assertPortableMigrationSetHash && inputs.assertPortableMigrationSetHash !== derived.portableMigrationSetHash) {
     reject('portableMigrationSetHash', 'operator-provided value does not match the source-derived value');
   }
@@ -227,8 +246,8 @@ export function buildStagingSignedReceipt(inputs: StagingReceiptInputs, runtimeD
     {
       id: inputs.snapshotId,
       status: PROVIDER_RAW_STATUS_CREATED,
-      volumeId: STAGING_PINS.sourceVolumeId,
-      databaseApp: STAGING_PINS.databaseApp,
+      volumeId: pins.sourceVolumeId,
+      databaseApp: pins.databaseApp,
       createdAt: inputs.snapshotCreatedAt,
       retentionDays: inputs.retentionDays,
       ...(inputs.storedSizeBytes != null ? { storedSizeBytes: inputs.storedSizeBytes } : {}),
@@ -246,10 +265,10 @@ export function buildStagingSignedReceipt(inputs: StagingReceiptInputs, runtimeD
     schemaVersion: '2',
     canonicalizationVersion: 1,
     receiptId: `rcpt2_${'0'.repeat(64)}`,
-    environment: 'staging',
-    targetApplication: STAGING_PINS.targetApplication,
-    databaseApp: STAGING_PINS.databaseApp,
-    sourceVolumeId: STAGING_PINS.sourceVolumeId,
+    environment: pins.environment,
+    targetApplication: pins.targetApplication,
+    databaseApp: pins.databaseApp,
+    sourceVolumeId: pins.sourceVolumeId,
     databaseSystemIdentifier: inputs.databaseSystemIdentifier,
     snapshotProvider: 'fly-volumes',
     providerSnapshotStatus: e.providerSnapshotStatus,
@@ -263,7 +282,7 @@ export function buildStagingSignedReceipt(inputs: StagingReceiptInputs, runtimeD
     retentionDays: inputs.retentionDays,
     storedSizeBytes: inputs.storedSizeBytes,
     normalizedProviderEvidenceDigest: norm.normalizedProviderEvidenceDigest,
-    providerAdapterVersion: STAGING_PINS.providerAdapterVersion,
+    providerAdapterVersion: pins.providerAdapterVersion,
     sourceCommit: inputs.sourceCommit,
     targetImageRef: inputs.targetImageRef,
     targetImageDigest: inputs.targetImageDigest,
@@ -297,15 +316,17 @@ export function buildSelfVerifyExpectation(
   inputs: StagingReceiptInputs,
   derived: DerivedMigrationFacts,
   keyStore: ReceiptV2Expectation['keyStore'],
+  pins: ReleasePins = STAGING_PINS,
 ): ReceiptV2Expectation {
   return {
-    environment: 'staging',
-    targetApplication: STAGING_PINS.targetApplication,
-    databaseApp: STAGING_PINS.databaseApp,
-    sourceVolumeId: STAGING_PINS.sourceVolumeId,
+    environment: pins.environment,
+    allowProductionEnvironment: pins.environment === 'production',
+    targetApplication: pins.targetApplication,
+    databaseApp: pins.databaseApp,
+    sourceVolumeId: pins.sourceVolumeId,
     databaseSystemIdentifier: inputs.databaseSystemIdentifier,
     snapshotProvider: FLY_VOLUMES_PROVIDER,
-    providerAdapterVersion: STAGING_PINS.providerAdapterVersion,
+    providerAdapterVersion: pins.providerAdapterVersion,
     minRetentionDays: SELF_VERIFY_MIN_RETENTION_DAYS,
     maxSnapshotAgeMs: SELF_VERIFY_MAX_SNAPSHOT_AGE_MS,
     sourceCommit: inputs.sourceCommit,
@@ -322,16 +343,16 @@ export function buildSelfVerifyExpectation(
 }
 
 /** Build → sign → self-verify. Returns ONLY public material. Throws if verification does not pass. */
-export function produceStagingReceipt(inputs: StagingReceiptInputs, privateKey: KeyObject, runtimeDir: string): StagingReceiptOutput {
+export function produceStagingReceipt(inputs: StagingReceiptInputs, privateKey: KeyObject, runtimeDir: string, pins: ReleasePins = STAGING_PINS): StagingReceiptOutput {
   const publicTrustEntry = derivePublicTrustEntry(privateKey, inputs.keyId);
-  const { signed, derived } = buildStagingSignedReceipt(inputs, runtimeDir);
+  const { signed, derived } = buildStagingSignedReceipt(inputs, runtimeDir, pins);
   const receipt = signReceiptV2(signed, privateKey);
   const canonicalHash = receiptV2CanonicalHash(signed);
 
   // Self-verify with the runtime verifier + the derived public trust — the SAME code path the release gate runs.
   const keyLoad = loadReceiptKeyBundle([publicTrustEntry]);
   if (!keyLoad.ok) throw new Error(`derived public trust bundle failed to load: ${keyLoad.code}`);
-  const exp = buildSelfVerifyExpectation(inputs, derived, keyLoad.store);
+  const exp = buildSelfVerifyExpectation(inputs, derived, keyLoad.store, pins);
   const result = verifyReceiptV2Parsed(receipt, exp);
   if (!result.ok) throw new Error(`self-verification failed at step ${result.step} (${result.code}): ${result.detail}`);
   return { receipt, canonicalHash, publicTrustEntry, derived };
