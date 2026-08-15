@@ -11,6 +11,13 @@ describe('operational HTTP surfaces', () => {
     expect(read('src/middleware.ts')).toContain("pathname === '/api/live'");
   });
 
+  it('middleware passes /api/mcp through to its own bearer gate (no session requirement)', () => {
+    // The MCP route is bearer-token-only by design (Phase 5): no cookie/session
+    // path exists, so a Supabase-session requirement in middleware would 401
+    // every legitimate MCP client. Regression pin for the 2026-08-15 fix.
+    expect(read('src/middleware.ts')).toContain("pathname === '/api/mcp'");
+  });
+
   it('never returns caught exception messages from the public readiness route', () => {
     const readiness = read('src/app/api/health/route.ts');
     expect(readiness).not.toMatch(/err\.message/);
