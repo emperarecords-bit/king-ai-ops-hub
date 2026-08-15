@@ -23,10 +23,11 @@ describe('fly.production.toml — Gate-1 production identity and safety pins', (
   });
 
   it('does NOT carry staging acceptance shortenings (production timing defaults apply)', () => {
-    expect(prod).not.toContain('CLEANUP_QUIET_MS');
-    expect(prod).not.toContain('PURGE_RETENTION_MS');
+    // Match ASSIGNMENTS, not prose — the config's comment legitimately names the vars it excludes.
+    expect(prod).not.toMatch(/^\s*CLEANUP_QUIET_MS\s*=/m);
+    expect(prod).not.toMatch(/^\s*PURGE_RETENTION_MS\s*=/m);
     // …while staging deliberately does carry them (sanity that the assertion is meaningful):
-    expect(staging).toContain('CLEANUP_QUIET_MS');
+    expect(staging).toMatch(/^\s*CLEANUP_QUIET_MS\s*=/m);
   });
 
   it('pins the production origin and Gate-1 D3 sizing', () => {
