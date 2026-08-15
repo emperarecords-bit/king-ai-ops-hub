@@ -80,6 +80,17 @@ export default async function MorningBriefingPage({
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {/* Owner Inbox (EV-011): the whole day as one stack of things to okay. */}
+          <Link
+            href="/inbox"
+            className={`rounded-md border px-4 py-2 text-sm font-semibold hover:opacity-80 ${
+              totals.pendingApprovals > 0
+                ? 'border-[var(--accent)] text-[var(--accent)]'
+                : 'border-[var(--border)] text-[var(--muted)]'
+            }`}
+          >
+            Inbox{totals.pendingApprovals > 0 ? ` (${totals.pendingApprovals})` : ''}
+          </Link>
           <Link
             href="/projects/new"
             className="rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#0b0e14] hover:bg-[var(--accent-strong)]"
