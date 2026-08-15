@@ -16,8 +16,9 @@ export const PRODUCTION_PINS: ReleasePins = {
   databaseIdentity: 'king_ai_ops_hub_production',
   snapshotProvider: FLY_VOLUMES_PROVIDER,
   providerAdapterVersion: FLY_VOLUMES_ADAPTER_VERSION,
-  expectedMigrationEndpoint: '0060_safe_kree',
-  expectedCommittedMigrationCount: 61,
-  /** Fresh production database: nothing applied yet; every committed migration is pending at first release. */
-  defaultAppliedCount: 0,
+  // Bumped 2026-08-15 for 0061 (provider_id/provider_selection gain 'google' and 'deepseek').
+  expectedMigrationEndpoint: '0061_glossy_magma',
+  expectedCommittedMigrationCount: 62,
+  /** Production launched 2026-08-15 with all 61 prior migrations applied; 0061 is the one pending. */
+  defaultAppliedCount: 61,
 } as const;

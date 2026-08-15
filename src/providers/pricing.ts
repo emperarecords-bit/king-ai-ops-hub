@@ -82,6 +82,41 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPricing>> = {
     outputMicrosPerM: 5_000_000n, // $5.00 / M
     maxOutputTokens: 64_000,
   },
+  // --- Google (Gemini) ------------------------------------------------------
+  // Rates are the PAID-tier list prices (ai.google.dev/pricing, 2026-08-15).
+  // A key from an unbilled AI Studio account runs on the free tier and is
+  // charged $0 by Google; the table still records list price so the budget
+  // gate stays conservative if billing is ever enabled on the key.
+  'gemini-3-flash': {
+    provider: 'google',
+    displayName: 'Gemini 3 Flash',
+    inputMicrosPerM: 300_000n, // $0.30 / M
+    outputMicrosPerM: 2_500_000n, // $2.50 / M
+    maxOutputTokens: 65_536,
+  },
+  'gemini-3-pro': {
+    provider: 'google',
+    displayName: 'Gemini 3 Pro',
+    inputMicrosPerM: 2_000_000n, // $2.00 / M
+    outputMicrosPerM: 12_000_000n, // $12.00 / M
+    maxOutputTokens: 65_536,
+  },
+  // --- DeepSeek -------------------------------------------------------------
+  // Rates from platform.deepseek.com pricing, 2026-08-15 (cache-miss input).
+  'deepseek-chat': {
+    provider: 'deepseek',
+    displayName: 'DeepSeek Chat',
+    inputMicrosPerM: 270_000n, // $0.27 / M
+    outputMicrosPerM: 1_100_000n, // $1.10 / M
+    maxOutputTokens: 8_192,
+  },
+  'deepseek-reasoner': {
+    provider: 'deepseek',
+    displayName: 'DeepSeek Reasoner',
+    inputMicrosPerM: 550_000n, // $0.55 / M
+    outputMicrosPerM: 2_190_000n, // $2.19 / M
+    maxOutputTokens: 64_000,
+  },
 };
 
 export function knownModel(model: string): boolean {

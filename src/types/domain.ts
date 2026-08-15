@@ -1,3 +1,4 @@
+import { type ProviderId } from './provider';
 /**
  * Cross-layer domain vocabulary. Table row types are inferred from the Drizzle
  * schema — this file holds only the enums and small value objects shared by
@@ -49,7 +50,7 @@ export interface ReviewDetail {
   readonly provenance?: {
     readonly reviewerAgentId: string;
     readonly reviewerDisplayName?: string;
-    readonly provider: 'openai' | 'anthropic';
+    readonly provider: ProviderId;
     readonly model: string;
     readonly rubricHash?: string;
     readonly rubricSnapshot?: string | null;

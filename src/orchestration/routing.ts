@@ -23,6 +23,8 @@ import { type ProviderId } from '@/types/provider';
 const FLAGSHIP_MODELS: Readonly<Record<ProviderId, string>> = {
   openai: 'gpt-5.4',
   anthropic: 'claude-opus-4-8',
+  google: 'gemini-3-pro',
+  deepseek: 'deepseek-reasoner',
 };
 
 /**

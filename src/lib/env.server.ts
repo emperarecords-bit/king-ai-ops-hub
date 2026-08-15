@@ -16,6 +16,16 @@ const serverEnvSchema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   OPENAI_API_KEY: z.string().min(1, 'OPENAI_API_KEY is required'),
   ANTHROPIC_API_KEY: z.string().min(1, 'ANTHROPIC_API_KEY is required'),
+  // Optional vendors — the registry only constructs their adapters when set.
+  // Empty string counts as unset so a blank line in .env can't half-enable one.
+  GEMINI_API_KEY: z
+    .string()
+    .optional()
+    .transform((v) => (v && v.trim() !== '' ? v : undefined)),
+  DEEPSEEK_API_KEY: z
+    .string()
+    .optional()
+    .transform((v) => (v && v.trim() !== '' ? v : undefined)),
   APP_ENCRYPTION_KEY: z
     .string()
     .refine((v) => Buffer.from(v, 'base64').length === 32, {
@@ -49,6 +59,8 @@ function assertProductionSafe(env: ServerEnv): void {
   };
   check('OPENAI_API_KEY', env.OPENAI_API_KEY);
   check('ANTHROPIC_API_KEY', env.ANTHROPIC_API_KEY);
+  if (env.GEMINI_API_KEY) check('GEMINI_API_KEY', env.GEMINI_API_KEY);
+  if (env.DEEPSEEK_API_KEY) check('DEEPSEEK_API_KEY', env.DEEPSEEK_API_KEY);
   check('APP_ENCRYPTION_KEY', env.APP_ENCRYPTION_KEY);
   check('DATABASE_URL', env.DATABASE_URL);
   // A superuser / dev password in the DB URL means RLS is not the enforced net.
