@@ -22,7 +22,7 @@ import { verifyReceiptV2Parsed } from '../../scripts/backup/receipt-v2-verify';
 /**
  * G-Backup staging-receipt producer — tests use EPHEMERAL, NON-PRODUCTION ed25519 keys generated in-process. No real
  * signer, GitHub secret, Fly, snapshot, migration, or deploy is involved. Migration facts are DERIVED from the
- * checked-out drizzle tree, so this proves the assembler binds to the real 0000–0063 source set.
+ * checked-out drizzle tree, so this proves the assembler binds to the real 0000–0064 source set.
  */
 
 const kp = generateKeyPairSync('ed25519');
@@ -72,16 +72,16 @@ function goodInputs(over: Partial<StagingReceiptInputs> = {}): StagingReceiptInp
 }
 
 describe('G-Backup staging-receipt producer — happy path (fixture keys)', () => {
-  it('signs + self-verifies; pending is exactly 0063 derived from source', () => {
+  it('signs + self-verifies; pending is exactly 0064 derived from source', () => {
     const out = produceStagingReceipt(goodInputs(), kp.privateKey, STAGING_RUNTIME_DIR);
     expect(receiptV2Schema.safeParse(out.receipt).success).toBe(true);
     expect(out.receipt.environment).toBe('staging');
     expect(out.receipt.targetApplication).toBe('king-ai-ops-hub-staging');
     expect(out.receipt.databaseApp).toBe('king-ai-hub-db-staging');
     expect(out.receipt.sourceVolumeId).toBe('vol_4m3kmknl059qpd6v');
-    expect(out.derived.endpointTag).toBe('0063_pricing_schedule_v3');
-    expect(out.derived.committedCount).toBe(64);
-    expect(out.derived.pendingMigrations.map((p) => p.migrationTag)).toEqual(['0063_pricing_schedule_v3']);
+    expect(out.derived.endpointTag).toBe('0064_employee_chat');
+    expect(out.derived.committedCount).toBe(65);
+    expect(out.derived.pendingMigrations.map((p) => p.migrationTag)).toEqual(['0064_employee_chat']);
     // Independently re-verify with the derived public trust.
     const load = loadReceiptKeyBundle([out.publicTrustEntry]);
     expect(load.ok).toBe(true);
@@ -196,7 +196,7 @@ describe('G-Backup staging-receipt CLI (fixture key via env) — writes only pub
       SNAPSHOT_DISCOVERY_METHOD: 'create-response-id',
       CREATE_RESPONSE_SNAPSHOT_ID: 'vs_abc123',
       KEY_ID: 'staging-dbr-2026-08',
-      APPLIED_COUNT: '63',
+      APPLIED_COUNT: '64',
     };
   }
 
@@ -212,7 +212,7 @@ describe('G-Backup staging-receipt CLI (fixture key via env) — writes only pub
       }
       const meta = JSON.parse(readFileSync(join(dir, 'verification-metadata.json'), 'utf8'));
       expect(meta.selfVerified).toBe(true);
-      expect(meta.pendingMigrationTags).toEqual(['0063_pricing_schedule_v3']);
+      expect(meta.pendingMigrationTags).toEqual(['0064_employee_chat']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -810,6 +810,24 @@ begin
 end
 $$;
 
+-- Employee Chat conversations (EV-004; migration 0064). to_regclass-guarded like api_tokens/github_repo_links
+-- so the penultimate-schema incremental bootstrap tolerates absence. Thread identities only — every exchange
+-- is still an ordinary task/run, so no delete grant: a conversation, once begun, is history.
+do $$
+begin
+  if to_regclass('public.conversations') is not null then
+    grant select, insert, update on conversations to app_server;
+    alter table conversations enable row level security;
+    alter table conversations force row level security;
+    drop policy if exists conversations_tenant on conversations;
+    execute
+      'create policy conversations_tenant on conversations
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+  end if;
+end
+$$;
+
 -- Provisioning INSERT policies (Sprint 5, "The Front Door") -------------------
 -- Workspace/org creation happens BEFORE the row being created has members, so
 -- the membership-based USING predicates above can never admit these inserts.

@@ -449,6 +449,13 @@
       "when": 1786806934267,
       "tag": "0063_pricing_schedule_v3",
       "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1786818268533,
+      "tag": "0064_employee_chat",
+      "breakpoints": true
     }
   ]
 }

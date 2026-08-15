@@ -1231,6 +1231,38 @@ export const taskSchedules = pgTable(
 // Execution
 // ---------------------------------------------------------------------------
 
+/**
+ * Employee Chat (EV-004): one standing conversation per (workspace, employee).
+ * A conversation is a THREAD IDENTITY only — every exchange still runs through
+ * the ordinary task/run machinery (each owner message becomes a task pinned to
+ * the employee, linked here via tasks.conversation_id), so budgets, approvals,
+ * audit, and usage accounting are inherited unchanged.
+ */
+export const conversations = pgTable(
+  'conversations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'restrict' }),
+    createdBy: uuid('created_by')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'restrict' }),
+    ...timestamps,
+  },
+  (t) => [
+    // v1: exactly ONE thread per employee — getOrCreate semantics, no thread management UI.
+    uniqueIndex('conversations_project_agent_uq').on(t.projectId, t.agentId),
+    index('conversations_org_project_idx').on(t.orgId, t.projectId),
+  ],
+);
+
 export const tasks = pgTable(
   'tasks',
   {
@@ -1241,6 +1273,8 @@ export const tasks = pgTable(
     projectId: uuid('project_id')
       .notNull()
       .references(() => projects.id, { onDelete: 'cascade' }),
+    /** Employee Chat: set when this task is one exchange of a conversation thread. */
+    conversationId: uuid('conversation_id').references(() => conversations.id, { onDelete: 'set null' }),
     title: text('title').notNull(),
     /** The user's brief, verbatim. Injection surface — handled per SECURITY.md T2. */
     input: text('input').notNull(),
@@ -1293,6 +1327,7 @@ export const tasks = pgTable(
     uniqueIndex('tasks_schedule_occurrence_uq')
       .on(t.scheduleId, t.scheduleOccurrenceAt)
       .where(sql`schedule_id is not null and schedule_occurrence_at is not null`),
+    index('tasks_conversation_idx').on(t.conversationId),
     // P1a agent pinning — composite FKs to agents. MATCH SIMPLE: a NULL agent id skips the check (legacy
     // rows are fine); a non-null id must reference an agent in the SAME (org_id, project_id) — a cross-
     // workspace pin is impossible. RESTRICT: a pinned employee cannot be deleted out from under history.

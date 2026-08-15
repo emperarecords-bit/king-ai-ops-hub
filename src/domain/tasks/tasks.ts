@@ -68,6 +68,8 @@ export const createTaskSchema = z
     objectiveId: z.string().uuid().nullable().default(null),
     /** Set only by the standing-work tick (Sprint 8); never by forms. */
     scheduleId: z.string().uuid().nullable().default(null),
+    /** Employee Chat (EV-004): set only by the chat domain; links the task into its thread. */
+    conversationId: z.string().uuid().nullable().default(null),
     /** P1a agent pinning — the EXACT employees this task runs. `primaryAgentId` is required (a task is
      *  always pinned to a specific enabled primary). `reviewerAgentId` is required IFF reviewEnabled, and
      *  must be absent otherwise; it can never equal the primary. Validated against the workspace in
@@ -155,6 +157,7 @@ async function prepareTaskInsert(
     values: {
       orgId: ctx.orgId,
       projectId: ctx.projectId,
+      conversationId: parsed.data.conversationId,
       title: parsed.data.title,
       input: parsed.data.input,
       providerSelection,
