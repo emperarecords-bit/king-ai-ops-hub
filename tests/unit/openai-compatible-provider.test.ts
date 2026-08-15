@@ -100,8 +100,8 @@ describe('OpenAICompatibleProvider', () => {
       inputTokens: 500_000,
       outputTokens: 100_000,
     });
-    // 0.5M * $2.00 + 0.1M * $12.00 = $1.00 + $1.20 = $2.20.
-    expect(cost.usdMicros).toBe(2_200_000n);
+    // 0.5M * $2.50 + 0.1M * $15.00 = $1.25 + $1.50 = $2.75.
+    expect(cost.usdMicros).toBe(2_750_000n);
   });
 
   it('maps HTTP statuses onto the shared error taxonomy', async () => {
