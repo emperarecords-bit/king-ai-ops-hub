@@ -68,10 +68,11 @@ export const STAGING_PINS: ReleasePins = {
   databaseIdentity: 'king_ai_ops_hub_staging',
   snapshotProvider: FLY_VOLUMES_PROVIDER,
   providerAdapterVersion: FLY_VOLUMES_ADAPTER_VERSION,
-  expectedMigrationEndpoint: '0056_milky_goliath',
-  expectedCommittedMigrationCount: 57,
-  /** Staging is at migration endpoint 0053 → 54 applied migrations; 0054–0056 are pending. */
-  defaultAppliedCount: 54,
+  // Bumped 2026-08-15 for the multi-provider + voice-provisioning release (0057–0062 land together).
+  expectedMigrationEndpoint: '0062_pricing_schedule_v2',
+  expectedCommittedMigrationCount: 63,
+  /** Staging is at migration endpoint 0056 → 57 applied migrations; 0057–0062 are pending. */
+  defaultAppliedCount: 57,
 } as const;
 
 /** Gate defaults (mirror scripts/migrate.ts buildGateConfigFromEnv): used for the producer's self-verification. */
