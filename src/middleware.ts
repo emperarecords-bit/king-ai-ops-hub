@@ -78,8 +78,16 @@ export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   // /api/health is an unauthenticated liveness probe for the load balancer
   // (O-21) — it exposes only aggregate up/down, never tenant data.
+  // /api/mcp authenticates with its OWN bearer token (api_tokens; Phase 5) and
+  // has no cookie/session path by design — the Supabase-session check here
+  // would 401 every legitimate MCP client, so it passes through to the route's
+  // authenticateMcp gate (which fails closed without a valid token).
   const isPublic =
-    pathname === '/login' || pathname.startsWith('/auth') || pathname === '/api/health' || pathname === '/api/live';
+    pathname === '/login' ||
+    pathname.startsWith('/auth') ||
+    pathname === '/api/health' ||
+    pathname === '/api/live' ||
+    pathname === '/api/mcp';
 
   if (!user && !isPublic) {
     // API callers get a JSON 401 (a login-page redirect would arrive as a 200
