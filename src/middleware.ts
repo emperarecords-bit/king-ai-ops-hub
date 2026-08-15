@@ -87,7 +87,12 @@ export async function middleware(request: NextRequest) {
     pathname.startsWith('/auth') ||
     pathname === '/api/health' ||
     pathname === '/api/live' ||
-    pathname === '/api/mcp';
+    pathname === '/api/mcp' ||
+    // PWA install: browsers fetch the manifest WITHOUT session cookies; a
+    // login redirect here would serve HTML and break installability. The
+    // manifest contains no tenant data. (Icon PNGs are already excluded by
+    // the matcher's extension rule.)
+    pathname === '/manifest.webmanifest';
 
   if (!user && !isPublic) {
     // API callers get a JSON 401 (a login-page redirect would arrive as a 200
