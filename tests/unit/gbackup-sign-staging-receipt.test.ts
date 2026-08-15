@@ -22,17 +22,18 @@ import { verifyReceiptV2Parsed } from '../../scripts/backup/receipt-v2-verify';
 /**
  * G-Backup staging-receipt producer — tests use EPHEMERAL, NON-PRODUCTION ed25519 keys generated in-process. No real
  * signer, GitHub secret, Fly, snapshot, migration, or deploy is involved. Migration facts are DERIVED from the
- * checked-out drizzle tree, so this proves the assembler binds to the real 0000–0056 source set.
+ * checked-out drizzle tree, so this proves the assembler binds to the real 0000–0062 source set.
  */
 
 const kp = generateKeyPairSync('ed25519');
 // The migration facts are derived from a REAL commit (the portable hash reads git blobs at sourceCommit), so the
 // tests bind the actual checked-out HEAD — the same code path the workflow runs against the selected source commit.
-// Staging v125 remains pinned to 0056. A moving HEAD must not redefine that staged source identity.
+// The staged source identity moved to 0062 with the 2026-08-15 multi-provider release (PR #52 merge).
+// A moving HEAD must not redefine it — the exact release commit is pinned here.
 const STAGING_SOURCE_COMMIT = execFileSync(
-  'git', ['rev-parse', '76e4464d20aa81f872d88a26ef130ab0dcf47929^{commit}'], { encoding: 'utf8' },
+  'git', ['rev-parse', 'cb1584625091d70b1eeee0d4061079f3343971eb^{commit}'], { encoding: 'utf8' },
 ).trim();
-const STAGING_RUNTIME_DIR = mkdtempSync(join(tmpdir(), 'staging-source-0056-'));
+const STAGING_RUNTIME_DIR = mkdtempSync(join(tmpdir(), 'staging-source-0062-'));
 const stagingJournalText = execFileSync(
   'git', ['show', `${STAGING_SOURCE_COMMIT}:drizzle/meta/_journal.json`], { encoding: 'utf8' },
 );
@@ -71,16 +72,23 @@ function goodInputs(over: Partial<StagingReceiptInputs> = {}): StagingReceiptInp
 }
 
 describe('G-Backup staging-receipt producer — happy path (fixture keys)', () => {
-  it('signs + self-verifies; pending is exactly 0054–0056 derived from source', () => {
+  it('signs + self-verifies; pending is exactly 0057–0062 derived from source', () => {
     const out = produceStagingReceipt(goodInputs(), kp.privateKey, STAGING_RUNTIME_DIR);
     expect(receiptV2Schema.safeParse(out.receipt).success).toBe(true);
     expect(out.receipt.environment).toBe('staging');
     expect(out.receipt.targetApplication).toBe('king-ai-ops-hub-staging');
     expect(out.receipt.databaseApp).toBe('king-ai-hub-db-staging');
     expect(out.receipt.sourceVolumeId).toBe('vol_4m3kmknl059qpd6v');
-    expect(out.derived.endpointTag).toBe('0056_milky_goliath');
-    expect(out.derived.committedCount).toBe(57);
-    expect(out.derived.pendingMigrations.map((p) => p.migrationTag)).toEqual(['0054_tense_banshee', '0055_calm_nightmare', '0056_milky_goliath']);
+    expect(out.derived.endpointTag).toBe('0062_pricing_schedule_v2');
+    expect(out.derived.committedCount).toBe(63);
+    expect(out.derived.pendingMigrations.map((p) => p.migrationTag)).toEqual([
+      '0057_reviewer_rubric',
+      '0058_yummy_the_hand',
+      '0059_living_morlocks',
+      '0060_safe_kree',
+      '0061_glossy_magma',
+      '0062_pricing_schedule_v2',
+    ]);
     // Independently re-verify with the derived public trust.
     const load = loadReceiptKeyBundle([out.publicTrustEntry]);
     expect(load.ok).toBe(true);
@@ -195,7 +203,7 @@ describe('G-Backup staging-receipt CLI (fixture key via env) — writes only pub
       SNAPSHOT_DISCOVERY_METHOD: 'create-response-id',
       CREATE_RESPONSE_SNAPSHOT_ID: 'vs_abc123',
       KEY_ID: 'staging-dbr-2026-08',
-      APPLIED_COUNT: '54',
+      APPLIED_COUNT: '57',
     };
   }
 
@@ -211,7 +219,14 @@ describe('G-Backup staging-receipt CLI (fixture key via env) — writes only pub
       }
       const meta = JSON.parse(readFileSync(join(dir, 'verification-metadata.json'), 'utf8'));
       expect(meta.selfVerified).toBe(true);
-      expect(meta.pendingMigrationTags).toEqual(['0054_tense_banshee', '0055_calm_nightmare', '0056_milky_goliath']);
+      expect(meta.pendingMigrationTags).toEqual([
+        '0057_reviewer_rubric',
+        '0058_yummy_the_hand',
+        '0059_living_morlocks',
+        '0060_safe_kree',
+        '0061_glossy_magma',
+        '0062_pricing_schedule_v2',
+      ]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
