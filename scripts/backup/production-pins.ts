@@ -16,9 +16,9 @@ export const PRODUCTION_PINS: ReleasePins = {
   databaseIdentity: 'king_ai_ops_hub_production',
   snapshotProvider: FLY_VOLUMES_PROVIDER,
   providerAdapterVersion: FLY_VOLUMES_ADAPTER_VERSION,
-  // Bumped 2026-08-15 (0063 pricing schedule v3 — corrected Gemini model ids). Prod deployed through 0062 same day.
-  expectedMigrationEndpoint: '0063_pricing_schedule_v3',
-  expectedCommittedMigrationCount: 64,
-  /** Production deployed through 0062 on 2026-08-15; 0063 is the one pending. */
-  defaultAppliedCount: 63,
+  // Bumped 2026-08-15 (0064 employee chat — EV-011). Prod deployed through 0063 same day.
+  expectedMigrationEndpoint: '0064_employee_chat',
+  expectedCommittedMigrationCount: 65,
+  /** Production deployed through 0063 on 2026-08-15; 0064 is the one pending. */
+  defaultAppliedCount: 64,
 } as const;

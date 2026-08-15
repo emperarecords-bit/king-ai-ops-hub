@@ -152,6 +152,16 @@ export default async function EmployeesPage({
                   <Card key={agent.id}>
                     <div className="mb-1 flex flex-wrap items-center gap-3">
                       <h3 className="font-semibold">{agent.name}</h3>
+                      {/* Employee Chat (EV-004): talking beats forms. Primaries only — reviewers are
+                          dispatched by the engine, not conversed with. */}
+                      {agent.role === 'primary' && agent.enabled ? (
+                        <Link
+                          href={`/p/${projectKey}/agents/${agent.id}/chat`}
+                          className="rounded border border-[var(--border)] px-2 py-0.5 text-xs text-[var(--accent)] hover:opacity-80"
+                        >
+                          Chat
+                        </Link>
+                      ) : null}
                       {org?.title ? (
                         <span className="rounded bg-[var(--surface-raised)] px-2 py-0.5 text-xs text-[var(--foreground)]">
                           {org.title}
