@@ -4,7 +4,7 @@ import { OpenAICompatibleProvider } from '@/providers/openai-compatible';
 import { otherProvider } from '@/providers/registry';
 import { resolveModelForTier } from '@/orchestration/routing';
 import { costForUsage, knownModel, modelsForProvider, providerSupportsModel } from '@/providers/pricing';
-import { PROVIDER_IDS, ProviderError } from '@/types/provider';
+import { PROVIDER_IDS, type ProviderError } from '@/types/provider';
 
 /**
  * Multi-provider expansion (2026-08-15): google (Gemini) and deepseek join as

@@ -1,6 +1,6 @@
 import { type TenantContext } from '@/types/domain';
 import { AppError } from '@/lib/errors';
-import { withTenant } from '@/db/tenant';
+import { withOrg, withTenant } from '@/db/tenant';
 import { resolveApiTokenIdentity } from '@/db/api-token';
 import { findAccessibleProjects, findOrgRole } from '@/db/system';
 import { consumeRateLimit } from '@/domain/usage/rate-limit';
@@ -59,11 +59,19 @@ async function callTool(auth: AuthenticatedMcp, name: string, args: unknown): Pr
     throw new AppError('forbidden', `This token's scope does not grant the tool "${name}".`);
   }
   const def = getToolDefinition(name)!;
-  return withTenant(auth.ctx, async (tx) => {
+  const run = async (tx: Parameters<typeof def.handler>[0]) => {
     // Per (token, tool) minute bucket, reusing the existing atomic limiter. Throws RateLimitedError when exceeded.
     await consumeRateLimit(tx, `mcp:${auth.tokenId}:${name}`, RATE_LIMIT_PER_MINUTE);
     return def.handler(tx, auth.ctx, args);
-  });
+  };
+  // Org-scoped provisioning tools target a workspace that is not (or not yet)
+  // the token's own, so they open at org scope; the handler performs its own
+  // membership checks and stamps the project scope mid-transaction. Everything
+  // else stays bound to the token's one project.
+  if (def.scope === 'org') {
+    return withOrg({ userId: auth.ctx.userId, orgId: auth.ctx.orgId }, run);
+  }
+  return withTenant(auth.ctx, run);
 }
 
 // --- JSON-RPC 2.0 ------------------------------------------------------------

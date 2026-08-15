@@ -10,11 +10,27 @@ import {
 import { MCP_TOOLS, getToolDefinition } from '@/domain/mcp/tools';
 
 describe('mcp tool surface', () => {
-  it('exposes exactly the four read and two write tools', () => {
-    expect([...MCP_READ_TOOLS]).toEqual(['list_projects', 'get_task', 'search_messages', 'get_usage']);
-    expect([...MCP_WRITE_TOOLS]).toEqual(['create_task', 'submit_run']);
-    expect(MCP_TOOLS).toHaveLength(6);
+  it('exposes exactly the five read and four write tools', () => {
+    expect([...MCP_READ_TOOLS]).toEqual([
+      'list_projects',
+      'get_task',
+      'search_messages',
+      'get_usage',
+      'list_position_templates',
+    ]);
+    expect([...MCP_WRITE_TOOLS]).toEqual(['create_task', 'submit_run', 'create_workspace', 'staff_positions']);
+    expect(MCP_TOOLS).toHaveLength(9);
     expect(MCP_TOOLS.map((t) => t.name).sort()).toEqual([...MCP_TOOL_NAMES].sort());
+  });
+
+  it('org scope is granted ONLY to the two provisioning writes; reads stay project-bound', () => {
+    for (const t of MCP_TOOLS) {
+      if (t.name === 'create_workspace' || t.name === 'staff_positions') {
+        expect(t.scope).toBe('org');
+      } else {
+        expect(t.scope ?? 'project').toBe('project');
+      }
+    }
   });
 
   it('new tokens default to read-only scope', () => {

@@ -61,7 +61,11 @@ export function ProviderBadge({ provider }: { provider: string }) {
       ? 'border-[#3d6b58] text-[#74c3a4]'
       : provider === 'anthropic'
         ? 'border-[#6b5a3d] text-[#d4a843]'
-        : 'border-[var(--border)] text-[var(--muted)]';
+        : provider === 'google'
+          ? 'border-[#3d556b] text-[#74a4c3]'
+          : provider === 'deepseek'
+            ? 'border-[#553d6b] text-[#a474c3]'
+            : 'border-[var(--border)] text-[var(--muted)]';
   return (
     <span className={`inline-block rounded border px-2 py-0.5 text-xs ${style}`}>{provider}</span>
   );
