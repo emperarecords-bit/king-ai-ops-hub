@@ -4,11 +4,11 @@
  * `src/providers` translate to and from these shapes.
  */
 
-export const PROVIDER_IDS = ['openai', 'anthropic'] as const;
+export const PROVIDER_IDS = ['openai', 'anthropic', 'google', 'deepseek'] as const;
 export type ProviderId = (typeof PROVIDER_IDS)[number];
 
 /** A provider choice as the user expresses it on a task. */
-export const PROVIDER_SELECTIONS = ['openai', 'anthropic', 'both'] as const;
+export const PROVIDER_SELECTIONS = ['openai', 'anthropic', 'google', 'deepseek', 'both'] as const;
 export type ProviderSelection = (typeof PROVIDER_SELECTIONS)[number];
 
 export interface ModelDescriptor {

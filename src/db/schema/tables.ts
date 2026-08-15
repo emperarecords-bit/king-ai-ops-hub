@@ -1,4 +1,5 @@
 import { sql } from 'drizzle-orm';
+import { type ProviderId } from '@/types/provider';
 import {
   type AnyPgColumn,
   bigint,
@@ -2048,7 +2049,11 @@ export const pricingScheduleEntries = pgTable(
     scheduleId: uuid('schedule_id')
       .notNull()
       .references(() => pricingSchedules.id, { onDelete: 'restrict' }),
-    provider: providerIdEnum('provider').notNull(),
+    // text (app-typed), NOT provider_id: a pricing seed migration must be able to reference providers
+    // added in the SAME migration batch, and Postgres <18 forbids using a same-transaction enum value
+    // (55P04 check_safe_enum_use). Value validity is guaranteed by the seed generator, which builds
+    // entries from the typed MODEL_PRICING catalog.
+    provider: text('provider').$type<ProviderId>().notNull(),
     model: text('model').notNull(),
     inputUnitPriceMicros: bigint('input_unit_price_micros', { mode: 'bigint' }).notNull(),
     outputUnitPriceMicros: bigint('output_unit_price_micros', { mode: 'bigint' }).notNull(),

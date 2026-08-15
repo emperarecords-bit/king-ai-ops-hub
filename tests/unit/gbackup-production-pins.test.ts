@@ -64,7 +64,10 @@ describe('production pins — consistency with the repository', () => {
       expect(PRODUCTION_PINS[field], field).not.toBe(STAGING_PINS[field]);
       expect(PRODUCTION_PINS[field].length).toBeGreaterThan(0);
     }
-    expect(PRODUCTION_PINS.defaultAppliedCount).toBe(0); // fresh database: everything pending at first release
+    // Production launched 2026-08-15 with 61 migrations applied; the default applied
+    // count must never exceed the committed set (that would mean a pin typo).
+    expect(PRODUCTION_PINS.defaultAppliedCount).toBe(61);
+    expect(PRODUCTION_PINS.defaultAppliedCount).toBeLessThanOrEqual(PRODUCTION_PINS.expectedCommittedMigrationCount);
   });
 });
 
@@ -79,8 +82,10 @@ describe('production pins — the shared producer signs + self-verifies a produc
     expect(out.receipt.targetApplication).toBe('king-ai-ops-hub-prod');
     expect(out.receipt.sourceVolumeId).toBe('vol_vlye16958n6x6ed4');
     expect(out.receipt.keyId).toBe('prod-dbr-2026-08');
-    // Fresh DB: the pending set is the ENTIRE committed migration set.
-    expect(out.derived.pendingMigrations.length).toBe(PRODUCTION_PINS.expectedCommittedMigrationCount);
+    // Pending set = committed set minus what production has already applied.
+    expect(out.derived.pendingMigrations.length).toBe(
+      PRODUCTION_PINS.expectedCommittedMigrationCount - PRODUCTION_PINS.defaultAppliedCount,
+    );
     expect(out.derived.endpointTag).toBe(PRODUCTION_PINS.expectedMigrationEndpoint);
     // Self-verification already ran inside produceStagingReceipt (it throws on failure) — reaching here IS the proof.
     expect(out.publicTrustEntry.purpose).toBe('deployment_backup_receipt');
@@ -93,7 +98,7 @@ describe('production pins — the shared producer signs + self-verifies a produc
     const keyLoad = loadReceiptKeyBundle([out.publicTrustEntry]);
     if (!keyLoad.ok) throw new Error('trust load failed');
     const exp = {
-      ...buildSelfVerifyExpectation(inputs, deriveMigrationFacts({ runtimeDir: process.cwd(), gitCommitish: head }, 0, PRODUCTION_PINS), keyLoad.store, PRODUCTION_PINS),
+      ...buildSelfVerifyExpectation(inputs, deriveMigrationFacts({ runtimeDir: process.cwd(), gitCommitish: head }, PRODUCTION_PINS.defaultAppliedCount, PRODUCTION_PINS), keyLoad.store, PRODUCTION_PINS),
       allowProductionEnvironment: false,
     };
     const result = verifyReceiptV2Parsed(out.receipt, exp);

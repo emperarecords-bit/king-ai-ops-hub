@@ -428,6 +428,20 @@
       "when": 1786626643154,
       "tag": "0060_safe_kree",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1786796462349,
+      "tag": "0061_glossy_magma",
+      "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1786799561891,
+      "tag": "0062_pricing_schedule_v2",
+      "breakpoints": true
     }
   ]
 }

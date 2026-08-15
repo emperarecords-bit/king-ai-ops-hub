@@ -2,7 +2,7 @@ import 'server-only';
 import { randomUUID } from 'node:crypto';
 import { eq, and, desc, sql } from 'drizzle-orm';
 import { type ReliabilityState, type TenantContext } from '@/types/domain';
-import { assessProviderErrorOutcome, ProviderError, type ProviderId } from '@/types/provider';
+import { assessProviderErrorOutcome, ProviderError, type ProviderId, type ProviderSelection } from '@/types/provider';
 import { AppError, AssignmentRequiredError, ConflictError } from '@/lib/errors';
 import { serverEnv } from '@/lib/env.server';
 import { log } from '@/lib/log';
@@ -156,7 +156,7 @@ function toEngineAgent(row: AgentRow, tier: ModelTier): EngineAgent {
 }
 
 /** Which vendor is primary / reviewer for this task's provider selection. */
-export function resolveProviderPair(selection: 'openai' | 'anthropic' | 'both', reviewEnabled: boolean): {
+export function resolveProviderPair(selection: ProviderSelection, reviewEnabled: boolean): {
   primary: ProviderId;
   reviewer: ProviderId | null;
 } {

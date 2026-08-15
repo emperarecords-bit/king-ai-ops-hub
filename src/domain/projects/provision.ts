@@ -37,7 +37,7 @@ import { DEFAULT_STAFF } from './default-staff';
 
 const DEFAULT_WORKSPACE_BUDGET_MICROS = 25_000_000n; // $25/month, adjustable later
 
-const STANDARD_DEPARTMENTS = [
+export const STANDARD_DEPARTMENTS = [
   ['engineering', 'Engineering'],
   ['marketing', 'Marketing'],
   ['finance', 'Finance'],
