@@ -53,8 +53,13 @@ describe('0058 executor lifecycle migration contract', () => {
     expect(rls).not.toContain("executor_execution_attempts to app_system");
   });
 
-  it('does not weaken the dry-run-only dispatch boundary or add filesystem writes', () => {
-    expect(dispatch).toContain("request.mode !== 'dry_run'");
+  it('does not weaken the gated dispatch boundary or add filesystem writes', () => {
+    // Action Executors v1: the blanket dry-run-only rule became explicit per-executor gates.
+    // Every layer must remain present in the dispatch source.
+    expect(dispatch).toContain('supportedModes.includes(request.mode)');
+    expect(dispatch).toContain('enabledExecutorIds');
+    expect(dispatch).toContain('EXECUTORS_KILL_SWITCH');
+    expect(dispatch).toContain('ALLOWED_RISKS.has(riskClass)');
     expect(dispatch).not.toMatch(/writeFile|appendFile|rename\(|unlink|mkdir/);
   });
 });

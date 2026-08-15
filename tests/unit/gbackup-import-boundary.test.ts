@@ -171,8 +171,8 @@ describe('G-Backup-A import boundary', () => {
     expect(migrate.includes("join(process.cwd(), 'source-identity.json')")).toBe(true);
   });
 
-  it('executor eligibility remains false for every action', () => {
-    for (const a of ACTION_TYPES) expect(hasEligibleExecutor(a)).toBe(false);
+  it('executor eligibility is true ONLY for git_pr (Action Executors v1)', () => {
+    for (const a of ACTION_TYPES) expect(hasEligibleExecutor(a)).toBe(a === 'git_pr');
   });
 
   it('engine constants are unchanged', () => {

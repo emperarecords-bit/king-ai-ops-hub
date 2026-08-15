@@ -70,7 +70,8 @@ export interface ExecutorCapability {
   readonly riskClasses: readonly ExecutorRiskClass[];
   readonly supportedModes: readonly ExecutionMode[];
   readonly enabledByDefault: false;
-  readonly externalSideEffects: false;
+  /** True for executors whose LIVE mode performs external side effects. Dry-run is side-effect-free for every executor. */
+  readonly externalSideEffects: boolean;
 }
 
 export interface ExecutorProvenance {
@@ -123,7 +124,7 @@ export function validateExecutorResult(
   if (result.outcome === 'ambiguous' && (result.reconciliation !== 'required' || result.retryAllowed)) {
     throw new Error('Ambiguous outcomes require reconciliation and prohibit retry.');
   }
-  if (result.outcome === 'not_executed' && (action.mode !== 'dry_run' || capability.externalSideEffects)) {
+  if (result.outcome === 'not_executed' && action.mode !== 'dry_run') {
     throw new Error('A not_executed result is valid only for a side-effect-free dry run.');
   }
   return result;

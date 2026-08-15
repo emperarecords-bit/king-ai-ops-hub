@@ -1,15 +1,15 @@
 import { type ActionType } from '@/types/domain';
 
 /**
- * Action-executor registry (HUB-002, item 7). Phase 3 — `executeApprovedAction()` — is NOT built: no
- * executor exists for ANY action type yet, so an authorized action can never auto-execute. This is a
- * POSITIVE determination, not an absence of information: the set below is authoritative and empty. Only
- * when a real executor lands do we register its action type here — and only then does the honest
- * "execution unavailable" wording drop for that type.
+ * Action-executor registry (HUB-002, item 7). Action Executors v1: a REAL executor now exists for
+ * `git_pr` (./git-pr-executor.ts) — an approved git_pr action can execute through the dispatch
+ * choke point when the server explicitly enables it (EXECUTORS_ENABLED). This set is authoritative:
+ * an action type absent here can never execute, and the honest "execution unavailable" wording
+ * remains for it. Keep this in lockstep with resolveExecutor() in ./dispatch.ts.
  */
-const ELIGIBLE_EXECUTOR_ACTION_TYPES: ReadonlySet<ActionType> = new Set<ActionType>(); // intentionally empty
+const ELIGIBLE_EXECUTOR_ACTION_TYPES: ReadonlySet<ActionType> = new Set<ActionType>(['git_pr']);
 
-/** True when a real executor exists for this action type (none do today). */
+/** True when a real executor exists for this action type. */
 export function hasEligibleExecutor(actionType: ActionType): boolean {
   return ELIGIBLE_EXECUTOR_ACTION_TYPES.has(actionType);
 }

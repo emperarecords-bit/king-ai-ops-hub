@@ -30,7 +30,7 @@ export function DecisionForm({
         value="approved"
         disabled={pending}
         className="rounded-md bg-[var(--success)] px-4 py-1.5 text-sm font-semibold text-[#0b0e14] disabled:opacity-50"
-        title="Authorize this exact action within the scope shown. Records authorization only — it does not execute."
+        title="Authorize this exact action within the scope shown. Actions with a live executor (git_pr) execute immediately; everything else records authorization only."
       >
         Authorize
       </button>
@@ -47,6 +47,19 @@ export function DecisionForm({
       {state.error ? (
         <p role="alert" className="w-full text-sm text-[var(--danger)]">
           {state.error}
+        </p>
+      ) : null}
+      {state.executed ? (
+        <p className={`w-full text-sm ${state.executed.outcome === 'succeeded' ? 'text-[var(--success)]' : 'text-amber-400'}`}>
+          {state.executed.message}
+          {state.executed.prUrl ? (
+            <>
+              {' '}
+              <a href={state.executed.prUrl} target="_blank" rel="noreferrer" className="underline">
+                View PR
+              </a>
+            </>
+          ) : null}
         </p>
       ) : null}
     </form>

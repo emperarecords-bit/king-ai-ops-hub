@@ -3,7 +3,7 @@
 import { useActionState } from 'react';
 import { decideFromInbox, type InboxDecisionState } from './actions';
 
-const INITIAL: InboxDecisionState = { error: null };
+const INITIAL: InboxDecisionState = { error: null, executed: null };
 
 /** Two buttons, one decision. The detail page (linked above) carries the full
  *  consequence record for anything that deserves a closer look first. */
@@ -32,6 +32,19 @@ export function InboxDecisionForm({ projectKey, approvalId }: { projectKey: stri
         No
       </button>
       {state.error ? <span className="text-xs text-red-400">{state.error}</span> : null}
+      {state.executed ? (
+        <span className={`text-xs ${state.executed.outcome === 'succeeded' ? 'text-[var(--success,#74c3a4)]' : 'text-amber-400'}`}>
+          {state.executed.message}
+          {state.executed.prUrl ? (
+            <>
+              {' '}
+              <a href={state.executed.prUrl} target="_blank" rel="noreferrer" className="underline">
+                View PR
+              </a>
+            </>
+          ) : null}
+        </span>
+      ) : null}
     </form>
   );
 }

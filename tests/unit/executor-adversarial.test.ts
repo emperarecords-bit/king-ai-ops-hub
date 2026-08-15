@@ -36,11 +36,20 @@ describe('executor adversarial boundaries', () => {
     expect(() => executorActionSchema.parse(forged)).toThrow();
   });
 
-  it('live mode remains rejected even with a fabricated not_executed claim', async () => {
+  it('live mode is gated by executor capability + explicit enablement, and the noop still refuses it', async () => {
     const source = readFileSync(join(process.cwd(), 'src/domain/execution/dispatch.ts'), 'utf8');
-    expect(source).toContain("request.mode !== 'dry_run'");
+    // Action Executors v1: the blanket live prohibition is replaced by explicit gates — every one
+    // must appear in the dispatch source, pinned here so a refactor cannot silently drop a layer.
+    expect(source).toContain('supportedModes.includes(request.mode)');
+    expect(source).toContain('enabledExecutorIds');
+    expect(source).toContain('EXECUTORS_KILL_SWITCH');
+    expect(source).toContain('ALLOWED_RISKS.has(riskClass)');
     const executor = new NoopDryRunExecutor();
     await expect(executor.execute({ mode: 'live', outcome: 'not_executed' } as never)).rejects.toThrow();
+    // A fabricated not_executed claim in live mode still fails result validation.
+    const action = { ...trustedAction(), mode: 'live' as const };
+    const fake = resultFor(action);
+    expect(() => validateExecutorResult(action, NOOP_EXECUTOR_CAPABILITY, fake)).toThrow(/dry run/i);
   });
 
   it('trusted dispatch is server-only and absent from model orchestration', () => {

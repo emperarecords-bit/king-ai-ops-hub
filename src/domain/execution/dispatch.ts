@@ -4,10 +4,19 @@ import { z } from 'zod';
 import { approvals, auditLogs, tasks } from '@/db/schema';
 import { type DbTx } from '@/db/client';
 import { acquireAuditWriteLock, writeAudit } from '@/domain/audit/audit';
+import { getGitHubClient } from '@/domain/github/client';
+import { listRepoLinks } from '@/domain/github/links';
 import { canonicalJson } from '@/orchestration/actions';
 import { sha256Hex } from '@/lib/crypto';
 import { type TenantContext } from '@/types/domain';
-import { EXECUTION_MODES, validateExecutorResult, type ExecutorAction, type ExecutorResult } from './executor-contract';
+import {
+  EXECUTION_MODES,
+  validateExecutorResult,
+  type Executor,
+  type ExecutorAction,
+  type ExecutorResult,
+} from './executor-contract';
+import { GitPrExecutor } from './git-pr-executor';
 import { NoopDryRunExecutor } from './noop-executor';
 import { EXECUTOR_RISK_BY_ACTION } from './executor-policy';
 
@@ -32,8 +41,35 @@ export interface DispatchPolicy {
   readonly now?: Date;
 }
 
-const FOUNDATION_ALLOWED_RISKS = new Set(['reversible_internal_write']);
+/**
+ * Server enablement from the environment: EXECUTORS_ENABLED is a comma-separated executor-id list
+ * ("git_pr"); EXECUTORS_KILL_SWITCH=1 empties it instantly without a deploy. Unset means disabled —
+ * absence of configuration can never enable execution.
+ */
+export function resolveDispatchPolicyFromEnv(env: NodeJS.ProcessEnv = process.env): DispatchPolicy {
+  const stop = env.EXECUTORS_KILL_SWITCH === '1' || env.EXECUTORS_KILL_SWITCH === 'true';
+  const ids = (env.EXECUTORS_ENABLED ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return { enabledExecutorIds: stop ? [] : ids };
+}
+
+/** Risk classes any executor may act on. Everything above external_reversible stays prohibited. */
+const ALLOWED_RISKS = new Set(['reversible_internal_write', 'external_reversible']);
 const noop = new NoopDryRunExecutor();
+
+/**
+ * Resolve the executor for an action type. The registry is deliberately explicit — an action type
+ * with no entry here can never execute, whatever the payload claims.
+ */
+function resolveExecutor(tx: DbTx, ctx: TenantContext, actionType: string): Executor | null {
+  if (actionType === 'git_pr') {
+    return new GitPrExecutor({ client: getGitHubClient(), loadLinks: () => listRepoLinks(tx, ctx) });
+  }
+  if (actionType === 'file_write') return noop;
+  return null;
+}
 
 function blocked(message: string, reconciliation: ExecutorResult['reconciliation'] = 'not_required'): ExecutorResult {
   const now = new Date(0).toISOString();
@@ -48,7 +84,7 @@ function blocked(message: string, reconciliation: ExecutorResult['reconciliation
   };
 }
 
-function auditDetail(action: ExecutorAction, result?: ExecutorResult): Record<string, unknown> {
+function auditDetail(action: ExecutorAction, executorId: string, result?: ExecutorResult): Record<string, unknown> {
   return {
     actorId: action.authorization.actorId,
     orgId: action.orgId,
@@ -57,7 +93,7 @@ function auditDetail(action: ExecutorAction, result?: ExecutorResult): Record<st
     runId: action.runId,
     correlationId: action.correlationId,
     proposedAction: action.actionType,
-    executorId: result?.provenance.executorId ?? noop.capability.executorId,
+    executorId: result?.provenance.executorId ?? executorId,
     riskClass: action.riskClass,
     authorizationDecision: 'allowed',
     confirmationState: action.confirmation.required ? 'confirmed' : 'not_required',
@@ -66,6 +102,7 @@ function auditDetail(action: ExecutorAction, result?: ExecutorResult): Record<st
     mode: action.mode,
     outcome: result?.outcome ?? 'intent_recorded',
     reconciliation: result?.reconciliation ?? 'not_required',
+    ...(result?.preview ? { resultPreview: result.preview } : {}),
   };
 }
 
@@ -75,8 +112,11 @@ async function writeBlocked(tx: DbTx, ctx: TenantContext, approvalId: string | n
 }
 
 /**
- * The sole Phase 3 dispatch choke point. It re-reads trusted state, claims idempotency under the
- * append-only audit lock, and can dispatch only to the deterministic no-op in dry-run mode.
+ * The sole execution dispatch choke point. It re-reads trusted state, claims idempotency under the
+ * append-only audit lock, and dispatches only to an explicitly registered AND explicitly enabled
+ * executor. Live mode (Action Executors v1) additionally requires the executor to declare live
+ * support and the risk class to be at most external_reversible; a fresh payload-bound confirmation
+ * from the acting admin is required in every mode.
  */
 export async function executeApprovedAction(
   tx: DbTx,
@@ -90,7 +130,6 @@ export async function executeApprovedAction(
   const now = policy.now ?? new Date();
 
   if (ctx.projectRole !== 'admin') return writeBlocked(tx, ctx, request.approvalId, 'Execution requires project-admin authority.');
-  if (request.mode !== 'dry_run') return writeBlocked(tx, ctx, request.approvalId, 'Live execution is prohibited in the Phase 3 foundation.', { mode: request.mode });
 
   const rows = await tx
     .select({
@@ -113,9 +152,15 @@ export async function executeApprovedAction(
   if (!payload || sha256Hex(canonicalJson(payload)) !== row.payloadSha256) return writeBlocked(tx, ctx, row.id, 'Approved payload integrity check failed.');
 
   const riskClass = EXECUTOR_RISK_BY_ACTION[row.actionType];
-  if (!FOUNDATION_ALLOWED_RISKS.has(riskClass)) return writeBlocked(tx, ctx, row.id, 'This risk class is prohibited in the Phase 3 foundation.', { actionType: row.actionType, riskClass });
-  if (!noop.capability.actionTypes.includes(row.actionType as 'file_write')) return writeBlocked(tx, ctx, row.id, 'No executor declares this action type.', { actionType: row.actionType });
-  if (!(policy.enabledExecutorIds ?? []).includes(noop.capability.executorId)) return writeBlocked(tx, ctx, row.id, 'The executor is disabled.');
+  if (!ALLOWED_RISKS.has(riskClass)) return writeBlocked(tx, ctx, row.id, 'This risk class is prohibited.', { actionType: row.actionType, riskClass });
+  const executor = resolveExecutor(tx, ctx, row.actionType);
+  if (!executor || !executor.capability.actionTypes.includes(row.actionType)) {
+    return writeBlocked(tx, ctx, row.id, 'No executor declares this action type.', { actionType: row.actionType });
+  }
+  if (!(policy.enabledExecutorIds ?? []).includes(executor.capability.executorId)) return writeBlocked(tx, ctx, row.id, 'The executor is disabled.');
+  if (!executor.capability.supportedModes.includes(request.mode)) {
+    return writeBlocked(tx, ctx, row.id, `The executor does not support ${request.mode} mode.`, { mode: request.mode });
+  }
 
   const confirmation = request.confirmation;
   if (!confirmation || confirmation.confirmedBy !== ctx.userId || confirmation.payloadSha256 !== row.payloadSha256 || confirmation.confirmedAt.getTime() > now.getTime() || confirmation.expiresAt.getTime() <= now.getTime()) {
@@ -138,15 +183,15 @@ export async function executeApprovedAction(
   )).limit(1);
   if (prior.length > 0) return writeBlocked(tx, ctx, row.id, 'Duplicate idempotency key.', { idempotencyKey: request.idempotencyKey });
 
-  await writeAudit(tx, ctx, { action: 'execution.intent', entityType: 'approval', entityId: row.id, detail: auditDetail(action) });
+  const executorId = executor.capability.executorId;
+  await writeAudit(tx, ctx, { action: 'execution.intent', entityType: 'approval', entityId: row.id, detail: auditDetail(action, executorId) });
   try {
-    const result = validateExecutorResult(action, noop.capability, await noop.execute(action));
-    await writeAudit(tx, ctx, { action: 'execution.result', entityType: 'approval', entityId: row.id, detail: auditDetail(action, result) });
+    const result = validateExecutorResult(action, executor.capability, await executor.execute(action));
+    await writeAudit(tx, ctx, { action: 'execution.result', entityType: 'approval', entityId: row.id, detail: auditDetail(action, executorId, result) });
     return result;
   } catch {
     const result: ExecutorResult = { ...blocked('Executor failed before a side effect could occur.'), outcome: 'failed' };
-    await writeAudit(tx, ctx, { action: 'execution.result', entityType: 'approval', entityId: row.id, detail: auditDetail(action, result) });
+    await writeAudit(tx, ctx, { action: 'execution.result', entityType: 'approval', entityId: row.id, detail: auditDetail(action, executorId, result) });
     return result;
   }
 }
-
