@@ -28,12 +28,12 @@ import { verifyReceiptV2Parsed } from '../../scripts/backup/receipt-v2-verify';
 const kp = generateKeyPairSync('ed25519');
 // The migration facts are derived from a REAL commit (the portable hash reads git blobs at sourceCommit), so the
 // tests bind the actual checked-out HEAD — the same code path the workflow runs against the selected source commit.
-// The staged source identity moved to 0062 with the 2026-08-15 multi-provider release (PR #52 merge).
+// The staged source identity moved to 0063 with the 2026-08-15 Gemini-id fix release.
 // A moving HEAD must not redefine it — the exact release commit is pinned here.
 const STAGING_SOURCE_COMMIT = execFileSync(
   'git', ['rev-parse', 'cb1584625091d70b1eeee0d4061079f3343971eb^{commit}'], { encoding: 'utf8' },
 ).trim();
-const STAGING_RUNTIME_DIR = mkdtempSync(join(tmpdir(), 'staging-source-0062-'));
+const STAGING_RUNTIME_DIR = mkdtempSync(join(tmpdir(), 'staging-source-0063-'));
 const stagingJournalText = execFileSync(
   'git', ['show', `${STAGING_SOURCE_COMMIT}:drizzle/meta/_journal.json`], { encoding: 'utf8' },
 );
