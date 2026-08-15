@@ -83,22 +83,24 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPricing>> = {
     maxOutputTokens: 64_000,
   },
   // --- Google (Gemini) ------------------------------------------------------
-  // Rates are the PAID-tier list prices (ai.google.dev/pricing, 2026-08-15).
-  // A key from an unbilled AI Studio account runs on the free tier and is
-  // charged $0 by Google; the table still records list price so the budget
-  // gate stays conservative if billing is ever enabled on the key.
-  'gemini-3-flash': {
+  // Model ids LIVE-PROBED against the OpenAI-compat endpoint on 2026-08-15
+  // (the earlier gemini-3-flash/-pro ids 404 and the 2.5 line is retired).
+  // A key from an unbilled AI Studio account runs flash-lite on the FREE tier
+  // ($0 charged by Google); the pro tier 429s without billing. Rates below are
+  // CONSERVATIVE estimates (could not verify the pricing page for these ids) —
+  // over-counting is the safe direction for the budget gate.
+  'gemini-3.1-flash-lite': {
     provider: 'google',
-    displayName: 'Gemini 3 Flash',
-    inputMicrosPerM: 300_000n, // $0.30 / M
-    outputMicrosPerM: 2_500_000n, // $2.50 / M
+    displayName: 'Gemini 3.1 Flash Lite',
+    inputMicrosPerM: 300_000n, // $0.30 / M — conservative estimate
+    outputMicrosPerM: 2_500_000n, // $2.50 / M — conservative estimate
     maxOutputTokens: 65_536,
   },
-  'gemini-3-pro': {
+  'gemini-3.1-pro-preview': {
     provider: 'google',
-    displayName: 'Gemini 3 Pro',
-    inputMicrosPerM: 2_000_000n, // $2.00 / M
-    outputMicrosPerM: 12_000_000n, // $12.00 / M
+    displayName: 'Gemini 3.1 Pro (preview)',
+    inputMicrosPerM: 2_500_000n, // $2.50 / M — conservative estimate
+    outputMicrosPerM: 15_000_000n, // $15.00 / M — conservative estimate
     maxOutputTokens: 65_536,
   },
   // --- DeepSeek -------------------------------------------------------------

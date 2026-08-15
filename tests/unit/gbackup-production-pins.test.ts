@@ -64,9 +64,9 @@ describe('production pins — consistency with the repository', () => {
       expect(PRODUCTION_PINS[field], field).not.toBe(STAGING_PINS[field]);
       expect(PRODUCTION_PINS[field].length).toBeGreaterThan(0);
     }
-    // Production launched 2026-08-15 with 61 migrations applied; the default applied
+    // Production deployed through 0062 on 2026-08-15 (63 applied); the default applied
     // count must never exceed the committed set (that would mean a pin typo).
-    expect(PRODUCTION_PINS.defaultAppliedCount).toBe(61);
+    expect(PRODUCTION_PINS.defaultAppliedCount).toBe(63);
     expect(PRODUCTION_PINS.defaultAppliedCount).toBeLessThanOrEqual(PRODUCTION_PINS.expectedCommittedMigrationCount);
   });
 });
