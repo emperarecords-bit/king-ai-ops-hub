@@ -25,8 +25,8 @@ function makeProvider(): OpenAICompatibleProvider {
 describe('model catalog — google and deepseek rows', () => {
   it('registers both models per new provider', () => {
     expect(modelsForProvider('google').map((m) => m.id).sort()).toEqual([
-      'gemini-3-flash',
-      'gemini-3-pro',
+      'gemini-3.1-flash-lite',
+      'gemini-3.1-pro-preview',
     ]);
     expect(modelsForProvider('deepseek').map((m) => m.id).sort()).toEqual([
       'deepseek-chat',
@@ -35,17 +35,17 @@ describe('model catalog — google and deepseek rows', () => {
   });
 
   it('rejects cross-vendor pairs for the new providers', () => {
-    expect(providerSupportsModel('google', 'gemini-3-flash')).toBe(true);
+    expect(providerSupportsModel('google', 'gemini-3.1-flash-lite')).toBe(true);
     expect(providerSupportsModel('google', 'gpt-5.4')).toBe(false);
     expect(providerSupportsModel('deepseek', 'deepseek-chat')).toBe(true);
-    expect(providerSupportsModel('deepseek', 'gemini-3-pro')).toBe(false);
+    expect(providerSupportsModel('deepseek', 'gemini-3.1-pro-preview')).toBe(false);
     expect(providerSupportsModel('openai', 'deepseek-chat')).toBe(false);
-    expect(knownModel('gemini-3-flash')).toBe(true);
+    expect(knownModel('gemini-3.1-flash-lite')).toBe(true);
   });
 
-  it('prices gemini-3-flash usage exactly (integer micros)', () => {
+  it('prices gemini-3.1-flash-lite usage exactly (integer micros)', () => {
     // 1M input at $0.30 + 1M output at $2.50 = $2.80 exactly.
-    const cost = costForUsage('google', 'gemini-3-flash', {
+    const cost = costForUsage('google', 'gemini-3.1-flash-lite', {
       inputTokens: 1_000_000,
       outputTokens: 1_000_000,
     });
@@ -64,9 +64,9 @@ describe('model catalog — google and deepseek rows', () => {
 
 describe('tier routing for the new providers', () => {
   it('flagship overrides to the vendor flagship; standard keeps the configured model', () => {
-    expect(resolveModelForTier('flagship', 'google', 'gemini-3-flash')).toBe('gemini-3-pro');
+    expect(resolveModelForTier('flagship', 'google', 'gemini-3.1-flash-lite')).toBe('gemini-3.1-pro-preview');
     expect(resolveModelForTier('flagship', 'deepseek', 'deepseek-chat')).toBe('deepseek-reasoner');
-    expect(resolveModelForTier('standard', 'google', 'gemini-3-flash')).toBe('gemini-3-flash');
+    expect(resolveModelForTier('standard', 'google', 'gemini-3.1-flash-lite')).toBe('gemini-3.1-flash-lite');
     expect(resolveModelForTier('standard', 'deepseek', 'deepseek-chat')).toBe('deepseek-chat');
   });
 });
@@ -96,12 +96,12 @@ describe('OpenAICompatibleProvider', () => {
   });
 
   it('estimates cost through the shared pricing table', () => {
-    const cost = makeProvider().estimateCost('gemini-3-pro', {
+    const cost = makeProvider().estimateCost('gemini-3.1-pro-preview', {
       inputTokens: 500_000,
       outputTokens: 100_000,
     });
-    // 0.5M * $2.00 + 0.1M * $12.00 = $1.00 + $1.20 = $2.20.
-    expect(cost.usdMicros).toBe(2_200_000n);
+    // 0.5M * $2.50 + 0.1M * $15.00 = $1.25 + $1.50 = $2.75.
+    expect(cost.usdMicros).toBe(2_750_000n);
   });
 
   it('maps HTTP statuses onto the shared error taxonomy', async () => {

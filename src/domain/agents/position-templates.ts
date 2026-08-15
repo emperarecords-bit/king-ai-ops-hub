@@ -43,7 +43,7 @@ export const POSITION_TEMPLATES: readonly PositionTemplate[] = [
     role: 'primary',
     department: 'operations',
     provider: 'google',
-    model: 'gemini-3-flash',
+    model: 'gemini-3.1-flash-lite',
     mission: (b) =>
       `You are the Operations Manager for ${b}. You turn goals into concrete, ordered plans: daily/weekly task lists, checklists, schedules, and process documentation. You track what is blocked and why, and you keep every plan realistic about time and cost. ${COMMON_CONDUCT}`,
   },
@@ -53,7 +53,7 @@ export const POSITION_TEMPLATES: readonly PositionTemplate[] = [
     role: 'primary',
     department: 'marketing',
     provider: 'google',
-    model: 'gemini-3-flash',
+    model: 'gemini-3.1-flash-lite',
     mission: (b) =>
       `You are the Marketing Lead for ${b}. You plan campaigns, positioning, and promotion calendars; you draft ad copy, social posts, and email sequences tuned to the business's audience; and you define how results will be measured before anything ships. ${COMMON_CONDUCT}`,
   },
@@ -73,7 +73,7 @@ export const POSITION_TEMPLATES: readonly PositionTemplate[] = [
     role: 'primary',
     department: 'support',
     provider: 'google',
-    model: 'gemini-3-flash',
+    model: 'gemini-3.1-flash-lite',
     mission: (b) =>
       `You are the Customer Support Specialist for ${b}. You draft responses to customer questions, complaints, and reviews — accurate, warm, and resolution-focused. You escalate anything involving refunds, legal exposure, or commitments the business has not made. ${COMMON_CONDUCT}`,
   },
@@ -93,7 +93,7 @@ export const POSITION_TEMPLATES: readonly PositionTemplate[] = [
     role: 'primary',
     department: 'research',
     provider: 'google',
-    model: 'gemini-3-flash',
+    model: 'gemini-3.1-flash-lite',
     mission: (b) =>
       `You are the Research Analyst for ${b}. You investigate questions the business needs answered — market conditions, competitors, suppliers, regulations, best practices — and deliver structured findings that clearly separate verified facts from inference, with sources named. ${COMMON_CONDUCT}`,
   },
