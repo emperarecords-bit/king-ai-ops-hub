@@ -20,10 +20,10 @@ export const PRICING_CURRENCY = 'USD' as const;
 
 /** Source provenance: the repository's authoritative pricing version (NOT independent Hub verification). */
 export const PRICING_SOURCE_VERSION = PRICING_VERSION; // '2026-07-24'
-export const SEED_MIGRATION_ID = '0053_pricing_foundations' as const;
+export const SEED_MIGRATION_ID = '0062_pricing_schedule_v2' as const;
 
-/** Stable sentinel id for the single seeded schedule (deterministic across environments). */
-export const SEED_SCHEDULE_ID = 'f00d0053-0000-4000-8000-000000000001' as const;
+/** Stable sentinel id for the CURRENT seeded schedule (deterministic across environments). v1 (f00d0053…, 5 entries) was superseded 2026-08-15 by v2, which adds the google/deepseek models; the v1 rows remain in the DB as immutable history. */
+export const SEED_SCHEDULE_ID = 'f00d0062-0000-4000-8000-000000000001' as const;
 
 /**
  * IMPORTANT: `PRICING_VERSION` ('2026-07-24') is the source OBSERVATION/provenance date — NOT a

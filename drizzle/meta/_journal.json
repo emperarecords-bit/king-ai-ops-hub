@@ -435,6 +435,13 @@
       "when": 1786796462349,
       "tag": "0061_glossy_magma",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1786799037841,
+      "tag": "0062_pricing_schedule_v2",
+      "breakpoints": true
     }
   ]
 }
