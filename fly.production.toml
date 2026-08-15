@@ -1,0 +1,54 @@
+# fly.production.toml — PRODUCTION app configuration (Gate 1 D1/D3, owner-approved 2026-08-13).
+#
+# Deployed ONLY with an explicit config + digest-bound image during the receipt-gated release ceremony:
+#   fly deploy --config fly.production.toml --image registry.fly.io/king-ai-ops-hub-prod@sha256:<digest>
+# The default fly.toml remains the staging configuration; nothing deploys production implicitly.
+#
+# Differences from staging, each deliberate:
+#   * app/name — the Gate-1 production identity.
+#   * [[vm]] memory 1gb — Gate-1 D3 sizing (staging runs 512mb).
+#   * NO CLEANUP_QUIET_MS / PURGE_RETENTION_MS overrides — those are staging-only acceptance shortenings;
+#     production uses the code's real defaults (15-minute cleanup quiet, 7-day purge retention).
+#   * APP_URL pinned to the production origin (Gate 1 D2).
+# Machine COUNTS (web×2 min=max=2, worker×1) are applied post-deploy via `fly scale count` per Gate-1 D3;
+# min_machines_running keeps both web machines from ever autostopping.
+
+app = 'king-ai-ops-hub-prod'
+primary_region = 'iad'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[deploy]
+  release_command = 'npm run db:migrate'
+
+[env]
+  NODE_ENV = 'production'
+  PORT = '3000'
+  APP_URL = 'https://king-ai-ops-hub-prod.fly.dev'
+  # Cloud Project Library (O-23). Credentials come from the Tigris attachment
+  # (AWS_* secrets); the S3 reader accepts those as a fallback for S3_*.
+  STORAGE_DRIVER = 's3'
+
+[processes]
+  web = 'node server.js'
+  worker = 'npm run worker'
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = 'off'
+  min_machines_running = 2
+  processes = ['web']
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '20s'
+    method = 'GET'
+    path = '/api/health'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '1gb'
+  processes = ['web', 'worker']
