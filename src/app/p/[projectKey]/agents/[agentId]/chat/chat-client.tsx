@@ -1,8 +1,9 @@
 'use client';
 
-import { useActionState, useEffect, useRef } from 'react';
+import { useActionState, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { sendChatMessageAction, type ChatFormState } from './actions';
+import { speak, speechOutputSupported, stopSpeaking, useSpeechInput } from './use-speech';
 
 interface Entry {
   id: string;
@@ -32,6 +33,30 @@ export function ChatClient({
   const router = useRouter();
   const formRef = useRef<HTMLFormElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Voice input: final transcripts append into the (uncontrolled) textarea; the owner edits and sends.
+  const speech = useSpeechInput((text) => {
+    const box = textareaRef.current;
+    if (!box) return;
+    box.value = box.value ? `${box.value.replace(/\s+$/, '')} ${text}` : text;
+  });
+  // Voice replies: when on, each NEW employee message is read aloud as it arrives.
+  const [autoSpeak, setAutoSpeak] = useState(false);
+  const lastSpokenRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!autoSpeak) return;
+    const last = [...entries].reverse().find((e) => e.role === 'employee');
+    if (!last) return;
+    if (lastSpokenRef.current === null) {
+      lastSpokenRef.current = last.id; // arm on the current tail; only messages after this are spoken
+      return;
+    }
+    if (last.id !== lastSpokenRef.current) {
+      lastSpokenRef.current = last.id;
+      speak(last.content);
+    }
+  }, [autoSpeak, entries]);
 
   // Poll while the employee is composing (their run hasn't finished).
   useEffect(() => {
@@ -70,7 +95,20 @@ export function ChatClient({
                   : 'border-[var(--border)]')
               }
             >
-              <div className="mb-1 text-xs opacity-50">{e.role === 'owner' ? 'You' : 'Employee'}</div>
+              <div className="mb-1 flex items-center gap-2 text-xs opacity-50">
+                {e.role === 'owner' ? 'You' : 'Employee'}
+                {e.role === 'employee' && speechOutputSupported() ? (
+                  <button
+                    type="button"
+                    onClick={() => speak(e.content)}
+                    title="Read aloud"
+                    aria-label="Read this message aloud"
+                    className="rounded px-1 hover:opacity-100"
+                  >
+                    🔊
+                  </button>
+                ) : null}
+              </div>
               {e.content}
             </div>
           </div>
@@ -89,28 +127,66 @@ export function ChatClient({
         <input type="hidden" name="projectKey" value={projectKey} />
         <input type="hidden" name="agentId" value={agentId} />
         <textarea
+          ref={textareaRef}
           name="content"
           rows={3}
           maxLength={8000}
           required
-          placeholder="Type a message…"
+          placeholder={speech.listening ? 'Listening… speak now' : 'Type a message, or tap the mic and talk…'}
           className="w-full rounded border border-[var(--border)] bg-transparent p-2 text-sm"
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
+              speech.stop();
               formRef.current?.requestSubmit();
             }
           }}
         />
-        <div className="flex items-center justify-between">
-          <span className="text-xs opacity-50">Enter to send · Shift+Enter for a new line</span>
-          <button
-            type="submit"
-            disabled={pending}
-            className="rounded border border-[var(--border)] px-4 py-1.5 text-sm hover:opacity-80 disabled:opacity-40"
-          >
-            {pending ? 'Sending…' : 'Send'}
-          </button>
+        {speech.listening && speech.interim ? (
+          <p className="text-xs italic opacity-60">{speech.interim}…</p>
+        ) : null}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="flex items-center gap-3 text-xs opacity-50">
+            Enter to send · Shift+Enter for a new line
+            {speechOutputSupported() ? (
+              <label className="flex cursor-pointer items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={autoSpeak}
+                  onChange={(e) => {
+                    setAutoSpeak(e.target.checked);
+                    if (!e.target.checked) stopSpeaking();
+                  }}
+                />
+                Read replies aloud
+              </label>
+            ) : null}
+          </span>
+          <span className="flex items-center gap-2">
+            {speech.supported ? (
+              <button
+                type="button"
+                onClick={speech.toggle}
+                title={speech.listening ? 'Stop listening' : 'Speak your message'}
+                aria-label={speech.listening ? 'Stop listening' : 'Speak your message'}
+                className={`rounded border px-3 py-1.5 text-sm hover:opacity-80 ${
+                  speech.listening
+                    ? 'animate-pulse border-[var(--danger,#c37474)] text-[var(--danger,#c37474)]'
+                    : 'border-[var(--border)]'
+                }`}
+              >
+                {speech.listening ? '● Listening' : '🎤 Speak'}
+              </button>
+            ) : null}
+            <button
+              type="submit"
+              disabled={pending}
+              onClick={() => speech.stop()}
+              className="rounded border border-[var(--border)] px-4 py-1.5 text-sm hover:opacity-80 disabled:opacity-40"
+            >
+              {pending ? 'Sending…' : 'Send'}
+            </button>
+          </span>
         </div>
         {state.error && <p className="text-sm text-red-400">{state.error}</p>}
       </form>
