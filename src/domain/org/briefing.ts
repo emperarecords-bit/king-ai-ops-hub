@@ -23,6 +23,28 @@ export function resolveHqProjectKey(env: Record<string, string | undefined> = pr
 const MAX_REPORT_SNIPPET = 700;
 const MAX_BRIEFING_CHARS = 18_000;
 
+/**
+ * Cross-workspace delegation targets for headquarters' Chief of Staff: every OTHER active
+ * workspace in the org that has an installed General Manager (projects.owner_agent_id).
+ * Read-only, org-scoped — the same authority the briefing itself uses.
+ */
+export async function listDelegationTargets(
+  userId: string,
+  orgId: string,
+  excludeProjectId: string,
+): Promise<Array<{ key: string; name: string }>> {
+  return withOrg({ userId, orgId }, async (tx) => {
+    const rows = await tx
+      .select({ id: projects.id, key: projects.key, name: projects.name, ownerAgentId: projects.ownerAgentId })
+      .from(projects)
+      .where(and(eq(projects.orgId, orgId), eq(projects.archived, false)))
+      .orderBy(projects.key);
+    return rows
+      .filter((p) => p.id !== excludeProjectId && p.ownerAgentId != null)
+      .map((p) => ({ key: p.key, name: p.name }));
+  });
+}
+
 export async function assembleOrgBriefing(userId: string, orgId: string): Promise<string | null> {
   return withOrg({ userId, orgId }, async (tx) => {
     const projectRows = await tx

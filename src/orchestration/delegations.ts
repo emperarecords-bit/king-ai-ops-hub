@@ -21,6 +21,13 @@ const delegatedTaskSchema = z
     title: z.string().trim().min(1).max(200),
     /** Complete, self-contained work instructions — the assignee sees nothing else. */
     instructions: z.string().trim().min(1).max(8_000),
+    /**
+     * Cross-workspace target (HQ's Chief of Staff only; the runner enforces identity). When set to
+     * ANOTHER workspace's key, the delegation is NOT executed directly: it becomes an org_delegation
+     * approval in the owner's Inbox, and on Okay the hub creates the task for that workspace's
+     * General Manager. `assignee` is ignored for cross-workspace entries — the target GM receives it.
+     */
+    workspace: z.string().trim().min(1).max(120).optional(),
   })
   .strict();
 
@@ -28,6 +35,7 @@ export interface DelegatedTask {
   readonly assignee: string;
   readonly title: string;
   readonly instructions: string;
+  readonly workspace?: string;
 }
 
 export interface DelegationExtraction {
@@ -77,13 +85,24 @@ export function extractDelegatedTasks(modelText: string): DelegationExtraction {
   return { delegations, rejected };
 }
 
+/** A cross-workspace delegation target the HQ GM may address (workspace key + display name). */
+export interface DelegationTarget {
+  readonly key: string;
+  readonly name: string;
+}
+
 /**
  * Appended to the GM's system prompt ONLY (the runner decides — an employee's prompt never carries
  * this, and a delegation block emitted by a non-GM is dropped and audited at finalization).
+ * `crossWorkspaceTargets` is non-empty ONLY for headquarters' Chief of Staff: it unlocks the
+ * `workspace` field, whose entries become owner-approval requests rather than direct tasks.
  */
-export function buildDelegationRules(roster: readonly string[]): string {
+export function buildDelegationRules(
+  roster: readonly string[],
+  crossWorkspaceTargets: readonly DelegationTarget[] = [],
+): string {
   const names = roster.length > 0 ? roster.map((n) => `"${n}"`).join(', ') : '(no enabled employees)';
-  return `
+  const base = `
 You are this workspace's General Manager, and you can DELEGATE real work: tasks you assign are created and run automatically, without waiting for the owner. Anything consequential your employees then propose still goes to the owner's approvals queue.
 - To delegate, end your reply with a single fenced block:
 ${DELEGATION_BLOCK_OPEN}
@@ -92,4 +111,9 @@ ${DELEGATION_BLOCK_OPEN}
 - You may assign to exactly these employees (use the name verbatim): ${names}.
 - At most ${MAX_DELEGATIONS_PER_RUN} delegations per reply. Never assign to yourself.
 - Delegate whenever work should advance: break the owner's goals into concrete next tasks, assign each to the right specialist, and re-check results in your next standup. Prefer delegating over merely describing what should happen.`;
+  if (crossWorkspaceTargets.length === 0) return base;
+  const targets = crossWorkspaceTargets.map((t) => `"${t.key}" (${t.name})`).join(', ');
+  return `${base}
+- CROSS-BUSINESS DELEGATION (headquarters only): you may also direct another business's General Manager by adding "workspace": "<workspace key>" to an entry. Such an entry is NOT executed immediately — it goes to the owner's Inbox, and once the owner taps Okay the hub creates the task for that workspace's General Manager automatically. Set "assignee" to "General Manager" and write instructions addressed to that GM. Valid workspace keys: ${targets}.
+- Use cross-business delegation to turn the owner's company-level orders into per-business action without waiting for the owner to relay them. Your own HQ analysts remain for portfolio-level analysis.`;
 }

@@ -89,6 +89,12 @@ export function extractProposedActions(modelText: string): ActionExtraction {
       );
       continue;
     }
+    // org_delegation approvals are minted exclusively by the trusted runner from the Chief of
+    // Staff's delegated-tasks block — a model proposing one directly is refused, not repaired.
+    if (result.data.type === 'org_delegation') {
+      rejected.push(`Action ${index} rejected: org_delegation is hub-minted and cannot be proposed.`);
+      continue;
+    }
     const canonical = canonicalJson(result.data.payload);
     if (Buffer.byteLength(canonical, 'utf8') > MAX_PAYLOAD_BYTES) {
       rejected.push(`Action ${index} rejected: payload exceeds ${MAX_PAYLOAD_BYTES} bytes.`);

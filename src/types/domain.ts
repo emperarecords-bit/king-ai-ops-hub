@@ -75,6 +75,10 @@ export const ACTION_TYPES = [
   'financial',
   'destructive',
   'external_http',
+  // Hub-minted only (never model-proposable; extraction rejects it): the Chief of Staff's
+  // approved cross-workspace delegation — on Okay the hub creates a task for the target
+  // workspace's General Manager.
+  'org_delegation',
 ] as const;
 export type ActionType = (typeof ACTION_TYPES)[number];
 
