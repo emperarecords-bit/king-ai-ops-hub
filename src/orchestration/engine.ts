@@ -24,6 +24,7 @@ import {
 import { canonicalReviewRubric, reviewRubricHash } from '@/domain/agents/reviewer-rubric';
 import { extractProposedActions, type ProposedAction, stripActionBlock } from './actions';
 import { extractDelegatedTasks, type DelegatedTask } from './delegations';
+import { extractRunArtifacts, type RunArtifact } from './artifacts-block';
 import { sha256Hex } from '@/lib/crypto';
 
 /**
@@ -208,6 +209,8 @@ export interface EngineResult {
   readonly proposedActions: readonly ProposedAction[];
   /** GM delegation: extracted unconditionally, AUTHORIZED only by the runner (GM identity check). */
   readonly delegatedTasks: readonly DelegatedTask[];
+  /** Deliverables any employee saved to the workspace shelf (internal reversible writes). */
+  readonly runArtifacts: readonly RunArtifact[];
   readonly steps: readonly StepRecord[];
   readonly failureReason: string | null;
 }
@@ -420,6 +423,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
         consolidated: '',
         proposedActions: [],
         delegatedTasks: [],
+        runArtifacts: [],
         steps,
         failureReason: `Primary model call failed: ${message}`,
       };
@@ -629,12 +633,18 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
   if (delegationExtraction.rejected.length > 0) {
     await sink.onMalformedOutput(stepNumber, delegationExtraction.rejected);
   }
+  // Deliverables: any employee may save artifacts (internal reversible writes, audited at finalize).
+  const artifactExtraction = extractRunArtifacts(finalText);
+  if (artifactExtraction.rejected.length > 0) {
+    await sink.onMalformedOutput(stepNumber, artifactExtraction.rejected);
+  }
 
   return {
     ok: true,
     consolidated,
     proposedActions: extraction.actions,
     delegatedTasks: delegationExtraction.delegations,
+    runArtifacts: artifactExtraction.artifacts,
     steps,
     failureReason: null,
   };

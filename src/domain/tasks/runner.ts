@@ -25,6 +25,7 @@ import { AUTHORITY } from '@/orchestration/prompts';
 import { buildDelegationRules, MAX_DELEGATIONS_PER_RUN } from '@/orchestration/delegations';
 import { createTask } from '@/domain/tasks/tasks';
 import { loadApprovedContextForRun } from '@/domain/github/content';
+import { createTextArtifact } from '@/domain/artifacts/artifacts';
 import { resolveModelForTier } from '@/orchestration/routing';
 import {
   type ContextManifestEntry,
@@ -1459,6 +1460,18 @@ async function finalizeCompleted(
       }
     }
 
+    // Deliverables to the workspace shelf: internal, reversible, audited (artifact.created inside
+    // createTextArtifact). Any employee may save them; failures never fail the run's finalize.
+    let artifactsCreated = 0;
+    for (const a of result.runArtifacts) {
+      try {
+        await createTextArtifact(tx, ctx, { name: a.name, kind: a.kind, content: a.content, taskId, runId });
+        artifactsCreated += 1;
+      } catch (err) {
+        log.warn('run artifact save failed (run unaffected)', { runId, name: a.name, errorClass: err instanceof Error ? err.name : 'unknown' });
+      }
+    }
+
     const finalStatus = authorizationsRequested > 0 ? ('awaiting_approval' as const) : ('completed' as const);
 
     await tx
@@ -1477,7 +1490,7 @@ async function finalizeCompleted(
       action: 'run.completed',
       entityType: 'run',
       entityId: runId,
-      detail: { steps: result.steps.length, proposedActions: result.proposedActions.length, delegationsCreated, finalStatus },
+      detail: { steps: result.steps.length, proposedActions: result.proposedActions.length, delegationsCreated, artifactsCreated, finalStatus },
     });
     await writeAudit(tx, ctx, {
       action: 'run.finalization_completed',
