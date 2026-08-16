@@ -26,6 +26,7 @@ import { buildDelegationRules, MAX_DELEGATIONS_PER_RUN } from '@/orchestration/d
 import { createTask } from '@/domain/tasks/tasks';
 import { loadApprovedContextForRun } from '@/domain/github/content';
 import { createTextArtifact } from '@/domain/artifacts/artifacts';
+import { assembleOrgBriefing, resolveHqProjectKey } from '@/domain/org/briefing';
 import { resolveModelForTier } from '@/orchestration/routing';
 import {
   type ContextManifestEntry,
@@ -1159,9 +1160,9 @@ async function executeAndFinalize(
 
   // GM delegation: ONLY the workspace's General Manager (projects.owner_agent_id) carries the
   // delegation contract in its system prompt, with the live roster of assignable employees.
-  const gmRoster = await withTenant(ctx, async (tx) => {
+  const gmInfo = await withTenant(ctx, async (tx) => {
     const proj = await tx
-      .select({ ownerAgentId: projects.ownerAgentId })
+      .select({ ownerAgentId: projects.ownerAgentId, key: projects.key })
       .from(projects)
       .where(eq(projects.id, ctx.projectId))
       .limit(1);
@@ -1170,19 +1171,37 @@ async function executeAndFinalize(
       .select({ name: agents.name })
       .from(agents)
       .where(and(eq(agents.projectId, ctx.projectId), eq(agents.enabled, true), eq(agents.role, 'primary'), sql`${agents.id} <> ${primaryRow.id}`));
-    return roster.map((r) => r.name);
+    return { roster: roster.map((r) => r.name), projectKey: proj[0].key };
   });
   const primaryEngineAgent = toEngineAgent(primaryRow, task.modelTier);
-  const primaryForRun = gmRoster
-    ? { ...primaryEngineAgent, systemPrompt: `${primaryEngineAgent.systemPrompt}\n${buildDelegationRules(gmRoster)}` }
+  const primaryForRun = gmInfo
+    ? { ...primaryEngineAgent, systemPrompt: `${primaryEngineAgent.systemPrompt}\n${buildDelegationRules(gmInfo.roster)}` }
     : primaryEngineAgent;
+
+  // Chief of Staff (owner directive: HQ sees everything): the HQ workspace's GM — and no one
+  // else — gets the read-only organization-wide briefing as trusted operational state.
+  const hqKey = resolveHqProjectKey();
+  let orgBriefing: string | null = null;
+  if (gmInfo && hqKey && gmInfo.projectKey === hqKey) {
+    try {
+      orgBriefing = await assembleOrgBriefing(ctx.userId, ctx.orgId);
+    } catch (err) {
+      log.warn('org briefing assembly failed (run continues without it)', { errorClass: err instanceof Error ? err.name : 'unknown' });
+    }
+  }
+  const contextItemsForRun = orgBriefing
+    ? [
+        ...assembled.contextItems,
+        { title: 'Organization-wide briefing (headquarters)', content: orgBriefing, authority: AUTHORITY.HUB_STATE, kind: 'Organization briefing' },
+      ]
+    : assembled.contextItems;
 
   let result;
   try {
     result = await executeRun(
       {
         taskInput: task.input,
-        contextItems: assembled.contextItems,
+        contextItems: contextItemsForRun,
         operatingPriorities: assembled.operatingPriorities,
         objective: assembled.objective,
         freshnessComparison: assembled.freshnessComparison,
