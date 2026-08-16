@@ -56,9 +56,9 @@ describe('GitPrExecutor', () => {
     expect(result.message).toContain('#42');
     expect(result.preview).toMatchObject({ prNumber: 42, prUrl: 'https://github.com/emperarecords-bit/accuratebids/pull/42', branch: 'hub/fix-header', intoBranch: 'main' });
     expect(calls.map((c) => c.method)).toEqual(['createBranch', 'commitToBranch', 'openPullRequest']);
-    const [openArgs] = calls[2].args.slice(1) as [{ fromBranch: string; intoBranch: string }];
+    const openArgs = calls[2]?.args[1] as { fromBranch: string; intoBranch: string };
     expect(openArgs).toMatchObject({ fromBranch: 'hub/fix-header', intoBranch: 'main' });
-    const repoRef = calls[0].args[0] as RepoRef;
+    const repoRef = calls[0]?.args[0] as RepoRef;
     expect(repoRef).toEqual({ installationId: LINK.installationId, repoFullName: LINK.repoFullName });
   });
 
@@ -154,9 +154,9 @@ describe('GitPrExecutor', () => {
 
 describe('resolveDispatchPolicyFromEnv', () => {
   it('is disabled by default, parses the list, and the kill switch empties it', () => {
-    expect(resolveDispatchPolicyFromEnv({} as NodeJS.ProcessEnv).enabledExecutorIds).toEqual([]);
-    expect(resolveDispatchPolicyFromEnv({ EXECUTORS_ENABLED: 'git_pr, noop_dry_run' } as NodeJS.ProcessEnv).enabledExecutorIds).toEqual(['git_pr', 'noop_dry_run']);
-    expect(resolveDispatchPolicyFromEnv({ EXECUTORS_ENABLED: 'git_pr', EXECUTORS_KILL_SWITCH: '1' } as NodeJS.ProcessEnv).enabledExecutorIds).toEqual([]);
-    expect(resolveDispatchPolicyFromEnv({ EXECUTORS_ENABLED: 'git_pr', EXECUTORS_KILL_SWITCH: 'true' } as NodeJS.ProcessEnv).enabledExecutorIds).toEqual([]);
+    expect(resolveDispatchPolicyFromEnv({}).enabledExecutorIds).toEqual([]);
+    expect(resolveDispatchPolicyFromEnv({ EXECUTORS_ENABLED: 'git_pr, noop_dry_run' }).enabledExecutorIds).toEqual(['git_pr', 'noop_dry_run']);
+    expect(resolveDispatchPolicyFromEnv({ EXECUTORS_ENABLED: 'git_pr', EXECUTORS_KILL_SWITCH: '1' }).enabledExecutorIds).toEqual([]);
+    expect(resolveDispatchPolicyFromEnv({ EXECUTORS_ENABLED: 'git_pr', EXECUTORS_KILL_SWITCH: 'true' }).enabledExecutorIds).toEqual([]);
   });
 });

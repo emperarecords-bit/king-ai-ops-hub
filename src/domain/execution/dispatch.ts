@@ -46,7 +46,7 @@ export interface DispatchPolicy {
  * ("git_pr"); EXECUTORS_KILL_SWITCH=1 empties it instantly without a deploy. Unset means disabled —
  * absence of configuration can never enable execution.
  */
-export function resolveDispatchPolicyFromEnv(env: NodeJS.ProcessEnv = process.env): DispatchPolicy {
+export function resolveDispatchPolicyFromEnv(env: Record<string, string | undefined> = process.env): DispatchPolicy {
   const stop = env.EXECUTORS_KILL_SWITCH === '1' || env.EXECUTORS_KILL_SWITCH === 'true';
   const ids = (env.EXECUTORS_ENABLED ?? '')
     .split(',')
