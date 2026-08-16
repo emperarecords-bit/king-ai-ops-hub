@@ -1,4 +1,6 @@
 import Link from 'next/link';
+import { eq } from 'drizzle-orm';
+import { projects } from '@/db/schema';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { listTasks } from '@/domain/tasks/tasks';
@@ -30,14 +32,24 @@ export default async function DashboardPage({
   const visibility = visibilityFromParam(sp.includeNonLive);
   const ctx = await requireTenant(projectKey);
 
-  const { settings, health, approvals, tasks, agents, stats } = await withTenant(ctx, async (tx) => ({
-    settings: await getWorkspaceSettings(tx, ctx),
-    health: await assessWorkspaceHealth(tx, ctx), // health headline is live-only by construction
-    approvals: await listApprovals(tx, ctx, 'pending'),
-    tasks: await listTasks(tx, ctx, 12),
-    agents: await listAgents(tx, ctx),
-    stats: await employeeStats(tx, ctx),
-  }));
+  const { settings, health, approvals, tasks, agents, stats, gm } = await withTenant(ctx, async (tx) => {
+    const loaded = {
+      settings: await getWorkspaceSettings(tx, ctx),
+      health: await assessWorkspaceHealth(tx, ctx), // health headline is live-only by construction
+      approvals: await listApprovals(tx, ctx, 'pending'),
+      tasks: await listTasks(tx, ctx, 12),
+      agents: await listAgents(tx, ctx),
+      stats: await employeeStats(tx, ctx),
+    };
+    // The General Manager greets at the door (owner directive): the workspace's single point of contact.
+    const owner = await tx
+      .select({ ownerAgentId: projects.ownerAgentId })
+      .from(projects)
+      .where(eq(projects.id, ctx.projectId))
+      .limit(1);
+    const gmAgent = owner[0]?.ownerAgentId ? (loaded.agents.find((a) => a.id === owner[0]!.ownerAgentId) ?? null) : null;
+    return { ...loaded, gm: gmAgent && gmAgent.enabled ? { id: gmAgent.id, name: gmAgent.name } : null };
+  });
 
   const base = `/p/${projectKey}`;
   const summary = briefingSummary(health, settings.name);
@@ -64,6 +76,22 @@ export default async function DashboardPage({
     <div className="mx-auto max-w-3xl">
       <p className="text-sm text-[var(--muted)]">{greeting}</p>
       <h1 className="mb-1 mt-1 text-2xl font-medium leading-snug text-[var(--foreground)]">{summary.headline}</h1>
+
+      {/* The GM greets at the door — one tap from opening the workspace to talking to the person who runs it. */}
+      {gm ? (
+        <div className="mb-4 mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-[var(--accent)] bg-[var(--surface)] px-4 py-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold text-[var(--foreground)]">{gm.name}</p>
+            <p className="text-xs text-[var(--muted)]">Your General Manager — runs this workspace, reports to you.</p>
+          </div>
+          <Link
+            href={`${base}/agents/${gm.id}/chat`}
+            className="rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#0b0e14] hover:bg-[var(--accent-strong)]"
+          >
+            Chat with your GM
+          </Link>
+        </div>
+      ) : null}
 
       <NonLiveControls pathname={base} searchParams={sp} includeNonLive={visibility.includeNonLive} excluded={excludedRecent} />
       <p className="mb-4 text-xs text-[var(--muted)]" data-testid="dashboard-run-facts">
