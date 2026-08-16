@@ -73,15 +73,21 @@ export default async function DashboardPage({
         {' '}· not a health verdict.
       </p>
 
-      {/* Overall condition + per-dimension read — health is defined across dimensions, not by the absence of flags. */}
+      {/* Overall condition + per-dimension read — health is defined across dimensions, not by the absence of flags.
+          Every chip is a DOOR: it links to the page where that dimension is actually managed. */}
       <div className="mb-6 flex flex-wrap items-center gap-2 text-xs">
         <span className={`rounded px-2 py-0.5 font-semibold ${overallClass(health.overall)}`}>
           {overallLabel(health.overall)}
         </span>
         {(['execution', 'workflow_integrity', 'governance', 'outcome', 'activity'] as HealthDimension[]).map((d) => (
-          <span key={d} className={`rounded px-2 py-0.5 ${dimClass(health.dimensions[d])}`}>
-            {DIM_LABEL[d]}: {health.dimensions[d]}
-          </span>
+          <Link
+            key={d}
+            href={`${base}${DIM_ROUTE[d]}`}
+            title={`Open ${DIM_LABEL[d].toLowerCase()}`}
+            className={`rounded px-2 py-0.5 underline-offset-2 hover:underline hover:opacity-80 ${dimClass(health.dimensions[d])}`}
+          >
+            {DIM_LABEL[d]}: {health.dimensions[d]} →
+          </Link>
         ))}
       </div>
 
@@ -126,6 +132,10 @@ export default async function DashboardPage({
                   <span className="font-medium text-[var(--foreground)]">{f.title}</span>
                   <span className="text-[var(--muted)]"> — {f.recommendedAction}</span>
                   <span className="mt-0.5 block text-xs text-[var(--muted)]">{f.evidence}</span>
+                  {/* Every finding is actionable: link straight to its subject, else to its dimension's page. */}
+                  <Link href={findingHref(base, f)} className="mt-0.5 inline-block text-xs text-[var(--accent)]">
+                    Go to it →
+                  </Link>
                 </span>
               </li>
             ))}
@@ -183,6 +193,19 @@ export default async function DashboardPage({
 const DIM_LABEL: Record<HealthDimension, string> = {
   execution: 'Execution', workflow_integrity: 'Workflow', governance: 'Governance', outcome: 'Outcome', activity: 'Activity',
 };
+/** Where each health dimension is actually managed — the chip's click-through destination. */
+const DIM_ROUTE: Record<HealthDimension, string> = {
+  execution: '/work', workflow_integrity: '/work', governance: '/approvals', outcome: '/objectives', activity: '/work',
+};
+/** A finding links to its subject entity when one is recorded, else to its dimension's page. */
+function findingHref(base: string, f: { dimension: HealthDimension; entityType: string | null; entityId: string | null }): string {
+  if (f.entityId) {
+    if (f.entityType === 'task') return `${base}/tasks/${f.entityId}`;
+    if (f.entityType === 'approval') return `${base}/approvals/${f.entityId}`;
+    if (f.entityType === 'objective') return `${base}/objectives/${f.entityId}`;
+  }
+  return `${base}${DIM_ROUTE[f.dimension]}`;
+}
 function overallClass(s: string): string {
   if (s === 'healthy') return 'bg-[#1f3a2a] text-[var(--success)]';
   if (s === 'data_integrity_issue' || s === 'blocked' || s === 'needs_attention') return 'bg-[#3a2026] text-[var(--danger)]';

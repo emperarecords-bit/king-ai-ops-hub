@@ -26,7 +26,7 @@ function olr(over: Partial<ObjectiveListRow> & { criteria: SuccessCriterion[]; t
     accountableEmployee: null,
     successCriteria: criteria,
     workItemTotal,
-    progress: { tasksTotal, tasksCompleted: tasksTotal, criteriaTotal: criteria.length, criteriaSatisfied: criteria.filter((c) => c.status !== 'unmet').length, milestonesTotal: 0, milestonesCompleted: 0, percent: 0 },
+    progress: { tasksTotal, tasksCompleted: tasksTotal, tasksRunning: 0, tasksAwaitingApproval: 0, criteriaTotal: criteria.length, criteriaSatisfied: criteria.filter((c) => c.status !== 'unmet').length, milestonesTotal: 0, milestonesCompleted: 0, percent: 0, lastActivityAt: null },
     createdAt: new Date('2026-07-01'),
   };
 }
