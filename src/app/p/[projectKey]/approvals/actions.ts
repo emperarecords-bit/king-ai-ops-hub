@@ -7,9 +7,12 @@ import { log } from '@/lib/log';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { decideApproval, withdrawAuthorizedAction } from '@/domain/approvals/approvals';
+import { executeApprovedIfEligible, type ApprovalExecutionOutcome } from '@/domain/execution/execute-on-approval';
 
 export interface DecisionState {
   error: string | null;
+  /** Action Executors v1: what the hub did right after approval (null when nothing was attempted). */
+  executed?: ApprovalExecutionOutcome | null;
 }
 
 const decisionSchema = z.object({
@@ -28,11 +31,21 @@ export async function decide(_prev: DecisionState, formData: FormData): Promise<
   });
   if (!parsed.success) return { error: 'Invalid request.' };
 
+  let executed: ApprovalExecutionOutcome | null = null;
   try {
     const ctx = await requireTenant(parsed.data.projectKey);
     await withTenant(ctx, (tx) =>
       decideApproval(tx, ctx, parsed.data.approvalId, parsed.data.decision, parsed.data.note),
     );
+    if (parsed.data.decision === 'approved') {
+      try {
+        const outcome = await executeApprovedIfEligible(ctx, parsed.data.approvalId);
+        executed = outcome.attempted ? outcome : null;
+      } catch (err) {
+        log.error('executeApprovedIfEligible failed', { err });
+        executed = { attempted: true, outcome: 'failed', message: 'Execution failed unexpectedly; the approval itself is recorded.', prUrl: null };
+      }
+    }
   } catch (err) {
     if (!(err instanceof AppError)) log.error('decideApproval failed', { err });
     return { error: toPublicMessage(err) };
@@ -40,7 +53,7 @@ export async function decide(_prev: DecisionState, formData: FormData): Promise<
 
   revalidatePath(`/p/${parsed.data.projectKey}/approvals`);
   revalidatePath(`/p/${parsed.data.projectKey}/approvals/${parsed.data.approvalId}`);
-  return { error: null };
+  return { error: null, executed };
 }
 
 const withdrawSchema = z.object({

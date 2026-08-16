@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { and, eq } from 'drizzle-orm';
-import { approvals, auditLogs, memberships, organizations, profiles, projectMembers, projects, tasks } from '@/db/schema';
+import { approvals, auditLogs, githubRepoLinks, memberships, organizations, profiles, projectMembers, projects, tasks } from '@/db/schema';
 import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { executeApprovedAction } from '@/domain/execution/dispatch';
+import { executeApprovedIfEligible } from '@/domain/execution/execute-on-approval';
+import { setGitHubClientOverrideForTests, type GitHubRepoClient } from '@/domain/github/client';
 import { canonicalJson } from '@/orchestration/actions';
 import { sha256Hex } from '@/lib/crypto';
 import { type TenantContext } from '@/types/domain';
@@ -76,6 +78,51 @@ describe.skipIf(!available)('trusted executor dispatch', { timeout: 15_000 }, ()
     expect((await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, request(prohibited.approvalId, prohibited.hash), { enabledExecutorIds: ['noop_dry_run'] }))).outcome).toBe('blocked');
     const foreign = { ...ctx, projectId: '00000000-0000-4000-8000-000000000099' };
     await expect(withTenant(foreign, (tx) => executeApprovedAction(tx, foreign, request(a.approvalId, a.hash), { enabledExecutorIds: ['noop_dry_run'] }))).rejects.toThrow();
+  });
+
+  it('executes an approved git_pr live end-to-end, exactly once (Action Executors v1)', async () => {
+    const db = getSetupDb();
+    const repoFullName = 'emperarecords-bit/accuratebids';
+    await db.insert(githubRepoLinks).values({ orgId: ctx.orgId, projectId: ctx.projectId, installationId: 153529449n, repoFullName, defaultBranch: 'main', linkedBy: ctx.userId }).onConflictDoNothing();
+
+    const payload = { repo: repoFullName, branch: 'hub/executor-e2e', title: 'Executor e2e', body: 'from test', files: [{ path: 'docs/note.md', content: 'hello' }] };
+    const [task] = await db.insert(tasks).values({ orgId: ctx.orgId, projectId: ctx.projectId, title: 'Executor live', input: 'live', providerSelection: 'openai', createdBy: ctx.userId, status: 'completed' }).returning({ id: tasks.id });
+    const [approval] = await db.insert(approvals).values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId: task!.id, actionType: 'git_pr', payload, payloadSha256: sha256Hex(canonicalJson(payload)), summary: 'Open PR', status: 'approved', decidedBy: ctx.userId, decidedAt: new Date(), expiresAt: new Date(Date.now() + 60_000) }).returning({ id: approvals.id });
+
+    const calls: string[] = [];
+    setGitHubClientOverrideForTests({
+      listTree: async () => [],
+      readBlob: async () => '',
+      createBranch: async () => { calls.push('createBranch'); },
+      commitToBranch: async () => { calls.push('commitToBranch'); },
+      openPullRequest: async () => { calls.push('openPullRequest'); return { prNumber: 7 }; },
+    } as GitHubRepoClient);
+    try {
+      const first = await executeApprovedIfEligible(ctx, approval!.id, { enabledExecutorIds: ['git_pr'] });
+      expect(first).toMatchObject({ attempted: true, outcome: 'succeeded', prUrl: `https://github.com/${repoFullName}/pull/7` });
+      expect(calls).toEqual(['createBranch', 'commitToBranch', 'openPullRequest']);
+
+      // The deterministic per-approval idempotency key means a second Okay can never re-execute.
+      const again = await executeApprovedIfEligible(ctx, approval!.id, { enabledExecutorIds: ['git_pr'] });
+      expect(again.outcome).toBe('blocked');
+      expect(calls).toHaveLength(3);
+
+      const events = await db.select({ action: auditLogs.action }).from(auditLogs).where(and(eq(auditLogs.entityId, approval!.id), eq(auditLogs.action, 'execution.result')));
+      expect(events).toHaveLength(1);
+    } finally {
+      setGitHubClientOverrideForTests(null);
+    }
+  });
+
+  it('does not attempt execution while the executor is disabled or for action types without one', async () => {
+    const a = await approved('git_pr');
+    // Disabled server config (the default): dispatch blocks, nothing external happens.
+    const disabled = await executeApprovedIfEligible(ctx, a.approvalId, { enabledExecutorIds: [] });
+    expect(disabled).toMatchObject({ attempted: true, outcome: 'blocked' });
+    // file_write has no live executor: nothing is attempted at all.
+    const fw = await approved('file_write');
+    const notAttempted = await executeApprovedIfEligible(ctx, fw.approvalId, { enabledExecutorIds: ['git_pr'] });
+    expect(notAttempted).toMatchObject({ attempted: false, outcome: null });
   });
 
   it('audits malformed input without dispatching', async () => {
