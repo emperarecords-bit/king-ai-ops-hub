@@ -38,6 +38,7 @@ export const NAV_DOMAINS: NavDomain[] = [
       { slug: 'decisions', label: 'Decisions' },
       { slug: 'documents', label: 'Documents' },
       { slug: 'artifacts', label: 'Artifacts' },
+      { slug: 'repo', label: 'Repository' },
     ],
   },
   {

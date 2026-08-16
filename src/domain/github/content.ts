@@ -1,5 +1,6 @@
+import { and, asc, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { type TenantContext } from '@/types/domain';
+import { type ContextItemStatus, type TenantContext } from '@/types/domain';
 import { ValidationError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { projectContextItems } from '@/db/schema';
@@ -95,4 +96,94 @@ export function repoFileToContextItem(args: { repoFullName: string; ref: string;
     authority: AUTHORITY.PROJECT_DOCUMENT,
     kind: 'GitHub repository file',
   };
+}
+
+// --- Repo browser (owner-directed 2026-08-16): list, approve, archive, and CONSUME context items. ---
+
+export interface ContextItemSummary {
+  id: string;
+  title: string;
+  status: ContextItemStatus;
+  bytes: number;
+  createdAt: Date;
+}
+
+/** Every imported item for the management surface, newest first. */
+export async function listContextItems(tx: DbTx, ctx: TenantContext): Promise<ContextItemSummary[]> {
+  const rows = await tx
+    .select({
+      id: projectContextItems.id,
+      title: projectContextItems.title,
+      status: projectContextItems.status,
+      content: projectContextItems.content,
+      createdAt: projectContextItems.createdAt,
+    })
+    .from(projectContextItems)
+    .where(and(eq(projectContextItems.projectId, ctx.projectId), eq(projectContextItems.orgId, ctx.orgId)))
+    .orderBy(desc(projectContextItems.createdAt));
+  return rows.map((r) => ({ id: r.id, title: r.title, status: r.status, bytes: Buffer.byteLength(r.content, 'utf8'), createdAt: r.createdAt }));
+}
+
+function requireProjectAdmin(ctx: TenantContext): void {
+  if (ctx.projectRole !== 'admin') {
+    throw new ValidationError(['Only project admins can change context-item status.']);
+  }
+}
+
+/** Approve a pending item (admin-only): from now on every run in this workspace can read it. */
+export async function approveContextItem(tx: DbTx, ctx: TenantContext, id: string): Promise<void> {
+  requireProjectAdmin(ctx);
+  const updated = await tx
+    .update(projectContextItems)
+    .set({ status: 'approved', updatedAt: new Date() })
+    .where(and(eq(projectContextItems.id, id), eq(projectContextItems.projectId, ctx.projectId), eq(projectContextItems.status, 'pending')))
+    .returning({ id: projectContextItems.id, title: projectContextItems.title });
+  if (updated.length === 0) throw new ValidationError(['Context item is not pending in this workspace.']);
+  await writeAudit(tx, ctx, { action: 'context.approved', entityType: 'context_item', entityId: id, detail: { title: updated[0]!.title } });
+}
+
+/** Archive an item (admin-only): it stops being offered to runs, but the record remains. */
+export async function archiveContextItem(tx: DbTx, ctx: TenantContext, id: string): Promise<void> {
+  requireProjectAdmin(ctx);
+  const updated = await tx
+    .update(projectContextItems)
+    .set({ status: 'archived', updatedAt: new Date() })
+    .where(and(eq(projectContextItems.id, id), eq(projectContextItems.projectId, ctx.projectId)))
+    .returning({ id: projectContextItems.id, title: projectContextItems.title });
+  if (updated.length === 0) throw new ValidationError(['Context item was not found in this workspace.']);
+  await writeAudit(tx, ctx, { action: 'context.archived', entityType: 'context_item', entityId: id, detail: { title: updated[0]!.title } });
+}
+
+/** Prompt-budget bounds for imported files: enough for real source files, never a runaway prompt. */
+export const MAX_CONTEXT_ITEMS_PER_RUN = 20;
+export const MAX_CONTEXT_ITEM_CHARS = 24_000;
+export const MAX_CONTEXT_TOTAL_CHARS = 120_000;
+
+/**
+ * The consumption side (previously unwired): every APPROVED context item, shaped for prompt
+ * assembly and bounded. Oldest-approved first so the set is stable as new files are added; each
+ * item is truncated at MAX_CONTEXT_ITEM_CHARS with an explicit marker, and assembly stops before
+ * MAX_CONTEXT_TOTAL_CHARS. Downstream, every item still passes through wrapUntrusted — repo
+ * content is reference data, never instructions.
+ */
+export async function loadApprovedContextForRun(tx: DbTx, ctx: TenantContext): Promise<ContextItemForPrompt[]> {
+  const rows = await tx
+    .select({ title: projectContextItems.title, content: projectContextItems.content })
+    .from(projectContextItems)
+    .where(and(eq(projectContextItems.projectId, ctx.projectId), eq(projectContextItems.orgId, ctx.orgId), eq(projectContextItems.status, 'approved')))
+    .orderBy(asc(projectContextItems.createdAt))
+    .limit(MAX_CONTEXT_ITEMS_PER_RUN);
+
+  const out: ContextItemForPrompt[] = [];
+  let total = 0;
+  for (const r of rows) {
+    const truncated =
+      r.content.length > MAX_CONTEXT_ITEM_CHARS
+        ? `${r.content.slice(0, MAX_CONTEXT_ITEM_CHARS)}\n[... truncated at ${MAX_CONTEXT_ITEM_CHARS} characters - open the file in the Repository browser for the rest]`
+        : r.content;
+    if (total + truncated.length > MAX_CONTEXT_TOTAL_CHARS) break;
+    total += truncated.length;
+    out.push({ title: r.title, content: truncated, authority: AUTHORITY.PROJECT_DOCUMENT, kind: 'Imported repository file' });
+  }
+  return out;
 }

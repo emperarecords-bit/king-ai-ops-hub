@@ -24,6 +24,7 @@ import {
 import { AUTHORITY } from '@/orchestration/prompts';
 import { buildDelegationRules, MAX_DELEGATIONS_PER_RUN } from '@/orchestration/delegations';
 import { createTask } from '@/domain/tasks/tasks';
+import { loadApprovedContextForRun } from '@/domain/github/content';
 import { resolveModelForTier } from '@/orchestration/routing';
 import {
   type ContextManifestEntry,
@@ -256,6 +257,8 @@ async function assembleRunContext(
     consumerType: 'task_run',
     consumerAgentIds: [primaryRow.id, reviewerRow?.id].filter((id): id is string => !!id),
   });
+  // Repo browser: human-approved imported repository files (bounded; untrusted-wrapped downstream).
+  const importedRepoContext = await loadApprovedContextForRun(tx, ctx);
   const retrieved = docSources.retrieved;
   const coreRefs = docSources.coreRefs;
   const productionStatus = docSources.productionStatus;
@@ -333,6 +336,7 @@ async function assembleRunContext(
           },
         ]
       : []),
+    ...importedRepoContext,
   ];
 
   const PRODUCTION_STATUS_RE = /production[ _-]?status/i;
