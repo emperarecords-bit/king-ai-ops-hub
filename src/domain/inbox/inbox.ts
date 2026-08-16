@@ -40,7 +40,11 @@ export async function ownerInbox(
 ): Promise<OwnerInbox> {
   const items: InboxItem[] = [];
   let workspacesWithPending = 0;
-  for (const project of projects) {
+  // The Inbox is a DECISION surface: only workspaces the caller administers appear. A member or
+  // viewer (e.g. a hired assistant) must never be shown Okay/No buttons the server would refuse —
+  // decideApproval is admin-only, and this filter keeps the surface honest about that.
+  const decidable = projects.filter((p) => p.projectRole === 'admin');
+  for (const project of decidable) {
     const ctx: TenantContext = {
       userId,
       orgId: project.orgId,
@@ -83,5 +87,5 @@ export async function ownerInbox(
     }
   }
   items.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
-  return { items, workspacesWithPending, workspacesChecked: projects.length };
+  return { items, workspacesWithPending, workspacesChecked: decidable.length };
 }

@@ -143,4 +143,21 @@ describe('owner inbox', () => {
     expect(inbox.items).toHaveLength(0);
     expect(inbox.workspacesChecked).toBe(0);
   });
+
+  it('non-admin memberships never surface in the inbox (assistant boundary)', async () => {
+    if (!available) return;
+    // wsB still holds a pending approval from the earlier test. A caller who is only a MEMBER
+    // there (and a viewer of wsA) must see an empty decision surface — decideApproval would
+    // refuse them, so the inbox must not show them the buttons.
+    const memberRecords = [
+      { projectId: wsA.projectId, orgId, key: wsA.key, name: wsA.name, description: '', projectRole: 'viewer' as const },
+      { projectId: wsB.projectId, orgId, key: wsB.key, name: wsB.name, description: '', projectRole: 'member' as const },
+    ];
+    const inbox = await ownerInbox(userId, memberRecords, new Map([[orgId, 'member' as const]]));
+    expect(inbox.items).toHaveLength(0);
+    expect(inbox.workspacesChecked).toBe(0);
+    // The same records with admin rights DO see the pending item — the filter is the only difference.
+    const adminInbox = await ownerInbox(userId, accessRecords(), orgRoles());
+    expect(adminInbox.items.length).toBeGreaterThan(0);
+  });
 });

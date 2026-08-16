@@ -40,6 +40,8 @@ export async function sendChatMessageAction(
 
   try {
     const ctx = await requireTenant(projectKey);
+    // Chat runs are real (billed) tasks: read-only viewers observe, they don't spend.
+    if (ctx.projectRole === 'viewer') return { error: 'Viewers cannot send messages.', sentAt: null };
     const { taskId } = await withTenant(ctx, (tx) => sendChatMessage(tx, ctx, { agentId, content }));
     revalidatePath(`/p/${projectKey}/agents/${agentId}/chat`);
 
