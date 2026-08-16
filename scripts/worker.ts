@@ -10,6 +10,7 @@ import {
   reconcileStaleDocumentJobs,
   runClaimedDocumentJob,
 } from '../src/domain/documents/document-jobs';
+import { runDueSchedules } from '../src/domain/standing/standing';
 import { log } from '../src/lib/log';
 
 /**
@@ -31,6 +32,12 @@ const IDLE_MS = 2_000;
 // reconcile again on a bounded interval — idempotent (`reconcileStaleJobs` only
 // touches jobs already past their lease), and cheap when there is nothing stale.
 const RECONCILE_INTERVAL_MS = 60_000;
+// Standing work (task_schedules) materializes HERE: runDueSchedules() was previously invoked only
+// by a local operator script, so in the cloud no schedule ever produced a task. The tick is safe to
+// run from any number of workers concurrently — each due occurrence collapses to one task via its
+// deterministic identity (schedule_id + due next_run_at, onConflictDoNothing) and the whole
+// occurrence is one fail-closed transaction.
+const STANDING_TICK_INTERVAL_MS = 60_000;
 let stopping = false;
 
 /** Reclaim jobs whose lease has expired (run + document queues). Idempotent and
@@ -44,10 +51,24 @@ async function reconcileOnce(reason: 'boot' | 'periodic'): Promise<void> {
   }
 }
 
+/** Materialize due schedules into tasks + queued jobs. Errors are logged, never fatal to the loop. */
+async function standingTickOnce(reason: 'boot' | 'periodic'): Promise<void> {
+  try {
+    const tick = await runDueSchedules();
+    if (tick.due > 0) {
+      log.info('worker.standing_tick', { reason, ...tick });
+    }
+  } catch (err) {
+    log.error('worker.standing_tick_failed', { reason, err });
+  }
+}
+
 async function loop(): Promise<void> {
   await reconcileOnce('boot');
+  await standingTickOnce('boot');
   let lastReconcile = Date.now();
-  log.info('worker.ready', { idlePollMs: IDLE_MS, reconcileIntervalMs: RECONCILE_INTERVAL_MS });
+  let lastStandingTick = Date.now();
+  log.info('worker.ready', { idlePollMs: IDLE_MS, reconcileIntervalMs: RECONCILE_INTERVAL_MS, standingTickMs: STANDING_TICK_INTERVAL_MS });
 
   while (!stopping) {
     let claimed = false;
@@ -57,6 +78,10 @@ async function loop(): Promise<void> {
       if (Date.now() - lastReconcile >= RECONCILE_INTERVAL_MS) {
         await reconcileOnce('periodic');
         lastReconcile = Date.now();
+      }
+      if (Date.now() - lastStandingTick >= STANDING_TICK_INTERVAL_MS) {
+        await standingTickOnce('periodic');
+        lastStandingTick = Date.now();
       }
 
       const job = await claimNextJob();
