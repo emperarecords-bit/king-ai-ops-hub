@@ -33,10 +33,30 @@ function recognitionCtor(): RecognitionCtor | null {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
 }
 
+/** Human-facing explanation for a recognition failure — silence taught us nothing. */
+function explainError(code: string | undefined): string {
+  switch (code) {
+    case 'not-allowed':
+    case 'service-not-allowed':
+      return 'Microphone access is blocked. Click the padlock in the address bar, allow the Microphone, then reload this page.';
+    case 'audio-capture':
+      return 'No microphone was found. Plug one in or pick an input device in your system sound settings, then try again.';
+    case 'network':
+      return 'The speech service is unreachable. Voice input needs an internet connection (the browser transcribes via its online speech service).';
+    case 'no-speech':
+      return 'No speech was detected — tap the mic and try again.';
+    case 'aborted':
+      return '';
+    default:
+      return `Voice input failed${code ? ` (${code})` : ''}. Try again, or check the microphone permission in the address bar.`;
+  }
+}
+
 export function useSpeechInput(onFinalText: (text: string) => void) {
   const [supported, setSupported] = useState(false);
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState('');
+  const [error, setError] = useState<string | null>(null);
   const recRef = useRef<RecognitionLike | null>(null);
   const onFinalRef = useRef(onFinalText);
   useEffect(() => {
@@ -62,6 +82,7 @@ export function useSpeechInput(onFinalText: (text: string) => void) {
   const start = useCallback(() => {
     const Ctor = recognitionCtor();
     if (!Ctor || recRef.current) return;
+    setError(null);
     const rec = new Ctor();
     rec.lang = navigator.language || 'en-US';
     rec.continuous = true;
@@ -80,18 +101,25 @@ export function useSpeechInput(onFinalText: (text: string) => void) {
       setListening(false);
       setInterim('');
     };
-    rec.onerror = () => {
+    rec.onerror = (e) => {
       recRef.current = null;
       setListening(false);
       setInterim('');
+      const message = explainError(e?.error);
+      if (message) setError(message);
     };
     recRef.current = rec;
-    rec.start();
-    setListening(true);
+    try {
+      rec.start();
+      setListening(true);
+    } catch {
+      recRef.current = null;
+      setError('Voice input could not start. Reload the page and try again.');
+    }
   }, []);
 
   const toggle = useCallback(() => (listening ? stop() : start()), [listening, start, stop]);
-  return { supported, listening, interim, toggle, stop };
+  return { supported, listening, interim, error, toggle, stop };
 }
 
 /** Read one message aloud (cancels anything already speaking). Light cleanup of markdown noise. */

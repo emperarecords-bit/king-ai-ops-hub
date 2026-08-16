@@ -145,6 +145,7 @@ export function ChatClient({
         {speech.listening && speech.interim ? (
           <p className="text-xs italic opacity-60">{speech.interim}…</p>
         ) : null}
+        {speech.error ? <p className="text-xs text-amber-400">{speech.error}</p> : null}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="flex items-center gap-3 text-xs opacity-50">
             Enter to send · Shift+Enter for a new line
@@ -177,7 +178,14 @@ export function ChatClient({
               >
                 {speech.listening ? '● Listening' : '🎤 Speak'}
               </button>
-            ) : null}
+            ) : (
+              <span
+                className="cursor-not-allowed rounded border border-[var(--border)] px-3 py-1.5 text-sm opacity-40"
+                title="Voice input is not available in this browser — use Chrome, Edge, or Safari."
+              >
+                🎤 Speak
+              </span>
+            )}
             <button
               type="submit"
               disabled={pending}
