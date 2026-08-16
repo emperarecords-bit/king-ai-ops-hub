@@ -116,8 +116,8 @@ describe('pricing foundation (P1a)', () => {
     expect(cost.usdMicros).toBe(750_000n);
   });
 
-  it('executor eligibility is true ONLY for git_pr (Action Executors v1; pricing gains no executor)', () => {
-    for (const a of ACTION_TYPES) expect(hasEligibleExecutor(a)).toBe(a === 'git_pr');
+  it('executor eligibility is true ONLY for git_pr and org_delegation (pricing gains no executor)', () => {
+    for (const a of ACTION_TYPES) expect(hasEligibleExecutor(a)).toBe(a === 'git_pr' || a === 'org_delegation');
   });
 
   it('no live-dispatch module imports the pricing foundation or canonical lib', () => {

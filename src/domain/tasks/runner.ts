@@ -26,7 +26,7 @@ import { buildDelegationRules, MAX_DELEGATIONS_PER_RUN } from '@/orchestration/d
 import { createTask } from '@/domain/tasks/tasks';
 import { loadApprovedContextForRun } from '@/domain/github/content';
 import { createTextArtifact } from '@/domain/artifacts/artifacts';
-import { assembleOrgBriefing, resolveHqProjectKey } from '@/domain/org/briefing';
+import { assembleOrgBriefing, listDelegationTargets, resolveHqProjectKey } from '@/domain/org/briefing';
 import { resolveModelForTier } from '@/orchestration/routing';
 import {
   type ContextManifestEntry,
@@ -41,6 +41,7 @@ import { assembleCurrentOperatingPriorities } from '@/domain/prompts/effective-p
 import { computeActivityClassification } from '@/domain/classification/classification';
 import { ASSEMBLER_VERSION, assembleEffectivePrompt } from '@/orchestration/prompts';
 import { sha256Hex } from '@/lib/crypto';
+import { canonicalJson } from '@/orchestration/actions';
 import { selectRelevantKnowledge, logKnowledgeApplications } from '@/domain/knowledge/knowledge';
 import { loadObjectiveForRun } from '@/domain/objectives/objectives';
 import { assembleDocumentSources } from '@/domain/documents/retrieval-mode';
@@ -1173,22 +1174,25 @@ async function executeAndFinalize(
       .where(and(eq(agents.projectId, ctx.projectId), eq(agents.enabled, true), eq(agents.role, 'primary'), sql`${agents.id} <> ${primaryRow.id}`));
     return { roster: roster.map((r) => r.name), projectKey: proj[0].key };
   });
-  const primaryEngineAgent = toEngineAgent(primaryRow, task.modelTier);
-  const primaryForRun = gmInfo
-    ? { ...primaryEngineAgent, systemPrompt: `${primaryEngineAgent.systemPrompt}\n${buildDelegationRules(gmInfo.roster)}` }
-    : primaryEngineAgent;
-
   // Chief of Staff (owner directive: HQ sees everything): the HQ workspace's GM — and no one
-  // else — gets the read-only organization-wide briefing as trusted operational state.
+  // else — gets the read-only organization-wide briefing as trusted operational state, plus the
+  // cross-workspace delegation contract (whose entries become owner approvals, never direct tasks).
   const hqKey = resolveHqProjectKey();
+  const isHqGm = Boolean(gmInfo && hqKey && gmInfo.projectKey === hqKey);
+  let crossTargets: Awaited<ReturnType<typeof listDelegationTargets>> = [];
   let orgBriefing: string | null = null;
-  if (gmInfo && hqKey && gmInfo.projectKey === hqKey) {
+  if (isHqGm) {
     try {
       orgBriefing = await assembleOrgBriefing(ctx.userId, ctx.orgId);
+      crossTargets = await listDelegationTargets(ctx.userId, ctx.orgId, ctx.projectId);
     } catch (err) {
       log.warn('org briefing assembly failed (run continues without it)', { errorClass: err instanceof Error ? err.name : 'unknown' });
     }
   }
+  const primaryEngineAgent = toEngineAgent(primaryRow, task.modelTier);
+  const primaryForRun = gmInfo
+    ? { ...primaryEngineAgent, systemPrompt: `${primaryEngineAgent.systemPrompt}\n${buildDelegationRules(gmInfo.roster, crossTargets)}` }
+    : primaryEngineAgent;
   const contextItemsForRun = orgBriefing
     ? [
         ...assembled.contextItems,
@@ -1414,7 +1418,7 @@ async function finalizeCompleted(
     let delegationsCreated = 0;
     if (result.delegatedTasks.length > 0) {
       const proj = await tx
-        .select({ ownerAgentId: projects.ownerAgentId })
+        .select({ ownerAgentId: projects.ownerAgentId, key: projects.key })
         .from(projects)
         .where(eq(projects.id, ctx.projectId))
         .limit(1);
@@ -1426,8 +1430,59 @@ async function finalizeCompleted(
           detail: { reason: 'delegator_is_not_general_manager', delegatorAgentId: primaryRow.id, count: result.delegatedTasks.length },
         });
       } else {
+        const ownKey = proj[0].key;
+        const hqProjectKey = resolveHqProjectKey();
         const parent = await tx.select({ objectiveId: tasks.objectiveId }).from(tasks).where(eq(tasks.id, taskId)).limit(1);
         for (const d of result.delegatedTasks.slice(0, MAX_DELEGATIONS_PER_RUN)) {
+          // Cross-workspace delegation (v2): NEVER executed directly. Only headquarters' Chief of
+          // Staff may propose one, and it becomes an org_delegation approval in the owner's Inbox —
+          // on Okay, the executor creates the task for the target workspace's General Manager.
+          if (d.workspace && d.workspace !== ownKey) {
+            if (!hqProjectKey || ownKey !== hqProjectKey) {
+              await writeAudit(tx, ctx, {
+                action: 'task.delegation_rejected',
+                entityType: 'task',
+                entityId: taskId,
+                detail: { reason: 'cross_workspace_requires_headquarters', workspace: d.workspace, title: d.title },
+              });
+              continue;
+            }
+            const payload = { targetProjectKey: d.workspace, title: d.title, instructions: d.instructions };
+            const payloadSha256 = sha256Hex(canonicalJson(payload));
+            if (await pendingDuplicateExists(tx, ctx, 'org_delegation', payloadSha256)) {
+              await writeAudit(tx, ctx, {
+                action: 'approval.duplicate_suppressed',
+                entityType: 'task',
+                entityId: taskId,
+                detail: { actionType: 'org_delegation', summary: d.title, payloadSha256 },
+              });
+              continue;
+            }
+            const insertedApproval = await tx
+              .insert(approvals)
+              .values({
+                orgId: ctx.orgId,
+                projectId: ctx.projectId,
+                taskId,
+                runId,
+                actionType: 'org_delegation',
+                payload,
+                payloadSha256,
+                summary: `Delegate to ${d.workspace}: ${d.title}`,
+                status: 'pending',
+                requestedBy: primaryRow.provider,
+                expiresAt: new Date(Date.now() + APPROVAL_TTL_MS),
+              })
+              .returning({ id: approvals.id });
+            authorizationsRequested += 1;
+            await writeAudit(tx, ctx, {
+              action: 'approval.requested',
+              entityType: 'approval',
+              entityId: insertedApproval[0]!.id,
+              detail: { actionType: 'org_delegation', summary: `Delegate to ${d.workspace}: ${d.title}` },
+            });
+            continue;
+          }
           const assignee = (
             await tx
               .select({ id: agents.id, provider: agents.provider })

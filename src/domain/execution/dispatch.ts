@@ -18,6 +18,7 @@ import {
 } from './executor-contract';
 import { GitPrExecutor } from './git-pr-executor';
 import { NoopDryRunExecutor } from './noop-executor';
+import { OrgDelegationExecutor } from './org-delegation-executor';
 import { EXECUTOR_RISK_BY_ACTION } from './executor-policy';
 
 const dispatchRequestSchema = z.object({
@@ -67,6 +68,7 @@ function resolveExecutor(tx: DbTx, ctx: TenantContext, actionType: string): Exec
   if (actionType === 'git_pr') {
     return new GitPrExecutor({ client: getGitHubClient(), loadLinks: () => listRepoLinks(tx, ctx) });
   }
+  if (actionType === 'org_delegation') return new OrgDelegationExecutor({ tx, ctx });
   if (actionType === 'file_write') return noop;
   return null;
 }

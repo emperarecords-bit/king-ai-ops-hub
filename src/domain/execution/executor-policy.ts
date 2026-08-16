@@ -7,6 +7,7 @@ export const EXECUTOR_RISK_BY_ACTION: Readonly<Record<ActionType, ExecutorRiskCl
   git_pr: 'external_reversible', deployment: 'destructive_irreversible', db_mutation: 'destructive_irreversible',
   email_send: 'external_reversible', social_publish: 'external_reversible', financial: 'financial_regulated',
   destructive: 'destructive_irreversible', external_http: 'external_reversible',
+  org_delegation: 'reversible_internal_write',
 });
 
 export function executorFoundationStatus(actionType: ActionType) {

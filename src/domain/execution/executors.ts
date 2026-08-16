@@ -7,7 +7,7 @@ import { type ActionType } from '@/types/domain';
  * an action type absent here can never execute, and the honest "execution unavailable" wording
  * remains for it. Keep this in lockstep with resolveExecutor() in ./dispatch.ts.
  */
-const ELIGIBLE_EXECUTOR_ACTION_TYPES: ReadonlySet<ActionType> = new Set<ActionType>(['git_pr']);
+const ELIGIBLE_EXECUTOR_ACTION_TYPES: ReadonlySet<ActionType> = new Set<ActionType>(['git_pr', 'org_delegation']);
 
 /** True when a real executor exists for this action type. */
 export function hasEligibleExecutor(actionType: ActionType): boolean {
