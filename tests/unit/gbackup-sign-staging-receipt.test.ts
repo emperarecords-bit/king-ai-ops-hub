@@ -22,18 +22,18 @@ import { verifyReceiptV2Parsed } from '../../scripts/backup/receipt-v2-verify';
 /**
  * G-Backup staging-receipt producer — tests use EPHEMERAL, NON-PRODUCTION ed25519 keys generated in-process. No real
  * signer, GitHub secret, Fly, snapshot, migration, or deploy is involved. Migration facts are DERIVED from the
- * checked-out drizzle tree, so this proves the assembler binds to the real 0000–0064 source set.
+ * checked-out drizzle tree, so this proves the assembler binds to the real 0000–0065 source set.
  */
 
 const kp = generateKeyPairSync('ed25519');
 // The migration facts are derived from a REAL commit (the portable hash reads git blobs at sourceCommit), so the
 // tests bind the actual checked-out HEAD — the same code path the workflow runs against the selected source commit.
-// The staged source identity moved to 0064 with the 2026-08-15 Employee Chat release (EV-011).
+// The staged source identity moved to 0065 with the 2026-08-16 cross-workspace delegation release.
 // A moving HEAD must not redefine it — the exact release commit is pinned here.
 const STAGING_SOURCE_COMMIT = execFileSync(
-  'git', ['rev-parse', '641d32f1ba28597deabc4f6e7f40dd034c4d9e99^{commit}'], { encoding: 'utf8' },
+  'git', ['rev-parse', 'ab545cbd0d9ef3f034f0784f2dccea4a0f4e411b^{commit}'], { encoding: 'utf8' },
 ).trim();
-const STAGING_RUNTIME_DIR = mkdtempSync(join(tmpdir(), 'staging-source-0064-'));
+const STAGING_RUNTIME_DIR = mkdtempSync(join(tmpdir(), 'staging-source-0065-'));
 const stagingJournalText = execFileSync(
   'git', ['show', `${STAGING_SOURCE_COMMIT}:drizzle/meta/_journal.json`], { encoding: 'utf8' },
 );
@@ -72,16 +72,16 @@ function goodInputs(over: Partial<StagingReceiptInputs> = {}): StagingReceiptInp
 }
 
 describe('G-Backup staging-receipt producer — happy path (fixture keys)', () => {
-  it('signs + self-verifies; pending is exactly 0064 derived from source', () => {
+  it('signs + self-verifies; pending is exactly 0065 derived from source', () => {
     const out = produceStagingReceipt(goodInputs(), kp.privateKey, STAGING_RUNTIME_DIR);
     expect(receiptV2Schema.safeParse(out.receipt).success).toBe(true);
     expect(out.receipt.environment).toBe('staging');
     expect(out.receipt.targetApplication).toBe('king-ai-ops-hub-staging');
     expect(out.receipt.databaseApp).toBe('king-ai-hub-db-staging');
     expect(out.receipt.sourceVolumeId).toBe('vol_4m3kmknl059qpd6v');
-    expect(out.derived.endpointTag).toBe('0064_employee_chat');
-    expect(out.derived.committedCount).toBe(65);
-    expect(out.derived.pendingMigrations.map((p) => p.migrationTag)).toEqual(['0064_employee_chat']);
+    expect(out.derived.endpointTag).toBe('0065_org_delegation');
+    expect(out.derived.committedCount).toBe(66);
+    expect(out.derived.pendingMigrations.map((p) => p.migrationTag)).toEqual(['0065_org_delegation']);
     // Independently re-verify with the derived public trust.
     const load = loadReceiptKeyBundle([out.publicTrustEntry]);
     expect(load.ok).toBe(true);
@@ -196,7 +196,7 @@ describe('G-Backup staging-receipt CLI (fixture key via env) — writes only pub
       SNAPSHOT_DISCOVERY_METHOD: 'create-response-id',
       CREATE_RESPONSE_SNAPSHOT_ID: 'vs_abc123',
       KEY_ID: 'staging-dbr-2026-08',
-      APPLIED_COUNT: '64',
+      APPLIED_COUNT: '65',
     };
   }
 
@@ -212,7 +212,7 @@ describe('G-Backup staging-receipt CLI (fixture key via env) — writes only pub
       }
       const meta = JSON.parse(readFileSync(join(dir, 'verification-metadata.json'), 'utf8'));
       expect(meta.selfVerified).toBe(true);
-      expect(meta.pendingMigrationTags).toEqual(['0064_employee_chat']);
+      expect(meta.pendingMigrationTags).toEqual(['0065_org_delegation']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
