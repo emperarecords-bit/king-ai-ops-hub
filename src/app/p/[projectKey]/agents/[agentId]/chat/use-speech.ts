@@ -38,7 +38,7 @@ function explainError(code: string | undefined): string {
   switch (code) {
     case 'not-allowed':
     case 'service-not-allowed':
-      return 'Microphone access is blocked. Click the padlock in the address bar, allow the Microphone, then reload this page.';
+      return 'Microphone access is blocked. Click the icon just left of the web address (a padlock or two small sliders), set Microphone to Allow (it may be under "Site settings"), then reload this page. Or open chrome://settings/content/microphone and remove this site from "Not allowed".';
     case 'audio-capture':
       return 'No microphone was found. Plug one in or pick an input device in your system sound settings, then try again.';
     case 'network':
