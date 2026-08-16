@@ -26,9 +26,12 @@ export default async function EmployeeChatPage({
         title={`Chat — ${thread.agentName}`}
         subtitle="Talk to this employee directly. Every exchange is a normal, budgeted, audited run."
       />
-      <div className="text-sm">
+      <div className="flex items-center gap-4 text-sm">
         <Link href={`/p/${projectKey}/agents`} className="underline opacity-70 hover:opacity-100">
           ← Back to Employees
+        </Link>
+        <Link href={`/p/${projectKey}/agents/${agentId}/talk`} className="underline opacity-70 hover:opacity-100">
+          🎤 Voice mode
         </Link>
       </div>
       <Card>

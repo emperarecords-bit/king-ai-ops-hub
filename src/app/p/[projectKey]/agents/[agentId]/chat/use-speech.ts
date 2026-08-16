@@ -52,16 +52,26 @@ function explainError(code: string | undefined): string {
   }
 }
 
-export function useSpeechInput(onFinalText: (text: string) => void) {
+export interface SpeechInputOptions {
+  /** false = recognition auto-ends when the speaker pauses (Voice Mode's send trigger). */
+  continuous?: boolean;
+  /** Fired when recognition ends on its own (not via stop()) — Voice Mode auto-sends here. */
+  onAutoEnd?: () => void;
+}
+
+export function useSpeechInput(onFinalText: (text: string) => void, options: SpeechInputOptions = {}) {
   const [supported, setSupported] = useState(false);
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState('');
   const [error, setError] = useState<string | null>(null);
   const recRef = useRef<RecognitionLike | null>(null);
+  const manualStopRef = useRef(false);
   const onFinalRef = useRef(onFinalText);
+  const onAutoEndRef = useRef(options.onAutoEnd);
   useEffect(() => {
     onFinalRef.current = onFinalText;
-  }, [onFinalText]);
+    onAutoEndRef.current = options.onAutoEnd;
+  }, [onFinalText, options.onAutoEnd]);
 
   useEffect(() => {
     // Deferred detection: SSR renders unsupported, the client corrects after mount.
@@ -73,6 +83,7 @@ export function useSpeechInput(onFinalText: (text: string) => void) {
   }, []);
 
   const stop = useCallback(() => {
+    manualStopRef.current = true;
     recRef.current?.stop();
     recRef.current = null;
     setListening(false);
@@ -83,9 +94,10 @@ export function useSpeechInput(onFinalText: (text: string) => void) {
     const Ctor = recognitionCtor();
     if (!Ctor || recRef.current) return;
     setError(null);
+    manualStopRef.current = false;
     const rec = new Ctor();
     rec.lang = navigator.language || 'en-US';
-    rec.continuous = true;
+    rec.continuous = options.continuous !== false;
     rec.interimResults = true;
     rec.onresult = (e) => {
       let interimText = '';
@@ -97,9 +109,11 @@ export function useSpeechInput(onFinalText: (text: string) => void) {
       setInterim(interimText);
     };
     rec.onend = () => {
+      const wasManual = manualStopRef.current;
       recRef.current = null;
       setListening(false);
       setInterim('');
+      if (!wasManual) onAutoEndRef.current?.();
     };
     rec.onerror = (e) => {
       recRef.current = null;
@@ -116,15 +130,30 @@ export function useSpeechInput(onFinalText: (text: string) => void) {
       recRef.current = null;
       setError('Voice input could not start. Reload the page and try again.');
     }
-  }, []);
+  }, [options.continuous]);
 
   const toggle = useCallback(() => (listening ? stop() : start()), [listening, start, stop]);
-  return { supported, listening, interim, error, toggle, stop };
+  return { supported, listening, interim, error, toggle, start, stop };
+}
+
+/**
+ * Unlock speech output from a user gesture. Mobile browsers only allow speech that starts from a
+ * tap — priming with an empty utterance inside the tap handler lets LATER, programmatic speech
+ * (an arriving reply) play out loud.
+ */
+export function primeSpeech(): void {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+  const u = new SpeechSynthesisUtterance(' ');
+  u.volume = 0;
+  window.speechSynthesis.speak(u);
 }
 
 /** Read one message aloud (cancels anything already speaking). Light cleanup of markdown noise. */
-export function speak(text: string): void {
-  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+export function speak(text: string, onDone?: () => void): void {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+    onDone?.();
+    return;
+  }
   window.speechSynthesis.cancel();
   const cleaned = text
     .replace(/```[\s\S]*?```/g, ' Code block omitted. ')
@@ -133,6 +162,10 @@ export function speak(text: string): void {
     .slice(0, 4000);
   const utterance = new SpeechSynthesisUtterance(cleaned);
   utterance.rate = 1.05;
+  if (onDone) {
+    utterance.onend = () => onDone();
+    utterance.onerror = () => onDone();
+  }
   window.speechSynthesis.speak(utterance);
 }
 

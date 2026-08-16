@@ -85,10 +85,16 @@ export default async function DashboardPage({
             <p className="text-xs text-[var(--muted)]">Your General Manager — runs this workspace, reports to you.</p>
           </div>
           <Link
-            href={`${base}/agents/${gm.id}/chat`}
+            href={`${base}/agents/${gm.id}/talk`}
             className="rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#0b0e14] hover:bg-[var(--accent-strong)]"
           >
-            Chat with your GM
+            🎤 Talk
+          </Link>
+          <Link
+            href={`${base}/agents/${gm.id}/chat`}
+            className="rounded-md border border-[var(--border)] px-4 py-2 text-sm font-semibold hover:border-[var(--accent)]"
+          >
+            ⌨️ Chat
           </Link>
         </div>
       ) : null}
