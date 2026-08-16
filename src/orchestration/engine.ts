@@ -23,6 +23,7 @@ import {
 } from './prompts';
 import { canonicalReviewRubric, reviewRubricHash } from '@/domain/agents/reviewer-rubric';
 import { extractProposedActions, type ProposedAction, stripActionBlock } from './actions';
+import { extractDelegatedTasks, type DelegatedTask } from './delegations';
 import { sha256Hex } from '@/lib/crypto';
 
 /**
@@ -205,6 +206,8 @@ export interface EngineResult {
   readonly ok: boolean;
   readonly consolidated: string;
   readonly proposedActions: readonly ProposedAction[];
+  /** GM delegation: extracted unconditionally, AUTHORIZED only by the runner (GM identity check). */
+  readonly delegatedTasks: readonly DelegatedTask[];
   readonly steps: readonly StepRecord[];
   readonly failureReason: string | null;
 }
@@ -416,6 +419,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
         ok: false,
         consolidated: '',
         proposedActions: [],
+        delegatedTasks: [],
         steps,
         failureReason: `Primary model call failed: ${message}`,
       };
@@ -619,11 +623,18 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
   if (extraction.rejected.length > 0) {
     await sink.onMalformedOutput(stepNumber, extraction.rejected);
   }
+  // GM delegation block (same TB-4 stance): extracted here, but AUTHORITY is decided by the
+  // runner — only the workspace's General Manager's delegations are ever acted on.
+  const delegationExtraction = extractDelegatedTasks(finalText);
+  if (delegationExtraction.rejected.length > 0) {
+    await sink.onMalformedOutput(stepNumber, delegationExtraction.rejected);
+  }
 
   return {
     ok: true,
     consolidated,
     proposedActions: extraction.actions,
+    delegatedTasks: delegationExtraction.delegations,
     steps,
     failureReason: null,
   };
