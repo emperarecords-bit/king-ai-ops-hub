@@ -1,6 +1,6 @@
 import 'server-only';
 import { and, desc, eq, sql } from 'drizzle-orm';
-import { agents, approvals, messages, objectives, projects, tasks } from '@/db/schema';
+import { agents, approvals, auditLogs, messages, objectives, projects, tasks } from '@/db/schema';
 import { withOrg } from '@/db/tenant';
 
 /**
@@ -22,6 +22,9 @@ export function resolveHqProjectKey(env: Record<string, string | undefined> = pr
 
 const MAX_REPORT_SNIPPET = 700;
 const MAX_BRIEFING_CHARS = 18_000;
+/** Report-back: HQ directives return in FULL (bounded), unlike ordinary work's short excerpt. */
+const MAX_DIRECTIVES_PER_BUSINESS = 3;
+const MAX_DIRECTIVE_REPORT_CHARS = 4_000;
 
 /**
  * Cross-workspace delegation targets for headquarters' Chief of Staff: every OTHER active
@@ -101,6 +104,56 @@ export async function assembleOrgBriefing(userId: string, orgId: string): Promis
         if (msg) reportSnippet = msg.content.slice(0, MAX_REPORT_SNIPPET);
       }
 
+      // Report-back (owner directive 2026-08-16): tasks this business received FROM headquarters
+      // via approved cross-workspace delegation come back in FULL — the Chief of Staff must be
+      // able to close the loop without anyone relaying. Provenance is the audited task.delegated
+      // event the executor wrote in this workspace (crossWorkspace=true), never a string match.
+      const directiveAudits = await tx
+        .select({ taskId: auditLogs.entityId })
+        .from(auditLogs)
+        .where(
+          and(
+            eq(auditLogs.orgId, orgId),
+            eq(auditLogs.projectId, p.id),
+            eq(auditLogs.action, 'task.delegated'),
+            sql`${auditLogs.detail}->>'crossWorkspace' = 'true'`,
+          ),
+        )
+        .orderBy(desc(auditLogs.createdAt))
+        .limit(MAX_DIRECTIVES_PER_BUSINESS);
+      const directiveLines: string[] = [];
+      for (const d of directiveAudits) {
+        if (!d.taskId) continue;
+        const t = (
+          await tx
+            .select({ id: tasks.id, title: tasks.title, status: tasks.status, updatedAt: tasks.updatedAt })
+            .from(tasks)
+            .where(and(eq(tasks.id, d.taskId), eq(tasks.projectId, p.id)))
+            .limit(1)
+        )[0];
+        if (!t) continue;
+        const when = `${t.updatedAt.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+        if (t.status === 'completed' || t.status === 'awaiting_approval') {
+          const msg = (
+            await tx
+              .select({ content: messages.content })
+              .from(messages)
+              .where(and(eq(messages.taskId, t.id), eq(messages.role, 'assistant')))
+              .orderBy(desc(messages.createdAt))
+              .limit(1)
+          )[0];
+          const body = !msg
+            ? '(no report recorded)'
+            : msg.content.length > MAX_DIRECTIVE_REPORT_CHARS
+              ? `${msg.content.slice(0, MAX_DIRECTIVE_REPORT_CHARS)}\n[directive report truncated]`
+              : msg.content;
+          const state = t.status === 'completed' ? 'COMPLETED' : 'done, awaiting owner approval';
+          directiveLines.push(`- "${t.title}" — ${state} ${when}. Full report:\n${body}`);
+        } else {
+          directiveLines.push(`- "${t.title}" — ${t.status.replace(/_/g, ' ')} (as of ${when})`);
+        }
+      }
+
       const lines = [
         `## ${p.name} (${p.key})`,
         `General Manager: ${gm?.name ?? 'unassigned'}`,
@@ -112,6 +165,9 @@ export async function assembleOrgBriefing(userId: string, orgId: string): Promis
           ? `Latest completed work: "${latestDone.title}" (${latestDone.updatedAt.toISOString().slice(0, 16).replace('T', ' ')} UTC)${reportSnippet ? `\nReport excerpt: ${reportSnippet}` : ''}`
           : 'Latest completed work: none yet',
       ];
+      if (directiveLines.length > 0) {
+        lines.push(`Headquarters directives (report-back):\n${directiveLines.join('\n')}`);
+      }
       sections.push(lines.join('\n'));
     }
 

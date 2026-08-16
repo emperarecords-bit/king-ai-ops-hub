@@ -3,6 +3,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { agents, approvals, memberships, messages, objectives, organizations, profiles, projectMembers, projects, tasks } from '@/db/schema';
 import { getSetupDb } from '@/db/client';
+import { withTenant } from '@/db/tenant';
+import { writeAudit } from '@/domain/audit/audit';
 import { assembleOrgBriefing, resolveHqProjectKey } from '@/domain/org/briefing';
 import { fixtureKey } from '@tests/support/fixture-key';
 
@@ -45,6 +47,25 @@ beforeAll(async () => {
   await db
     .insert(approvals)
     .values({ orgId, projectId: projectIds[0]!, taskId: task!.id, actionType: 'email_send', payload: {}, payloadSha256: 'a'.repeat(64), summary: 'Send the weekly email', status: 'pending', expiresAt: new Date(Date.now() + 60_000) });
+
+  // Report-back fixture: business beta received a directive FROM headquarters (cross-workspace
+  // delegation) and completed it with a report LONGER than the ordinary 700-char excerpt.
+  const longReport = `Directive answered in full. ${'The pipeline is healthy and every stage gate is on schedule. '.repeat(30)}END-OF-DIRECTIVE-REPORT`;
+  const [directive] = await db
+    .insert(tasks)
+    .values({ orgId, projectId: projectIds[1]!, title: 'HQ directive: expansion readiness', input: 'Directive from headquarters (Chief of Staff), approved by the owner:\n\nAssess readiness.', providerSelection: 'google', createdBy: userId, status: 'completed' })
+    .returning({ id: tasks.id });
+  await db.insert(messages).values({ orgId, projectId: projectIds[1]!, taskId: directive!.id, role: 'assistant', content: longReport });
+  // Provenance the way the executor records it: the audited task.delegated event in the target
+  // workspace — written through the real chain-safe writeAudit, never raw SQL.
+  await withTenant({ userId, orgId, projectId: projectIds[1]!, orgRole: 'owner', projectRole: 'admin' }, (tx) =>
+    writeAudit(tx, { userId, orgId, projectId: projectIds[1]! }, {
+      action: 'task.delegated',
+      entityType: 'task',
+      entityId: directive!.id,
+      detail: { crossWorkspace: true, fromProjectId: projectIds[0], approvalId: randomUUID(), toAgentId: randomUUID(), assignee: 'GM beta', title: 'HQ directive: expansion readiness' },
+    }),
+  );
 });
 
 afterAll(async () => {
@@ -62,8 +83,18 @@ describe.skipIf(!available)('Chief of Staff org briefing', { timeout: 15_000 }, 
     expect(briefing!).toContain('Grow alpha');
     expect(briefing!).toContain('Pending owner approvals: 1');
     expect(briefing!).toContain('Alpha is on track');
-    // The other business honestly reports no completed work.
-    expect(briefing!).toContain('Latest completed work: none yet');
+  });
+
+  it('headquarters directives return their FULL report (report-back), ordinary work stays an excerpt', async () => {
+    const briefing = await assembleOrgBriefing(userId, orgId);
+    expect(briefing!).toContain('Headquarters directives (report-back):');
+    expect(briefing!).toContain('"HQ directive: expansion readiness" — COMPLETED');
+    // The full report exceeds the ordinary excerpt cap and must arrive intact to its final marker.
+    expect(briefing!).toContain('END-OF-DIRECTIVE-REPORT');
+    // Alpha received no directives — its section must not carry the header.
+    const alphaSection = briefing!.split('## ').find((s) => s.startsWith('Biz alpha'));
+    expect(alphaSection).toBeTruthy();
+    expect(alphaSection!).not.toContain('Headquarters directives');
   });
 
   it('HQ designation fails closed without server config', () => {
