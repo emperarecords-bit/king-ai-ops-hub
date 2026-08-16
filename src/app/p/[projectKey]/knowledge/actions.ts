@@ -34,6 +34,8 @@ async function mutation(
   if (!projectKey) return { error: 'Invalid request.' };
   try {
     const ctx = await requireTenant(projectKey);
+    // Knowledge shapes what every employee believes: read-only viewers never curate it.
+    if (ctx.projectRole === 'viewer') return { error: 'Viewers cannot modify knowledge.' };
     await fn(ctx);
   } catch (err) {
     if (!(err instanceof AppError)) log.error('knowledge mutation failed', { err });
