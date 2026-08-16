@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { expireStaleApprovals, listApprovalsForQueue, reconcileStrandedApprovalTasks, type QueueApprovalRow } from '@/domain/approvals/approvals';
+import { executionRecordsForApprovals } from '@/domain/execution/execution-results';
 import { assessConsequence, isInlineAuthorizable, readConsequence } from '@/domain/approvals/consequence';
 import { Card, EmptyState, PageHeader } from '@/components/ui';
 import { DecisionForm } from './decision-form';
@@ -40,10 +41,13 @@ export default async function ApprovalsPage({
   const { projectKey } = await params;
   const ctx = await requireTenant(projectKey);
 
-  const rows = await withTenant(ctx, async (tx) => {
+  const { rows, executions } = await withTenant(ctx, async (tx) => {
     await expireStaleApprovals(tx, ctx); // the queue never lies
     await reconcileStrandedApprovalTasks(tx, ctx); // no task stays "awaiting" once every proposal is decided
-    return listApprovalsForQueue(tx, ctx);
+    const list = await listApprovalsForQueue(tx, ctx);
+    // Durable execution outcomes (from the audit log) for everything already decided.
+    const decidedIds = list.filter((a) => a.status !== 'pending').map((a) => a.id);
+    return { rows: list, executions: await executionRecordsForApprovals(tx, ctx, decidedIds) };
   });
 
   const assessed = rows.map((a) => {
@@ -65,9 +69,10 @@ export default async function ApprovalsPage({
       />
 
       <p className="mb-6 rounded-md border border-[var(--border)] bg-[var(--surface)] px-4 py-3 text-sm text-[var(--muted)]">
-        <span className="font-medium text-[var(--foreground)]">Authorization is not execution.</span>{' '}
-        Authorizing records that you granted this action; this version does not carry it out
-        automatically. Execution still happens separately.
+        <span className="font-medium text-[var(--foreground)]">Authorizing can execute.</span>{' '}
+        Actions with a live executor (currently: pull requests) are carried out by the Hub the moment
+        you authorize them, and the outcome is recorded below. Everything else records authorization
+        only — execution for those still happens separately.
       </p>
 
       {needsClarification.length > 0 ? (
@@ -100,20 +105,42 @@ export default async function ApprovalsPage({
           <EmptyState>No history yet.</EmptyState>
         ) : (
           <ul className="divide-y divide-[var(--border)]">
-            {decided.map(({ a }) => (
-              <li key={a.id} className="flex items-center justify-between gap-3 py-3 text-sm">
-                <div className="min-w-0">
-                  <Link href={`/p/${projectKey}/approvals/${a.id}`} className="hover:text-[var(--accent)]">
-                    <span className="font-mono text-xs text-[var(--muted)]">{a.actionType}</span>{' '}
-                    <span className="truncate">{a.summary}</span>
-                  </Link>
-                  {a.decisionNote ? <p className="text-xs text-[var(--muted)]">note: {a.decisionNote}</p> : null}
-                </div>
-                <span className="shrink-0 rounded bg-[var(--surface-raised)] px-2 py-0.5 text-xs text-[var(--muted)]">
-                  {AUTHORIZATION_LABEL[a.status] ?? a.status}
-                </span>
-              </li>
-            ))}
+            {decided.map(({ a }) => {
+              const exec = executions.get(a.id);
+              return (
+                <li key={a.id} className="flex items-center justify-between gap-3 py-3 text-sm">
+                  <div className="min-w-0">
+                    <Link href={`/p/${projectKey}/approvals/${a.id}`} className="hover:text-[var(--accent)]">
+                      <span className="font-mono text-xs text-[var(--muted)]">{a.actionType}</span>{' '}
+                      <span className="truncate">{a.summary}</span>
+                    </Link>
+                    {a.decisionNote ? <p className="text-xs text-[var(--muted)]">note: {a.decisionNote}</p> : null}
+                    {exec?.outcome === 'succeeded' && exec.prUrl ? (
+                      <p className="text-xs">
+                        <a href={exec.prUrl} target="_blank" rel="noreferrer" className="text-[var(--success)] underline">
+                          Executed — pull request #{exec.prNumber} ↗
+                        </a>
+                      </p>
+                    ) : null}
+                  </div>
+                  <span
+                    className={`shrink-0 rounded px-2 py-0.5 text-xs ${
+                      exec?.outcome === 'succeeded'
+                        ? 'bg-[var(--surface-raised)] text-[var(--success)]'
+                        : exec
+                          ? 'bg-[var(--surface-raised)] text-amber-400'
+                          : 'bg-[var(--surface-raised)] text-[var(--muted)]'
+                    }`}
+                  >
+                    {exec
+                      ? exec.outcome === 'succeeded'
+                        ? 'Executed'
+                        : `Execution ${exec.outcome}`
+                      : (AUTHORIZATION_LABEL[a.status] ?? a.status)}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         )}
       </Card>

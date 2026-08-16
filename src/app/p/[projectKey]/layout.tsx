@@ -37,7 +37,7 @@ export default async function ProjectLayout({
     // Stack on mobile (no fixed sidebar squeezing content → no horizontal overflow); side rail on md+.
     <div className="flex min-h-screen flex-col md:flex-row">
       <aside className="w-full shrink-0 border-b border-[var(--border)] bg-[var(--surface)] p-3 md:w-56 md:border-b-0 md:border-r">
-        <div className="mb-3 flex items-center gap-2 px-2 py-1">
+        <div className="mb-1 flex items-center gap-2 px-2 py-1">
           <span className="truncate text-sm font-semibold text-[var(--foreground)]" title={name}>
             {name}
           </span>
@@ -48,6 +48,13 @@ export default async function ProjectLayout({
             switch
           </Link>
         </div>
+        {/* The owner's cross-workspace Inbox is reachable from EVERY workspace, always. */}
+        <Link
+          href="/inbox"
+          className="mb-3 block rounded-md border border-[var(--border)] px-2 py-1.5 text-sm font-semibold text-[var(--accent)] hover:border-[var(--accent)]"
+        >
+          Inbox
+        </Link>
         {/* Mobile: a collapsed menu so the workspace nav never pushes content down or sideways. */}
         <details className="md:hidden">
           <summary className="cursor-pointer px-2 py-1 text-sm text-[var(--muted)]">Menu</summary>

@@ -4,6 +4,7 @@ import { AppError, NotFoundError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { agents, approvals, objectives, profiles, tasks } from '@/db/schema';
 import { writeAudit } from '@/domain/audit/audit';
+import { executionRecordsForApprovals } from '@/domain/execution/execution-results';
 
 /**
  * The human approval gate (invariant I4). This module DECIDES authorization; it never
@@ -257,7 +258,7 @@ export async function tasksWithAuthorizedUnexecutedActions(
 ): Promise<Set<string>> {
   if (taskIds.length === 0) return new Set();
   const rows = await tx
-    .select({ taskId: approvals.taskId })
+    .select({ id: approvals.id, taskId: approvals.taskId })
     .from(approvals)
     .where(
       and(
@@ -267,7 +268,11 @@ export async function tasksWithAuthorizedUnexecutedActions(
         inArray(approvals.taskId, [...taskIds]),
       ),
     );
-  return new Set(rows.map((r) => r.taskId));
+  if (rows.length === 0) return new Set();
+  // Action Executors v1: an approval whose latest execution.result SUCCEEDED is executed — the
+  // honesty qualifier must drop for it. Anything short of succeeded stays "unexecuted".
+  const records = await executionRecordsForApprovals(tx, ctx, rows.map((r) => r.id));
+  return new Set(rows.filter((r) => records.get(r.id)?.outcome !== 'succeeded').map((r) => r.taskId));
 }
 
 /**

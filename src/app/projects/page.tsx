@@ -68,6 +68,21 @@ export default async function MorningBriefingPage({
 
   return (
     <main className="mx-auto max-w-4xl p-8">
+      {/* The Inbox is the front door: when anything waits on the owner's okay, it is the FIRST
+          thing on the page — a full-width call to action, not a button to hunt for. */}
+      {totals.pendingApprovals > 0 ? (
+        <Link
+          href="/inbox"
+          className="mb-6 block rounded-lg border-2 border-[var(--accent)] bg-[var(--surface)] px-5 py-4 hover:bg-[var(--surface-raised)]"
+        >
+          <span className="text-base font-bold text-[var(--accent)]">
+            {totals.pendingApprovals} action{totals.pendingApprovals === 1 ? '' : 's'} waiting for your okay
+          </span>
+          <span className="mt-1 block text-sm text-[var(--muted)]">
+            Your employees proposed work that needs your decision. Open the Inbox to review and okay it →
+          </span>
+        </Link>
+      ) : null}
       <div className="mb-8 flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold">{greeting}</h1>

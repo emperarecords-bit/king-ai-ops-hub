@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { getApprovalDetail } from '@/domain/approvals/approvals';
+import { executionRecordsForApprovals } from '@/domain/execution/execution-results';
 import { assessConsequence, readConsequence } from '@/domain/approvals/consequence';
 import { NotFoundError } from '@/lib/errors';
 import { currentEpochMs } from '@/lib/clock';
@@ -40,8 +41,13 @@ export default async function ApprovalDetailPage({
   const isAdmin = ctx.projectRole === 'admin';
 
   let a;
+  let exec;
   try {
-    a = await withTenant(ctx, (tx) => getApprovalDetail(tx, ctx, approvalId));
+    ({ a, exec } = await withTenant(ctx, async (tx) => {
+      const detail = await getApprovalDetail(tx, ctx, approvalId);
+      const records = await executionRecordsForApprovals(tx, ctx, [approvalId]);
+      return { a: detail, exec: records.get(approvalId) ?? null };
+    }));
   } catch (err) {
     if (err instanceof NotFoundError) notFound();
     throw err;
@@ -54,9 +60,16 @@ export default async function ApprovalDetailPage({
   const expired = pending && a.expiresAt.getTime() < currentEpochMs();
 
   // Three distinct lifecycles — the operator must never infer whether the action actually happened.
+  // Execution state comes from the durable audit record, never from the decision alone.
   const aiWork = a.taskStatus === 'completed' ? 'Finished' : a.taskStatus.replaceAll('_', ' ');
   const authorizationState = AUTHORIZATION_LABEL[a.status] ?? a.status;
-  const executionState = a.status === 'approved' ? 'Authorized, not executed — live execution disabled' : 'Not started';
+  const executionState = exec
+    ? exec.outcome === 'succeeded'
+      ? `Executed${exec.prNumber ? ` — pull request #${exec.prNumber}` : ''} on ${ts(exec.executedAt)}`
+      : `Execution ${exec.outcome} on ${ts(exec.executedAt)}`
+    : a.status === 'approved'
+      ? 'Authorized, not executed'
+      : 'Not started';
 
   return (
     <div className="mx-auto max-w-3xl">
@@ -200,10 +213,28 @@ export default async function ApprovalDetailPage({
               {a.decisionNote}
             </p>
           ) : null}
-          {a.status === 'approved' ? (
+          {exec ? (
+            exec.outcome === 'succeeded' ? (
+              <p className="mt-2 text-sm text-[var(--success)]">
+                Executed by the Hub{exec.executorId ? ` (${exec.executorId} executor)` : ''} on {ts(exec.executedAt)}.
+                {exec.prUrl ? (
+                  <>
+                    {' '}
+                    <a href={exec.prUrl} target="_blank" rel="noreferrer" className="underline">
+                      View pull request #{exec.prNumber} ↗
+                    </a>
+                  </>
+                ) : null}
+              </p>
+            ) : (
+              <p className="mt-2 text-sm text-amber-400">
+                Execution {exec.outcome} on {ts(exec.executedAt)} — see the audit log for the full record.
+              </p>
+            )
+          ) : a.status === 'approved' ? (
             <p className="mt-2 text-xs text-[var(--muted)]">
-              Authorized, not executed — the Phase 3 foundation permits validation and preview only. No
-              live executor capability is enabled.
+              Authorized, not executed — no live executor is enabled for this action type, or execution
+              has not been attempted.
             </p>
           ) : null}
           <p className="mt-3 text-xs text-[var(--muted)]">
