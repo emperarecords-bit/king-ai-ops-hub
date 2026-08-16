@@ -8,7 +8,7 @@ import { serverEnv } from '@/lib/env.server';
 import { log } from '@/lib/log';
 import { withTenant } from '@/db/tenant';
 import { type DbTx } from '@/db/client';
-import { approvals, decisions, messages, projects, runExecutionCheckpoints, runs, runSteps, tasks } from '@/db/schema';
+import { agents, approvals, decisions, messages, projects, runExecutionCheckpoints, runJobs, runs, runSteps, tasks } from '@/db/schema';
 import { getProvider, otherProvider } from '@/providers/registry';
 import {
   AmbiguousProviderOutcomeSignal,
@@ -22,6 +22,8 @@ import {
   type StepRecord,
 } from '@/orchestration/engine';
 import { AUTHORITY } from '@/orchestration/prompts';
+import { buildDelegationRules, MAX_DELEGATIONS_PER_RUN } from '@/orchestration/delegations';
+import { createTask } from '@/domain/tasks/tasks';
 import { resolveModelForTier } from '@/orchestration/routing';
 import {
   type ContextManifestEntry,
@@ -1150,6 +1152,26 @@ async function executeAndFinalize(
     }
   };
 
+  // GM delegation: ONLY the workspace's General Manager (projects.owner_agent_id) carries the
+  // delegation contract in its system prompt, with the live roster of assignable employees.
+  const gmRoster = await withTenant(ctx, async (tx) => {
+    const proj = await tx
+      .select({ ownerAgentId: projects.ownerAgentId })
+      .from(projects)
+      .where(eq(projects.id, ctx.projectId))
+      .limit(1);
+    if (!proj[0] || proj[0].ownerAgentId !== primaryRow.id) return null;
+    const roster = await tx
+      .select({ name: agents.name })
+      .from(agents)
+      .where(and(eq(agents.projectId, ctx.projectId), eq(agents.enabled, true), eq(agents.role, 'primary'), sql`${agents.id} <> ${primaryRow.id}`));
+    return roster.map((r) => r.name);
+  });
+  const primaryEngineAgent = toEngineAgent(primaryRow, task.modelTier);
+  const primaryForRun = gmRoster
+    ? { ...primaryEngineAgent, systemPrompt: `${primaryEngineAgent.systemPrompt}\n${buildDelegationRules(gmRoster)}` }
+    : primaryEngineAgent;
+
   let result;
   try {
     result = await executeRun(
@@ -1159,7 +1181,7 @@ async function executeAndFinalize(
         operatingPriorities: assembled.operatingPriorities,
         objective: assembled.objective,
         freshnessComparison: assembled.freshnessComparison,
-        primary: toEngineAgent(primaryRow, task.modelTier),
+        primary: primaryForRun,
         reviewer: reviewerRow ? toEngineAgent(reviewerRow, task.modelTier) : null,
         perCallTimeoutMs: env.PROVIDER_TIMEOUT_MS,
         runDeadline: Date.now() + env.RUN_TIMEOUT_MS,
@@ -1361,6 +1383,78 @@ async function finalizeCompleted(
       });
     }
 
+    // GM delegation — authority decided HERE, at the trust boundary: only the workspace's General
+    // Manager (projects.owner_agent_id) may spawn work; a delegation block from anyone else is
+    // dropped and audited. Delegated tasks are internal reversible work (they run automatically);
+    // anything consequential a delegated employee proposes still lands in the approvals queue.
+    let delegationsCreated = 0;
+    if (result.delegatedTasks.length > 0) {
+      const proj = await tx
+        .select({ ownerAgentId: projects.ownerAgentId })
+        .from(projects)
+        .where(eq(projects.id, ctx.projectId))
+        .limit(1);
+      if (proj[0]?.ownerAgentId !== primaryRow.id) {
+        await writeAudit(tx, ctx, {
+          action: 'task.delegation_rejected',
+          entityType: 'task',
+          entityId: taskId,
+          detail: { reason: 'delegator_is_not_general_manager', delegatorAgentId: primaryRow.id, count: result.delegatedTasks.length },
+        });
+      } else {
+        const parent = await tx.select({ objectiveId: tasks.objectiveId }).from(tasks).where(eq(tasks.id, taskId)).limit(1);
+        for (const d of result.delegatedTasks.slice(0, MAX_DELEGATIONS_PER_RUN)) {
+          const assignee = (
+            await tx
+              .select({ id: agents.id, provider: agents.provider })
+              .from(agents)
+              .where(and(eq(agents.projectId, ctx.projectId), eq(agents.name, d.assignee), eq(agents.enabled, true), eq(agents.role, 'primary')))
+              .limit(1)
+          )[0];
+          if (!assignee || assignee.id === primaryRow.id) {
+            await writeAudit(tx, ctx, {
+              action: 'task.delegation_rejected',
+              entityType: 'task',
+              entityId: taskId,
+              detail: { reason: assignee ? 'gm_cannot_assign_itself' : 'assignee_not_assignable', assignee: d.assignee, title: d.title },
+            });
+            continue;
+          }
+          try {
+            const newTaskId = await createTask(tx, ctx, {
+              title: d.title,
+              input: `Assignment from the General Manager:\n\n${d.instructions}`,
+              providerSelection: assignee.provider,
+              reviewEnabled: false,
+              primaryAgentId: assignee.id,
+              objectiveId: parent[0]?.objectiveId ?? null,
+            });
+            // Queue directly (mirrors enqueueRun; jobs.ts imports this module, so no back-import).
+            await tx
+              .insert(runJobs)
+              .values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId: newTaskId, status: 'queued', dispatchKind: 'standing' })
+              .onConflictDoNothing();
+            await writeAudit(tx, ctx, { action: 'run_job.enqueued', entityType: 'task', entityId: newTaskId, detail: { dispatchKind: 'standing', delegated: true } });
+            await writeAudit(tx, ctx, {
+              action: 'task.delegated',
+              entityType: 'task',
+              entityId: newTaskId,
+              detail: { byAgentId: primaryRow.id, toAgentId: assignee.id, assignee: d.assignee, title: d.title, sourceTaskId: taskId, sourceRunId: runId },
+            });
+            delegationsCreated += 1;
+          } catch (err) {
+            // createTask validates BEFORE any insert, so a rejection leaves the transaction healthy.
+            await writeAudit(tx, ctx, {
+              action: 'task.delegation_rejected',
+              entityType: 'task',
+              entityId: taskId,
+              detail: { reason: 'creation_failed', assignee: d.assignee, title: d.title, error: err instanceof Error ? err.message : 'unknown' },
+            });
+          }
+        }
+      }
+    }
+
     const finalStatus = authorizationsRequested > 0 ? ('awaiting_approval' as const) : ('completed' as const);
 
     await tx
@@ -1379,7 +1473,7 @@ async function finalizeCompleted(
       action: 'run.completed',
       entityType: 'run',
       entityId: runId,
-      detail: { steps: result.steps.length, proposedActions: result.proposedActions.length, finalStatus },
+      detail: { steps: result.steps.length, proposedActions: result.proposedActions.length, delegationsCreated, finalStatus },
     });
     await writeAudit(tx, ctx, {
       action: 'run.finalization_completed',
