@@ -6,6 +6,8 @@ import { getSetupDb } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { executeApprovedAction } from '@/domain/execution/dispatch';
 import { executeApprovedIfEligible } from '@/domain/execution/execute-on-approval';
+import { executionRecordsForApprovals } from '@/domain/execution/execution-results';
+import { tasksWithAuthorizedUnexecutedActions } from '@/domain/approvals/approvals';
 import { setGitHubClientOverrideForTests, type GitHubRepoClient } from '@/domain/github/client';
 import { canonicalJson } from '@/orchestration/actions';
 import { sha256Hex } from '@/lib/crypto';
@@ -109,6 +111,13 @@ describe.skipIf(!available)('trusted executor dispatch', { timeout: 15_000 }, ()
 
       const events = await db.select({ action: auditLogs.action }).from(auditLogs).where(and(eq(auditLogs.entityId, approval!.id), eq(auditLogs.action, 'execution.result')));
       expect(events).toHaveLength(1);
+
+      // The durable execution record is readable from the audit log, and the honesty read drops
+      // the "authorized-but-unexecuted" qualifier for the executed task.
+      const records = await withTenant(ctx, (tx) => executionRecordsForApprovals(tx, ctx, [approval!.id]));
+      expect(records.get(approval!.id)).toMatchObject({ outcome: 'succeeded', executorId: 'git_pr', prNumber: 7, prUrl: `https://github.com/${repoFullName}/pull/7` });
+      const unexecuted = await withTenant(ctx, (tx) => tasksWithAuthorizedUnexecutedActions(tx, ctx, [task!.id]));
+      expect(unexecuted.has(task!.id)).toBe(false);
     } finally {
       setGitHubClientOverrideForTests(null);
     }
@@ -119,6 +128,10 @@ describe.skipIf(!available)('trusted executor dispatch', { timeout: 15_000 }, ()
     // Disabled server config (the default): dispatch blocks, nothing external happens.
     const disabled = await executeApprovedIfEligible(ctx, a.approvalId, { enabledExecutorIds: [] });
     expect(disabled).toMatchObject({ attempted: true, outcome: 'blocked' });
+    // A blocked attempt is NOT execution: the approval's task keeps its unexecuted qualifier.
+    const taskRow = await getSetupDb().select({ taskId: approvals.taskId }).from(approvals).where(eq(approvals.id, a.approvalId));
+    const stillUnexecuted = await withTenant(ctx, (tx) => tasksWithAuthorizedUnexecutedActions(tx, ctx, [taskRow[0]!.taskId]));
+    expect(stillUnexecuted.has(taskRow[0]!.taskId)).toBe(true);
     // file_write has no live executor: nothing is attempted at all.
     const fw = await approved('file_write');
     const notAttempted = await executeApprovedIfEligible(ctx, fw.approvalId, { enabledExecutorIds: ['git_pr'] });
