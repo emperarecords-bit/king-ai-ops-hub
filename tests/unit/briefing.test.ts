@@ -23,11 +23,14 @@ function obj(over: Partial<ObjectiveListRow> & { tasksTotal: number; tasksComple
     progress: {
       tasksTotal,
       tasksCompleted,
+      tasksRunning: 0,
+      tasksAwaitingApproval: 0,
       criteriaTotal: 0,
       criteriaSatisfied: 0,
       milestonesTotal: 0,
       milestonesCompleted: 0,
       percent,
+      lastActivityAt: null,
     },
   };
 }

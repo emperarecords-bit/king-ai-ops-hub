@@ -113,12 +113,18 @@ export async function createObjective(
 export interface ObjectiveProgress {
   tasksTotal: number;
   tasksCompleted: number;
+  /** In flight right now (pending or running). */
+  tasksRunning: number;
+  /** Finished work sitting in the owner's Inbox. */
+  tasksAwaitingApproval: number;
   criteriaTotal: number;
   criteriaSatisfied: number; // met + waived
   milestonesTotal: number;
   milestonesCompleted: number;
   /** 0..100. Tasks when any exist, else criteria, else 0. */
   percent: number;
+  /** Most recent movement on any contributing task (null when no tasks yet). */
+  lastActivityAt: Date | null;
 }
 
 export interface ObjectiveListRow {
@@ -175,6 +181,9 @@ export async function listObjectives(tx: DbTx, ctx: TenantContext): Promise<Obje
       objectiveId: tasks.objectiveId,
       total: sql<string>`count(*)`,
       completed: sql<string>`count(*) filter (where ${tasks.status} = 'completed')`,
+      running: sql<string>`count(*) filter (where ${tasks.status} in ('pending', 'running'))`,
+      awaiting: sql<string>`count(*) filter (where ${tasks.status} = 'awaiting_approval')`,
+      lastActivityAt: sql<string | null>`max(${tasks.updatedAt})`,
     })
     .from(tasks)
     .where(and(eq(tasks.projectId, ctx.projectId), inArray(tasks.objectiveId, ids), eq(tasks.classification, 'live')))
@@ -207,10 +216,13 @@ export async function listObjectives(tx: DbTx, ctx: TenantContext): Promise<Obje
     const base = {
       tasksTotal: Number(t?.total ?? 0),
       tasksCompleted: Number(t?.completed ?? 0),
+      tasksRunning: Number(t?.running ?? 0),
+      tasksAwaitingApproval: Number(t?.awaiting ?? 0),
       criteriaTotal: criteria.length,
       criteriaSatisfied: criteria.filter((c) => c.status !== 'unmet').length,
       milestonesTotal: Number(m?.total ?? 0),
       milestonesCompleted: Number(m?.completed ?? 0),
+      lastActivityAt: t?.lastActivityAt ? new Date(t.lastActivityAt) : null,
     };
     return {
       id: r.id,
@@ -434,10 +446,15 @@ export async function getObjective(
     // Headline progress is LIVE-only regardless of the display toggle.
     tasksTotal: liveTasks.length,
     tasksCompleted: liveTasks.filter((t) => t.status === 'completed').length,
+    tasksRunning: liveTasks.filter((t) => t.status === 'pending' || t.status === 'running').length,
+    tasksAwaitingApproval: liveTasks.filter((t) => t.status === 'awaiting_approval').length,
     criteriaTotal: row.successCriteria.length,
     criteriaSatisfied: row.successCriteria.filter((c) => c.status !== 'unmet').length,
     milestonesTotal: ms.length,
     milestonesCompleted: ms.filter((m) => m.status === 'completed').length,
+    lastActivityAt: liveTasks.length
+      ? liveTasks.reduce<Date | null>((acc, t) => (!acc || t.createdAt > acc ? t.createdAt : acc), null)
+      : null,
   };
 
   return {
