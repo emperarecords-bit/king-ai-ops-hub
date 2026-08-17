@@ -29,6 +29,7 @@ import { createTextArtifact } from '@/domain/artifacts/artifacts';
 import { assembleOrgBriefing, listDelegationTargets, resolveHqProjectKey } from '@/domain/org/briefing';
 import { assembleTeamBriefing } from '@/domain/tasks/team-briefing';
 import { assemblePortfolioBriefing } from '@/domain/portfolio/portfolio';
+import { assembleAccurateBidsSight, sightEnabledKeys } from '@/domain/integrations/accuratebids-sight';
 import { createOwnerQuestions } from '@/domain/questions/questions';
 import { resolveModelForTier } from '@/orchestration/routing';
 import {
@@ -1210,6 +1211,22 @@ async function executeAndFinalize(
   } catch (err) {
     log.warn('portfolio briefing assembly failed (run continues without it)', { errorClass: err instanceof Error ? err.name : 'unknown' });
   }
+  // AccurateBids sight: configured workspaces (the owner's contracting business) see the live
+  // read-only AccurateBids book in every run. Absent config or endpoint trouble → no snapshot.
+  let accurateBidsSight: string | null = null;
+  try {
+    const sightKeys = sightEnabledKeys();
+    if (sightKeys.length > 0) {
+      const projRows = await withTenant(ctx, (tx) =>
+        tx.select({ key: projects.key }).from(projects).where(eq(projects.id, ctx.projectId)).limit(1),
+      );
+      if (projRows[0] && sightKeys.includes(projRows[0].key)) {
+        accurateBidsSight = await assembleAccurateBidsSight();
+      }
+    }
+  } catch (err) {
+    log.warn('accuratebids sight assembly failed (run continues without it)', { errorClass: err instanceof Error ? err.name : 'unknown' });
+  }
   const primaryEngineAgent = toEngineAgent(primaryRow, task.modelTier);
   const primaryForRun = gmInfo
     ? { ...primaryEngineAgent, systemPrompt: `${primaryEngineAgent.systemPrompt}\n${buildDelegationRules(gmInfo.roster, crossTargets)}` }
@@ -1219,6 +1236,7 @@ async function executeAndFinalize(
     ...(teamBriefing ? [{ title: 'Team briefing (this workspace)', content: teamBriefing, authority: AUTHORITY.HUB_STATE, kind: 'Team briefing' }] : []),
     ...(orgBriefing ? [{ title: 'Organization-wide briefing (headquarters)', content: orgBriefing, authority: AUTHORITY.HUB_STATE, kind: 'Organization briefing' }] : []),
     ...(portfolioBriefing ? [{ title: 'Owner portfolio snapshot (this workspace)', content: portfolioBriefing, authority: AUTHORITY.HUB_STATE, kind: 'Portfolio snapshot' }] : []),
+    ...(accurateBidsSight ? [{ title: 'AccurateBids live snapshot (read-only)', content: accurateBidsSight, authority: AUTHORITY.HUB_STATE, kind: 'AccurateBids snapshot' }] : []),
   ];
 
   let result;
