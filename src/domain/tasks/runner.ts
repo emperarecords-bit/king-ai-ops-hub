@@ -28,6 +28,7 @@ import { loadApprovedContextForRun } from '@/domain/github/content';
 import { createTextArtifact } from '@/domain/artifacts/artifacts';
 import { assembleOrgBriefing, listDelegationTargets, resolveHqProjectKey } from '@/domain/org/briefing';
 import { assembleTeamBriefing } from '@/domain/tasks/team-briefing';
+import { assemblePortfolioBriefing } from '@/domain/portfolio/portfolio';
 import { createOwnerQuestions } from '@/domain/questions/questions';
 import { resolveModelForTier } from '@/orchestration/routing';
 import {
@@ -1201,6 +1202,14 @@ async function executeAndFinalize(
       log.warn('team briefing assembly failed (run continues without it)', { errorClass: err instanceof Error ? err.name : 'unknown' });
     }
   }
+  // Workspaces with a portfolio ledger (the Stocks desk) get the owner's real holdings in
+  // every run, so research lands on what the owner actually owns. Null everywhere else.
+  let portfolioBriefing: string | null = null;
+  try {
+    portfolioBriefing = await withTenant(ctx, (tx) => assemblePortfolioBriefing(tx, ctx));
+  } catch (err) {
+    log.warn('portfolio briefing assembly failed (run continues without it)', { errorClass: err instanceof Error ? err.name : 'unknown' });
+  }
   const primaryEngineAgent = toEngineAgent(primaryRow, task.modelTier);
   const primaryForRun = gmInfo
     ? { ...primaryEngineAgent, systemPrompt: `${primaryEngineAgent.systemPrompt}\n${buildDelegationRules(gmInfo.roster, crossTargets)}` }
@@ -1209,6 +1218,7 @@ async function executeAndFinalize(
     ...assembled.contextItems,
     ...(teamBriefing ? [{ title: 'Team briefing (this workspace)', content: teamBriefing, authority: AUTHORITY.HUB_STATE, kind: 'Team briefing' }] : []),
     ...(orgBriefing ? [{ title: 'Organization-wide briefing (headquarters)', content: orgBriefing, authority: AUTHORITY.HUB_STATE, kind: 'Organization briefing' }] : []),
+    ...(portfolioBriefing ? [{ title: 'Owner portfolio snapshot (this workspace)', content: portfolioBriefing, authority: AUTHORITY.HUB_STATE, kind: 'Portfolio snapshot' }] : []),
   ];
 
   let result;
