@@ -1,8 +1,10 @@
 import Link from 'next/link';
 import { listMyProjectsWithOrgRoles } from '@/domain/auth/guard';
 import { ownerInbox } from '@/domain/inbox/inbox';
+import { openQuestionsForOwner } from '@/domain/questions/questions';
 import { Card, EmptyState, PageHeader } from '@/components/ui';
 import { InboxDecisionForm } from './inbox-decision-form';
+import { QuestionAnswerForm } from './question-answer-form';
 
 /**
  * The Owner Inbox (EV-011 follow-up): every pending approval, every business,
@@ -13,15 +15,16 @@ import { InboxDecisionForm } from './inbox-decision-form';
 export default async function InboxPage() {
   const { user, projects, orgRoles } = await listMyProjectsWithOrgRoles();
   const inbox = await ownerInbox(user.id, projects, orgRoles);
+  const questions = await openQuestionsForOwner(user.id, projects, orgRoles);
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-6">
       <PageHeader
         title="Inbox"
         subtitle={
-          inbox.items.length === 0
-            ? `Nothing needs your okay — checked ${inbox.workspacesChecked} businesses.`
-            : `${inbox.items.length} thing${inbox.items.length === 1 ? '' : 's'} waiting for your okay across ${inbox.workspacesWithPending} business${inbox.workspacesWithPending === 1 ? '' : 'es'}.`
+          inbox.items.length === 0 && questions.length === 0
+            ? `Nothing needs you — checked ${inbox.workspacesChecked} businesses.`
+            : `${inbox.items.length} decision${inbox.items.length === 1 ? '' : 's'} · ${questions.length} question${questions.length === 1 ? '' : 's'} for you.`
         }
       />
       <div className="text-sm">
@@ -30,10 +33,33 @@ export default async function InboxPage() {
         </Link>
       </div>
 
-      {inbox.items.length === 0 ? (
+      {questions.length > 0 ? (
+        <section className="space-y-3">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-[var(--muted)]">
+            Questions for you — your answer becomes that business&apos;s knowledge
+          </h2>
+          {questions.map((q) => (
+            <Card key={q.questionId}>
+              <div className="flex flex-col gap-2">
+                <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
+                  <span className="rounded bg-[var(--surface-raised)] px-2 py-0.5 text-[var(--foreground)]">
+                    {q.workspaceName}
+                  </span>
+                  {q.askedBy ? <span>asked by {q.askedBy}</span> : null}
+                  <span>· {q.createdAt.toISOString().slice(0, 16).replace('T', ' ')} UTC</span>
+                </div>
+                <p className="text-sm font-semibold">{q.question}</p>
+                <QuestionAnswerForm projectKey={q.projectKey} questionId={q.questionId} />
+              </div>
+            </Card>
+          ))}
+        </section>
+      ) : null}
+
+      {inbox.items.length === 0 && questions.length === 0 ? (
         <EmptyState>
-          All clear. When an employee proposes something consequential — sending, publishing, spending, changing
-          code — it appears here and waits for you.
+          All clear. When an employee proposes something consequential — or needs a fact only you can supply —
+          it appears here and waits for you.
         </EmptyState>
       ) : (
         inbox.items.map((item) => (

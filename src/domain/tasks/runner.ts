@@ -28,6 +28,7 @@ import { loadApprovedContextForRun } from '@/domain/github/content';
 import { createTextArtifact } from '@/domain/artifacts/artifacts';
 import { assembleOrgBriefing, listDelegationTargets, resolveHqProjectKey } from '@/domain/org/briefing';
 import { assembleTeamBriefing } from '@/domain/tasks/team-briefing';
+import { createOwnerQuestions } from '@/domain/questions/questions';
 import { resolveModelForTier } from '@/orchestration/routing';
 import {
   type ContextManifestEntry,
@@ -1556,6 +1557,22 @@ async function finalizeCompleted(
       }
     }
 
+    // Ask-the-owner: any employee's questions become open Inbox items (bounded, deduped, audited
+    // inside createOwnerQuestions). Failures never fail the run's finalize.
+    let questionsAsked = 0;
+    if (result.ownerQuestions.length > 0) {
+      try {
+        questionsAsked = await createOwnerQuestions(tx, ctx, {
+          taskId,
+          runId,
+          agentId: primaryRow.id,
+          questions: result.ownerQuestions,
+        });
+      } catch (err) {
+        log.warn('owner question save failed (run unaffected)', { runId, errorClass: err instanceof Error ? err.name : 'unknown' });
+      }
+    }
+
     const finalStatus = authorizationsRequested > 0 ? ('awaiting_approval' as const) : ('completed' as const);
 
     await tx
@@ -1574,7 +1591,7 @@ async function finalizeCompleted(
       action: 'run.completed',
       entityType: 'run',
       entityId: runId,
-      detail: { steps: result.steps.length, proposedActions: result.proposedActions.length, delegationsCreated, artifactsCreated, finalStatus },
+      detail: { steps: result.steps.length, proposedActions: result.proposedActions.length, delegationsCreated, artifactsCreated, questionsAsked, finalStatus },
     });
     await writeAudit(tx, ctx, {
       action: 'run.finalization_completed',

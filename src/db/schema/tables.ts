@@ -2131,3 +2131,42 @@ export const platformPricingState = pgTable(
     }),
   ],
 );
+
+/**
+ * Ask-the-owner (owner directive 2026-08-17): a question an employee's run addressed to the owner.
+ * Open questions surface on the owner's Inbox; the owner's answer is written into this workspace's
+ * knowledge (the durable record) and stored here for provenance. Append-mostly: rows are answered
+ * or dismissed, never deleted.
+ */
+export const ownerQuestions = pgTable(
+  'owner_questions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    runId: uuid('run_id').references(() => runs.id, { onDelete: 'set null' }),
+    /** The employee whose run asked. */
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'restrict' }),
+    question: text('question').notNull(),
+    /** open | answered | dismissed — app-enforced vocabulary (no enum: append-safe). */
+    status: text('status').notNull().default('open'),
+    answer: text('answer'),
+    answeredBy: uuid('answered_by').references(() => profiles.id, { onDelete: 'restrict' }),
+    answeredAt: timestamp('answered_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    index('owner_questions_project_status_idx').on(t.projectId, t.status),
+    index('owner_questions_org_idx').on(t.orgId),
+    check('owner_questions_status_chk', sql`${t.status} in ('open','answered','dismissed')`),
+  ],
+);
