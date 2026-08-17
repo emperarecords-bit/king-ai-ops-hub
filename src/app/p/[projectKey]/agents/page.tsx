@@ -151,7 +151,11 @@ export default async function EmployeesPage({
                 return (
                   <Card key={agent.id}>
                     <div className="mb-1 flex flex-wrap items-center gap-3">
-                      <h3 className="font-semibold">{agent.name}</h3>
+                      <h3 className="font-semibold">
+                        <Link href={`/p/${projectKey}/agents/${agent.id}`} className="hover:underline">
+                          {agent.name}
+                        </Link>
+                      </h3>
                       {/* Employee Chat (EV-004): talking beats forms. Primaries only — reviewers are
                           dispatched by the engine, not conversed with. */}
                       {agent.role === 'primary' && agent.enabled ? (
