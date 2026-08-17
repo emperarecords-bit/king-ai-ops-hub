@@ -828,6 +828,24 @@ begin
 end
 $$;
 
+-- Ask-the-owner questions (migration 0066). to_regclass-guarded like conversations so the
+-- penultimate-schema incremental bootstrap tolerates absence. Questions are answered or
+-- dismissed, never deleted — no delete grant.
+do $$
+begin
+  if to_regclass('public.owner_questions') is not null then
+    grant select, insert, update on owner_questions to app_server;
+    alter table owner_questions enable row level security;
+    alter table owner_questions force row level security;
+    drop policy if exists owner_questions_tenant on owner_questions;
+    execute
+      'create policy owner_questions_tenant on owner_questions
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+  end if;
+end
+$$;
+
 -- Provisioning INSERT policies (Sprint 5, "The Front Door") -------------------
 -- Workspace/org creation happens BEFORE the row being created has members, so
 -- the membership-based USING predicates above can never admit these inserts.

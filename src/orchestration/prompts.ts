@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { createHash } from 'node:crypto';
 import { ARTIFACT_RULES } from './artifacts-block';
+import { QUESTION_RULES } from './questions-block';
 import {
   type Freshness,
   type FreshnessComparison,
@@ -115,7 +116,7 @@ function freshnessTag(f: Freshness | undefined): string {
 }
 
 export function buildPrimarySystem(agentSystemPrompt: string): string {
-  return `${agentSystemPrompt}\n${SHARED_RULES}${ARTIFACT_RULES}\n${AUTHORITY_CONTRACT}`;
+  return `${agentSystemPrompt}\n${SHARED_RULES}${ARTIFACT_RULES}${QUESTION_RULES}\n${AUTHORITY_CONTRACT}`;
 }
 
 /** The objective a task serves — owner intent that frames the work. */

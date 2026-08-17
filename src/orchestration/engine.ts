@@ -25,6 +25,7 @@ import { canonicalReviewRubric, reviewRubricHash } from '@/domain/agents/reviewe
 import { extractProposedActions, type ProposedAction, stripActionBlock } from './actions';
 import { extractDelegatedTasks, type DelegatedTask } from './delegations';
 import { extractRunArtifacts, type RunArtifact } from './artifacts-block';
+import { extractOwnerQuestions } from './questions-block';
 import { sha256Hex } from '@/lib/crypto';
 
 /**
@@ -211,6 +212,7 @@ export interface EngineResult {
   readonly delegatedTasks: readonly DelegatedTask[];
   /** Deliverables any employee saved to the workspace shelf (internal reversible writes). */
   readonly runArtifacts: readonly RunArtifact[];
+  readonly ownerQuestions: readonly string[];
   readonly steps: readonly StepRecord[];
   readonly failureReason: string | null;
 }
@@ -424,6 +426,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
         proposedActions: [],
         delegatedTasks: [],
         runArtifacts: [],
+        ownerQuestions: [],
         steps,
         failureReason: `Primary model call failed: ${message}`,
       };
@@ -638,6 +641,11 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
   if (artifactExtraction.rejected.length > 0) {
     await sink.onMalformedOutput(stepNumber, artifactExtraction.rejected);
   }
+  // Ask-the-owner: any employee may raise questions; rows are created at finalization.
+  const questionExtraction = extractOwnerQuestions(finalText);
+  if (questionExtraction.rejected.length > 0) {
+    await sink.onMalformedOutput(stepNumber, questionExtraction.rejected);
+  }
 
   return {
     ok: true,
@@ -645,6 +653,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
     proposedActions: extraction.actions,
     delegatedTasks: delegationExtraction.delegations,
     runArtifacts: artifactExtraction.artifacts,
+    ownerQuestions: questionExtraction.questions,
     steps,
     failureReason: null,
   };

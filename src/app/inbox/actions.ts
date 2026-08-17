@@ -7,6 +7,7 @@ import { log } from '@/lib/log';
 import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { decideApproval } from '@/domain/approvals/approvals';
+import { answerOwnerQuestion, dismissOwnerQuestion } from '@/domain/questions/questions';
 import { executeApprovedIfEligible, type ApprovalExecutionOutcome } from '@/domain/execution/execute-on-approval';
 
 export interface InboxDecisionState {
@@ -59,4 +60,49 @@ export async function decideFromInbox(
   revalidatePath('/inbox');
   revalidatePath(`/p/${parsed.data.projectKey}/approvals`);
   return { error: null, executed };
+}
+
+export interface QuestionAnswerState {
+  error: string | null;
+  resolved: boolean;
+}
+
+const questionSchema = z.object({
+  projectKey: z.string().min(1),
+  questionId: z.string().uuid(),
+  intent: z.enum(['answer', 'dismiss']),
+  answer: z.string().max(8_000).optional(),
+});
+
+/**
+ * Ask-the-owner: resolve one question FROM the inbox. Same viewport-not-privilege
+ * stance as decideFromInbox — requireTenant re-derives membership for the target
+ * workspace, and the domain enforces admin authority. An answer becomes ACTIVE
+ * knowledge in the asking workspace.
+ */
+export async function resolveQuestionFromInbox(
+  _prev: QuestionAnswerState,
+  formData: FormData,
+): Promise<QuestionAnswerState> {
+  const parsed = questionSchema.safeParse({
+    projectKey: formData.get('projectKey'),
+    questionId: formData.get('questionId'),
+    intent: formData.get('intent'),
+    answer: formData.get('answer') ?? undefined,
+  });
+  if (!parsed.success) return { error: 'Invalid request.', resolved: false };
+  try {
+    const ctx = await requireTenant(parsed.data.projectKey);
+    await withTenant(ctx, (tx) =>
+      parsed.data.intent === 'answer'
+        ? answerOwnerQuestion(tx, ctx, parsed.data.questionId, parsed.data.answer ?? '')
+        : dismissOwnerQuestion(tx, ctx, parsed.data.questionId),
+    );
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('resolveQuestionFromInbox failed', { err });
+    return { error: toPublicMessage(err), resolved: false };
+  }
+  revalidatePath('/inbox');
+  revalidatePath(`/p/${parsed.data.projectKey}/knowledge`);
+  return { error: null, resolved: true };
 }
