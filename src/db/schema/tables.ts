@@ -9,6 +9,7 @@ import {
   index,
   integer,
   jsonb,
+  numeric,
   pgTable,
   real,
   text,
@@ -2168,5 +2169,98 @@ export const ownerQuestions = pgTable(
     index('owner_questions_project_status_idx').on(t.projectId, t.status),
     index('owner_questions_org_idx').on(t.orgId),
     check('owner_questions_status_chk', sql`${t.status} in ('open','answered','dismissed')`),
+  ],
+);
+
+/**
+ * Portfolio tracking (owner directive 2026-08-17): the owner places every trade personally in
+ * their brokerage; the hub is a LEDGER of what they tell it — accounts, trades, and cached
+ * quotes. Nothing here executes anything. Quantities/prices are numeric strings in JS
+ * (fractional shares exist); the domain layer owns the arithmetic.
+ */
+export const brokerageAccounts = pgTable(
+  'brokerage_accounts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    /** Owner-facing label, e.g. "Robinhood — personal". */
+    name: text('name').notNull(),
+    broker: text('broker'),
+    currency: text('currency').notNull().default('USD'),
+    /** active | closed — app-enforced vocabulary (no enum: append-safe). */
+    status: text('status').notNull().default('active'),
+    createdBy: uuid('created_by')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'restrict' }),
+    ...timestamps,
+  },
+  (t) => [
+    index('brokerage_accounts_project_idx').on(t.projectId, t.status),
+    unique('brokerage_accounts_project_name_uniq').on(t.projectId, t.name),
+    check('brokerage_accounts_status_chk', sql`${t.status} in ('active','closed')`),
+  ],
+);
+
+export const portfolioTrades = pgTable(
+  'portfolio_trades',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    accountId: uuid('account_id')
+      .notNull()
+      .references(() => brokerageAccounts.id, { onDelete: 'cascade' }),
+    symbol: text('symbol').notNull(),
+    /** buy | sell — app-enforced vocabulary. No shorts in v1 (a sell may not exceed holdings). */
+    side: text('side').notNull(),
+    quantity: numeric('quantity', { precision: 20, scale: 8 }).notNull(),
+    price: numeric('price', { precision: 20, scale: 8 }).notNull(),
+    fees: numeric('fees', { precision: 20, scale: 8 }).notNull().default('0'),
+    tradedAt: timestamp('traded_at', { withTimezone: true }).notNull(),
+    note: text('note'),
+    createdBy: uuid('created_by')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'restrict' }),
+    ...timestamps,
+  },
+  (t) => [
+    index('portfolio_trades_account_symbol_idx').on(t.accountId, t.symbol),
+    index('portfolio_trades_project_traded_idx').on(t.projectId, t.tradedAt),
+    check('portfolio_trades_side_chk', sql`${t.side} in ('buy','sell')`),
+    check('portfolio_trades_quantity_chk', sql`${t.quantity} > 0`),
+    check('portfolio_trades_price_chk', sql`${t.price} >= 0`),
+    check('portfolio_trades_fees_chk', sql`${t.fees} >= 0`),
+  ],
+);
+
+/** Latest cached market price per symbol per workspace (manual refresh; best-effort source). */
+export const symbolQuotes = pgTable(
+  'symbol_quotes',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    symbol: text('symbol').notNull(),
+    price: numeric('price', { precision: 20, scale: 8 }).notNull(),
+    asOf: timestamp('as_of', { withTimezone: true }).notNull(),
+    source: text('source').notNull().default('stooq'),
+    ...timestamps,
+  },
+  (t) => [
+    unique('symbol_quotes_project_symbol_uniq').on(t.projectId, t.symbol),
+    index('symbol_quotes_org_idx').on(t.orgId),
   ],
 );

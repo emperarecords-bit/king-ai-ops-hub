@@ -470,6 +470,13 @@
       "when": 1786970005107,
       "tag": "0066_owner_questions",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1786987465992,
+      "tag": "0067_stock_portfolio",
+      "breakpoints": true
     }
   ]
 }

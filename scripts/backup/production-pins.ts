@@ -16,9 +16,9 @@ export const PRODUCTION_PINS: ReleasePins = {
   databaseIdentity: 'king_ai_ops_hub_production',
   snapshotProvider: FLY_VOLUMES_PROVIDER,
   providerAdapterVersion: FLY_VOLUMES_ADAPTER_VERSION,
-  // Bumped 2026-08-17 (0066 owner_questions — ask-the-owner).
-  expectedMigrationEndpoint: '0066_owner_questions',
-  expectedCommittedMigrationCount: 67,
-  /** Production deployed through 0065 on 2026-08-16; 0066 is the one pending. */
-  defaultAppliedCount: 66,
+  // Bumped 2026-08-17 (0067 stock_portfolio — position ledger).
+  expectedMigrationEndpoint: '0067_stock_portfolio',
+  expectedCommittedMigrationCount: 68,
+  /** Production deployed through 0066 on 2026-08-17; 0067 is the one pending. */
+  defaultAppliedCount: 67,
 } as const;

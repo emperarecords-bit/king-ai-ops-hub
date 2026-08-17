@@ -846,6 +846,44 @@ begin
 end
 $$;
 
+-- Portfolio ledger (migration 0067). to_regclass-guarded like owner_questions so the
+-- penultimate-schema incremental bootstrap tolerates absence. Trades may be deleted
+-- (typo correction by the owner); accounts and quotes are never deleted by the app.
+do $$
+begin
+  if to_regclass('public.brokerage_accounts') is not null then
+    grant select, insert, update on brokerage_accounts to app_server;
+    alter table brokerage_accounts enable row level security;
+    alter table brokerage_accounts force row level security;
+    drop policy if exists brokerage_accounts_tenant on brokerage_accounts;
+    execute
+      'create policy brokerage_accounts_tenant on brokerage_accounts
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+  end if;
+  if to_regclass('public.portfolio_trades') is not null then
+    grant select, insert, update, delete on portfolio_trades to app_server;
+    alter table portfolio_trades enable row level security;
+    alter table portfolio_trades force row level security;
+    drop policy if exists portfolio_trades_tenant on portfolio_trades;
+    execute
+      'create policy portfolio_trades_tenant on portfolio_trades
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+  end if;
+  if to_regclass('public.symbol_quotes') is not null then
+    grant select, insert, update on symbol_quotes to app_server;
+    alter table symbol_quotes enable row level security;
+    alter table symbol_quotes force row level security;
+    drop policy if exists symbol_quotes_tenant on symbol_quotes;
+    execute
+      'create policy symbol_quotes_tenant on symbol_quotes
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+  end if;
+end
+$$;
+
 -- Provisioning INSERT policies (Sprint 5, "The Front Door") -------------------
 -- Workspace/org creation happens BEFORE the row being created has members, so
 -- the membership-based USING predicates above can never admit these inserts.
