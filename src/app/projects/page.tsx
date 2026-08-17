@@ -130,34 +130,95 @@ export default async function MorningBriefingPage({
         </EmptyState>
       ) : (
         <>
+          {/* Every headline number answers "what is that?" on click: Decisions jumps to the
+              Inbox; the other three expand into a per-business breakdown, each row a link. */}
           <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <Card title="Decisions waiting">
-              <p
-                className={`text-3xl font-bold ${totals.pendingApprovals > 0 ? 'text-[var(--accent)]' : ''}`}
-              >
-                {totals.pendingApprovals}
-              </p>
-            </Card>
-            <Card title="Completed (24h)">
-              <p className="text-3xl font-bold">{totals.runsCompleted}</p>
-              {totals.reviewInterventions > 0 ? (
-                <p className="mt-1 text-xs text-[var(--muted)]">
-                  {totals.reviewInterventions} changed by review — worth reading
+            <Link href="/inbox" className="block">
+              <Card title="Decisions waiting" className="h-full transition-colors hover:border-[var(--accent)]">
+                <p
+                  className={`text-3xl font-bold ${totals.pendingApprovals > 0 ? 'text-[var(--accent)]' : ''}`}
+                >
+                  {totals.pendingApprovals}
                 </p>
-              ) : null}
+                <p className="mt-1 text-xs text-[var(--muted)]">Open the Inbox →</p>
+              </Card>
+            </Link>
+            <Card title="Completed (24h)">
+              <details>
+                <summary className="cursor-pointer list-none">
+                  <p className="text-3xl font-bold">{totals.runsCompleted}</p>
+                  <p className="mt-1 text-xs text-[var(--muted)]">
+                    {totals.reviewInterventions > 0
+                      ? `${totals.reviewInterventions} changed by review — worth reading · `
+                      : ''}
+                    tap for breakdown ▾
+                  </p>
+                </summary>
+                <ul className="mt-2 space-y-1 text-xs">
+                  {workspaces.filter((w) => w.runsCompleted > 0).map((w) => (
+                    <li key={w.projectKey}>
+                      <Link href={`/p/${w.projectKey}/work`} className="flex justify-between hover:underline">
+                        <span className="truncate">{w.projectName}</span>
+                        <span className="shrink-0 pl-2 font-semibold">{w.runsCompleted}</span>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </details>
             </Card>
             <Card title="Needs attention">
-              <p
-                className={`text-3xl font-bold ${needsAttention > 0 ? 'text-[var(--danger)]' : ''}`}
-              >
-                {needsAttention}
-              </p>
-              <p className="mt-1 text-xs text-[var(--muted)]">
-                failed · at-risk · budget
-              </p>
+              <details>
+                <summary className="cursor-pointer list-none">
+                  <p
+                    className={`text-3xl font-bold ${needsAttention > 0 ? 'text-[var(--danger)]' : ''}`}
+                  >
+                    {needsAttention}
+                  </p>
+                  <p className="mt-1 text-xs text-[var(--muted)]">failed · at-risk · budget · tap for breakdown ▾</p>
+                </summary>
+                <ul className="mt-2 space-y-1 text-xs">
+                  {workspaces
+                    .filter((w) => w.runsFailed > 0 || w.objectivesAtRisk > 0 || w.spentPct >= 80)
+                    .map((w) => (
+                      <li key={w.projectKey} className="flex flex-wrap gap-x-2">
+                        <span className="truncate">{w.projectName}:</span>
+                        {w.runsFailed > 0 ? (
+                          <Link href={`/p/${w.projectKey}/work`} className="text-[var(--danger)] hover:underline">
+                            {w.runsFailed} failed
+                          </Link>
+                        ) : null}
+                        {w.objectivesAtRisk > 0 ? (
+                          <Link href={`/p/${w.projectKey}/objectives`} className="text-[var(--danger)] hover:underline">
+                            {w.objectivesAtRisk} at-risk
+                          </Link>
+                        ) : null}
+                        {w.spentPct >= 80 ? (
+                          <Link href={`/p/${w.projectKey}`} className="text-[var(--danger)] hover:underline">
+                            budget {w.spentPct}%
+                          </Link>
+                        ) : null}
+                      </li>
+                    ))}
+                </ul>
+              </details>
             </Card>
             <Card title="Working now">
-              <p className="text-3xl font-bold">{totals.workingNow}</p>
+              <details>
+                <summary className="cursor-pointer list-none">
+                  <p className="text-3xl font-bold">{totals.workingNow}</p>
+                  <p className="mt-1 text-xs text-[var(--muted)]">tap for breakdown ▾</p>
+                </summary>
+                <ul className="mt-2 space-y-1 text-xs">
+                  {workspaces.filter((w) => w.workingNow > 0).map((w) => (
+                    <li key={w.projectKey}>
+                      <Link href={`/p/${w.projectKey}/work`} className="flex justify-between hover:underline">
+                        <span className="truncate">{w.projectName}</span>
+                        <span className="shrink-0 pl-2 font-semibold">{w.workingNow}</span>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </details>
             </Card>
           </div>
 
