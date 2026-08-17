@@ -16,6 +16,7 @@ import {
   type ExecutorAction,
   type ExecutorResult,
 } from './executor-contract';
+import { AccurateBidsQuoteExecutor, accurateBidsDepsFromEnv } from './accuratebids-quote-executor';
 import { GitPrExecutor } from './git-pr-executor';
 import { NoopDryRunExecutor } from './noop-executor';
 import { OrgDelegationExecutor } from './org-delegation-executor';
@@ -69,6 +70,7 @@ function resolveExecutor(tx: DbTx, ctx: TenantContext, actionType: string): Exec
     return new GitPrExecutor({ client: getGitHubClient(), loadLinks: () => listRepoLinks(tx, ctx) });
   }
   if (actionType === 'org_delegation') return new OrgDelegationExecutor({ tx, ctx });
+  if (actionType === 'external_http') return new AccurateBidsQuoteExecutor(accurateBidsDepsFromEnv());
   if (actionType === 'file_write') return noop;
   return null;
 }

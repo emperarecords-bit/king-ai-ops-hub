@@ -117,7 +117,9 @@ describe('pricing foundation (P1a)', () => {
   });
 
   it('executor eligibility is true ONLY for git_pr and org_delegation (pricing gains no executor)', () => {
-    for (const a of ACTION_TYPES) expect(hasEligibleExecutor(a)).toBe(a === 'git_pr' || a === 'org_delegation');
+    for (const a of ACTION_TYPES) {
+      expect(hasEligibleExecutor(a)).toBe(a === 'git_pr' || a === 'org_delegation' || a === 'external_http');
+    }
   });
 
   it('no live-dispatch module imports the pricing foundation or canonical lib', () => {

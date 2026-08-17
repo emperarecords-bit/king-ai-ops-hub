@@ -7,7 +7,14 @@ import { type ActionType } from '@/types/domain';
  * an action type absent here can never execute, and the honest "execution unavailable" wording
  * remains for it. Keep this in lockstep with resolveExecutor() in ./dispatch.ts.
  */
-const ELIGIBLE_EXECUTOR_ACTION_TYPES: ReadonlySet<ActionType> = new Set<ActionType>(['git_pr', 'org_delegation']);
+const ELIGIBLE_EXECUTOR_ACTION_TYPES: ReadonlySet<ActionType> = new Set<ActionType>([
+  'git_pr',
+  'org_delegation',
+  // The AccurateBids tap-in: external_http actions whose payload matches the strict
+  // accuratebids_quote contract become real draft quotes; every other external_http
+  // payload is refused by the executor with an explanatory block.
+  'external_http',
+]);
 
 /** True when a real executor exists for this action type. */
 export function hasEligibleExecutor(actionType: ActionType): boolean {
