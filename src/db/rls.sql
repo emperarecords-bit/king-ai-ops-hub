@@ -95,7 +95,7 @@ grant select, insert, update on
   agents, departments, project_context_items, integration_secrets,
   tasks, runs, run_steps, artifacts, approvals,
   objectives, milestones, knowledge_items, task_schedules,
-  documents, document_versions, document_chunks, document_version_tombstones, object_cleanup_operations, document_purge_operations, run_document_versions, task_dependencies, decisions, decision_injections, knowledge_injections, knowledge_sources, knowledge_verification_events, knowledge_disclosure_grants, document_disclosure_grants, knowledge_proposals, ai_operations, run_jobs, document_jobs, owner_questions,
+  documents, document_versions, document_chunks, document_version_tombstones, object_cleanup_operations, document_purge_operations, run_document_versions, task_dependencies, decisions, decision_injections, knowledge_injections, knowledge_sources, knowledge_verification_events, knowledge_disclosure_grants, document_disclosure_grants, knowledge_proposals, ai_operations, run_jobs, document_jobs,
   work_items,
   instruments, watchlists, watchlist_items, market_quotes, research_notes, trade_theses, paper_portfolios, paper_positions, paper_orders, paper_fills, risk_limits, restricted_symbols, risk_checks, kill_switches,
   usage_events, spend_limits, rate_limit_buckets, profiles
@@ -690,7 +690,7 @@ begin
     'artifacts', 'approvals', 'usage_events', 'spend_limits',
     'objectives', 'milestones', 'knowledge_items', 'task_schedules',
     'documents', 'document_versions', 'document_chunks', 'document_version_tombstones', 'object_cleanup_operations', 'document_purge_operations', 'run_document_versions', 'task_dependencies', 'decisions', 'decision_injections', 'knowledge_injections', 'knowledge_sources', 'knowledge_verification_events', 'knowledge_disclosure_grants', 'document_disclosure_grants', 'knowledge_proposals', 'ai_operations', 'run_jobs',
-    'document_jobs', 'work_items', 'owner_questions',
+    'document_jobs', 'work_items',
     -- Stock Trading (P1): every trading table is strictly (org, project) tenant-scoped.
     'instruments', 'watchlists', 'watchlist_items', 'market_quotes', 'research_notes', 'trade_theses',
     'paper_portfolios', 'paper_positions', 'paper_orders', 'paper_fills', 'risk_limits', 'restricted_symbols',
@@ -822,6 +822,24 @@ begin
     drop policy if exists conversations_tenant on conversations;
     execute
       'create policy conversations_tenant on conversations
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+  end if;
+end
+$$;
+
+-- Ask-the-owner questions (migration 0066). to_regclass-guarded like conversations so the
+-- penultimate-schema incremental bootstrap tolerates absence. Questions are answered or
+-- dismissed, never deleted — no delete grant.
+do $$
+begin
+  if to_regclass('public.owner_questions') is not null then
+    grant select, insert, update on owner_questions to app_server;
+    alter table owner_questions enable row level security;
+    alter table owner_questions force row level security;
+    drop policy if exists owner_questions_tenant on owner_questions;
+    execute
+      'create policy owner_questions_tenant on owner_questions
          using (org_id = app.current_org_id() and project_id = app.current_project_id())
          with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
   end if;
