@@ -27,6 +27,7 @@ import { createTask } from '@/domain/tasks/tasks';
 import { loadApprovedContextForRun } from '@/domain/github/content';
 import { createTextArtifact } from '@/domain/artifacts/artifacts';
 import { assembleOrgBriefing, listDelegationTargets, resolveHqProjectKey } from '@/domain/org/briefing';
+import { assembleTeamBriefing } from '@/domain/tasks/team-briefing';
 import { resolveModelForTier } from '@/orchestration/routing';
 import {
   type ContextManifestEntry,
@@ -1189,16 +1190,25 @@ async function executeAndFinalize(
       log.warn('org briefing assembly failed (run continues without it)', { errorClass: err instanceof Error ? err.name : 'unknown' });
     }
   }
+  // Team briefing: EVERY General Manager's run (all workspaces, HQ included) carries live sight
+  // of its own team's recent work, so the GM routes information instead of delegating blind.
+  let teamBriefing: string | null = null;
+  if (gmInfo) {
+    try {
+      teamBriefing = await withTenant(ctx, (tx) => assembleTeamBriefing(tx, ctx, { excludeTaskId: taskId }));
+    } catch (err) {
+      log.warn('team briefing assembly failed (run continues without it)', { errorClass: err instanceof Error ? err.name : 'unknown' });
+    }
+  }
   const primaryEngineAgent = toEngineAgent(primaryRow, task.modelTier);
   const primaryForRun = gmInfo
     ? { ...primaryEngineAgent, systemPrompt: `${primaryEngineAgent.systemPrompt}\n${buildDelegationRules(gmInfo.roster, crossTargets)}` }
     : primaryEngineAgent;
-  const contextItemsForRun = orgBriefing
-    ? [
-        ...assembled.contextItems,
-        { title: 'Organization-wide briefing (headquarters)', content: orgBriefing, authority: AUTHORITY.HUB_STATE, kind: 'Organization briefing' },
-      ]
-    : assembled.contextItems;
+  const contextItemsForRun = [
+    ...assembled.contextItems,
+    ...(teamBriefing ? [{ title: 'Team briefing (this workspace)', content: teamBriefing, authority: AUTHORITY.HUB_STATE, kind: 'Team briefing' }] : []),
+    ...(orgBriefing ? [{ title: 'Organization-wide briefing (headquarters)', content: orgBriefing, authority: AUTHORITY.HUB_STATE, kind: 'Organization briefing' }] : []),
+  ];
 
   let result;
   try {
