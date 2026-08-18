@@ -21,7 +21,13 @@ export function resolveHqProjectKey(env: Record<string, string | undefined> = pr
 }
 
 const MAX_REPORT_SNIPPET = 700;
-const MAX_BRIEFING_CHARS = 18_000;
+const MAX_BRIEFING_CHARS = 30_000;
+/**
+ * Every business must survive the size cap. A tail-only truncation once silently dropped the
+ * last four workspaces alphabetically (their directive reports existed; the Chief of Staff
+ * reported "no reply") — so the budget is divided per business, never taken from the tail.
+ */
+const MIN_BUSINESS_SECTION_CHARS = 1_500;
 /** Report-back: HQ directives return in FULL (bounded), unlike ordinary work's short excerpt. */
 const MAX_DIRECTIVES_PER_BUSINESS = 3;
 const MAX_DIRECTIVE_REPORT_CHARS = 4_000;
@@ -171,7 +177,20 @@ export async function assembleOrgBriefing(userId: string, orgId: string): Promis
       sections.push(lines.join('\n'));
     }
 
-    const briefing = `Organization-wide briefing across ${projectRows.length} workspaces (read-only; assembled by the hub):\n\n${sections.join('\n\n')}`;
+    // Fair-share sizing: when the whole briefing would exceed the cap, every business section
+    // shrinks to its share — no business is ever dropped from the end.
+    const header = `Organization-wide briefing across ${projectRows.length} workspaces (read-only; assembled by the hub):`;
+    let body = sections.join('\n\n');
+    if (header.length + 2 + body.length > MAX_BRIEFING_CHARS && sections.length > 0) {
+      const perBusiness = Math.max(
+        MIN_BUSINESS_SECTION_CHARS,
+        Math.floor((MAX_BRIEFING_CHARS - header.length - 2 * sections.length) / sections.length),
+      );
+      body = sections
+        .map((s) => (s.length > perBusiness ? `${s.slice(0, perBusiness)}\n[section truncated to fit; full reports live in that workspace]` : s))
+        .join('\n\n');
+    }
+    const briefing = `${header}\n\n${body}`;
     return briefing.length > MAX_BRIEFING_CHARS ? `${briefing.slice(0, MAX_BRIEFING_CHARS)}\n[briefing truncated]` : briefing;
   });
 }
