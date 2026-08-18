@@ -108,6 +108,9 @@ export default tseslint.config(
       'playwright-report/**',
       'test-results/**',
       'next-env.d.ts',
+      // Standalone deployables (own runtime, own style — CommonJS Node services deployed to
+      // their own Fly apps). They are not part of the Next.js app this config governs.
+      'services/**',
     ],
   },
   ...coreWebVitals,
