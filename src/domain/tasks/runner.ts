@@ -31,6 +31,8 @@ import { assembleTeamBriefing } from '@/domain/tasks/team-briefing';
 import { assemblePortfolioBriefing } from '@/domain/portfolio/portfolio';
 import { assembleAccurateBidsSight, sightEnabledKeys } from '@/domain/integrations/accuratebids-sight';
 import { createOwnerQuestions } from '@/domain/questions/questions';
+import { createHqQuestions, deliverHqAnswer } from '@/domain/questions/hq-questions';
+import { HQ_QUESTION_RULES, extractHqQuestions } from '@/orchestration/questions-block';
 import { resolveModelForTier } from '@/orchestration/routing';
 import {
   type ContextManifestEntry,
@@ -1228,8 +1230,10 @@ async function executeAndFinalize(
     log.warn('accuratebids sight assembly failed (run continues without it)', { errorClass: err instanceof Error ? err.name : 'unknown' });
   }
   const primaryEngineAgent = toEngineAgent(primaryRow, task.modelTier);
+  // Ask-HQ: business (non-headquarters) GMs may raise questions to the Chief of Staff.
+  const hqAskRules = gmInfo && !isHqGm && hqKey ? `\n${HQ_QUESTION_RULES}` : '';
   const primaryForRun = gmInfo
-    ? { ...primaryEngineAgent, systemPrompt: `${primaryEngineAgent.systemPrompt}\n${buildDelegationRules(gmInfo.roster, crossTargets)}` }
+    ? { ...primaryEngineAgent, systemPrompt: `${primaryEngineAgent.systemPrompt}\n${buildDelegationRules(gmInfo.roster, crossTargets)}${hqAskRules}` }
     : primaryEngineAgent;
   const contextItemsForRun = [
     ...assembled.contextItems,
@@ -1599,6 +1603,38 @@ async function finalizeCompleted(
       } catch (err) {
         log.warn('owner question save failed (run unaffected)', { runId, errorClass: err instanceof Error ? err.name : 'unknown' });
       }
+    }
+
+    // Ask-HQ (owner directive 2026-08-19). Both directions ride this finalize:
+    //  * a business GM's hq-questions become Chief of Staff tasks at headquarters;
+    //  * a completing headquarters Ask-HQ task delivers its reply into the asker's knowledge.
+    // GM-ness and HQ-ness are re-derived here (cheap, trusted reads); failures never fail finalize.
+    try {
+      const hqKeyNow = resolveHqProjectKey();
+      if (hqKeyNow) {
+        const [proj] = await tx
+          .select({ key: projects.key, ownerAgentId: projects.ownerAgentId })
+          .from(projects)
+          .where(eq(projects.id, ctx.projectId))
+          .limit(1);
+        const isGmRun = Boolean(proj && proj.ownerAgentId === primaryRow.id);
+        if (proj && proj.key === hqKeyNow) {
+          await deliverHqAnswer(tx, ctx, { taskId, answerText: result.consolidated });
+        } else if (isGmRun) {
+          const hqExtraction = extractHqQuestions(result.consolidated);
+          if (hqExtraction.questions.length > 0) {
+            await createHqQuestions(tx, ctx, {
+              taskId,
+              runId,
+              agentId: primaryRow.id,
+              agentName: primaryRow.name,
+              questions: hqExtraction.questions,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      log.warn('ask-hq handling failed (run unaffected)', { runId, errorClass: err instanceof Error ? err.name : 'unknown' });
     }
 
     const finalStatus = authorizationsRequested > 0 ? ('awaiting_approval' as const) : ('completed' as const);
