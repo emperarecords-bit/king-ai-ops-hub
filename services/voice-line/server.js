@@ -289,4 +289,64 @@ app.post('/sms', (req, res) => {
     .catch((e) => console.error('sms agent failed:', e.message));
 });
 
+// ------------------------------------------------------------ owner notifier
+// The owner's directive (2026-08-20): "there's no way for the chief of staff to
+// contact me" -> text the owner IMMEDIATELY when anything lands in the Inbox.
+// Polls the hub database read-only (NOTIFY_DATABASE_URL is a SELECT-only role);
+// one SMS per poll batches everything new in that minute, so a burst of items
+// can never storm the owner's phone. Watermark starts at boot: only items that
+// arrive while the notifier is alive are announced (no replay of old backlog).
+// Texts go out only after the A2P campaign is approved; before that Twilio
+// accepts the send and carriers drop it - harmless, and it self-activates.
+const NOTIFY_DATABASE_URL = process.env.NOTIFY_DATABASE_URL || '';
+const TWILIO_LINE_NUMBER = process.env.TWILIO_LINE_NUMBER || '';
+
+if (NOTIFY_DATABASE_URL && TWILIO_LINE_NUMBER && restClient && OWNER_NUMBERS.length > 0) {
+  const postgres = require('postgres');
+  const nsql = postgres(NOTIFY_DATABASE_URL, { max: 1, prepare: false, idle_timeout: 30 });
+  let watermark = new Date();
+  let polling = false;
+
+  const short = (s, n) => (s || '').replace(/\s+/g, ' ').trim().slice(0, n);
+
+  async function pollInbox() {
+    if (polling) return;
+    polling = true;
+    try {
+      // The role's ONLY window into the database is this definer function.
+      const rows = await nsql`select * from public.notifier_inbox(${watermark})`;
+      const qs = rows.filter((r) => r.kind === 'question');
+      const aps = rows.filter((r) => r.kind === 'decision');
+      if (rows.length === 0) return;
+      for (const r of rows) if (r.created_at > watermark) watermark = r.created_at;
+
+      const lines = [];
+      for (const q of qs.slice(0, 4)) lines.push(`[${q.key}] asks: ${short(q.item, 140)}`);
+      for (const a of aps.slice(0, 4)) lines.push(`[${a.key}] needs your Okay/No: ${short(a.item, 110)}`);
+      const more = qs.length + aps.length - lines.length;
+      if (more > 0) lines.push(`...and ${more} more.`);
+      const body =
+        `New in your Inbox - ${qs.length ? `${qs.length} question${qs.length > 1 ? 's' : ''}` : ''}` +
+        `${qs.length && aps.length ? ', ' : ''}${aps.length ? `${aps.length} decision${aps.length > 1 ? 's' : ''}` : ''}:\n` +
+        lines.join('\n') + `\nText me back or open the Inbox.`;
+      for (const to of OWNER_NUMBERS) {
+        try {
+          await restClient.messages.create({ from: TWILIO_LINE_NUMBER, to, body: body.slice(0, 1500) });
+          console.log('notifier: texted', to, `(${qs.length}q/${aps.length}d)`);
+        } catch (e) {
+          console.error('notifier: send failed:', e.message);
+        }
+      }
+    } catch (e) {
+      console.error('notifier: poll failed:', e.message);
+    } finally {
+      polling = false;
+    }
+  }
+  setInterval(pollInbox, 60_000);
+  console.log('notifier: watching the Inbox (60s poll, SMS to', OWNER_NUMBERS.join(','), ')');
+} else {
+  console.log('notifier: disabled (needs NOTIFY_DATABASE_URL, TWILIO_LINE_NUMBER, Twilio creds, OWNER_PHONE_NUMBERS)');
+}
+
 server.listen(PORT, '0.0.0.0', () => console.log(`voice-line listening on :${PORT}`));

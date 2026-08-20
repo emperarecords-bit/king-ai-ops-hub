@@ -14,7 +14,9 @@ primary_region = "iad"
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true
-  min_machines_running = 0
+  # The owner-notifier poll loop must survive idle periods: one machine stays up
+  # (owner directive 2026-08-20: the CoS texts the owner when the Inbox changes).
+  min_machines_running = 1
 
 [[vm]]
   size = "shared-cpu-1x"
