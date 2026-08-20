@@ -72,10 +72,11 @@ export function formatSightBriefing(data: Record<string, unknown>): string {
   ];
   const recentQuotes = Array.isArray(quotes.recent) ? (quotes.recent as SnapshotQuote[]) : [];
   if (recentQuotes.length > 0) {
-    lines.push('', 'Recent quotes (newest first):');
+    lines.push('', 'Recent quotes (newest first; the [id] is what an accuratebids_invoice payload needs to invoice a quote):');
     for (const q of recentQuotes) {
+      const qid = (q as Record<string, unknown>).id;
       lines.push(
-        `  ${s(q.bid_date, 10)} | ${s(q.job_name, 90)} | ${s(q.customer_name, 40)} | ${s(q.status, 20)} | ${money(q.grand_total)}${q.deposit_paid === true ? ' | deposit PAID' : ''}`,
+        `  ${qid ? `[id ${s(qid, 40)}] ` : ''}${s(q.bid_date, 10)} | ${s(q.job_name, 90)} | ${s(q.customer_name, 40)} | ${s(q.status, 20)} | ${money(q.grand_total)}${q.deposit_paid === true ? ' | deposit PAID' : ''}`,
       );
     }
   }
