@@ -300,6 +300,13 @@ app.post('/sms', (req, res) => {
 // accepts the send and carriers drop it - harmless, and it self-activates.
 const NOTIFY_DATABASE_URL = process.env.NOTIFY_DATABASE_URL || '';
 const TWILIO_LINE_NUMBER = process.env.TWILIO_LINE_NUMBER || '';
+// Email bridge (owner directive 2026-08-20): until A2P approval lets SMS actually
+// deliver, the same notification also goes to the owner's email. The bridge
+// retires ITSELF: once a sent SMS is confirmed 'delivered' by Twilio, email stops.
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL || '';
+const NOTIFY_EMAIL_FROM = process.env.NOTIFY_EMAIL_FROM || 'Chief of Staff <noreply@accuratebids.com>';
+let smsConfirmedDelivering = false;
 
 if (NOTIFY_DATABASE_URL && TWILIO_LINE_NUMBER && restClient && OWNER_NUMBERS.length > 0) {
   const postgres = require('postgres');
@@ -331,10 +338,42 @@ if (NOTIFY_DATABASE_URL && TWILIO_LINE_NUMBER && restClient && OWNER_NUMBERS.len
         lines.join('\n') + `\nText me back or open the Inbox.`;
       for (const to of OWNER_NUMBERS) {
         try {
-          await restClient.messages.create({ from: TWILIO_LINE_NUMBER, to, body: body.slice(0, 1500) });
+          const msg = await restClient.messages.create({ from: TWILIO_LINE_NUMBER, to, body: body.slice(0, 1500) });
           console.log('notifier: texted', to, `(${qs.length}q/${aps.length}d)`);
+          // Self-retiring email bridge: confirm real carrier delivery once, then stop emailing.
+          if (!smsConfirmedDelivering) {
+            setTimeout(async () => {
+              try {
+                const m = await restClient.messages(msg.sid).fetch();
+                if (m.status === 'delivered') {
+                  smsConfirmedDelivering = true;
+                  console.log('notifier: SMS confirmed delivering - email bridge retired');
+                }
+              } catch (e) {
+                console.error('notifier: delivery check failed:', e.message);
+              }
+            }, 60_000);
+          }
         } catch (e) {
           console.error('notifier: send failed:', e.message);
+        }
+      }
+      if (!smsConfirmedDelivering && RESEND_API_KEY && NOTIFY_EMAIL) {
+        try {
+          const res = await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              from: NOTIFY_EMAIL_FROM,
+              to: [NOTIFY_EMAIL],
+              subject: `Inbox: ${qs.length ? `${qs.length} question${qs.length > 1 ? 's' : ''}` : ''}${qs.length && aps.length ? ', ' : ''}${aps.length ? `${aps.length} decision${aps.length > 1 ? 's' : ''}` : ''} waiting`,
+              text: body + '\n\n(Email bridge: this stops automatically once texting is approved by carriers.)',
+            }),
+          });
+          if (res.ok) console.log('notifier: emailed', NOTIFY_EMAIL);
+          else console.error('notifier: email failed:', res.status, (await res.text()).slice(0, 120));
+        } catch (e) {
+          console.error('notifier: email failed:', e.message);
         }
       }
     } catch (e) {
