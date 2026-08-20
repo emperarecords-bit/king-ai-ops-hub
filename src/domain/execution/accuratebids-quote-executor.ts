@@ -80,11 +80,55 @@ export const accurateBidsReplyPayloadSchema = z
 
 export type AccurateBidsReplyPayload = z.infer<typeof accurateBidsReplyPayloadSchema>;
 
+/**
+ * The invoice side of the tap-in (owner directive 2026-08-20: "build the invoice side").
+ * Two modes, mirroring the AccurateBids app's own quote->invoice conversion:
+ *   - quote_id: invoice an existing quote (the endpoint copies its customer/job/line items and
+ *     refuses a second non-void invoice for the same quote, so a retry can't double-bill);
+ *   - direct: customer_name + job_name + line_items when there is no quote behind it.
+ * Unlike quotes there is NO draft state for invoices — on the owner's Okay the invoice is
+ * created as a real 'unpaid' receivable, which is exactly why the Okay gates it. The owner
+ * still controls when the customer sees it.
+ */
+export const accurateBidsInvoicePayloadSchema = z
+  .object({
+    kind: z.literal('accuratebids_invoice'),
+    quote_id: z.string().uuid().optional(),
+    customer_name: z.string().min(1).max(200).optional(),
+    customer_phone: z.string().max(40).optional(),
+    customer_email: z.string().max(200).optional(),
+    job_name: z.string().min(1).max(200).optional(),
+    job_address: z.string().max(300).optional(),
+    line_items: z
+      .array(
+        z.object({
+          description: z.string().min(1).max(300),
+          qty: z.number().positive().max(100_000),
+          unit: z.string().max(20).optional(),
+          unit_price: z.number().min(0).max(1_000_000),
+        }).strict(),
+      )
+      .max(100)
+      .optional(),
+    tax_percent: z.number().min(0).max(30).optional(),
+    due_days: z.number().int().min(1).max(365).optional(),
+    notes: z.string().max(2000).optional(),
+  })
+  .strict()
+  .refine(
+    (p) => Boolean(p.quote_id) || Boolean(p.customer_name && p.job_name && p.line_items?.length),
+    { message: 'Provide quote_id, or customer_name + job_name + at least one line_item.' },
+  );
+
+export type AccurateBidsInvoicePayload = z.infer<typeof accurateBidsInvoicePayloadSchema>;
+
 export interface AccurateBidsQuoteExecutorDeps {
   /** The hub-quote edge-function URL. Unset means quote drafting is unconfigured and blocks. */
   readonly endpointUrl: string | undefined;
   /** The hub-reply edge-function URL (Email Desk). Unset means replies are unconfigured and block. */
   readonly replyUrl?: string | undefined;
+  /** The hub-invoice edge-function URL. Unset means invoicing is unconfigured and blocks. */
+  readonly invoiceUrl?: string | undefined;
   /** The machine service token AccurateBids minted for the hub. Never a human login. */
   readonly serviceToken: string | undefined;
   readonly fetcher?: typeof fetch;
@@ -95,6 +139,7 @@ export function accurateBidsDepsFromEnv(env: Record<string, string | undefined> 
   return {
     endpointUrl: env.ACCURATEBIDS_QUOTE_URL,
     replyUrl: env.ACCURATEBIDS_REPLY_URL,
+    invoiceUrl: env.ACCURATEBIDS_INVOICE_URL,
     serviceToken: env.ACCURATEBIDS_SERVICE_TOKEN,
   };
 }
@@ -184,6 +229,66 @@ export class AccurateBidsQuoteExecutor implements Executor {
       } catch (err) {
         const detail = err instanceof Error ? err.message : 'unknown error';
         return result('ambiguous', `Could not confirm the support reply (${detail}). Check the request's status before retrying.`, replyPlan, { reconciliation: 'required' });
+      }
+    }
+
+    // Invoice side: an approved invoice routes to the hub-invoice endpoint.
+    if (kindPeek === 'accuratebids_invoice') {
+      const invParsed = accurateBidsInvoicePayloadSchema.safeParse(action.payload);
+      if (!invParsed.success) {
+        const issues = invParsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+        return result('blocked', `accuratebids_invoice payload is not executable: ${issues}`, null);
+      }
+      if (!this.deps.invoiceUrl || !this.deps.serviceToken) {
+        return result('blocked', 'AccurateBids invoicing is not configured on this server.', null);
+      }
+      const inv = invParsed.data;
+      const invPlan = {
+        kind: inv.kind,
+        quoteId: inv.quote_id ?? null,
+        customerName: inv.customer_name ?? null,
+        jobName: inv.job_name ?? null,
+        lineItemCount: inv.line_items?.length ?? 0,
+      };
+      if (action.mode === 'dry_run') {
+        return result('not_executed', 'Dry run only. Would create the invoice in AccurateBids.', { ...invPlan, wouldExecute: true });
+      }
+      const { kind: _invKind, ...invBody } = inv;
+      try {
+        const fetcher = this.deps.fetcher ?? fetch;
+        const res = await fetcher(this.deps.invoiceUrl, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${this.deps.serviceToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(invBody),
+          signal: AbortSignal.timeout(15_000),
+        });
+        const text = await res.text();
+        let parsedBody: Record<string, unknown> = {};
+        try {
+          parsedBody = JSON.parse(text) as Record<string, unknown>;
+        } catch {
+          // Non-JSON error body; status carries the verdict.
+        }
+        if (!res.ok || parsedBody.success !== true) {
+          const detail = typeof parsedBody.error === 'string' ? parsedBody.error : `HTTP ${res.status}`;
+          if (res.status === 409) {
+            return result('blocked', `That quote is already invoiced - a second invoice was refused (no double-billing). ${detail}`, invPlan);
+          }
+          if (res.status >= 500) {
+            return result('ambiguous', `AccurateBids returned ${detail}. The invoice may or may not exist - check the Invoices list before retrying.`, invPlan, { reconciliation: 'required' });
+          }
+          return result('failed', `AccurateBids refused the invoice: ${detail}`, invPlan, { retryAllowed: true });
+        }
+        const invoiceNumber = typeof parsedBody.invoice_number === 'string' ? parsedBody.invoice_number : null;
+        const amount = parsedBody.amount;
+        return result(
+          'succeeded',
+          `Invoice ${invoiceNumber ?? ''}${amount != null ? ` ($${amount})` : ''} created in AccurateBids. Review and send it there.`,
+          { ...invPlan, invoiceId: parsedBody.invoice_id ?? null, invoiceNumber, amount: amount ?? null },
+        );
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : 'unknown error';
+        return result('ambiguous', `Could not confirm the AccurateBids invoice (${detail}). Check the Invoices list before retrying.`, invPlan, { reconciliation: 'required' });
       }
     }
 
