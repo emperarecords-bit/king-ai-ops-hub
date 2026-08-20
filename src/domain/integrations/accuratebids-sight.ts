@@ -90,6 +90,16 @@ export function formatSightBriefing(data: Record<string, unknown>): string {
       );
     }
   }
+  // Email Desk: unanswered support inquiries. The id is what an accuratebids_reply payload needs.
+  const support = (data.support ?? {}) as Record<string, unknown>;
+  const openInquiries = Array.isArray(support.open) ? (support.open as Record<string, unknown>[]) : [];
+  if (openInquiries.length > 0) {
+    lines.push('', `EMAIL DESK - ${openInquiries.length} unanswered support inquiries (draft a reply and propose it as an accuratebids_reply action; the owner's approval sends it):`);
+    for (const q of openInquiries) {
+      lines.push(`  [id ${s(q.id, 40)}] ${s(q.created_at, 10)} | ${s(q.name, 40)} <${s(q.email, 60)}> | ${s(q.topic, 40)}`);
+      lines.push(`    "${s(q.message, 300)}"`);
+    }
+  }
   const text = lines.join('\n');
   return text.length > CAP ? `${text.slice(0, CAP)}\n[truncated]` : text;
 }
