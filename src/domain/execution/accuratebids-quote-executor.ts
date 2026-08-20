@@ -64,9 +64,27 @@ export const accurateBidsQuotePayloadSchema = z
 
 export type AccurateBidsQuotePayload = z.infer<typeof accurateBidsQuotePayloadSchema>;
 
+/**
+ * Email Desk (owner directive 2026-08-20: "build email desk"): an owner-approved reply to an
+ * AccurateBids support inquiry. On Okay the hub POSTs to the hub-reply endpoint, which sends
+ * the email through AccurateBids' own sender and marks the request answered. The endpoint
+ * refuses a second reply to the same request, so a retried approval can never double-email.
+ */
+export const accurateBidsReplyPayloadSchema = z
+  .object({
+    kind: z.literal('accuratebids_reply'),
+    request_id: z.string().uuid(),
+    reply_text: z.string().min(10).max(5000),
+  })
+  .strict();
+
+export type AccurateBidsReplyPayload = z.infer<typeof accurateBidsReplyPayloadSchema>;
+
 export interface AccurateBidsQuoteExecutorDeps {
-  /** The hub-quote edge-function URL. Unset means the executor is unconfigured and blocks. */
+  /** The hub-quote edge-function URL. Unset means quote drafting is unconfigured and blocks. */
   readonly endpointUrl: string | undefined;
+  /** The hub-reply edge-function URL (Email Desk). Unset means replies are unconfigured and block. */
+  readonly replyUrl?: string | undefined;
   /** The machine service token AccurateBids minted for the hub. Never a human login. */
   readonly serviceToken: string | undefined;
   readonly fetcher?: typeof fetch;
@@ -74,7 +92,11 @@ export interface AccurateBidsQuoteExecutorDeps {
 }
 
 export function accurateBidsDepsFromEnv(env: Record<string, string | undefined> = process.env): AccurateBidsQuoteExecutorDeps {
-  return { endpointUrl: env.ACCURATEBIDS_QUOTE_URL, serviceToken: env.ACCURATEBIDS_SERVICE_TOKEN };
+  return {
+    endpointUrl: env.ACCURATEBIDS_QUOTE_URL,
+    replyUrl: env.ACCURATEBIDS_REPLY_URL,
+    serviceToken: env.ACCURATEBIDS_SERVICE_TOKEN,
+  };
 }
 
 const CAPABILITY: ExecutorCapability = Object.freeze({
@@ -115,6 +137,56 @@ export class AccurateBidsQuoteExecutor implements Executor {
     if (sha256Hex(canonicalJson(action.payload)) !== action.payloadSha256) {
       return result('blocked', 'Payload integrity re-verification failed at the executor.', null);
     }
+
+    // Email Desk: an approved support-inquiry reply routes to its own endpoint.
+    const kindPeek = (action.payload as Record<string, unknown>).kind;
+    if (kindPeek === 'accuratebids_reply') {
+      const replyParsed = accurateBidsReplyPayloadSchema.safeParse(action.payload);
+      if (!replyParsed.success) {
+        const issues = replyParsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+        return result('blocked', `accuratebids_reply payload is not executable: ${issues}`, null);
+      }
+      if (!this.deps.replyUrl || !this.deps.serviceToken) {
+        return result('blocked', 'The AccurateBids Email Desk is not configured on this server.', null);
+      }
+      const rp = replyParsed.data;
+      const replyPlan = { kind: rp.kind, requestId: rp.request_id, replyChars: rp.reply_text.length };
+      if (action.mode === 'dry_run') {
+        return result('not_executed', 'Dry run only. Would send the support reply.', { ...replyPlan, wouldExecute: true });
+      }
+      try {
+        const fetcher = this.deps.fetcher ?? fetch;
+        const res = await fetcher(this.deps.replyUrl, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${this.deps.serviceToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ request_id: rp.request_id, reply_text: rp.reply_text }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        const text = await res.text();
+        let parsedBody: Record<string, unknown> = {};
+        try {
+          parsedBody = JSON.parse(text) as Record<string, unknown>;
+        } catch {
+          // Non-JSON error body; status carries the verdict.
+        }
+        if (!res.ok || parsedBody.success !== true) {
+          const detail = typeof parsedBody.error === 'string' ? parsedBody.error : `HTTP ${res.status}`;
+          if (res.status === 409) {
+            return result('blocked', 'This inquiry was already answered - a second reply was refused (no double-emailing).', replyPlan);
+          }
+          if (res.status >= 500) {
+            return result('ambiguous', `AccurateBids returned ${detail}. The reply may or may not have sent - check the request's status before retrying.`, replyPlan, { reconciliation: 'required' });
+          }
+          return result('failed', `AccurateBids refused the reply: ${detail}`, replyPlan, { retryAllowed: true });
+        }
+        const sentTo = typeof parsedBody.sent_to === 'string' ? parsedBody.sent_to : null;
+        return result('succeeded', `Support reply sent${sentTo ? ` to ${sentTo}` : ''}; the inquiry is marked answered.`, { ...replyPlan, sentTo });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : 'unknown error';
+        return result('ambiguous', `Could not confirm the support reply (${detail}). Check the request's status before retrying.`, replyPlan, { reconciliation: 'required' });
+      }
+    }
+
     const parsed = accurateBidsQuotePayloadSchema.safeParse(action.payload);
     if (!parsed.success) {
       const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
