@@ -13,7 +13,45 @@ import {
 } from './executor-contract';
 
 export const GIT_PR_EXECUTOR_ID = 'git_pr';
-export const GIT_PR_EXECUTOR_VERSION = '1';
+export const GIT_PR_EXECUTOR_VERSION = '2';
+
+/**
+ * Placeholder-disease guard (incident 2026-08-20): an agent proposed replacing a 631-line file with
+ * the literal text "<COMPLETE FILE CONTENT NEEDED>", which would have destroyed it on merge. Any
+ * proposed file whose content matches one of these markers is a refusal — the payload is a summary
+ * of an edit, not the edit itself, and committing it destroys whatever it claims to preserve.
+ */
+export const GIT_PR_PLACEHOLDER_PATTERNS: readonly RegExp[] = Object.freeze([
+  // Angle-bracketed content tokens, e.g. "<COMPLETE FILE CONTENT NEEDED>", "<FILE CONTENT HERE>".
+  /<[^>\n]*FILE\s+CONTENTS?[^>\n]*>/i,
+  // Unbracketed variants, e.g. "COMPLETE FILE CONTENT NEEDED", "full file content goes here".
+  /\b(?:COMPLETE|FULL|ENTIRE)\s+FILE\s+CONTENTS?\s+(?:NEEDED|HERE|GOES\s+HERE)\b/i,
+  // Elision markers that promise the rest of the file without carrying it.
+  /\brest\s+of\s+(?:the\s+)?file\s+(?:remains\s+|is\s+)?unchanged\b/i,
+  /(?:\.\.\.|…)\s*existing\s+code|existing\s+code\s*(?:\.\.\.|…)/i,
+  /\bTODO:?\s*(?:add\s+|insert\s+|fill\s+in\s+)?(?:the\s+)?full\s+(?:file\s+)?content\b/i,
+]);
+
+/** First placeholder marker found in proposed file content, or null when the content is clean. */
+export function findGitPrPlaceholder(content: string): string | null {
+  for (const pattern of GIT_PR_PLACEHOLDER_PATTERNS) {
+    const match = pattern.exec(content);
+    if (match) return match[0].trim();
+  }
+  return null;
+}
+
+/**
+ * Shrink guard: replacing an existing file while discarding more than ~90% of it is the signature
+ * of a truncated/placeholder proposal, not a real edit. Only meaningful for files already big
+ * enough that the loss is destructive — tiny files shrink legitimately all the time.
+ */
+export const GIT_PR_SHRINK_GUARD = Object.freeze({
+  /** Existing files smaller than this are exempt (a 90% shrink of a 100-byte file is a normal edit). */
+  minExistingBytes: 256,
+  /** Proposed content must keep at least this fraction of the existing file's bytes. */
+  minSurvivingFraction: 0.1,
+});
 
 /**
  * The canonical git_pr payload an agent must propose for the action to be executable. Anything the
@@ -65,7 +103,9 @@ const CAPABILITY: ExecutorCapability = Object.freeze({
  * request through the policy-gated GitHub client. Reversible by construction — a PR can be closed,
  * a work branch deleted; the default branch is untouchable (write policy, enforced twice: here and
  * inside every mutating client method). Failure AFTER the first side effect is reported `ambiguous`
- * with reconciliation required, never silently retried.
+ * with reconciliation required, never silently retried. Since v2 (incident 2026-08-20) proposed
+ * content is itself distrusted: placeholder markers and >90% shrinks of existing files are
+ * `blocked` before any write.
  */
 export class GitPrExecutor implements Executor {
   readonly capability = CAPABILITY;
@@ -103,6 +143,18 @@ export class GitPrExecutor implements Executor {
     }
     const payload = parsed.data;
 
+    // Placeholder-disease guard: pure content check, enforced in every mode before anything else.
+    for (const file of payload.files) {
+      const marker = findGitPrPlaceholder(file.content);
+      if (marker) {
+        return result(
+          'blocked',
+          `git_pr file "${file.path}" contains placeholder text ("${marker}") where real file content is required. Committing a placeholder destroys the file it claims to preserve — the proposal must carry the complete intended content.`,
+          null,
+        );
+      }
+    }
+
     const links = await this.deps.loadLinks();
     const link = links.find((l) => l.repoFullName === payload.repo);
     if (!link) {
@@ -133,6 +185,34 @@ export class GitPrExecutor implements Executor {
     }
 
     const repo: RepoRef = { installationId: link.installationId, repoFullName: link.repoFullName };
+
+    // Shrink guard: read the PR target's tree (read-only) BEFORE any side effect. A proposed file
+    // that replaces an existing one while keeping <10% of its bytes is placeholder disease with the
+    // markers stripped — blocked, never committed. Failure to read the tree is a retryable failure:
+    // the guard fails closed rather than writing unverified.
+    let existingSizes: ReadonlyMap<string, number>;
+    try {
+      const tree = await this.deps.client.listTree(repo, intoBranch);
+      existingSizes = new Map(
+        tree.filter((e) => e.type === 'blob' && e.size !== null).map((e) => [e.path, e.size as number]),
+      );
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unknown error';
+      return result('failed', `No side effect occurred: could not read ${intoBranch} to verify existing file sizes: ${detail}`, plan, { retryAllowed: true });
+    }
+    for (const file of payload.files) {
+      const existingBytes = existingSizes.get(file.path);
+      if (existingBytes === undefined || existingBytes < GIT_PR_SHRINK_GUARD.minExistingBytes) continue;
+      const proposedBytes = Buffer.byteLength(file.content, 'utf8');
+      if (proposedBytes < existingBytes * GIT_PR_SHRINK_GUARD.minSurvivingFraction) {
+        return result(
+          'blocked',
+          `git_pr file "${file.path}" would shrink an existing ${existingBytes}-byte file on ${intoBranch} to ${proposedBytes} bytes (over ${Math.round((1 - GIT_PR_SHRINK_GUARD.minSurvivingFraction) * 100)}% loss). That is the signature of a truncated or placeholder proposal — a real replacement must carry the complete intended content.`,
+          plan,
+        );
+      }
+    }
+
     let sideEffectStarted = false;
     try {
       try {
