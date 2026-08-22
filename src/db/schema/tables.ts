@@ -312,6 +312,13 @@ export const knowledgeItems = pgTable(
     departmentId: uuid('department_id').references(() => departments.id, { onDelete: 'set null' }),
     agentId: uuid('agent_id').references(() => agents.id, { onDelete: 'set null' }),
     kind: knowledgeKindEnum('kind').notNull().default('fact'),
+    /**
+     * Pinned knowledge bypasses lexical relevance in run-context selection: owner laws and
+     * decisions must reach EVERY run of the workspace, not only runs whose task text happens to
+     * share words with them. Root cause of the 2026-08-22 fix: generic production-cycle inputs
+     * never matched decision titles, so agents re-asked already-decided questions repeatedly.
+     */
+    pinned: boolean('pinned').notNull().default(false),
     title: text('title').notNull(),
     body: text('body').notNull(),
     version: integer('version').notNull().default(1),

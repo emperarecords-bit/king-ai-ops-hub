@@ -653,6 +653,7 @@ export async function selectRelevantKnowledge(
       scopeTaskStatus: scopeTask.status,
       scopeObjectiveStatus: scopeObjective.status,
       disclosure: knowledgeItems.disclosure,
+      pinned: knowledgeItems.pinned,
     })
     .from(knowledgeItems)
     .leftJoin(scopeTask, eq(knowledgeItems.scopeTaskId, scopeTask.id))
@@ -705,9 +706,15 @@ export async function selectRelevantKnowledge(
     if (assessKnowledge(baseAssessInput).useState === 'withheld') continue;
 
     // Scope RELEVANCE: a record failing scope is not rescued by lexical overlap.
+    // PINNED items bypass the lexical gate entirely: owner laws and decisions must reach every
+    // run, not only runs whose task text happens to share words with them. Every other gate
+    // (lifecycle, disclosure, scope validity, freshness, provenance) still applies above/below.
     let relScore = 0;
     let reason = '';
-    if (r.scopeKind === 'task') {
+    if (r.pinned && r.scopeKind !== 'task' && r.scopeKind !== 'objective') {
+      relScore = 10_000;
+      reason = 'pinned';
+    } else if (r.scopeKind === 'task') {
       if (r.scopeTaskId && r.scopeTaskId === args.currentTaskId) { relScore = 1000; reason = 'task'; }
     } else if (r.scopeKind === 'objective') {
       if (r.scopeObjectiveId && r.scopeObjectiveId === args.currentObjectiveId) { relScore = 100; reason = 'objective'; }

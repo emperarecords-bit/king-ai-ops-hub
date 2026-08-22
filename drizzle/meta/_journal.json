@@ -477,6 +477,13 @@
       "when": 1786987465992,
       "tag": "0067_stock_portfolio",
       "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1787429017731,
+      "tag": "0068_knowledge_pinned",
+      "breakpoints": true
     }
   ]
 }
