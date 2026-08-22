@@ -68,11 +68,11 @@ export const STAGING_PINS: ReleasePins = {
   databaseIdentity: 'king_ai_ops_hub_staging',
   snapshotProvider: FLY_VOLUMES_PROVIDER,
   providerAdapterVersion: FLY_VOLUMES_ADAPTER_VERSION,
-  // Bumped 2026-08-17 for 0067 (stock_portfolio — position ledger).
-  expectedMigrationEndpoint: '0067_stock_portfolio',
-  expectedCommittedMigrationCount: 68,
-  /** Staging deployed through 0066; 0067 is the one pending. */
-  defaultAppliedCount: 67,
+  // Bumped 2026-08-22 for 0068 (knowledge_pinned — pinned knowledge reaches every run).
+  expectedMigrationEndpoint: '0068_knowledge_pinned',
+  expectedCommittedMigrationCount: 69,
+  /** Staging deployed through 0067; 0068 is the one pending. */
+  defaultAppliedCount: 68,
 } as const;
 
 /** Gate defaults (mirror scripts/migrate.ts buildGateConfigFromEnv): used for the producer's self-verification. */
