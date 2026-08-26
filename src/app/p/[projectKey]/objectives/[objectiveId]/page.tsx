@@ -260,9 +260,14 @@ export default async function ObjectiveDetailPage({
                 key={m.id}
                 className="flex items-center justify-between gap-3 rounded-md border border-[var(--border)] p-3 text-sm"
               >
-                <div className="flex items-center gap-2">
-                  <span className="font-medium">{m.title}</span>
-                  <StatusBadge status={m.status} />
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{m.title}</span>
+                    <StatusBadge status={m.status} />
+                  </div>
+                  {m.description ? (
+                    <p className="mt-1 text-xs text-[var(--muted)]">{m.description}</p>
+                  ) : null}
                 </div>
                 {open ? (
                   <MilestoneStatusButton
