@@ -313,6 +313,7 @@ if (NOTIFY_DATABASE_URL && TWILIO_LINE_NUMBER && restClient && OWNER_NUMBERS.len
   const nsql = postgres(NOTIFY_DATABASE_URL, { max: 1, prepare: false, idle_timeout: 30 });
   let watermark = new Date();
   let polling = false;
+  const seen = new Map(); // announced item content -> first-seen ms (24h TTL)
 
   const short = (s, n) => (s || '').replace(/\s+/g, ' ').trim().slice(0, n);
 
@@ -321,11 +322,27 @@ if (NOTIFY_DATABASE_URL && TWILIO_LINE_NUMBER && restClient && OWNER_NUMBERS.len
     polling = true;
     try {
       // The role's ONLY window into the database is this definer function.
-      const rows = await nsql`select * from public.notifier_inbox(${watermark})`;
+      const all = await nsql`select * from public.notifier_inbox(${watermark})`;
+      // Postgres timestamps carry microseconds; JS Dates only milliseconds. A watermark
+      // truncated to .345 keeps matching a row at .345678 forever, so the same open item
+      // re-notified every poll (owner report 2026-08-25: "emailing every minute").
+      // Two defenses: advance the watermark 1ms PAST the newest row, and never announce
+      // the same item content twice (dedupe survives any watermark mistake).
+      for (const r of all) {
+        const ts = new Date(r.created_at).getTime() + 1;
+        if (ts > watermark.getTime()) watermark = new Date(ts);
+      }
+      const now = Date.now();
+      for (const k of seen.keys()) if (now - seen.get(k) > 24 * 3600 * 1000) seen.delete(k);
+      const rows = all.filter((r) => {
+        const key = r.kind + '|' + r.key + '|' + r.item;
+        if (seen.has(key)) return false;
+        seen.set(key, now);
+        return true;
+      });
       const qs = rows.filter((r) => r.kind === 'question');
       const aps = rows.filter((r) => r.kind === 'decision');
       if (rows.length === 0) return;
-      for (const r of rows) if (r.created_at > watermark) watermark = r.created_at;
 
       const lines = [];
       for (const q of qs.slice(0, 4)) lines.push(`[${q.key}] asks: ${short(q.item, 140)}`);
