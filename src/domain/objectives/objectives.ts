@@ -243,6 +243,7 @@ export async function listObjectives(tx: DbTx, ctx: TenantContext): Promise<Obje
 export interface MilestoneRow {
   id: string;
   title: string;
+  description: string | null;
   status: MilestoneStatus;
   position: number;
   targetDate: Date | null;
@@ -383,6 +384,7 @@ export async function getObjective(
     .select({
       id: milestones.id,
       title: milestones.title,
+      description: milestones.description,
       status: milestones.status,
       position: milestones.position,
       targetDate: milestones.targetDate,

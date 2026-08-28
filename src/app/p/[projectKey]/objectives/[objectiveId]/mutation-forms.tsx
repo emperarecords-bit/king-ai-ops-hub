@@ -363,15 +363,32 @@ export function MilestoneStatusButton({
   const [state, formAction, pending] = useActionState(changeMilestoneStatus, initialState);
   const next =
     status === 'planned' ? 'active' : status === 'active' ? 'completed' : null;
-  if (!next) return null;
+  // A mis-click must be reversible (owner report 2026-08-26): every non-planned
+  // state gets a small step-back next to the forward action.
+  const prev =
+    status === 'active' ? 'planned' : status === 'completed' ? 'active' : null;
+  if (!next && !prev) return null;
   return (
     <form action={formAction} className="flex items-center gap-1">
       <input type="hidden" name="projectKey" value={projectKey} />
       <input type="hidden" name="objectiveId" value={objectiveId} />
       <input type="hidden" name="milestoneId" value={milestoneId} />
-      <button name="status" value={next} disabled={pending} className={smallBtn}>
-        {next === 'active' ? 'Start' : 'Complete'}
-      </button>
+      {prev ? (
+        <button
+          name="status"
+          value={prev}
+          disabled={pending}
+          className={smallBtn}
+          title={prev === 'planned' ? 'Undo Start — back to planned' : 'Reopen — back to active'}
+        >
+          {prev === 'planned' ? '‹ Undo' : '‹ Reopen'}
+        </button>
+      ) : null}
+      {next ? (
+        <button name="status" value={next} disabled={pending} className={smallBtn}>
+          {next === 'active' ? 'Start' : 'Complete'}
+        </button>
+      ) : null}
       <ErrorNote error={state.error} />
     </form>
   );
