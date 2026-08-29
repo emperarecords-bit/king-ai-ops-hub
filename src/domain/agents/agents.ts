@@ -5,7 +5,7 @@ import { AppError, NotFoundError, ValidationError } from '@/lib/errors';
 import { sha256Hex } from '@/lib/crypto';
 import { type DbTx } from '@/db/client';
 import { agents, departments } from '@/db/schema';
-import { knownModel } from '@/providers/pricing';
+import { knownModel, providerForModel, providerSupportsModel } from '@/providers/pricing';
 import { writeAudit } from '@/domain/audit/audit';
 import { canonicalReviewRubric, validateReviewRubric } from './reviewer-rubric';
 
@@ -264,6 +264,7 @@ export async function updateAgent(
   agentId: string,
   patch: {
     model?: string;
+    provider?: ProviderId;
     systemPrompt?: string;
     reviewRubric?: string | null;
     temperatureMilli?: number;
@@ -274,6 +275,31 @@ export async function updateAgent(
   if (ctx.projectRole !== 'admin') throw new AppError('forbidden', 'Only a project admin can change employee configuration.');
   if (patch.model !== undefined && !knownModel(patch.model)) {
     throw new ValidationError([`Unknown model '${patch.model}'.`]);
+  }
+
+  // Provider MUST match the model — a model belongs to exactly one provider, and a mismatched pair
+  // (e.g. google + a claude-* model) fails dispatch as an "ambiguous provider outcome", stranding the run.
+  // So the provider FOLLOWS the model: whenever the model changes we set the correct provider for it, and
+  // an explicit provider is only accepted if it matches. (This is the root-cause fix for the editor being
+  // unable to change the provider — it now tracks the model automatically.)
+  if (patch.model !== undefined) {
+    const derived = providerForModel(patch.model);
+    if (!derived) throw new ValidationError([`Unknown model '${patch.model}'.`]);
+    if (patch.provider !== undefined && patch.provider !== derived) {
+      throw new ValidationError([`Model '${patch.model}' runs on provider '${derived}', not '${patch.provider}'.`]);
+    }
+    patch.provider = derived;
+  } else if (patch.provider !== undefined) {
+    // Changing provider alone: it must still match the agent's current model.
+    const current = await tx
+      .select({ model: agents.model })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.projectId, ctx.projectId), eq(agents.orgId, ctx.orgId)))
+      .limit(1);
+    if (!current[0]) throw new NotFoundError('Agent');
+    if (!providerSupportsModel(patch.provider, current[0].model)) {
+      throw new ValidationError([`Provider '${patch.provider}' does not serve the current model '${current[0].model}'. Change the model instead.`]);
+    }
   }
   if (
     patch.temperatureMilli !== undefined &&

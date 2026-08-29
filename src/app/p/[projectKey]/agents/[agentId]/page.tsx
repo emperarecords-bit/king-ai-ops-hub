@@ -6,9 +6,8 @@ import { listAgents } from '@/domain/agents/agents';
 import { listDepartments, listEmployees } from '@/domain/agents/org';
 import { employeeAttributionDrilldown } from '@/domain/agents/attribution';
 import { employeeProfile } from '@/domain/agents/profile';
-import { modelsForProvider } from '@/providers/pricing';
+import { allModels } from '@/providers/pricing';
 import { formatMoney } from '@/lib/money';
-import { type ProviderId } from '@/types/provider';
 import { Card, PageHeader, ProviderBadge, StatusBadge } from '@/components/ui';
 import { AgentForm } from '../agent-form';
 import { EmployeeOrgForm } from '../employee-org-form';
@@ -102,7 +101,7 @@ export default async function EmployeeProfilePage({
             <span className="text-[var(--muted)]">{agent.model}</span>
           </div>
           {canEdit ? (
-            <AgentForm projectKey={projectKey} agent={agent} models={modelsForProvider(agent.provider as ProviderId)} />
+            <AgentForm projectKey={projectKey} agent={agent} models={allModels()} />
           ) : (
             <pre className="whitespace-pre-wrap text-sm text-[var(--muted)]">{agent.systemPrompt}</pre>
           )}
