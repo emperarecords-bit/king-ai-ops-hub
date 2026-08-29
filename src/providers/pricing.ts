@@ -133,6 +133,15 @@ export function providerSupportsModel(provider: ProviderId, model: string): bool
   return knownModel(model) && MODEL_PRICING[model]!.provider === provider;
 }
 
+/**
+ * The one provider that can serve `model`, or null if the model is unknown. A model belongs to exactly
+ * one provider, so this is the authoritative pairing — used to keep an agent's provider consistent with
+ * its model (a mismatch like google + a claude-* model fails dispatch as an "ambiguous provider outcome").
+ */
+export function providerForModel(model: string): ProviderId | null {
+  return MODEL_PRICING[model]?.provider ?? null;
+}
+
 export function modelsForProvider(provider: ProviderId): ReadonlyArray<{
   id: string;
   displayName: string;
@@ -145,6 +154,25 @@ export function modelsForProvider(provider: ProviderId): ReadonlyArray<{
       displayName: p.displayName,
       maxOutputTokens: p.maxOutputTokens,
     }));
+}
+
+/**
+ * Every known model across all providers, each tagged with its provider. Used by the employee editor so a
+ * model from ANY provider can be chosen (the provider then follows the model). Without this the editor only
+ * ever showed the agent's current provider's models, making a cross-provider switch impossible.
+ */
+export function allModels(): ReadonlyArray<{
+  id: string;
+  displayName: string;
+  provider: ProviderId;
+  maxOutputTokens: number;
+}> {
+  return Object.entries(MODEL_PRICING).map(([id, p]) => ({
+    id,
+    displayName: p.displayName,
+    provider: p.provider,
+    maxOutputTokens: p.maxOutputTokens,
+  }));
 }
 
 /**

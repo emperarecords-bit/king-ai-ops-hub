@@ -9,9 +9,8 @@ import {
   employeeAttributionDrilldown,
   type EmployeeDrilldown,
 } from '@/domain/agents/attribution';
-import { modelsForProvider } from '@/providers/pricing';
+import { allModels } from '@/providers/pricing';
 import { formatMoney } from '@/lib/money';
-import { type ProviderId } from '@/types/provider';
 import { Card, PageHeader, ProviderBadge } from '@/components/ui';
 import { visibilityFromParam } from '@/domain/classification/classification';
 import { ClassificationChip, NonLiveControls } from '../non-live-controls';
@@ -329,7 +328,7 @@ export default async function EmployeesPage({
                           <AgentForm
                             projectKey={projectKey}
                             agent={agent}
-                            models={modelsForProvider(agent.provider as ProviderId)}
+                            models={allModels()}
                           />
                         </div>
                       </details>

@@ -25,10 +25,20 @@ export function AgentForm({
 }: {
   projectKey: string;
   agent: AgentFormData;
-  models: readonly { id: string; displayName: string }[];
+  models: readonly { id: string; displayName: string; provider: string }[];
 }) {
+  // Provider follows the model (a model runs on exactly one provider), so the picker offers every
+  // model grouped by provider and the server sets the matching provider on save. Group for display.
+  const byProvider = new Map<string, { id: string; displayName: string }[]>();
+  for (const m of models) {
+    const g = byProvider.get(m.provider) ?? [];
+    g.push({ id: m.id, displayName: m.displayName });
+    byProvider.set(m.provider, g);
+  }
+  const providerOf = new Map(models.map((m) => [m.id, m.provider]));
   const [state, formAction, pending] = useActionState(saveAgent, initialState);
   const [rubricBytes, setRubricBytes] = useState(() => new TextEncoder().encode(agent.reviewRubric ?? '').length);
+  const [model, setModel] = useState(agent.model);
 
   return (
     <form action={formAction} className="space-y-3">
@@ -40,15 +50,23 @@ export function AgentForm({
           <span className="mb-1 block text-[var(--muted)]">Model</span>
           <select
             name="model"
-            defaultValue={agent.model}
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
             className="w-full rounded-md border border-[var(--border)] bg-[var(--background)] px-2 py-1.5 text-sm"
           >
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.displayName}
-              </option>
+            {[...byProvider.entries()].map(([provider, list]) => (
+              <optgroup key={provider} label={provider}>
+                {list.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.displayName}
+                  </option>
+                ))}
+              </optgroup>
             ))}
           </select>
+          <span className="mt-1 block text-xs text-[var(--muted)]">
+            Provider: <strong>{providerOf.get(model) ?? agent.provider}</strong> — follows the model automatically.
+          </span>
         </label>
         <label className="block text-sm">
           <span className="mb-1 block text-[var(--muted)]">Temperature (0–1000 = 0.0–1.0)</span>
