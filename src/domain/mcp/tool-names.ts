@@ -10,6 +10,7 @@ export const MCP_READ_TOOLS = [
   'search_messages',
   'get_usage',
   'list_position_templates',
+  'market_quotes',
 ] as const;
 export const MCP_WRITE_TOOLS = ['create_task', 'submit_run', 'create_workspace', 'staff_positions'] as const;
 export const MCP_TOOL_NAMES = [...MCP_READ_TOOLS, ...MCP_WRITE_TOOLS] as const;

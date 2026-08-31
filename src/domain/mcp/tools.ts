@@ -8,6 +8,7 @@ import { createTask } from '@/domain/tasks/tasks';
 import { enqueueRun } from '@/domain/jobs/jobs';
 import { createWorkspaceWithStaff } from '@/domain/projects/provision';
 import { createEmployeeWithConfig } from '@/domain/agents/org';
+import { getMarketQuotes } from '@/domain/integrations/public-market';
 import {
   POSITION_KEYS,
   POSITION_TEMPLATES,
@@ -138,6 +139,33 @@ const getUsage: McpToolDefinition = {
       .from(usageEvents)
       .where(eq(usageEvents.projectId, ctx.projectId));
     return rows[0] ?? { events: 0, inputTokens: 0, outputTokens: 0, costMicros: '0' };
+  },
+};
+
+const marketQuotes: McpToolDefinition = {
+  name: 'market_quotes',
+  description:
+    'Read-only real-time market quotes (bid / ask / last) for up to 25 stock or ETF symbols, from Public.com. ' +
+    'Research only — this tool never places, replaces, or cancels any order.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      symbols: {
+        type: 'array',
+        items: { type: 'string', minLength: 1, maxLength: 8 },
+        minItems: 1,
+        maxItems: 25,
+      },
+    },
+    required: ['symbols'],
+    additionalProperties: false,
+  },
+  handler: async (_tx, _ctx, args) => {
+    const { symbols } = parse(
+      z.object({ symbols: z.array(z.string().trim().min(1).max(8)).min(1).max(25) }),
+      args,
+    );
+    return getMarketQuotes(symbols);
   },
 };
 
@@ -431,6 +459,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
   searchMessages,
   getUsage,
   listPositionTemplates,
+  marketQuotes,
   createTaskTool,
   submitRunTool,
   createWorkspaceTool,
