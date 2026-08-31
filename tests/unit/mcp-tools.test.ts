@@ -10,16 +10,17 @@ import {
 import { MCP_TOOLS, getToolDefinition } from '@/domain/mcp/tools';
 
 describe('mcp tool surface', () => {
-  it('exposes exactly the five read and four write tools', () => {
+  it('exposes exactly the six read and four write tools', () => {
     expect([...MCP_READ_TOOLS]).toEqual([
       'list_projects',
       'get_task',
       'search_messages',
       'get_usage',
       'list_position_templates',
+      'market_quotes',
     ]);
     expect([...MCP_WRITE_TOOLS]).toEqual(['create_task', 'submit_run', 'create_workspace', 'staff_positions']);
-    expect(MCP_TOOLS).toHaveLength(9);
+    expect(MCP_TOOLS).toHaveLength(10);
     expect(MCP_TOOLS.map((t) => t.name).sort()).toEqual([...MCP_TOOL_NAMES].sort());
   });
 
