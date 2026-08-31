@@ -1,0 +1,23 @@
+# The owner's phone line — a thin, stateless client of the hub. No database, no volumes.
+app = "king-ai-ops-hub-voice"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PUBLIC_HOST = "king-ai-ops-hub-voice.fly.dev"
+  HUB_MCP_URL = "https://king-ai-ops-hub-prod.fly.dev/api/mcp"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  # The owner-notifier poll loop must survive idle periods: one machine stays up
+  # (owner directive 2026-08-20: the CoS texts the owner when the Inbox changes).
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
