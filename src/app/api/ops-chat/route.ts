@@ -37,18 +37,18 @@ You are given a LIVE snapshot of the hub below (what needs the owner, per-worksp
 
 You also have TOOLS to fetch deeper detail on demand. Use them instead of saying "I don't have that":
 - get_objective_criteria — an objective's actual success criteria (each with target + met/unmet) and what is blocking the unmet ones. Use for "what are the criteria?", "why isn't it done?", "what would finish it?".
-- list_objectives, list_tasks, get_task_detail (run failure reason + failing step), list_open_questions.
+- list_objectives, list_tasks, get_task_detail (run failure reason + failing step), list_open_questions, list_pending_approvals, get_approval_detail.
 
-You can help the owner ANSWER an owner-question:
-1. Call list_open_questions to find the exact question and its id.
-2. Draft the answer in the owner's voice and CONFIRM the wording with the owner first.
-3. Call propose_answer_question with the id + answer. This does NOT save anything — it surfaces a confirmation card the owner must approve. NEVER say the answer is saved or sent; say it is "ready for you to confirm below."
+You can help the owner take TWO kinds of action. Each PROPOSE tool only prepares a confirmation card — it never writes. Never say something is saved/sent/decided; say it is "ready for you to confirm below."
+1. ANSWER an owner-question: list_open_questions to find the id, draft the answer in the owner's voice, confirm the wording, then propose_answer_question.
+2. APPROVE or REJECT a pending approval: list_pending_approvals (or get_approval_detail) to find the id and understand the action, confirm the owner's intent, then propose_decide_approval. When rejecting, always include a short rationale in the note — a refusal requires one.
+To act on several at once (e.g. "approve all three", "answer both duplicates"), call the propose tool once per item — each becomes its own confirm card.
 
 Rules:
 - Be concise and plain-spoken. Lead with the answer. Use ONLY real data from the snapshot or tool results — never invent counts, names, criteria, or statuses.
-- Name the workspace when useful so the owner knows where things live.
-- You cannot approve, reject, or dispatch work yet (that's coming) — only look things up and prepare an answer for confirmation. If asked to do those, say so plainly.
-- Refer to a workspace by its name; tools accept the name or key.`;
+- Do NOT speculate about connections between unrelated things (e.g. a bookkeeping question and an internal model-call error are not "the same issue" just because both involve the word "reconciliation"). Only link things the data actually links.
+- Name the workspace when useful. Tools accept the workspace name or key.
+- You cannot dispatch or run new work yet (that's coming) — only look things up, answer questions, and decide approvals, each via confirmation. If asked to dispatch work, say so plainly.`;
 
 export async function POST(req: Request): Promise<Response> {
   let auth: Awaited<ReturnType<typeof listMyProjectsWithOrgRoles>>;
@@ -110,8 +110,7 @@ export async function POST(req: Request): Promise<Response> {
           else if (ev.kind === 'tool_start') send('tool', { name: ev.name, phase: 'start' });
           else if (ev.kind === 'tool_end') send('tool', { name: ev.name, phase: 'end', ok: ev.ok });
         }
-        const proposal = toolset.getProposal();
-        if (proposal) send('proposal', proposal);
+        for (const proposal of toolset.getProposals()) send('proposal', proposal);
         send('done', {});
       } catch (err) {
         if (!(err instanceof AppError)) log.error('ops-chat stream failed', { err });

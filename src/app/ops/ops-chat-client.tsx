@@ -2,28 +2,42 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-interface Proposal {
-  kind: 'answer_question';
-  questionId: string;
-  projectKey: string;
-  workspaceName: string;
-  question: string;
-  answer: string;
+type Proposal =
+  | {
+      kind: 'answer_question';
+      questionId: string;
+      projectKey: string;
+      workspaceName: string;
+      question: string;
+      answer: string;
+    }
+  | {
+      kind: 'decide_approval';
+      approvalId: string;
+      projectKey: string;
+      workspaceName: string;
+      summary: string;
+      decision: 'approved' | 'rejected';
+      note: string;
+    };
+
+interface ProposalItem {
+  proposal: Proposal;
+  state: 'pending' | 'confirming' | 'done' | 'error' | 'cancelled';
+  error?: string;
 }
 
 interface Msg {
   id: string;
   role: 'owner' | 'assistant';
   content: string;
-  proposal?: Proposal;
-  proposalState?: 'pending' | 'confirming' | 'done' | 'error';
-  proposalError?: string;
+  proposals?: ProposalItem[];
 }
 
 const SUGGESTIONS = [
   'What needs me?',
   'How is AccurateBids doing?',
-  "What's been failing?",
+  'What approvals are waiting on me?',
   "What are StressProbe's success criteria?",
 ];
 
@@ -33,7 +47,10 @@ const TOOL_LABEL: Record<string, string> = {
   list_tasks: 'listing tasks',
   get_task_detail: 'reading the run detail',
   list_open_questions: 'finding open questions',
+  list_pending_approvals: 'finding pending approvals',
+  get_approval_detail: 'reading the approval',
   propose_answer_question: 'preparing the answer',
+  propose_decide_approval: 'preparing the decision',
 };
 
 let seq = 0;
@@ -49,9 +66,9 @@ function Rich({ text }: { text: string }) {
 }
 
 /**
- * Ops Chat surface (v2). Streams model replies over SSE (fetch), shows what it's
- * looking up as tools run, and renders a confirm card when it proposes answering
- * an owner-question — the write only happens on the owner's Confirm.
+ * Ops Chat surface (v2.1). Streams replies over SSE, shows what it's looking up,
+ * and renders a confirm card per proposed action (answering an owner-question or
+ * approving/rejecting a pending approval). The write happens only on Confirm.
  */
 export function OpsChatClient({ opening }: { opening: string }) {
   const [messages, setMessages] = useState<Msg[]>([{ id: 'opening', role: 'assistant', content: opening }]);
@@ -68,32 +85,45 @@ export function OpsChatClient({ opening }: { opening: string }) {
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  function patch(id: string, fields: Partial<Msg>) {
-    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...fields } : m)));
+  function setItem(msgId: string, index: number, fields: Partial<ProposalItem>) {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === msgId && m.proposals
+          ? { ...m, proposals: m.proposals.map((it, i) => (i === index ? { ...it, ...fields } : it)) }
+          : m,
+      ),
+    );
   }
 
-  async function confirmProposal(id: string) {
-    const m = messages.find((x) => x.id === id);
-    if (!m?.proposal) return;
-    patch(id, { proposalState: 'confirming', proposalError: undefined });
+  async function confirmProposal(msgId: string, index: number) {
+    const m = messages.find((x) => x.id === msgId);
+    const item = m?.proposals?.[index];
+    if (!item) return;
+    setItem(msgId, index, { state: 'confirming', error: undefined });
+    const p = item.proposal;
+    const body =
+      p.kind === 'answer_question'
+        ? { action: 'answer_question', projectKey: p.projectKey, questionId: p.questionId, answer: p.answer }
+        : {
+            action: 'decide_approval',
+            projectKey: p.projectKey,
+            approvalId: p.approvalId,
+            decision: p.decision,
+            note: p.note || undefined,
+          };
     try {
       const res = await fetch('/api/ops-chat/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'answer_question',
-          projectKey: m.proposal.projectKey,
-          questionId: m.proposal.questionId,
-          answer: m.proposal.answer,
-        }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
-        throw new Error(j.error || 'Could not record the answer.');
+        throw new Error(j.error || 'That did not go through.');
       }
-      patch(id, { proposalState: 'done' });
+      setItem(msgId, index, { state: 'done' });
     } catch (e) {
-      patch(id, { proposalState: 'error', proposalError: e instanceof Error ? e.message : 'Could not record the answer.' });
+      setItem(msgId, index, { state: 'error', error: e instanceof Error ? e.message : 'That did not go through.' });
     }
   }
 
@@ -173,7 +203,14 @@ export function OpsChatClient({ opening }: { opening: string }) {
               setToolActivity(null);
             }
           } else if (event === 'proposal') {
-            patch(replyId, { proposal: payload as unknown as Proposal, proposalState: 'pending' });
+            const proposal = payload as unknown as Proposal;
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === replyId
+                  ? { ...m, proposals: [...(m.proposals ?? []), { proposal, state: 'pending' as const }] }
+                  : m,
+              ),
+            );
           } else if (event === 'error') {
             streamError = typeof payload.message === 'string' ? payload.message : 'The assistant hit an error.';
           }
@@ -182,12 +219,12 @@ export function OpsChatClient({ opening }: { opening: string }) {
 
       if (streamError) {
         setError(streamError);
-        setMessages((prev) => prev.filter((m) => !(m.id === replyId && m.content.trim().length === 0 && !m.proposal)));
+        setMessages((prev) => prev.filter((m) => !(m.id === replyId && m.content.trim().length === 0 && !m.proposals)));
       }
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') return;
       setError(err instanceof Error ? err.message : 'Something went wrong.');
-      setMessages((prev) => prev.filter((m) => !(m.id === replyId && m.content.trim().length === 0 && !m.proposal)));
+      setMessages((prev) => prev.filter((m) => !(m.id === replyId && m.content.trim().length === 0 && !m.proposals)));
     } finally {
       setStreaming(false);
       setToolActivity(null);
@@ -211,48 +248,81 @@ export function OpsChatClient({ opening }: { opening: string }) {
               <div className="mb-1 text-xs opacity-50">{m.role === 'owner' ? 'You' : 'Ops Chat'}</div>
               {m.content.length > 0 ? (
                 <Rich text={m.content} />
-              ) : m.role === 'assistant' && !m.proposal ? (
+              ) : m.role === 'assistant' && !m.proposals ? (
                 <span className="opacity-60">{toolActivity ? `🔍 ${toolActivity}…` : 'Thinking…'}</span>
               ) : null}
 
-              {m.proposal ? (
-                <div className="mt-3 rounded-md border border-[var(--accent)] bg-[var(--surface-raised,rgba(120,160,255,0.06))] p-3">
-                  {m.proposalState === 'done' ? (
-                    <p className="text-sm text-[var(--success,#6bbf73)]">
-                      ✓ Recorded — the answer is saved and added to {m.proposal.workspaceName}&apos;s knowledge.
-                    </p>
-                  ) : (
-                    <>
-                      <p className="text-xs uppercase tracking-wide text-[var(--muted)]">
-                        Confirm — record this answer in {m.proposal.workspaceName}
-                      </p>
-                      <p className="mt-1 text-xs text-[var(--muted)]">Q: {m.proposal.question}</p>
-                      <p className="mt-2 whitespace-pre-wrap text-sm">{m.proposal.answer}</p>
-                      {m.proposalState === 'error' ? (
-                        <p className="mt-2 text-xs text-[var(--danger,#c37474)]">{m.proposalError}</p>
-                      ) : null}
-                      <div className="mt-3 flex items-center gap-2">
-                        <button
-                          type="button"
-                          disabled={m.proposalState === 'confirming'}
-                          onClick={() => confirmProposal(m.id)}
-                          className="rounded-md bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[#0b0e14] hover:bg-[var(--accent-strong)] disabled:opacity-50"
-                        >
-                          {m.proposalState === 'confirming' ? 'Recording…' : 'Confirm & record'}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={m.proposalState === 'confirming'}
-                          onClick={() => patch(m.id, { proposal: undefined, proposalState: undefined })}
-                          className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--muted)] hover:text-[var(--foreground)] disabled:opacity-50"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </>
-                  )}
-                </div>
-              ) : null}
+              {m.proposals?.map((item, i) => {
+                const p = item.proposal;
+                const isReject = p.kind === 'decide_approval' && p.decision === 'rejected';
+                const doneLabel =
+                  p.kind === 'answer_question'
+                    ? `✓ Recorded — saved and added to ${p.workspaceName}'s knowledge.`
+                    : `✓ ${p.decision === 'approved' ? 'Approved' : 'Rejected'} in ${p.workspaceName}.`;
+                return (
+                  <div
+                    key={i}
+                    className="mt-3 rounded-md border border-[var(--accent)] bg-[var(--surface-raised,rgba(120,160,255,0.06))] p-3"
+                  >
+                    {item.state === 'done' ? (
+                      <p className="text-sm text-[var(--success,#6bbf73)]">{doneLabel}</p>
+                    ) : item.state === 'cancelled' ? (
+                      <p className="text-sm text-[var(--muted)]">Cancelled — nothing was changed.</p>
+                    ) : (
+                      <>
+                        <p className="text-xs uppercase tracking-wide text-[var(--muted)]">
+                          {p.kind === 'answer_question'
+                            ? `Confirm — record this answer in ${p.workspaceName}`
+                            : `Confirm — ${p.decision === 'approved' ? 'approve' : 'reject'} in ${p.workspaceName}`}
+                        </p>
+                        {p.kind === 'answer_question' ? (
+                          <>
+                            <p className="mt-1 text-xs text-[var(--muted)]">Q: {p.question}</p>
+                            <p className="mt-2 whitespace-pre-wrap text-sm">{p.answer}</p>
+                          </>
+                        ) : (
+                          <>
+                            <p className="mt-1 whitespace-pre-wrap text-sm">{p.summary}</p>
+                            {p.note ? <p className="mt-1 text-xs text-[var(--muted)]">Note: {p.note}</p> : null}
+                            {isReject && !p.note ? (
+                              <p className="mt-1 text-xs text-[var(--danger,#c37474)]">
+                                A rejection needs a short rationale — ask Ops Chat to add one.
+                              </p>
+                            ) : null}
+                          </>
+                        )}
+                        {item.state === 'error' ? (
+                          <p className="mt-2 text-xs text-[var(--danger,#c37474)]">{item.error}</p>
+                        ) : null}
+                        <div className="mt-3 flex items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={item.state === 'confirming'}
+                            onClick={() => confirmProposal(m.id, i)}
+                            className="rounded-md bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[#0b0e14] hover:bg-[var(--accent-strong)] disabled:opacity-50"
+                          >
+                            {item.state === 'confirming'
+                              ? 'Working…'
+                              : p.kind === 'answer_question'
+                                ? 'Confirm & record'
+                                : p.decision === 'approved'
+                                  ? 'Confirm & approve'
+                                  : 'Confirm & reject'}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={item.state === 'confirming'}
+                            onClick={() => setItem(m.id, i, { state: 'cancelled', error: undefined })}
+                            className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--muted)] hover:text-[var(--foreground)] disabled:opacity-50"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         ))}
@@ -289,7 +359,7 @@ export function OpsChatClient({ opening }: { opening: string }) {
           onChange={(e) => setInput(e.target.value)}
           rows={2}
           maxLength={4000}
-          placeholder="Ask about your hub — status, a project, why something failed, or answer a question…"
+          placeholder="Ask about your hub, answer a question, or approve what's waiting…"
           className="w-full rounded border border-[var(--border)] bg-transparent p-2 text-sm"
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {

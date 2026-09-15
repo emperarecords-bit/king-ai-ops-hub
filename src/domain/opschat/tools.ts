@@ -7,32 +7,44 @@ import { listObjectives } from '@/domain/objectives/objectives';
 import { assessWorkspaceHealth } from '@/domain/health/health';
 import { listTasks, getTask, listRuns, listRunSteps } from '@/domain/tasks/tasks';
 import { openQuestionsForOwner, type OpenOwnerQuestion } from '@/domain/questions/questions';
+import { listApprovalsForQueue, getApprovalDetail, type QueueApprovalRow } from '@/domain/approvals/approvals';
 
 /**
- * Ops Chat v2 tool layer. The model may call these to fetch deeper detail on
- * demand (drill-down READS run instantly through the RLS boundary) and to
- * PROPOSE an answer to an owner-question (the propose tool NEVER writes — it
- * records a proposal the route surfaces for the owner to confirm; the write
- * happens only in the confirm endpoint, which re-validates via answerOwnerQuestion).
+ * Ops Chat tool layer (v2 + v2.1). The model may call these to fetch deeper
+ * detail on demand (READS run instantly through the RLS boundary) and to PROPOSE
+ * an action — answering an owner-question or deciding a pending approval. Propose
+ * tools NEVER write: they validate and record a proposal that the route surfaces
+ * for the owner to confirm; the write happens only in the confirm endpoint, which
+ * re-runs the same governed path (answerOwnerQuestion / decideApproval).
  *
- * Read handlers resolve a project the chat mentions (by name or key) to a
- * TenantContext and run inside withTenant, so every read is tenant-scoped.
+ * Multiple proposals per turn are supported (e.g. "approve all three"): each is
+ * surfaced as its own confirm card.
  */
 
-export interface OpsChatProposal {
-  readonly kind: 'answer_question';
-  readonly questionId: string;
-  readonly projectKey: string;
-  readonly workspaceName: string;
-  readonly question: string;
-  readonly answer: string;
-}
+export type OpsChatProposal =
+  | {
+      readonly kind: 'answer_question';
+      readonly questionId: string;
+      readonly projectKey: string;
+      readonly workspaceName: string;
+      readonly question: string;
+      readonly answer: string;
+    }
+  | {
+      readonly kind: 'decide_approval';
+      readonly approvalId: string;
+      readonly projectKey: string;
+      readonly workspaceName: string;
+      readonly summary: string;
+      readonly decision: 'approved' | 'rejected';
+      readonly note: string;
+    };
 
 export interface OpsChatToolset {
   readonly tools: readonly ToolSpec[];
   readonly runTool: ToolRunner;
-  /** The pending proposal recorded during this turn, if the model proposed one. */
-  getProposal(): OpsChatProposal | null;
+  /** Proposals recorded during this turn (may be several), for the owner to confirm. */
+  getProposals(): readonly OpsChatProposal[];
 }
 
 interface AuthScope {
@@ -75,11 +87,22 @@ function ctxFor(auth: AuthScope, p: ProjectAccessRecord): TenantContext {
   };
 }
 
+/** Pending approvals across the workspaces the caller ADMINISTERS, each tagged with its project. */
+async function pendingApprovals(auth: AuthScope): Promise<Array<{ project: ProjectAccessRecord; row: QueueApprovalRow }>> {
+  const out: Array<{ project: ProjectAccessRecord; row: QueueApprovalRow }> = [];
+  for (const p of auth.projects.filter((x) => x.projectRole === 'admin')) {
+    const ctx = ctxFor(auth, p);
+    const rows = await withTenant(ctx, (tx) => listApprovalsForQueue(tx, ctx));
+    for (const row of rows) if (row.status === 'pending') out.push({ project: p, row });
+  }
+  return out;
+}
+
 export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
   {
     name: 'get_objective_criteria',
     description:
-      "Get a workspace's objective, its success criteria (each with target and met/unmet status), and what is blocking the unmet ones. Use this when asked what an objective's criteria are, why it isn't done, or what it would take to complete it.",
+      "Get a workspace's objective, its success criteria (each with target and met/unmet status), and what is blocking the unmet ones. Use for 'what are the criteria?', 'why isn't it done?', 'what would finish it?'.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -103,10 +126,7 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
     description: 'List tasks in a workspace. Set open_only true to see only pending/running/awaiting-approval tasks.',
     inputSchema: {
       type: 'object',
-      properties: {
-        project: { type: 'string', description: 'Workspace name or key.' },
-        open_only: { type: 'boolean' },
-      },
+      properties: { project: { type: 'string' }, open_only: { type: 'boolean' } },
       required: ['project'],
     },
   },
@@ -116,10 +136,7 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
       "Get a task's detail and its latest run outcome — including the failure reason and the failing step when it failed. Use to explain why a task or run failed.",
     inputSchema: {
       type: 'object',
-      properties: {
-        project: { type: 'string', description: 'Workspace name or key.' },
-        task: { type: 'string', description: 'Task title or id.' },
-      },
+      properties: { project: { type: 'string' }, task: { type: 'string', description: 'Task title or id.' } },
       required: ['project', 'task'],
     },
   },
@@ -134,22 +151,62 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
     },
   },
   {
-    name: 'propose_answer_question',
+    name: 'list_pending_approvals',
     description:
-      'Prepare an answer to an owner-question FOR THE OWNER TO CONFIRM. This does NOT record anything itself — it surfaces a confirmation card to the owner, who must approve before it is saved. Always call list_open_questions first to get the correct questionId, and confirm the wording with the owner before proposing.',
+      'List decisions waiting on the owner (pending approvals), optionally filtered to one workspace. Each has an id, the workspace, and a summary of the proposed action. Call this to get an approvalId before proposing a decision.',
+    inputSchema: {
+      type: 'object',
+      properties: { project: { type: 'string', description: 'Optional workspace name or key to filter by.' } },
+      required: [],
+    },
+  },
+  {
+    name: 'get_approval_detail',
+    description: 'Get the full detail of one pending approval — the proposed action, its summary, and originating task.',
     inputSchema: {
       type: 'object',
       properties: {
-        questionId: { type: 'string', description: 'The id of the open owner-question (from list_open_questions).' },
+        project: { type: 'string', description: 'Workspace name or key.' },
+        approvalId: { type: 'string' },
+      },
+      required: ['project', 'approvalId'],
+    },
+  },
+  {
+    name: 'propose_answer_question',
+    description:
+      'Prepare an answer to an owner-question FOR THE OWNER TO CONFIRM. Does NOT record anything — it surfaces a confirmation card the owner must approve. Get the questionId from list_open_questions first, and confirm the wording with the owner. To answer several duplicates, call this once per question.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        questionId: { type: 'string' },
         answer: { type: 'string', description: "The answer to record, in the owner's voice." },
       },
       required: ['questionId', 'answer'],
     },
   },
+  {
+    name: 'propose_decide_approval',
+    description:
+      'Prepare an approve/reject decision on a pending approval FOR THE OWNER TO CONFIRM. Does NOT decide anything — it surfaces a confirmation card the owner must approve. Get the approvalId from list_pending_approvals first. To decide several at once, call this once per approval.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        approvalId: { type: 'string' },
+        decision: { type: 'string', enum: ['approve', 'reject'] },
+        note: { type: 'string', description: 'Optional short note recorded with the decision.' },
+      },
+      required: ['approvalId', 'decision'],
+    },
+  },
 ];
 
 export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
-  let proposal: OpsChatProposal | null = null;
+  const proposals: OpsChatProposal[] = [];
+  const addProposal = (p: OpsChatProposal) => {
+    const id = p.kind === 'answer_question' ? p.questionId : p.approvalId;
+    if (!proposals.some((x) => (x.kind === 'answer_question' ? x.questionId : x.approvalId) === id)) proposals.push(p);
+  };
 
   const runTool: ToolRunner = async ({ name, input }) => {
     switch (name) {
@@ -169,20 +226,19 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           const blockers = health.findings
             .filter((f) => f.dimension === 'outcome' || f.dimension === 'execution')
             .map((f) => ({ title: f.title, evidence: f.evidence, recommendedAction: f.recommendedAction }));
-          const criteria = target.successCriteria.map((c) => ({
-            label: c.label,
-            target: `${c.target} ${c.unit}`.trim(),
-            metric: c.metric,
-            status: c.status,
-            verifiedAt: c.verifiedAt,
-          }));
           return JSON.stringify({
             workspace: p.name,
             objective: target.title,
             status: target.status,
             criteriaMet: target.successCriteria.filter((c) => MET.has(c.status)).length,
             criteriaTotal: target.successCriteria.length,
-            criteria,
+            criteria: target.successCriteria.map((c) => ({
+              label: c.label,
+              target: `${c.target} ${c.unit}`.trim(),
+              metric: c.metric,
+              status: c.status,
+              verifiedAt: c.verifiedAt,
+            })),
             blockers,
             progress: target.progress,
           });
@@ -246,9 +302,7 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           return JSON.stringify({
             workspace: p.name,
             task: { title: detail.title, status: detail.status, objective: detail.objectiveTitle },
-            latestRun: latest
-              ? { status: latest.status, error: latest.errorMessage, finishedAt: latest.finishedAt }
-              : null,
+            latestRun: latest ? { status: latest.status, error: latest.errorMessage, finishedAt: latest.finishedAt } : null,
             failingSteps,
           });
         });
@@ -272,6 +326,46 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           })),
         });
       }
+      case 'list_pending_approvals': {
+        const filterRef = argStr(input, 'project');
+        const filterProj = filterRef ? resolveProject(auth.projects, filterRef) : null;
+        const all = await pendingApprovals(auth);
+        const filtered = filterProj ? all.filter((a) => a.project.key === filterProj.key) : all;
+        return JSON.stringify({
+          count: filtered.length,
+          approvals: filtered.map(({ project, row }) => ({
+            approvalId: row.id,
+            workspace: project.name,
+            actionType: row.actionType,
+            summary: row.summary,
+            proposedBy: row.ownerName,
+            task: row.taskTitle,
+          })),
+        });
+      }
+      case 'get_approval_detail': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const approvalId = argStr(input, 'approvalId');
+        const ctx = ctxFor(auth, p);
+        try {
+          const d = await withTenant(ctx, (tx) => getApprovalDetail(tx, ctx, approvalId));
+          return JSON.stringify({
+            workspace: p.name,
+            approvalId: d.id,
+            actionType: d.actionType,
+            summary: d.summary,
+            status: d.status,
+            task: d.taskTitle,
+            objective: d.objectiveTitle,
+            proposedBy: d.ownerName,
+            hasPendingDuplicate: d.hasPendingDuplicate,
+            originatingTaskCancelled: d.originatingTaskCancelled,
+          });
+        } catch {
+          return JSON.stringify({ error: 'No such approval in that workspace.' });
+        }
+      }
       case 'propose_answer_question': {
         const questionId = argStr(input, 'questionId');
         const answer = argStr(input, 'answer');
@@ -281,20 +375,47 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
         const q: OpenOwnerQuestion | undefined = all.find((x) => x.questionId === questionId);
         if (!q) {
           return JSON.stringify({
-            error: 'That question is not open, or you do not administer its workspace. Call list_open_questions to get a valid id.',
+            error: 'That question is not open, or you do not administer its workspace. Call list_open_questions for valid ids.',
           });
         }
-        proposal = {
+        addProposal({
           kind: 'answer_question',
           questionId: q.questionId,
           projectKey: q.projectKey,
           workspaceName: q.workspaceName,
           question: q.question,
           answer,
-        };
+        });
         return JSON.stringify({
           prepared: true,
-          note: `Prepared for the owner to confirm: recording this answer to the question in ${q.workspaceName}. Tell the owner it is ready and ask them to confirm below. Do NOT claim it is saved yet.`,
+          note: `Prepared for the owner to confirm: an answer to the question in ${q.workspaceName}. Tell the owner it is ready to confirm below. Do NOT claim it is saved yet.`,
+        });
+      }
+      case 'propose_decide_approval': {
+        const approvalId = argStr(input, 'approvalId');
+        const rawDecision = argStr(input, 'decision').toLowerCase();
+        const note = argStr(input, 'note');
+        if (!approvalId || (rawDecision !== 'approve' && rawDecision !== 'reject')) {
+          return JSON.stringify({ error: "approvalId and decision ('approve' or 'reject') are required." });
+        }
+        const match = (await pendingApprovals(auth)).find((a) => a.row.id === approvalId);
+        if (!match) {
+          return JSON.stringify({
+            error: 'That approval is not pending, or you do not administer its workspace. Call list_pending_approvals for valid ids.',
+          });
+        }
+        addProposal({
+          kind: 'decide_approval',
+          approvalId,
+          projectKey: match.project.key,
+          workspaceName: match.project.name,
+          summary: match.row.summary,
+          decision: rawDecision === 'approve' ? 'approved' : 'rejected',
+          note,
+        });
+        return JSON.stringify({
+          prepared: true,
+          note: `Prepared for the owner to confirm: ${rawDecision} the approval in ${match.project.name}. Tell the owner it is ready to confirm below. Do NOT claim it is decided yet.`,
         });
       }
       default:
@@ -302,5 +423,5 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
     }
   };
 
-  return { tools: OPS_CHAT_TOOLS, runTool, getProposal: () => proposal };
+  return { tools: OPS_CHAT_TOOLS, runTool, getProposals: () => proposals };
 }
