@@ -2,23 +2,43 @@
 
 import { useEffect, useRef, useState } from 'react';
 
+interface Proposal {
+  kind: 'answer_question';
+  questionId: string;
+  projectKey: string;
+  workspaceName: string;
+  question: string;
+  answer: string;
+}
+
 interface Msg {
   id: string;
   role: 'owner' | 'assistant';
   content: string;
+  proposal?: Proposal;
+  proposalState?: 'pending' | 'confirming' | 'done' | 'error';
+  proposalError?: string;
 }
 
 const SUGGESTIONS = [
   'What needs me?',
   'How is AccurateBids doing?',
   "What's been failing?",
-  "What has StressProbe been doing?",
+  "What are StressProbe's success criteria?",
 ];
+
+const TOOL_LABEL: Record<string, string> = {
+  get_objective_criteria: 'checking the criteria & blockers',
+  list_objectives: 'listing objectives',
+  list_tasks: 'listing tasks',
+  get_task_detail: 'reading the run detail',
+  list_open_questions: 'finding open questions',
+  propose_answer_question: 'preparing the answer',
+};
 
 let seq = 0;
 const nextId = () => `m${Date.now()}-${seq++}`;
 
-/** Minimal inline renderer: **bold** + preserved line breaks. No markdown lib. */
 function Rich({ text }: { text: string }) {
   const parts = text.split(/\*\*/);
   return (
@@ -29,29 +49,60 @@ function Rich({ text }: { text: string }) {
 }
 
 /**
- * The Ops Chat surface. Renders the opening pulse, streams model replies from
- * /api/ops-chat word-by-word (SSE over fetch — EventSource can't POST), and
- * keeps a short history for follow-up context. Read-only in v1.
+ * Ops Chat surface (v2). Streams model replies over SSE (fetch), shows what it's
+ * looking up as tools run, and renders a confirm card when it proposes answering
+ * an owner-question — the write only happens on the owner's Confirm.
  */
 export function OpsChatClient({ opening }: { opening: string }) {
   const [messages, setMessages] = useState<Msg[]>([{ id: 'opening', role: 'assistant', content: opening }]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
+  const [toolActivity, setToolActivity] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
-  }, [messages, streaming]);
+  }, [messages, streaming, toolActivity]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  function patch(id: string, fields: Partial<Msg>) {
+    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...fields } : m)));
+  }
+
+  async function confirmProposal(id: string) {
+    const m = messages.find((x) => x.id === id);
+    if (!m?.proposal) return;
+    patch(id, { proposalState: 'confirming', proposalError: undefined });
+    try {
+      const res = await fetch('/api/ops-chat/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'answer_question',
+          projectKey: m.proposal.projectKey,
+          questionId: m.proposal.questionId,
+          answer: m.proposal.answer,
+        }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || 'Could not record the answer.');
+      }
+      patch(id, { proposalState: 'done' });
+    } catch (e) {
+      patch(id, { proposalState: 'error', proposalError: e instanceof Error ? e.message : 'Could not record the answer.' });
+    }
+  }
 
   async function send(text: string) {
     const trimmed = text.trim();
     if (!trimmed || streaming) return;
     setError(null);
     setInput('');
+    setToolActivity(null);
 
     const history = messages
       .filter((m) => m.content.trim().length > 0)
@@ -65,7 +116,6 @@ export function OpsChatClient({ opening }: { opening: string }) {
 
     const controller = new AbortController();
     abortRef.current = controller;
-
     const append = (delta: string) =>
       setMessages((prev) => prev.map((m) => (m.id === replyId ? { ...m, content: m.content + delta } : m)));
 
@@ -76,14 +126,13 @@ export function OpsChatClient({ opening }: { opening: string }) {
         body: JSON.stringify({ message: trimmed, history }),
         signal: controller.signal,
       });
-
       if (!res.ok || !res.body) {
         let msg = 'Something went wrong.';
         try {
           const j = await res.json();
           if (j?.error) msg = String(j.error);
         } catch {
-          /* non-JSON body */
+          /* non-JSON */
         }
         throw new Error(msg);
       }
@@ -108,28 +157,40 @@ export function OpsChatClient({ opening }: { opening: string }) {
             else if (line.startsWith('data:')) data += line.slice(5).trim();
           }
           if (!data) continue;
-          let payload: { text?: string; message?: string };
+          let payload: Record<string, unknown>;
           try {
             payload = JSON.parse(data);
           } catch {
             continue;
           }
-          if (event === 'delta' && payload.text) append(payload.text);
-          else if (event === 'error') streamError = payload.message ?? 'The assistant hit an error.';
+          if (event === 'delta' && typeof payload.text === 'string') {
+            append(payload.text);
+            setToolActivity(null);
+          } else if (event === 'tool') {
+            if (payload.phase === 'start' && typeof payload.name === 'string') {
+              setToolActivity(TOOL_LABEL[payload.name] ?? 'looking that up');
+            } else if (payload.phase === 'end') {
+              setToolActivity(null);
+            }
+          } else if (event === 'proposal') {
+            patch(replyId, { proposal: payload as unknown as Proposal, proposalState: 'pending' });
+          } else if (event === 'error') {
+            streamError = typeof payload.message === 'string' ? payload.message : 'The assistant hit an error.';
+          }
         }
       }
 
       if (streamError) {
         setError(streamError);
-        // Drop the empty/partial reply bubble if nothing came back.
-        setMessages((prev) => prev.filter((m) => !(m.id === replyId && m.content.trim().length === 0)));
+        setMessages((prev) => prev.filter((m) => !(m.id === replyId && m.content.trim().length === 0 && !m.proposal)));
       }
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') return;
       setError(err instanceof Error ? err.message : 'Something went wrong.');
-      setMessages((prev) => prev.filter((m) => !(m.id === replyId && m.content.trim().length === 0)));
+      setMessages((prev) => prev.filter((m) => !(m.id === replyId && m.content.trim().length === 0 && !m.proposal)));
     } finally {
       setStreaming(false);
+      setToolActivity(null);
       abortRef.current = null;
     }
   }
@@ -150,9 +211,48 @@ export function OpsChatClient({ opening }: { opening: string }) {
               <div className="mb-1 text-xs opacity-50">{m.role === 'owner' ? 'You' : 'Ops Chat'}</div>
               {m.content.length > 0 ? (
                 <Rich text={m.content} />
-              ) : (
-                <span className="opacity-60">Thinking…</span>
-              )}
+              ) : m.role === 'assistant' && !m.proposal ? (
+                <span className="opacity-60">{toolActivity ? `🔍 ${toolActivity}…` : 'Thinking…'}</span>
+              ) : null}
+
+              {m.proposal ? (
+                <div className="mt-3 rounded-md border border-[var(--accent)] bg-[var(--surface-raised,rgba(120,160,255,0.06))] p-3">
+                  {m.proposalState === 'done' ? (
+                    <p className="text-sm text-[var(--success,#6bbf73)]">
+                      ✓ Recorded — the answer is saved and added to {m.proposal.workspaceName}&apos;s knowledge.
+                    </p>
+                  ) : (
+                    <>
+                      <p className="text-xs uppercase tracking-wide text-[var(--muted)]">
+                        Confirm — record this answer in {m.proposal.workspaceName}
+                      </p>
+                      <p className="mt-1 text-xs text-[var(--muted)]">Q: {m.proposal.question}</p>
+                      <p className="mt-2 whitespace-pre-wrap text-sm">{m.proposal.answer}</p>
+                      {m.proposalState === 'error' ? (
+                        <p className="mt-2 text-xs text-[var(--danger,#c37474)]">{m.proposalError}</p>
+                      ) : null}
+                      <div className="mt-3 flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={m.proposalState === 'confirming'}
+                          onClick={() => confirmProposal(m.id)}
+                          className="rounded-md bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[#0b0e14] hover:bg-[var(--accent-strong)] disabled:opacity-50"
+                        >
+                          {m.proposalState === 'confirming' ? 'Recording…' : 'Confirm & record'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={m.proposalState === 'confirming'}
+                          onClick={() => patch(m.id, { proposal: undefined, proposalState: undefined })}
+                          className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--muted)] hover:text-[var(--foreground)] disabled:opacity-50"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              ) : null}
             </div>
           </div>
         ))}
@@ -189,7 +289,7 @@ export function OpsChatClient({ opening }: { opening: string }) {
           onChange={(e) => setInput(e.target.value)}
           rows={2}
           maxLength={4000}
-          placeholder="Ask about your hub — status, a project, a failure, what needs you…"
+          placeholder="Ask about your hub — status, a project, why something failed, or answer a question…"
           className="w-full rounded border border-[var(--border)] bg-transparent p-2 text-sm"
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
