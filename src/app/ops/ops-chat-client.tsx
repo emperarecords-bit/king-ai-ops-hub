@@ -3,14 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 type Proposal =
-  | {
-      kind: 'answer_question';
-      questionId: string;
-      projectKey: string;
-      workspaceName: string;
-      question: string;
-      answer: string;
-    }
+  | { kind: 'answer_question'; questionId: string; projectKey: string; workspaceName: string; question: string; answer: string }
   | {
       kind: 'decide_approval';
       approvalId: string;
@@ -19,7 +12,17 @@ type Proposal =
       summary: string;
       decision: 'approved' | 'rejected';
       note: string;
-    };
+    }
+  | {
+      kind: 'dispatch_task';
+      projectKey: string;
+      workspaceName: string;
+      title: string;
+      instructions: string;
+      agentId: string;
+      agentName: string;
+    }
+  | { kind: 'rerun_task'; projectKey: string; workspaceName: string; taskId: string; taskTitle: string };
 
 interface ProposalItem {
   proposal: Proposal;
@@ -36,9 +39,9 @@ interface Msg {
 
 const SUGGESTIONS = [
   'What needs me?',
-  'How is AccurateBids doing?',
   'What approvals are waiting on me?',
   "What are StressProbe's success criteria?",
+  'Why did StressProbe stall?',
 ];
 
 const TOOL_LABEL: Record<string, string> = {
@@ -49,8 +52,11 @@ const TOOL_LABEL: Record<string, string> = {
   list_open_questions: 'finding open questions',
   list_pending_approvals: 'finding pending approvals',
   get_approval_detail: 'reading the approval',
+  list_agents: 'listing the agents',
   propose_answer_question: 'preparing the answer',
   propose_decide_approval: 'preparing the decision',
+  propose_dispatch_task: 'preparing the task',
+  propose_rerun_task: 'preparing the re-run',
 };
 
 let seq = 0;
@@ -65,10 +71,72 @@ function Rich({ text }: { text: string }) {
   );
 }
 
+function doneLabel(p: Proposal): string {
+  switch (p.kind) {
+    case 'answer_question':
+      return `✓ Recorded — saved and added to ${p.workspaceName}'s knowledge.`;
+    case 'decide_approval':
+      return `✓ ${p.decision === 'approved' ? 'Approved' : 'Rejected'} in ${p.workspaceName}.`;
+    case 'dispatch_task':
+      return `✓ Started — task queued in ${p.workspaceName}.`;
+    case 'rerun_task':
+      return `✓ Re-run queued for "${p.taskTitle}".`;
+  }
+}
+function headerLabel(p: Proposal): string {
+  switch (p.kind) {
+    case 'answer_question':
+      return `Confirm — record this answer in ${p.workspaceName}`;
+    case 'decide_approval':
+      return `Confirm — ${p.decision === 'approved' ? 'approve' : 'reject'} in ${p.workspaceName}`;
+    case 'dispatch_task':
+      return `Confirm — start a task in ${p.workspaceName} (uses tokens)`;
+    case 'rerun_task':
+      return `Confirm — re-run in ${p.workspaceName} (uses tokens)`;
+  }
+}
+function confirmLabel(p: Proposal): string {
+  switch (p.kind) {
+    case 'answer_question':
+      return 'Confirm & record';
+    case 'decide_approval':
+      return p.decision === 'approved' ? 'Confirm & approve' : 'Confirm & reject';
+    case 'dispatch_task':
+      return 'Confirm & start';
+    case 'rerun_task':
+      return 'Confirm & re-run';
+  }
+}
+function confirmBody(p: Proposal): Record<string, unknown> {
+  switch (p.kind) {
+    case 'answer_question':
+      return { action: 'answer_question', projectKey: p.projectKey, questionId: p.questionId, answer: p.answer };
+    case 'decide_approval':
+      return {
+        action: 'decide_approval',
+        projectKey: p.projectKey,
+        approvalId: p.approvalId,
+        decision: p.decision,
+        note: p.note || undefined,
+      };
+    case 'dispatch_task':
+      return {
+        action: 'dispatch_task',
+        projectKey: p.projectKey,
+        title: p.title,
+        instructions: p.instructions,
+        agentId: p.agentId,
+      };
+    case 'rerun_task':
+      return { action: 'rerun_task', projectKey: p.projectKey, taskId: p.taskId };
+  }
+}
+
 /**
- * Ops Chat surface (v2.1). Streams replies over SSE, shows what it's looking up,
- * and renders a confirm card per proposed action (answering an owner-question or
- * approving/rejecting a pending approval). The write happens only on Confirm.
+ * Ops Chat surface (v2.2). Streams replies over SSE, shows what it's looking up,
+ * and renders a confirm card per proposed action — answering a question,
+ * approving/rejecting, or dispatching/re-running work. The write (or run) happens
+ * only on Confirm.
  */
 export function OpsChatClient({ opening }: { opening: string }) {
   const [messages, setMessages] = useState<Msg[]>([{ id: 'opening', role: 'assistant', content: opening }]);
@@ -100,22 +168,11 @@ export function OpsChatClient({ opening }: { opening: string }) {
     const item = m?.proposals?.[index];
     if (!item) return;
     setItem(msgId, index, { state: 'confirming', error: undefined });
-    const p = item.proposal;
-    const body =
-      p.kind === 'answer_question'
-        ? { action: 'answer_question', projectKey: p.projectKey, questionId: p.questionId, answer: p.answer }
-        : {
-            action: 'decide_approval',
-            projectKey: p.projectKey,
-            approvalId: p.approvalId,
-            decision: p.decision,
-            note: p.note || undefined,
-          };
     try {
       const res = await fetch('/api/ops-chat/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(confirmBody(item.proposal)),
       });
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
@@ -254,43 +311,48 @@ export function OpsChatClient({ opening }: { opening: string }) {
 
               {m.proposals?.map((item, i) => {
                 const p = item.proposal;
-                const isReject = p.kind === 'decide_approval' && p.decision === 'rejected';
-                const doneLabel =
-                  p.kind === 'answer_question'
-                    ? `✓ Recorded — saved and added to ${p.workspaceName}'s knowledge.`
-                    : `✓ ${p.decision === 'approved' ? 'Approved' : 'Rejected'} in ${p.workspaceName}.`;
                 return (
                   <div
                     key={i}
                     className="mt-3 rounded-md border border-[var(--accent)] bg-[var(--surface-raised,rgba(120,160,255,0.06))] p-3"
                   >
                     {item.state === 'done' ? (
-                      <p className="text-sm text-[var(--success,#6bbf73)]">{doneLabel}</p>
+                      <p className="text-sm text-[var(--success,#6bbf73)]">{doneLabel(p)}</p>
                     ) : item.state === 'cancelled' ? (
                       <p className="text-sm text-[var(--muted)]">Cancelled — nothing was changed.</p>
                     ) : (
                       <>
-                        <p className="text-xs uppercase tracking-wide text-[var(--muted)]">
-                          {p.kind === 'answer_question'
-                            ? `Confirm — record this answer in ${p.workspaceName}`
-                            : `Confirm — ${p.decision === 'approved' ? 'approve' : 'reject'} in ${p.workspaceName}`}
-                        </p>
+                        <p className="text-xs uppercase tracking-wide text-[var(--muted)]">{headerLabel(p)}</p>
+
                         {p.kind === 'answer_question' ? (
                           <>
                             <p className="mt-1 text-xs text-[var(--muted)]">Q: {p.question}</p>
                             <p className="mt-2 whitespace-pre-wrap text-sm">{p.answer}</p>
                           </>
-                        ) : (
+                        ) : p.kind === 'decide_approval' ? (
                           <>
                             <p className="mt-1 whitespace-pre-wrap text-sm">{p.summary}</p>
                             {p.note ? <p className="mt-1 text-xs text-[var(--muted)]">Note: {p.note}</p> : null}
-                            {isReject && !p.note ? (
+                            {p.decision === 'rejected' && !p.note ? (
                               <p className="mt-1 text-xs text-[var(--danger,#c37474)]">
                                 A rejection needs a short rationale — ask Ops Chat to add one.
                               </p>
                             ) : null}
                           </>
+                        ) : p.kind === 'dispatch_task' ? (
+                          <>
+                            <p className="mt-1 text-sm font-semibold">{p.title}</p>
+                            <p className="mt-1 whitespace-pre-wrap text-sm text-[var(--muted)]">{p.instructions}</p>
+                            <p className="mt-1 text-xs text-[var(--muted)]">
+                              Run by {p.agentName}. Starts an AI run and uses tokens.
+                            </p>
+                          </>
+                        ) : (
+                          <p className="mt-1 text-sm">
+                            Re-run <span className="font-semibold">{p.taskTitle}</span>. Starts an AI run and uses tokens.
+                          </p>
                         )}
+
                         {item.state === 'error' ? (
                           <p className="mt-2 text-xs text-[var(--danger,#c37474)]">{item.error}</p>
                         ) : null}
@@ -301,13 +363,7 @@ export function OpsChatClient({ opening }: { opening: string }) {
                             onClick={() => confirmProposal(m.id, i)}
                             className="rounded-md bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[#0b0e14] hover:bg-[var(--accent-strong)] disabled:opacity-50"
                           >
-                            {item.state === 'confirming'
-                              ? 'Working…'
-                              : p.kind === 'answer_question'
-                                ? 'Confirm & record'
-                                : p.decision === 'approved'
-                                  ? 'Confirm & approve'
-                                  : 'Confirm & reject'}
+                            {item.state === 'confirming' ? 'Working…' : confirmLabel(p)}
                           </button>
                           <button
                             type="button"
@@ -359,7 +415,7 @@ export function OpsChatClient({ opening }: { opening: string }) {
           onChange={(e) => setInput(e.target.value)}
           rows={2}
           maxLength={4000}
-          placeholder="Ask about your hub, answer a question, or approve what's waiting…"
+          placeholder="Ask, answer, approve, or start work — all from here…"
           className="w-full rounded border border-[var(--border)] bg-transparent p-2 text-sm"
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {

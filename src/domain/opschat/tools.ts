@@ -8,6 +8,7 @@ import { assessWorkspaceHealth } from '@/domain/health/health';
 import { listTasks, getTask, listRuns, listRunSteps } from '@/domain/tasks/tasks';
 import { openQuestionsForOwner, type OpenOwnerQuestion } from '@/domain/questions/questions';
 import { listApprovalsForQueue, getApprovalDetail, type QueueApprovalRow } from '@/domain/approvals/approvals';
+import { listAgents } from '@/domain/agents/agents';
 
 /**
  * Ops Chat tool layer (v2 + v2.1). The model may call these to fetch deeper
@@ -38,7 +39,36 @@ export type OpsChatProposal =
       readonly summary: string;
       readonly decision: 'approved' | 'rejected';
       readonly note: string;
+    }
+  | {
+      readonly kind: 'dispatch_task';
+      readonly projectKey: string;
+      readonly workspaceName: string;
+      readonly title: string;
+      readonly instructions: string;
+      readonly agentId: string;
+      readonly agentName: string;
+    }
+  | {
+      readonly kind: 'rerun_task';
+      readonly projectKey: string;
+      readonly workspaceName: string;
+      readonly taskId: string;
+      readonly taskTitle: string;
     };
+
+function proposalKey(p: OpsChatProposal): string {
+  switch (p.kind) {
+    case 'answer_question':
+      return `q:${p.questionId}`;
+    case 'decide_approval':
+      return `a:${p.approvalId}`;
+    case 'rerun_task':
+      return `r:${p.taskId}`;
+    case 'dispatch_task':
+      return `d:${p.projectKey}:${p.title.toLowerCase()}`;
+  }
+}
 
 export interface OpsChatToolset {
   readonly tools: readonly ToolSpec[];
@@ -199,13 +229,50 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
       required: ['approvalId', 'decision'],
     },
   },
+  {
+    name: 'list_agents',
+    description: "List a workspace's AI agents (employees) — name and role — so you can pick which one should own a dispatched task.",
+    inputSchema: {
+      type: 'object',
+      properties: { project: { type: 'string', description: 'Workspace name or key.' } },
+      required: ['project'],
+    },
+  },
+  {
+    name: 'propose_dispatch_task',
+    description:
+      'Prepare to START NEW WORK in a workspace — create a task and queue an AI run FOR THE OWNER TO CONFIRM. This SPENDS money (an AI run uses tokens) and runs NOTHING until the owner confirms. Give a short title and clear instructions. Optionally name which agent owns it (use list_agents); otherwise the first available agent is used.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        title: { type: 'string', description: 'Short task title.' },
+        instructions: { type: 'string', description: 'What the agent should do.' },
+        agent: { type: 'string', description: 'Optional agent name to own the task.' },
+      },
+      required: ['project', 'title', 'instructions'],
+    },
+  },
+  {
+    name: 'propose_rerun_task',
+    description:
+      'Prepare to RE-RUN an existing task (e.g. retry a failed one) FOR THE OWNER TO CONFIRM. This SPENDS money and runs nothing until the owner confirms. Find the task with list_tasks or get_task_detail first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        task: { type: 'string', description: 'Task title or id.' },
+      },
+      required: ['project', 'task'],
+    },
+  },
 ];
 
 export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
   const proposals: OpsChatProposal[] = [];
   const addProposal = (p: OpsChatProposal) => {
-    const id = p.kind === 'answer_question' ? p.questionId : p.approvalId;
-    if (!proposals.some((x) => (x.kind === 'answer_question' ? x.questionId : x.approvalId) === id)) proposals.push(p);
+    const k = proposalKey(p);
+    if (!proposals.some((x) => proposalKey(x) === k)) proposals.push(p);
   };
 
   const runTool: ToolRunner = async ({ name, input }) => {
@@ -416,6 +483,70 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
         return JSON.stringify({
           prepared: true,
           note: `Prepared for the owner to confirm: ${rawDecision} the approval in ${match.project.name}. Tell the owner it is ready to confirm below. Do NOT claim it is decided yet.`,
+        });
+      }
+      case 'list_agents': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const ctx = ctxFor(auth, p);
+        return withTenant(ctx, async (tx) => {
+          const ags = await listAgents(tx, ctx);
+          return JSON.stringify({
+            workspace: p.name,
+            agents: ags.filter((a) => a.enabled).map((a) => ({ id: a.id, name: a.name, role: a.role })),
+          });
+        });
+      }
+      case 'propose_dispatch_task': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        if (p.projectRole !== 'admin') {
+          return JSON.stringify({ error: 'You must be an admin of that workspace to dispatch work.' });
+        }
+        const title = argStr(input, 'title');
+        const instructions = argStr(input, 'instructions');
+        if (!title || !instructions) return JSON.stringify({ error: 'title and instructions are required.' });
+        if (instructions.length > 32_000) return JSON.stringify({ error: 'Instructions too long (max 32000 chars).' });
+        const agentRef = argStr(input, 'agent');
+        const ctx = ctxFor(auth, p);
+        const agent = await withTenant(ctx, async (tx) => {
+          const ags = (await listAgents(tx, ctx)).filter((a) => a.enabled);
+          if (agentRef) return ags.find((a) => a.id === agentRef || a.name.toLowerCase().includes(agentRef.toLowerCase())) ?? null;
+          return ags[0] ?? null;
+        });
+        if (!agent) return JSON.stringify({ error: 'No available agent to own the task in that workspace — call list_agents.' });
+        addProposal({
+          kind: 'dispatch_task',
+          projectKey: p.key,
+          workspaceName: p.name,
+          title,
+          instructions,
+          agentId: agent.id,
+          agentName: agent.name,
+        });
+        return JSON.stringify({
+          prepared: true,
+          note: `Prepared for the owner to confirm: a new task "${title}" in ${p.name}, run by ${agent.name}. This will START an AI run (uses tokens) only after the owner confirms. Do NOT claim it is running yet.`,
+        });
+      }
+      case 'propose_rerun_task': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        if (p.projectRole !== 'admin') {
+          return JSON.stringify({ error: 'You must be an admin of that workspace to re-run work.' });
+        }
+        const taskRef = argStr(input, 'task');
+        if (!taskRef) return JSON.stringify({ error: 'task is required.' });
+        const ctx = ctxFor(auth, p);
+        const t = await withTenant(ctx, async (tx) => {
+          const rows = await listTasks(tx, ctx, 100);
+          return rows.find((x) => x.id === taskRef || x.title.toLowerCase().includes(taskRef.toLowerCase())) ?? null;
+        });
+        if (!t) return JSON.stringify({ error: 'No matching task — call list_tasks.' });
+        addProposal({ kind: 'rerun_task', projectKey: p.key, workspaceName: p.name, taskId: t.id, taskTitle: t.title });
+        return JSON.stringify({
+          prepared: true,
+          note: `Prepared for the owner to confirm: re-run "${t.title}" in ${p.name}. This will START an AI run (uses tokens) only after the owner confirms. Do NOT claim it is running yet.`,
         });
       }
       default:
