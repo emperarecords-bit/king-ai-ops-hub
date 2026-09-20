@@ -7,8 +7,10 @@
  * added to the RLS tenant loop in src/db/rls.sql (guarded by to_regclass) and
  * are ONLY reached through withTenant — never bypassing project isolation.
  *
- * This schema is provided for review. No migration is applied here; see
- * drizzle/0069_verification_ingest.sql (+ .rollback.sql) for the DDL/rollback.
+ * The DDL is journaled at drizzle/0071_verification_ingest.sql (generated from this
+ * schema via `npm run db:generate`, so it can never drift). The RLS policies +
+ * append-only/immutability triggers are applied separately by src/db/rls.sql after
+ * migrations (guarded by to_regclass), as with every other tenant table.
  */
 import { boolean, index, jsonb, pgTable, text, timestamp, unique, uuid } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';

@@ -16,7 +16,10 @@ const layerRules = [
         {
           patterns: [
             { group: ['@/app/*', '@/components/*'], message: 'db/lib/types must not import UI.' },
-            { group: ['@/domain/*'], message: 'db/lib/types must not import domain logic.' },
+            // Runtime imports from domain are forbidden (dependencies point downward). TYPE-ONLY imports
+            // are permitted: they are erased at compile time and create no runtime coupling, and a schema
+            // legitimately types its jsonb/text columns with the domain shapes they store.
+            { group: ['@/domain/*'], message: 'db/lib/types must not import domain logic (runtime).', allowTypeImports: true },
             { group: ['@/orchestration/*'], message: 'db/lib/types must not import the engine.' },
             { group: ['@/providers/*'], message: 'db/lib/types must not import provider adapters.' },
           ],
@@ -113,9 +116,19 @@ export default tseslint.config(
   ...coreWebVitals,
   ...tseslint.configs.recommended,
   {
+    // `react/no-danger` needs the react plugin, which eslint-config-next registers only for
+    // {js,jsx,mjs,ts,tsx,mts,cts} — NOT .cjs. Scoping the rule to that same set keeps it enforced
+    // everywhere React/JSX can exist while letting eslint lint a plain .cjs helper without failing to
+    // resolve the plugin. No weakening: a .cjs file cannot contain JSX dangerouslySetInnerHTML, and the
+    // no-restricted-syntax guard below still applies to every file.
+    files: ['**/*.{js,jsx,mjs,ts,tsx,mts,cts}'],
     rules: {
       // Model output is rendered as text, always. See SECURITY.md T2.
       'react/no-danger': 'error',
+    },
+  },
+  {
+    rules: {
       'no-restricted-syntax': [
         'error',
         {
@@ -139,11 +152,14 @@ export default tseslint.config(
   },
   ...layerRules,
   {
-    files: ['tests/**/*.ts', 'scripts/**/*.ts', '*.config.ts', '*.config.mjs'],
+    files: ['tests/**/*.ts', 'scripts/**/*.ts', 'scripts/**/*.cjs', '*.config.ts', '*.config.mjs'],
     rules: {
       'no-console': 'off',
       '@typescript-eslint/no-explicit-any': 'off',
       'no-restricted-imports': 'off',
+      // Standalone CommonJS helper scripts (e.g. scripts/int-verify/*.cjs) use require() — that is the
+      // native module system for .cjs, not a lint smell. App/library code is unaffected.
+      '@typescript-eslint/no-require-imports': 'off',
     },
   },
 );
