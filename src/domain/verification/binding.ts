@@ -7,6 +7,7 @@
  * contract explicitly allows it — cannot stand in for the committed SHA.
  */
 import type { EvidenceSubmission, RejectionCode, VerificationRequest } from './ingest-types';
+import { repoIdentityEquals } from './repo-identity';
 
 export interface TenantContext {
   readonly orgId: string;
@@ -35,7 +36,9 @@ export function validateBinding(
   if (submission.taskId !== request.taskId) {
     return reject('wrong_task', `Evidence task ${submission.taskId} does not match request task ${request.taskId}.`);
   }
-  if (submission.repoFullName !== request.repoFullName) {
+  // Repository identity is case-insensitive (GitHub semantics); the contract stores the canonical
+  // spelling, so evidence for the same repo binds regardless of the runner's capitalization.
+  if (!repoIdentityEquals(submission.repoFullName, request.repoFullName)) {
     return reject('wrong_repo', `Evidence repo ${submission.repoFullName} does not match ${request.repoFullName}.`);
   }
   // Stale/wrong code version: the contract pins exactly one commit.

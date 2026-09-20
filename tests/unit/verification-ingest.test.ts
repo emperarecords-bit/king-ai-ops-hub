@@ -130,6 +130,14 @@ describe('VER-002 acceptance', () => {
     expect(wrongRepo.rejection?.code).toBe('wrong_repo');
   });
 
+  it('binds evidence whose repository differs only in capitalization (same repo, not wrong_repo)', async () => {
+    // Contract repo is 'acme/widget'; the runner reports 'Acme/Widget' — the SAME repository.
+    const d = await ingestEvidence(deps, ctx, sign(makeSubmission({ repoFullName: 'Acme/Widget', idempotencyKey: 'idem-case' })));
+    expect(d.rejection?.code).not.toBe('wrong_repo');
+    expect(d.accepted).toBe(true);
+    expect(d.status).toBe('verified_complete');
+  });
+
   it('3. stale commit evidence cannot verify newer code', async () => {
     store.addRequest(makeRequest({ id: 'req-new', expectedCommitSha: NEWER }));
     const d = await ingestEvidence(
