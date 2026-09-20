@@ -37,6 +37,7 @@ function makeRequest(over: Partial<VerificationRequest> = {}): VerificationReque
     repoFullName: 'acme/widget',
     expectedCommitSha: COMMIT,
     requiredChecks: ['unit', 'typecheck'],
+    requiredArtifacts: ['test-results.json'],
     allowDirty: false,
     createdBy: 'user-1',
     createdAt: '2026-09-20T00:00:00.000Z',
@@ -144,15 +145,15 @@ describe('VER-002 acceptance', () => {
     const replay = await ingestEvidence(deps, ctx, sign(makeSubmission()));
     expect(replay.replayed).toBe(true);
     expect(replay.status).toBe(first.status);
-    // A tampered duplicate reusing the same idempotency key returns the ORIGINAL decision.
-    const tampered = await ingestEvidence(
+    // A CHANGED submission reusing the same key is an explicit conflict — never a
+    // silent overwrite — and the original decision is preserved.
+    const conflict = await ingestEvidence(
       deps,
       ctx,
       sign(makeSubmission({ checks: [passed('unit')] /* drop typecheck */ })),
     );
-    expect(tampered.replayed).toBe(true);
-    expect(tampered.status).toBe('verified_complete');
-    expect(store.evidence.length).toBe(1);
+    expect(conflict.rejection?.code).toBe('idempotency_conflict');
+    expect(store.evidence.length).toBe(1); // original still the only persisted record
   });
 
   it('5. missing / skipped / failed required checks prevent verification', async () => {
@@ -209,13 +210,21 @@ describe('VER-002 acceptance', () => {
     expect(adj.status).toBe('draft_complete');
   });
 
-  it('rejects a dirty working tree unless the contract allows it', async () => {
+  it('always rejects a dirty working tree in the initial integration (allowDirty not honored)', async () => {
     const dirty = await ingestEvidence(
       deps,
       ctx,
       sign(makeSubmission({ dirty: true, uncommittedChangesDigest: 'sha:deadbeef', idempotencyKey: 'idem-dirty' })),
     );
     expect(dirty.rejection?.code).toBe('dirty_tree');
+    // Even when a (reserved) allowDirty contract exists, a dirty tree is still rejected.
+    store.addRequest(makeRequest({ id: 'req-dirty', allowDirty: true }));
+    const dirty2 = await ingestEvidence(
+      deps,
+      ctx,
+      sign(makeSubmission({ requestId: 'req-dirty', dirty: true, uncommittedChangesDigest: 'sha:beef', idempotencyKey: 'idem-dirty2' })),
+    );
+    expect(dirty2.rejection?.code).toBe('dirty_tree');
   });
 });
 
@@ -313,12 +322,58 @@ describe('VER-002 review fixes', () => {
     expect(d.artifactAvailability[0]?.observedSha256).toBeNull(); // never read
   });
 
-  it('conflicting reuse of an idempotency key returns the ORIGINAL decision unchanged', async () => {
+  it('conflicting reuse of an idempotency key is an explicit conflict; original preserved', async () => {
     const first = await ingestEvidence(deps, ctx, sign(makeSubmission({ idempotencyKey: 'idem-conflict' })));
+    expect(first.status).toBe('verified_complete');
     // Re-sign a DIFFERENT payload under the same key (valid signature, changed runId).
     const conflict = await ingestEvidence(deps, ctx, sign(makeSubmission({ idempotencyKey: 'idem-conflict', runId: 'run-DIFFERENT' })));
-    expect(conflict.replayed).toBe(true);
-    expect(conflict.status).toBe(first.status);
+    expect(conflict.accepted).toBe(false);
+    expect(conflict.rejection?.code).toBe('idempotency_conflict');
+    // An IDENTICAL retry, by contrast, safely replays the original.
+    const retry = await ingestEvidence(deps, ctx, sign(makeSubmission({ idempotencyKey: 'idem-conflict' })));
+    expect(retry.replayed).toBe(true);
+    expect(retry.status).toBe(first.status);
     expect(store.evidence.filter((e) => e.submission.idempotencyKey === 'idem-conflict').length).toBe(1);
+  });
+
+  it('F-checks: contradictory / duplicate / missing-metadata checks are rejected as invalid_checks', async () => {
+    // status 'passed' with a non-zero exit code (contradiction).
+    const contra = await ingestEvidence(
+      deps,
+      ctx,
+      sign(makeSubmission({ checks: [passed('unit'), { ...passed('typecheck'), exitCode: 2 }], idempotencyKey: 'idem-contra' })),
+    );
+    expect(contra.rejection?.code).toBe('invalid_checks');
+    // duplicate check name.
+    const dup = await ingestEvidence(
+      deps,
+      ctx,
+      sign(makeSubmission({ checks: [passed('unit'), passed('unit'), passed('typecheck')], idempotencyKey: 'idem-dup' })),
+    );
+    expect(dup.rejection?.code).toBe('invalid_checks');
+    // 'passed' with no execution metadata.
+    const nometa = await ingestEvidence(
+      deps,
+      ctx,
+      sign(makeSubmission({ checks: [passed('unit'), { name: 'typecheck', status: 'passed', command: null, exitCode: null, startedAt: null, finishedAt: null, detail: null }], idempotencyKey: 'idem-nometa' })),
+    );
+    expect(nometa.rejection?.code).toBe('invalid_checks');
+  });
+
+  it('F-checks: a failed check is never described as passed in the scope statement', async () => {
+    const failed = await ingestEvidence(
+      deps,
+      ctx,
+      sign(makeSubmission({ checks: [passed('unit'), { ...passed('typecheck'), status: 'failed', exitCode: 1 }], idempotencyKey: 'idem-scope' })),
+    );
+    expect(failed.status).toBe('verification_failed');
+    expect(failed.checkEvaluation?.scope).toMatch(/did NOT pass/);
+    expect(failed.checkEvaluation?.scope).not.toMatch(/check\(s\) passed/);
+  });
+
+  it('F-artifacts: an empty submitted list cannot bypass a required artifact', async () => {
+    const empty = await ingestEvidence(deps, ctx, sign(makeSubmission({ artifacts: [], idempotencyKey: 'idem-empty' })));
+    expect(empty.status).toBe('verification_failed');
+    expect(empty.reasons.some((r) => /Required artifact\(s\) missing/.test(r))).toBe(true);
   });
 });

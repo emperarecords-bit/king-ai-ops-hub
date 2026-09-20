@@ -36,6 +36,8 @@ export const verificationRequests = pgTable(
     expectedCommitSha: text('expected_commit_sha').notNull(),
     /** Every check that must PASS, declared before any results arrive. */
     requiredChecks: jsonb('required_checks').$type<string[]>().notNull(),
+    /** Artifact paths that MUST be present and available, declared before execution. */
+    requiredArtifacts: jsonb('required_artifacts').$type<string[]>().notNull().default([]),
     allowDirty: boolean('allow_dirty').notNull().default(false),
     createdBy: uuid('created_by').references(() => profiles.id, { onDelete: 'set null' }),
     createdAt,
@@ -75,8 +77,10 @@ export const verificationEvidence = pgTable(
     checks: jsonb('checks').$type<CheckResult[]>().notNull(),
     artifacts: jsonb('artifacts').$type<SubmittedArtifact[]>().notNull(),
     artifactAvailability: jsonb('artifact_availability').$type<ArtifactAvailability[]>().notNull(),
-    /** Idempotency guard: a duplicate key never changes the stored decision. */
+    /** Idempotency guard: a duplicate (request,key) never changes the stored decision. */
     idempotencyKey: text('idempotency_key').notNull(),
+    /** Canonical digest of the original submission — identical retries match; different content conflicts. */
+    submissionSha256: text('submission_sha256').notNull(),
     accepted: boolean('accepted').notNull(),
     rejectionCode: text('rejection_code').$type<RejectionCode>(),
     status: text('status').notNull(),
@@ -86,7 +90,8 @@ export const verificationEvidence = pgTable(
     createdAt,
   },
   (t) => [
-    unique('verification_evidence_idempotency_uq').on(t.orgId, t.projectId, t.idempotencyKey),
+    // Idempotency is bound to the verification request, not just the project.
+    unique('verification_evidence_idempotency_uq').on(t.orgId, t.projectId, t.requestId, t.idempotencyKey),
     index('verification_evidence_task_idx').on(t.orgId, t.projectId, t.taskId),
     index('verification_evidence_request_idx').on(t.requestId),
   ],

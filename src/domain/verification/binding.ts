@@ -45,14 +45,12 @@ export function validateBinding(
       `Evidence commit ${submission.commitSha} does not match the reviewed commit ${request.expectedCommitSha}.`,
     );
   }
-  // A dirty tree is not the committed code unless the contract allows it.
-  if (submission.dirty && !request.allowDirty) {
-    return reject(
-      'dirty_tree',
-      submission.uncommittedChangesDigest
-        ? `Working tree was dirty (changes digest ${submission.uncommittedChangesDigest}); a commit SHA does not identify a dirty tree.`
-        : 'Working tree was dirty and no uncommitted-changes digest was recorded.',
-    );
+  // Initial integration: a dirty working tree is ALWAYS rejected. A commit SHA
+  // does not identify a dirty tree, and git-status text is not a content identity.
+  // (Verifying dirty work will require binding to a real content snapshot/digest;
+  // `allowDirty` is reserved for that and is intentionally not honored yet.)
+  if (submission.dirty) {
+    return reject('dirty_tree', 'Working tree was dirty; only committed code can be verified in this integration.');
   }
   return { ok: true, rejection: null };
 }

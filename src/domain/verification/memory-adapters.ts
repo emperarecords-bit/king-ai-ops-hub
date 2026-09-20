@@ -4,13 +4,14 @@
  * object store. The Drizzle + object-store adapters implement the same ports.
  */
 import type { EvidenceSubmission, IngestDecision, VerificationRequest } from './ingest-types';
-import type { RunnerSecretSource, StoredArtifactStore, VerificationStore } from './ports';
+import type { PriorEvidence, RunnerSecretSource, StoredArtifactStore, VerificationStore } from './ports';
 
-const scope = (orgId: string, projectId: string, key: string) => `${orgId}|${projectId}|${key}`;
+const scope = (orgId: string, projectId: string, ...parts: string[]) => [orgId, projectId, ...parts].join('|');
 
 export class InMemoryVerificationStore implements VerificationStore {
   private readonly requests = new Map<string, VerificationRequest>();
-  private readonly decisions = new Map<string, IngestDecision>();
+  // Keyed by (org, project, requestId, idempotencyKey) — idempotency is bound to the request.
+  private readonly records = new Map<string, PriorEvidence>();
   readonly evidence: { submission: EvidenceSubmission; decision: IngestDecision }[] = [];
 
   addRequest(req: VerificationRequest): void {
@@ -21,23 +22,26 @@ export class InMemoryVerificationStore implements VerificationStore {
     return this.requests.get(scope(orgId, projectId, requestId)) ?? null;
   }
 
-  async findDecisionByIdempotencyKey(orgId: string, projectId: string, key: string): Promise<IngestDecision | null> {
-    return this.decisions.get(scope(orgId, projectId, key)) ?? null;
+  async findExisting(orgId: string, projectId: string, requestId: string, key: string): Promise<PriorEvidence | null> {
+    return this.records.get(scope(orgId, projectId, requestId, key)) ?? null;
   }
 
   async saveEvidence(
     orgId: string,
     projectId: string,
     submission: EvidenceSubmission,
+    submissionSha256: string,
     decision: IngestDecision,
-  ): Promise<IngestDecision> {
-    const k = scope(orgId, projectId, submission.idempotencyKey);
-    // Idempotent: the first decision for a key wins and never changes.
-    const existing = this.decisions.get(k);
+  ): Promise<PriorEvidence> {
+    const k = scope(orgId, projectId, submission.requestId, submission.idempotencyKey);
+    // Idempotent: the first record for a key wins and never changes (mirrors the
+    // DB unique constraint + onConflictDoNothing).
+    const existing = this.records.get(k);
     if (existing) return existing;
-    this.decisions.set(k, decision);
+    const record: PriorEvidence = { decision, submissionSha256 };
+    this.records.set(k, record);
     this.evidence.push({ submission, decision });
-    return decision;
+    return record;
   }
 }
 

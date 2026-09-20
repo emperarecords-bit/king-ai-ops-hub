@@ -18,9 +18,9 @@
  */
 import { createHash } from 'node:crypto';
 import { and, eq, sql } from 'drizzle-orm';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { withTenant } from '@/db/tenant';
-import { verificationEvidence } from '@/db/schema';
+import { verificationEvidence, verificationRequests } from '@/db/schema';
 import { getObjectStore } from '@/domain/documents/object-store';
 import {
   ingestEvidence,
@@ -83,15 +83,35 @@ const deps = (tx: Parameters<Parameters<typeof withTenant>[1]>[0]): IngestDeps =
   secrets: new StaticRunnerSecretSource(new Map([[`${ORG}|${PROJECT}`, SECRET]])),
 });
 
+const createdRequestIds: string[] = [];
+
 async function seedRequest(): Promise<string> {
-  return withTenant(ctx, async (tx) => {
-    const id = crypto.randomUUID();
+  const id = crypto.randomUUID();
+  // Runs as the non-bypass app_server role via withTenant (RLS enforced), stamping
+  // the tenant GUCs — exactly the runtime path, not a superuser/migration bypass.
+  await withTenant(ctx, async (tx) => {
     await tx.execute(sql`
-      insert into verification_requests (id, org_id, project_id, task_id, repo_full_name, expected_commit_sha, required_checks, allow_dirty)
-      values (${id}, ${ORG}, ${PROJECT}, ${TASK}, 'acme/widget', ${COMMIT}, ${JSON.stringify(['unit'])}::jsonb, false)`);
-    return id;
+      insert into verification_requests
+        (id, org_id, project_id, task_id, repo_full_name, expected_commit_sha, required_checks, required_artifacts, allow_dirty)
+      values
+        (${id}, ${ORG}, ${PROJECT}, ${TASK}, 'acme/widget', ${COMMIT},
+         ${JSON.stringify(['unit'])}::jsonb, ${JSON.stringify(['test-results.json'])}::jsonb, false)`);
   });
+  createdRequestIds.push(id);
+  return id;
 }
+
+// Clean up only the records this test created (test-owned), never anything else.
+afterAll(async () => {
+  if (!enabled) return;
+  await getObjectStore().then((s) => s.delete(artKey).catch(() => undefined));
+  for (const id of createdRequestIds) {
+    await withTenant(ctx, async (tx) => {
+      await tx.execute(sql`delete from verification_evidence where request_id = ${id}`);
+      await tx.execute(sql`delete from verification_requests where id = ${id}`);
+    });
+  }
+});
 
 describe.skipIf(!enabled)('VER-002 real integration (DB + store + artifact adapter)', () => {
   it('accepts valid evidence and persists a verified decision', async () => {
@@ -121,10 +141,32 @@ describe.skipIf(!enabled)('VER-002 real integration (DB + store + artifact adapt
     expect(rows[0]?.n).toBe(1); // unique constraint held
   });
 
-  it('cannot read a verification_request from another project (tenant isolation)', async () => {
+  it('a conflicting concurrent submission (same key, different content) preserves the first decision', async () => {
+    await getObjectStore().then((s) => s.put(artKey, bytes, 'application/json'));
+    const requestId = await seedRequest();
+    const key = `conflict-${requestId}`;
+    const a = sign(submission({ requestId, idempotencyKey: key, runId: 'run-A' }));
+    const b = sign(submission({ requestId, idempotencyKey: key, runId: 'run-B' })); // different digest, same key
+    const [ra, rb] = await Promise.all([
+      withTenant(ctx, (tx) => ingestEvidence(deps(tx), ctx, a)),
+      withTenant(ctx, (tx) => ingestEvidence(deps(tx), ctx, b)),
+    ]);
+    // Exactly one is the winner; the other is an explicit conflict, never a silent overwrite.
+    const outcomes = [ra, rb].map((r) => (r.rejection?.code === 'idempotency_conflict' ? 'conflict' : r.status)).sort();
+    expect(outcomes).toEqual(['conflict', 'verified_complete']);
+    const rows = await withTenant(ctx, (tx) =>
+      tx.select({ n: sql<number>`count(*)::int` }).from(verificationEvidence).where(and(eq(verificationEvidence.requestId, requestId), eq(verificationEvidence.idempotencyKey, key))),
+    );
+    expect(rows[0]?.n).toBe(1); // one row only
+  });
+
+  it('RLS blocks a cross-project read directly — no app-level project filter in the query', async () => {
     const requestId = await seedRequest();
     const otherCtx = { ...ctx, projectId: '11111111-1111-1111-1111-111111111111' } as TenantContext;
-    const found = await withTenant(otherCtx, (tx) => createDrizzleVerificationStore(tx).getRequest(otherCtx.orgId, otherCtx.projectId, requestId));
-    expect(found).toBeNull();
+    // Query with NO project_id predicate: RLS alone must hide the other tenant's row.
+    const rows = await withTenant(otherCtx, (tx) =>
+      tx.select({ id: verificationRequests.id }).from(verificationRequests).where(eq(verificationRequests.id, requestId)),
+    );
+    expect(rows.length).toBe(0);
   });
 });

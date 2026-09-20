@@ -7,31 +7,27 @@
 import { and, eq } from 'drizzle-orm';
 import type { DbTx } from '@/db/client';
 import { verificationEvidence, verificationRequests } from '@/db/schema';
-import type {
-  ArtifactAvailability,
-  CheckResult,
-  IngestDecision,
-  RejectionCode,
-  SubmittedArtifact,
-  VerificationRequest,
-} from './index';
-import type { VerificationStore } from './ports';
+import type { ArtifactAvailability, CheckResult, RejectionCode, SubmittedArtifact, VerificationRequest } from './index';
+import type { PriorEvidence, VerificationStore } from './ports';
 import type { TaskVerificationStatus } from './types';
 
 type EvidenceRow = typeof verificationEvidence.$inferSelect;
 
-function rowToDecision(row: EvidenceRow): IngestDecision {
+function rowToPrior(row: EvidenceRow): PriorEvidence {
   return {
-    accepted: row.accepted,
-    rejection: row.rejectionCode ? { code: row.rejectionCode, message: row.reasons[0] ?? '' } : null,
-    status: row.status as TaskVerificationStatus,
-    deliverable: row.deliverable,
-    idempotencyKey: row.idempotencyKey,
-    checkEvaluation: null, // durable facts are status/reasons/artifactAvailability
-    artifactAvailability: row.artifactAvailability,
-    reasons: row.reasons,
-    decidedAt: row.decidedAt.toISOString(),
-    replayed: false,
+    submissionSha256: row.submissionSha256,
+    decision: {
+      accepted: row.accepted,
+      rejection: row.rejectionCode ? { code: row.rejectionCode, message: row.reasons[0] ?? '' } : null,
+      status: row.status as TaskVerificationStatus,
+      deliverable: row.deliverable,
+      idempotencyKey: row.idempotencyKey,
+      checkEvaluation: null, // durable facts are status/reasons/artifactAvailability
+      artifactAvailability: row.artifactAvailability,
+      reasons: row.reasons,
+      decidedAt: row.decidedAt.toISOString(),
+      replayed: false,
+    },
   };
 }
 
@@ -60,13 +56,14 @@ export function createDrizzleVerificationStore(tx: DbTx): VerificationStore {
         repoFullName: row.repoFullName,
         expectedCommitSha: row.expectedCommitSha,
         requiredChecks: row.requiredChecks,
+        requiredArtifacts: row.requiredArtifacts,
         allowDirty: row.allowDirty,
         createdBy: row.createdBy ?? '',
         createdAt: row.createdAt.toISOString(),
       };
     },
 
-    async findDecisionByIdempotencyKey(orgId, projectId, key): Promise<IngestDecision | null> {
+    async findExisting(orgId, projectId, requestId, key): Promise<PriorEvidence | null> {
       const row = (
         await tx
           .select()
@@ -75,15 +72,16 @@ export function createDrizzleVerificationStore(tx: DbTx): VerificationStore {
             and(
               eq(verificationEvidence.orgId, orgId),
               eq(verificationEvidence.projectId, projectId),
+              eq(verificationEvidence.requestId, requestId),
               eq(verificationEvidence.idempotencyKey, key),
             ),
           )
           .limit(1)
       )[0];
-      return row ? rowToDecision(row) : null;
+      return row ? rowToPrior(row) : null;
     },
 
-    async saveEvidence(orgId, projectId, submission, decision): Promise<IngestDecision> {
+    async saveEvidence(orgId, projectId, submission, submissionSha256, decision): Promise<PriorEvidence> {
       await tx
         .insert(verificationEvidence)
         .values({
@@ -104,6 +102,7 @@ export function createDrizzleVerificationStore(tx: DbTx): VerificationStore {
           artifacts: [...submission.artifacts] as SubmittedArtifact[],
           artifactAvailability: [...decision.artifactAvailability] as ArtifactAvailability[],
           idempotencyKey: submission.idempotencyKey,
+          submissionSha256,
           accepted: decision.accepted,
           rejectionCode: (decision.rejection?.code ?? null) as RejectionCode | null,
           status: decision.status,
@@ -111,13 +110,20 @@ export function createDrizzleVerificationStore(tx: DbTx): VerificationStore {
           reasons: [...decision.reasons] as string[],
           decidedAt: new Date(decision.decidedAt),
         })
-        // Idempotent persistence: a duplicate key is a no-op; the first decision stands.
+        // Idempotent persistence: a duplicate (request,key) is a no-op; the first record stands.
         .onConflictDoNothing({
-          target: [verificationEvidence.orgId, verificationEvidence.projectId, verificationEvidence.idempotencyKey],
+          target: [
+            verificationEvidence.orgId,
+            verificationEvidence.projectId,
+            verificationEvidence.requestId,
+            verificationEvidence.idempotencyKey,
+          ],
         });
 
-      const stored = await this.findDecisionByIdempotencyKey(orgId, projectId, submission.idempotencyKey);
-      return stored ?? decision;
+      // Re-select the WINNER (ours, or a concurrent insert's) so the orchestrator
+      // can detect a losing conflict by digest mismatch.
+      const stored = await this.findExisting(orgId, projectId, submission.requestId, submission.idempotencyKey);
+      return stored ?? { decision, submissionSha256 };
     },
   };
 }

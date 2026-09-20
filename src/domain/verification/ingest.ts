@@ -15,7 +15,7 @@ import { validateBinding, type TenantContext } from './binding';
 import { evaluateChecks } from './checks';
 import type { IngestDecision, RejectionCode, SignedEnvelope } from './ingest-types';
 import type { IngestDeps } from './ports';
-import { verifyEvidenceSignature } from './signing';
+import { submissionDigest, verifyEvidenceSignature } from './signing';
 
 export async function ingestEvidence(
   deps: IngestDeps,
@@ -64,37 +64,51 @@ export async function ingestEvidence(
     return reject('expired', `Submission timestamp ${payload.submittedAt} is outside the ${maxAgeMs}ms freshness window.`);
   }
 
-  // 3. Replay/idempotency — a duplicate key returns the ORIGINAL decision, unchanged.
-  const prior = await deps.store.findDecisionByIdempotencyKey(ctx.orgId, ctx.projectId, payload.idempotencyKey);
-  if (prior) return { ...prior, replayed: true };
+  // 3. Idempotency — bound to (request + canonical submission digest). An identical
+  //    retry returns the ORIGINAL decision; a DIFFERENT submission reusing the key
+  //    is an explicit conflict, never a silent overwrite.
+  const digest = submissionDigest(payload);
+  const prior = await deps.store.findExisting(ctx.orgId, ctx.projectId, payload.requestId, payload.idempotencyKey);
+  if (prior) {
+    if (prior.submissionSha256 === digest) return { ...prior.decision, replayed: true };
+    return reject('idempotency_conflict', 'Idempotency key reused with a different submission; the original decision is preserved.');
+  }
 
   // 4. Binding.
   const binding = validateBinding(request, payload, ctx);
   if (!binding.ok && binding.rejection) {
     const rejected = reject(binding.rejection.code, binding.rejection.message);
-    return deps.store.saveEvidence(ctx.orgId, ctx.projectId, payload, rejected);
+    return (await deps.store.saveEvidence(ctx.orgId, ctx.projectId, payload, digest, rejected)).decision;
   }
 
-  // 5. Required checks (declared up front on the contract).
+  // 5. Required checks (declared up front). Structural defects invalidate the submission.
   const checkEvaluation = evaluateChecks(request.requiredChecks, payload.checks, payload.commitSha);
+  if (checkEvaluation.problems.length > 0) {
+    const rejected = reject('invalid_checks', `Invalid checks: ${checkEvaluation.problems.join(' ')}`);
+    return (await deps.store.saveEvidence(ctx.orgId, ctx.projectId, payload, digest, { ...rejected, checkEvaluation })).decision;
+  }
 
   // 6. Artifact availability (stored, retrievable, hash-matched) — and tenant-bound.
-  //    A storageKey outside this tenant's partition is rejected as `forbidden`
-  //    even if the supplied hash matches, so evidence cannot reference another
-  //    tenant's artifacts or arbitrary storage objects.
+  //    A storageKey outside this tenant's partition is `forbidden` and never
+  //    dereferenced, even if the supplied hash matches.
   const keyAllowed = (key: string): boolean => key.startsWith(`org/${ctx.orgId}/project/${ctx.projectId}/`);
   const artifactAvailability = await verifyArtifactAvailability(payload.artifacts, deps.artifacts, keyAllowed);
   const artifactsOk = allArtifactsAvailable(artifactAvailability);
+
+  // 6b. Required artifacts (declared before execution). Every one must be present
+  //     AND available — an empty submitted list can never bypass this.
+  const availablePaths = new Set(artifactAvailability.filter((a) => a.state === 'available').map((a) => a.path));
+  const missingRequired = request.requiredArtifacts.filter((p) => !availablePaths.has(p));
 
   // 7. Adjudicate.
   const reasons: string[] = [checkEvaluation.scope];
   let status: IngestDecision['status'];
   let deliverable = false;
-  if (checkEvaluation.allRequiredPassed && artifactsOk) {
+  if (checkEvaluation.allRequiredPassed && artifactsOk && missingRequired.length === 0) {
     status = 'verified_complete';
     deliverable = true;
     reasons.push(
-      `All ${request.requiredChecks.length} required check(s) passed and ${artifactAvailability.length} artifact(s) confirmed available at ${payload.commitSha}.`,
+      `All ${request.requiredChecks.length} required check(s) passed and all ${request.requiredArtifacts.length} required artifact(s) confirmed available at ${payload.commitSha}.`,
     );
   } else {
     status = 'verification_failed';
@@ -103,9 +117,12 @@ export async function ingestEvidence(
         `Required checks not satisfied: ${checkEvaluation.failing.map((f) => `${f.name}=${f.status}`).join(', ') || 'none declared'}.`,
       );
     }
+    if (missingRequired.length > 0) {
+      reasons.push(`Required artifact(s) missing or unavailable: ${missingRequired.join(', ')}.`);
+    }
     if (!artifactsOk) {
       const bad = artifactAvailability.filter((a) => a.state !== 'available');
-      reasons.push(`Artifacts not verifiable: ${bad.map((a) => `${a.path}=${a.state}`).join(', ')}.`);
+      reasons.push(`Submitted artifacts not verifiable: ${bad.map((a) => `${a.path}=${a.state}`).join(', ')}.`);
     }
   }
 
@@ -121,5 +138,12 @@ export async function ingestEvidence(
     decidedAt,
     replayed: false,
   };
-  return deps.store.saveEvidence(ctx.orgId, ctx.projectId, payload, decision);
+  // Persist under the unique (request, key). A concurrent insert with the same
+  // key but a different submission wins the row → detect by digest mismatch and
+  // return a conflict rather than the other submission's decision.
+  const saved = await deps.store.saveEvidence(ctx.orgId, ctx.projectId, payload, digest, decision);
+  if (saved.submissionSha256 !== digest) {
+    return reject('idempotency_conflict', 'A concurrent submission with the same key differed; the first decision is preserved.');
+  }
+  return saved.decision;
 }

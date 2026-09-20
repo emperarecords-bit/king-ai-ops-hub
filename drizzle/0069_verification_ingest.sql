@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS "verification_requests" (
   "repo_full_name" text NOT NULL,
   "expected_commit_sha" text NOT NULL,
   "required_checks" jsonb NOT NULL,
+  "required_artifacts" jsonb DEFAULT '[]'::jsonb NOT NULL,
   "allow_dirty" boolean DEFAULT false NOT NULL,
   "created_by" uuid,
   "created_at" timestamptz DEFAULT now() NOT NULL,
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS "verification_evidence" (
   "artifacts" jsonb NOT NULL,
   "artifact_availability" jsonb NOT NULL,
   "idempotency_key" text NOT NULL,
+  "submission_sha256" text NOT NULL,
   "accepted" boolean NOT NULL,
   "rejection_code" text,
   "status" text NOT NULL,
@@ -46,7 +48,7 @@ CREATE TABLE IF NOT EXISTS "verification_evidence" (
   "reasons" jsonb NOT NULL,
   "decided_at" timestamptz NOT NULL,
   "created_at" timestamptz DEFAULT now() NOT NULL,
-  CONSTRAINT "verification_evidence_idempotency_uq" UNIQUE ("org_id", "project_id", "idempotency_key")
+  CONSTRAINT "verification_evidence_idempotency_uq" UNIQUE ("org_id", "project_id", "request_id", "idempotency_key")
 );
 
 DO $$ BEGIN

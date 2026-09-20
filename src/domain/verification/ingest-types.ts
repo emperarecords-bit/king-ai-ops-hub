@@ -60,7 +60,11 @@ export interface VerificationRequest {
   readonly expectedCommitSha: string;
   /** Every check that must PASS. Declared up front, before results. */
   readonly requiredChecks: readonly string[];
-  /** Whether a dirty working tree is acceptable (default false: a SHA does not identify a dirty tree). */
+  /** Artifact paths that MUST be present and available. Declared before execution;
+   *  an empty submitted list can never bypass these. */
+  readonly requiredArtifacts: readonly string[];
+  /** Reserved. Dirty working trees are rejected in this initial integration
+   *  regardless of this flag (a future release may bind to a real content snapshot). */
   readonly allowDirty: boolean;
   readonly createdBy: string;
   readonly createdAt: string;
@@ -107,13 +111,18 @@ export type RejectionCode =
   | 'wrong_repo'
   | 'wrong_task'
   | 'stale_commit'
-  | 'dirty_tree';
+  | 'dirty_tree'
+  | 'invalid_checks'
+  | 'idempotency_conflict';
 
 export interface CheckEvaluation {
   readonly allRequiredPassed: boolean;
   readonly byCheck: readonly { readonly name: string; readonly status: CheckStatus }[];
   readonly failing: readonly { readonly name: string; readonly status: CheckStatus }[];
-  /** Scope statement — never overclaims. */
+  /** Structural problems that make the submission invalid: duplicate check names,
+   *  contradictory status/exit, or missing execution metadata. Non-empty ⇒ reject. */
+  readonly problems: readonly string[];
+  /** Scope statement — reflects the ACTUAL outcome; never describes a failure as passed. */
   readonly scope: string;
 }
 

@@ -90,6 +90,7 @@ function makeRequest(over: Partial<VerificationRequest>): VerificationRequest {
     repoFullName: REPO,
     expectedCommitSha: 'x',
     requiredChecks: ['unit'],
+    requiredArtifacts: ['test-results.json'],
     allowDirty: false,
     createdBy: 'owner',
     createdAt: new Date().toISOString(),
@@ -140,16 +141,21 @@ async function main(): Promise<void> {
     const pass = runCheck(dir, 'unit', []);
     const artSha = createHash('sha256').update(pass.bytes).digest('hex');
     artifacts.put(`org/${ORG}/project/${PROJ}/art/test-results.json`, pass.bytes);
-    const happy = await ingestEvidence(deps, ctx, sign(submission(commit, [pass.check], artSha)));
+    const happySub = submission(commit, [pass.check], artSha); // one submission object…
+    const happy = await ingestEvidence(deps, ctx, sign(happySub));
     check(
       'accepted → verified_complete',
       happy.accepted && happy.status === 'verified_complete' && happy.deliverable,
       `check ${pass.check.name} exit=${pass.check.exitCode} → ${happy.status}; ${happy.reasons[1] ?? ''}`,
     );
 
-    console.log('\nReplay — same idempotency key does not change the result');
-    const replay = await ingestEvidence(deps, ctx, sign(submission(commit, [pass.check], artSha)));
+    console.log('\nReplay — a byte-identical retry returns the original result');
+    const replay = await ingestEvidence(deps, ctx, sign(happySub)); // …resent verbatim
     check('replayed, unchanged', replay.replayed && replay.status === happy.status, `replayed=${replay.replayed} status=${replay.status}`);
+
+    console.log('\nConflict — same key, DIFFERENT content is rejected (original preserved)');
+    const conflict = await ingestEvidence(deps, ctx, sign(submission(commit, [pass.check], artSha, { runId: 'run-DIFFERENT' })));
+    check('rejected idempotency_conflict', conflict.rejection?.code === 'idempotency_conflict', `${conflict.rejection?.code}`);
 
     console.log('\nStale commit — evidence for an older commit cannot verify a newer contract');
     writeFileSync(join(dir, 'README.md'), 'new work\n');

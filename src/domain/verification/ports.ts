@@ -16,18 +16,31 @@ export interface RunnerSecretSource {
   getRunnerSecret(orgId: string, projectId: string): Promise<string | null>;
 }
 
+/** A prior submission recorded under an idempotency key, with its content digest. */
+export interface PriorEvidence {
+  readonly decision: IngestDecision;
+  /** Canonical digest of the ORIGINAL submission — identical retries match it. */
+  readonly submissionSha256: string;
+}
+
 /** Persistence for contracts + idempotent evidence decisions. */
 export interface VerificationStore {
   getRequest(orgId: string, projectId: string, requestId: string): Promise<VerificationRequest | null>;
-  /** Prior decision for this idempotency key, if any (replay safety). */
-  findDecisionByIdempotencyKey(orgId: string, projectId: string, key: string): Promise<IngestDecision | null>;
-  /** Persist the submission + its decision atomically; returns the stored decision. */
+  /** Prior evidence for (request, idempotency key), if any — for replay/conflict. */
+  findExisting(orgId: string, projectId: string, requestId: string, key: string): Promise<PriorEvidence | null>;
+  /**
+   * Persist the submission + digest + decision atomically. Under a unique
+   * constraint on (org, project, request_id, idempotency_key), a concurrent
+   * insert with the same key is a no-op and this returns the WINNER's stored
+   * record — so the caller can detect a losing conflict by digest mismatch.
+   */
   saveEvidence(
     orgId: string,
     projectId: string,
     submission: EvidenceSubmission,
+    submissionSha256: string,
     decision: IngestDecision,
-  ): Promise<IngestDecision>;
+  ): Promise<PriorEvidence>;
 }
 
 export interface IngestDeps {

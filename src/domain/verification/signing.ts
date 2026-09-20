@@ -7,8 +7,14 @@
  * authenticated connection: no inbound network trust, no bearer tokens on disk,
  * and pasted agent prose (which carries no valid signature) can never enter.
  */
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import type { EvidenceSubmission } from './ingest-types';
+
+/** Canonical content digest of a submission — the identity used for idempotency:
+ *  an identical retry has the same digest; any change produces a different one. */
+export function submissionDigest(payload: EvidenceSubmission): string {
+  return createHash('sha256').update(canonicalJson(payload)).digest('hex');
+}
 
 /** Deterministic JSON with sorted keys so signer and verifier agree byte-for-byte. */
 export function canonicalJson(value: unknown): string {
