@@ -5,11 +5,20 @@ Companion to `external-runner-design.md` (rev. 4). Turns the design into an orde
 money is spent, nothing is deployed, staging/production migrations remain paused, and StressProbe is
 untouched.
 
-**Sequencing principle.** Every PR merges safely with **ingestion still disabled**
-(`VERIFICATION_RUNNER_MASTER_SECRET` unset ⇒ the ingest path rejects everything). Nothing goes live
-until the final enablement ceremony. Each PR is reviewable on its own and verified on **disposable
-databases / throwaway buckets only**; because staging/prod migrations are paused, merged migrations
-are **not** applied to staging/prod in this phase.
+**Sequencing principle.** Every PR merges safely, and nothing goes live until the final enablement
+ceremony. Each PR is reviewable on its own and verified on **disposable databases / throwaway
+buckets only**; because staging/prod migrations are paused, merged migrations are **not** applied to
+staging/prod in this phase.
+
+> **Correction (scope of the master-secret kill-switch).** An unset `VERIFICATION_RUNNER_MASTER_SECRET`
+> disables **evidence ingestion only** — it stops signature verification, so signed evidence is
+> rejected. It does **not** disable runner-**credential issuance** (PR-2), **contract retrieval**
+> (PR-3), or **upload-grant issuance** (PR-4): those capabilities do not depend on the signing master
+> and would be reachable the moment their routes exist. So "ingestion disabled" is **not** a blanket
+> "feature off". Each of those three capabilities needs its **own explicit enablement control** (a
+> per-capability flag/gate, default-off) so a route added in an early PR cannot be exercised before
+> the owner intends it. Do not treat an unset master as sufficient to keep credentials, retrieval, or
+> upload grants inert.
 
 ## Two gates carried forward (apply wherever named below)
 - **Gate A — provider is a proposal, not a fact.** `STORAGE_DRIVER=s3` is a dev default; it does
@@ -17,9 +26,11 @@ are **not** applied to staging/prod in this phase.
   `ObjectStore` port, and S3 is selected only by an explicit owner decision (PR-4) plus a passing
   acceptance run (PR-5). No enforcement property (size/checksum/no-overwrite) may be *claimed* until
   PR-5 is green against the actual endpoint+SDK.
-- **Gate B — quota is reclaimed only on proof an upload cannot still complete.** A reservation is
-  never released on URL expiry. PR-6 must **document and enforce a maximum upload duration** so the
-  drain window is provably longer than any in-flight PUT, then confirm absence with a `HEAD`.
+- **Gate B — quota reclamation of un-finalized grants stays UNRESOLVED until a hard upload deadline is
+  demonstrably enforced.** A reservation is never released on URL expiry. Size caps, assumed
+  throughput, and idle timeouts do **not** establish a hard total-upload deadline, so no timed
+  reclamation is claimed; only **finalize** (a confirmed upload) releases quota until a real deadline
+  mechanism is chosen and its abort is proven (see Gate B detail).
 
 ---
 
@@ -28,11 +39,11 @@ are **not** applied to staging/prod in this phase.
 | # | PR | What it lands | Independently reviewable because | Turns anything on? |
 |---|----|----|----|----|
 | **1** | **Evidence immutability + FK RESTRICT** | `rls.sql` revoke UPDATE/DELETE on `verification_evidence` + `app.forbid_mutation()` trigger; flip verification FKs `cascade → restrict`; journaled migration; `PRODUCTION_PINS` bump; regression. | Pure DB hardening of an existing table; no runner, storage, or auth. Corrects a confirmed current gap. | No |
-| **2** | **Machine-principal auth foundation** | `verification_runner_keys` table (hash-at-rest); pre-tenant `keyId` lookup (`SECURITY DEFINER` fn); `requireRunnerOrTenant` guard; endpoint permission matrix; signing-key version + revocation checks on both paths. | Auth layer only; human path unchanged; ingestion stays disabled. | No |
-| **3** | **Contract retrieval + catalog pin** | `GET …/requests/assigned` (runner-auth, read-only); `catalog_version`/`catalog_digest` columns pinned at creation; ingest rejects `catalog_mismatch` and non-matching commands. | Extends the existing create/ingest paths; no storage/runner. | No |
-| **4** | **Upload-grant endpoint (mechanism only)** | `POST …/uploads` issuing a presigned PUT via the `ObjectStore` port; opaque server-generated object IDs + validated logical paths; server-generated keys. **Claims no enforcement yet.** | Mechanism behind the existing port; **Gate A** — provider chosen here, not assumed. | No |
+| **2** | **Machine-principal auth foundation** | `verification_runner_keys` table (hash-at-rest); pre-tenant `keyId` lookup (`SECURITY DEFINER` fn); `requireRunnerOrTenant` guard; endpoint permission matrix; signing-key version + revocation checks on both paths. **Credential issuance behind its own default-off enablement gate** (not the signing master). | Auth layer only; human path unchanged; issuance gated default-off. | No |
+| **3** | **Contract retrieval + catalog pin** | `GET …/requests/assigned` (runner-auth, read-only); `catalog_version`/`catalog_digest` columns pinned at creation; ingest rejects `catalog_mismatch` and non-matching commands. **Runner retrieval behind its own default-off gate** (not the signing master). | Extends the existing create/ingest paths; no storage/runner. | No |
+| **4** | **Upload-grant endpoint (mechanism only)** | `POST …/uploads` issuing a presigned PUT via the `ObjectStore` port; opaque server-generated object IDs + validated logical paths; server-generated keys. **Claims no enforcement yet; grant issuance behind its own default-off gate** (not the signing master). | Mechanism behind the existing port; **Gate A** — provider chosen here, not assumed. | No |
 | **5** | **Provider acceptance tests (§4.7)** | The suite proving size / checksum-encoding / no-overwrite against a **throwaway** bucket + pinned SDK. Flips upload docs from "intended" to "enforced" only when green. | Test-only; **Gate A** unblock. Live run deferred until the owner authorizes a disposable bucket (provisioning/spend — not now). | No |
-| **6** | **Quota accounting + in-flight reclamation** | Atomic reservation/finalize; **Gate B** — max-upload-duration enforcement + drain-window reclamation + `HEAD` proof; orphan handoff to cleanup. | Builds on PR-4 keys; self-contained accounting. | No |
+| **6** | **Quota accounting + finalize** (timed reclamation deferred) | Atomic reservation + **finalize** on confirmed upload. **Gate B** — timed reclamation of un-finalized grants is left UNRESOLVED until a hard upload-deadline mechanism is chosen and its abort proven; no reclamation-on-expiry. | Builds on PR-4 keys; self-contained accounting. | No |
 | **7** | **Recoverable retention path** | `verification_purge_jobs` table; retention role + `SECURITY DEFINER` purge fn; retried/audited object deletion; enables safe parent deletion again. | Closes the deletion side of PR-1's RESTRICT; governed, role-authorized. | No |
 | **8** | **Runner reference client** (external repo/CI) | Two-stage runner: isolated execution harness → attestation (sign + upload + submit). *Design already specifies; build is a later, separate effort — explicitly not now.* | External to the Hub; consumes stable Hub APIs. | No |
 | **9** | **Enablement ceremony** | Set `VERIFICATION_RUNNER_MASTER_SECRET` (≥32 chars) in **staging** behind the signed-receipt migration process; apply the accumulated migrations; run PR-5 acceptance against a disposable bucket; then production. | The only step that goes live. Paused now. | **Yes** |
@@ -103,25 +114,37 @@ All verified on a disposable `*_test` DB as the non-superuser `app_server` role 
   of the raw digest; `412` on `If-None-Match: *`). Until then the path is "intended, unverified" and
   ingest-side digest re-verification is the backstop.
 
-### Gate B — max upload duration, so quota reclamation is provable (PR-6)
+### Gate B — quota reclamation is UNRESOLVED until a hard upload deadline is demonstrably enforced (PR-6)
 A reservation is released only when an upload **cannot still complete**. Because S3 evaluates a
 presigned URL's expiry at request *start*, a PUT begun just before expiry can keep writing after it,
-so "URL expired" is not proof. PR-6 makes the in-flight window **bounded and enforced**:
+so "URL expired" is not proof.
 
-- **Bounded object size** (per-artifact cap, §4.5) puts a ceiling on bytes to transfer.
-- **Short presign expiry `T_url`** (e.g. 5 min): no *new* PUT can start after `T_url`.
-- **Enforced maximum upload duration `T_max`:** the worst-case time a PUT started before `T_url` can
-  still be writing. It is enforced by (a) the size cap, (b) the storage provider's own
-  request/idle-connection timeout (S3 aborts a stalled request), and (c) a configured hard ceiling
-  used to compute the window; a request exceeding `T_max` is guaranteed aborted, not silently
-  lingering. `T_max` is documented as an explicit constant with its basis (size cap ÷ assumed floor
-  throughput, plus provider idle-timeout margin).
-- **Reclamation only after the drain window `T_url + T_max`,** and only after a `HEAD` confirms **no
-  object landed**; if an object is present it is finalized (if referenced by accepted evidence) or
-  handed to cleanup as an orphan, and quota is released **only after** that deletion is confirmed.
-- **Acceptance (PR-6):** a simulated slow PUT that lands *after* `T_url` must keep holding quota
-  until it is finalized or proven absent after `T_url + T_max`; reclamation must never fire at
-  `T_url` alone.
+> **Correction (an earlier draft overstated this).** A size cap, an *assumed* floor throughput, and a
+> provider idle-connection timeout do **NOT** establish a hard total upload deadline. Idle timeouts
+> bound *silence between bytes*, not total duration — a client that keeps trickling bytes can hold a
+> PUT open far longer than `size ÷ assumed-throughput`, and the "assumed floor throughput" is an
+> assumption, not an enforced floor. So `T_max` computed that way is **not** a guarantee, and a drain
+> window built on it is **not** proof an upload cannot still land.
+
+**Therefore quota reclamation of un-finalized grants is an OPEN problem, deferred within PR-6 until a
+hard total-upload deadline is demonstrably enforced.** What is solid vs. unresolved:
+
+- **Solid:** never release on URL expiry; **finalize** (release-to-committed) on a confirmed,
+  digest/size-matched upload is always safe and is the primary path.
+- **Unresolved (must be demonstrated before any timed reclamation):** a mechanism that puts a **hard
+  ceiling on a single PUT's total wall-clock**, independent of throughput assumptions — candidates to
+  evaluate, not assume: a provider/proxy-enforced maximum-request-duration, refusing plain PUT in
+  favor of multipart with per-part deadlines, or a signed request-expiry the provider enforces on
+  completion rather than only at start. Timed reclamation stays disabled until one of these is chosen
+  **and** an acceptance test proves a PUT is actually aborted at the deadline (a deliberately slow,
+  byte-trickling PUT must be killed, not merely time out on idle).
+- Until then, un-finalized reservations are either held indefinitely or reclaimed only by an explicit
+  operator action, never by an assumed timer.
+
+- **Acceptance (PR-6):** (a) a finalized upload releases correctly; (b) a slow/byte-trickling PUT
+  started before `T_url` is shown to still be able to land after it, demonstrating that expiry is not
+  a deadline; (c) no timed reclamation path exists until a hard-deadline mechanism is implemented and
+  its abort is proven.
 
 ---
 
