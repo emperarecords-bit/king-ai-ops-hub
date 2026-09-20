@@ -6,7 +6,7 @@
  */
 import { and, eq } from 'drizzle-orm';
 import type { DbTx } from '@/db/client';
-import { tasks, verificationEvidence, verificationRequests } from '@/db/schema';
+import { githubRepoLinks, tasks, verificationEvidence, verificationRequests } from '@/db/schema';
 import type { ArtifactAvailability, CheckResult, RejectionCode, SubmittedArtifact, VerificationRequest } from './index';
 import type { PriorEvidence, VerificationStore } from './ports';
 import type { TaskVerificationStatus } from './types';
@@ -76,6 +76,14 @@ export function createDrizzleVerificationStore(tx: DbTx): VerificationStore {
           .limit(1)
       )[0];
       return Boolean(row);
+    },
+
+    async linkedRepoFullNames(orgId, projectId): Promise<string[]> {
+      const rows = await tx
+        .select({ repo: githubRepoLinks.repoFullName })
+        .from(githubRepoLinks)
+        .where(and(eq(githubRepoLinks.orgId, orgId), eq(githubRepoLinks.projectId, projectId)));
+      return rows.map((r) => r.repo);
     },
 
     async findRequestByTaskCommit(orgId, projectId, taskId, commitSha): Promise<VerificationRequest | null> {

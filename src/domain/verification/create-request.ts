@@ -29,7 +29,12 @@ export interface VerificationRequestInput {
   readonly allowDirty?: boolean;
 }
 
-export type CreateRequestRejectionCode = 'invalid_input' | 'task_not_in_project' | 'contract_conflict';
+export type CreateRequestRejectionCode =
+  | 'invalid_input'
+  | 'task_not_in_project'
+  | 'repo_not_authorized'
+  | 'no_repo_binding'
+  | 'contract_conflict';
 
 export interface CreateRequestOutcome {
   /** true = this call created a new contract; false = an identical contract already existed (idempotent). */
@@ -42,15 +47,28 @@ const COMMIT_RE = /^[0-9a-f]{40}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REPO_RE = /^[^/\s]+\/[^/\s]+$/;
 
-function normalizeList(v: readonly string[] | undefined): string[] {
-  if (!Array.isArray(v)) return [];
+/**
+ * Validate a string list WITHOUT silently dropping entries: any blank or non-string entry is an error
+ * (a caller must send a clean list, not one the Hub quietly rewrites). An explicitly empty list is
+ * allowed only when `allowEmpty` (required artifacts may legitimately be none).
+ */
+function validateList(
+  v: readonly string[] | undefined,
+  label: string,
+  allowEmpty: boolean,
+): { ok: true; value: string[] } | { ok: false; message: string } {
+  const arr = v ?? [];
+  if (!Array.isArray(arr)) return { ok: false, message: `${label} must be an array of non-empty strings` };
+  if (!allowEmpty && arr.length === 0) return { ok: false, message: `${label} must declare at least one entry` };
   const out: string[] = [];
-  for (const x of v) {
-    if (typeof x !== 'string') continue;
-    const s = x.trim();
-    if (s) out.push(s);
+  for (const x of arr) {
+    if (typeof x !== 'string' || x.trim() === '') {
+      return { ok: false, message: `${label} must not contain blank or non-string entries` };
+    }
+    out.push(x.trim());
   }
-  return out;
+  if (new Set(out).size !== out.length) return { ok: false, message: `${label} must not contain duplicate entries` };
+  return { ok: true, value: out };
 }
 
 function validate(input: VerificationRequestInput): { ok: true; value: NewVerificationRequest } | { ok: false; message: string } {
@@ -60,12 +78,11 @@ function validate(input: VerificationRequestInput): { ok: true; value: NewVerifi
   if (!REPO_RE.test(repoFullName)) return { ok: false, message: 'repoFullName must be "owner/repo"' };
   const commitSha = (input.commitSha ?? '').trim().toLowerCase();
   if (!COMMIT_RE.test(commitSha)) return { ok: false, message: 'commitSha must be a full 40-hex commit SHA' };
-  const requiredChecks = normalizeList(input.requiredChecks);
-  if (requiredChecks.length === 0) return { ok: false, message: 'requiredChecks must declare at least one check' };
-  if (new Set(requiredChecks).size !== requiredChecks.length) return { ok: false, message: 'requiredChecks must not contain duplicates' };
-  const requiredArtifacts = normalizeList(input.requiredArtifacts);
-  if (new Set(requiredArtifacts).size !== requiredArtifacts.length) return { ok: false, message: 'requiredArtifacts must not contain duplicates' };
-  return { ok: true, value: { taskId, repoFullName, commitSha, requiredChecks, requiredArtifacts, allowDirty: input.allowDirty === true } };
+  const checks = validateList(input.requiredChecks, 'requiredChecks', false);
+  if (!checks.ok) return checks;
+  const artifacts = validateList(input.requiredArtifacts, 'requiredArtifacts', true);
+  if (!artifacts.ok) return artifacts;
+  return { ok: true, value: { taskId, repoFullName, commitSha, requiredChecks: checks.value, requiredArtifacts: artifacts.value, allowDirty: input.allowDirty === true } };
 }
 
 const sameSet = (a: readonly string[], b: readonly string[]): boolean =>
@@ -102,6 +119,19 @@ export async function createVerificationRequest(
 
   if (!(await store.taskExistsInTenant(ctx.orgId, ctx.projectId, n.taskId))) {
     return { created: false, request: null, rejection: { code: 'task_not_in_project', message: 'task does not exist in this project' } };
+  }
+
+  // The repository must be one the project has a TRUSTED link to (github_repo_links). No links at all is
+  // an explicit failure (no authorized binding exists), not a silent accept; a link set that does not
+  // include the requested repo rejects an unrelated repository. Comparison is case-insensitive (GitHub
+  // owner/repo are case-insensitive).
+  const linked = await store.linkedRepoFullNames(ctx.orgId, ctx.projectId);
+  if (linked.length === 0) {
+    return { created: false, request: null, rejection: { code: 'no_repo_binding', message: 'no repository is linked to this project; a verification contract cannot be created' } };
+  }
+  const lower = n.repoFullName.toLowerCase();
+  if (!linked.some((l) => l.toLowerCase() === lower)) {
+    return { created: false, request: null, rejection: { code: 'repo_not_authorized', message: 'repoFullName is not an authorized repository for this project' } };
   }
 
   const existing = await store.findRequestByTaskCommit(ctx.orgId, ctx.projectId, n.taskId, n.commitSha);

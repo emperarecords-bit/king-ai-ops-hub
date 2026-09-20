@@ -12,6 +12,7 @@ const scope = (orgId: string, projectId: string, ...parts: string[]) => [orgId, 
 export class InMemoryVerificationStore implements VerificationStore {
   private readonly requests = new Map<string, VerificationRequest>();
   private readonly tasks = new Set<string>();
+  private readonly repos = new Map<string, Set<string>>();
   // Keyed by (org, project, requestId, idempotencyKey) — idempotency is bound to the request.
   private readonly records = new Map<string, PriorEvidence>();
   readonly evidence: { submission: EvidenceSubmission; decision: IngestDecision }[] = [];
@@ -23,6 +24,18 @@ export class InMemoryVerificationStore implements VerificationStore {
   /** Test helper: declare a task as existing in a tenant. */
   addTask(orgId: string, projectId: string, taskId: string): void {
     this.tasks.add(scope(orgId, projectId, taskId));
+  }
+
+  /** Test helper: declare a repository as linked (authorized) for a project. */
+  addRepo(orgId: string, projectId: string, repoFullName: string): void {
+    const key = scope(orgId, projectId);
+    const set = this.repos.get(key) ?? new Set<string>();
+    set.add(repoFullName);
+    this.repos.set(key, set);
+  }
+
+  async linkedRepoFullNames(orgId: string, projectId: string): Promise<string[]> {
+    return [...(this.repos.get(scope(orgId, projectId)) ?? [])];
   }
 
   async getRequest(orgId: string, projectId: string, requestId: string): Promise<VerificationRequest | null> {

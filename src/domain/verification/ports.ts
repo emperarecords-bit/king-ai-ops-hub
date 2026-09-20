@@ -31,6 +31,9 @@ export interface VerificationStore {
   taskExistsInTenant(orgId: string, projectId: string, taskId: string): Promise<boolean>;
   /** The existing contract for the natural key (org, project, task, commit), if any. */
   findRequestByTaskCommit(orgId: string, projectId: string, taskId: string, commitSha: string): Promise<VerificationRequest | null>;
+  /** The repositories authorized for this project (its github_repo_links). A contract may only bind one
+   *  of these; an empty result means NO authorized binding exists and creation must fail explicitly. */
+  linkedRepoFullNames(orgId: string, projectId: string): Promise<string[]>;
   /**
    * Insert a contract idempotently under the unique (org, project, task_id, expected_commit_sha) key.
    * `inserted` is true when THIS call created the row; on a concurrent-create race the losing call gets

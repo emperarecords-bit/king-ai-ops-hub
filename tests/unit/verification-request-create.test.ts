@@ -14,6 +14,7 @@ const ctx = { orgId: ORG, projectId: PROJECT, userId: USER };
 function storeWithTask(): InMemoryVerificationStore {
   const s = new InMemoryVerificationStore();
   s.addTask(ORG, PROJECT, TASK);
+  s.addRepo(ORG, PROJECT, 'acme/widget'); // the project's trusted (linked) repo
   return s;
 }
 const validInput = (over: Partial<VerificationRequestInput> = {}): VerificationRequestInput => ({
@@ -96,6 +97,48 @@ describe('createVerificationRequest — contract creation', () => {
       expect(out.rejection?.code, label).toBe('invalid_input');
       expect(out.request, label).toBeNull();
     }
+  });
+
+  it('rejects a repository not linked to the project (unrelated repo)', async () => {
+    const store = storeWithTask(); // links acme/widget only
+    const out = await createVerificationRequest(store, ctx, validInput({ repoFullName: 'evil/other', commitSha: 'b'.repeat(40) }));
+    expect(out.rejection?.code).toBe('repo_not_authorized');
+    expect(out.request).toBeNull();
+  });
+
+  it('matches the linked repo case-insensitively', async () => {
+    const store = storeWithTask();
+    const out = await createVerificationRequest(store, ctx, validInput({ repoFullName: 'Acme/Widget', commitSha: 'b'.repeat(40) }));
+    expect(out.created).toBe(true);
+  });
+
+  it('fails explicitly when the project has NO linked repository (no authorized binding)', async () => {
+    const store = new InMemoryVerificationStore();
+    store.addTask(ORG, PROJECT, TASK); // task exists, but no repo linked
+    const out = await createVerificationRequest(store, ctx, validInput());
+    expect(out.rejection?.code).toBe('no_repo_binding');
+    expect(out.request).toBeNull();
+  });
+
+  it('rejects blank/malformed check or artifact entries (does not silently drop them)', async () => {
+    const store = storeWithTask();
+    for (const bad of [
+      validInput({ requiredChecks: ['unit', ''] }),
+      validInput({ requiredChecks: ['unit', '   '] }),
+      validInput({ requiredArtifacts: ['ok.json', ''] }),
+      validInput({ requiredArtifacts: ['ok.json', '  '] }),
+    ]) {
+      const out = await createVerificationRequest(store, ctx, bad);
+      expect(out.rejection?.code).toBe('invalid_input');
+      expect(out.request).toBeNull();
+    }
+  });
+
+  it('supports an explicitly empty required-artifacts list', async () => {
+    const store = storeWithTask();
+    const out = await createVerificationRequest(store, ctx, validInput({ requiredArtifacts: [], commitSha: 'b'.repeat(40) }));
+    expect(out.created).toBe(true);
+    expect(out.request!.requiredArtifacts).toEqual([]);
   });
 
   it('normalizes the commit to lower-case and trims list entries', async () => {

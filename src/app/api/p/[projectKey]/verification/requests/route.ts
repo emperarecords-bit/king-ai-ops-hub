@@ -12,6 +12,10 @@ import { createDrizzleVerificationStore } from '@/domain/verification/drizzle-st
  * that project may create a contract in it. org/project/creator are taken from that context, NEVER the
  * body, so a caller cannot bind a contract to another tenant (the DB RLS with-check pins it too).
  *
+ * Write permission: creating a verification contract is a project WRITE. The `admin` and `member` roles
+ * may create one; the `viewer` (read-only) role may not. An authenticated non-member is rejected earlier
+ * by requireTenant (403), because they have no access record for the project.
+ *
  * The contract is immutable: creating one for a (task, commit) that already has an IDENTICAL contract
  * returns it (200, created:false); a DIFFERENT contract for the same (task, commit) is a 409 conflict.
  * There is no update route.
@@ -41,6 +45,11 @@ export async function POST(
     );
   }
 
+  // admin + member may create a verification contract; viewer (read-only) may not.
+  if (ctx.projectRole === 'viewer') {
+    return Response.json({ error: 'Viewers cannot create verification requests.' }, { status: 403 });
+  }
+
   let body: unknown;
   try {
     body = await req.json();
@@ -57,9 +66,10 @@ export async function POST(
       createVerificationRequest(createDrizzleVerificationStore(tx), ctx, parsed.data),
     );
     if (outcome.rejection) {
+      const code = outcome.rejection.code;
       const status =
-        outcome.rejection.code === 'invalid_input' ? 400 : outcome.rejection.code === 'task_not_in_project' ? 404 : 409;
-      return Response.json({ error: outcome.rejection.message, code: outcome.rejection.code }, { status });
+        code === 'invalid_input' ? 400 : code === 'task_not_in_project' ? 404 : code === 'repo_not_authorized' ? 403 : 409; // no_repo_binding, contract_conflict
+      return Response.json({ error: outcome.rejection.message, code }, { status });
     }
     return Response.json({ request: outcome.request, created: outcome.created }, { status: outcome.created ? 201 : 200 });
   } catch (err) {

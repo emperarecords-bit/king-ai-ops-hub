@@ -427,6 +427,9 @@ describe('VER-002 concurrent persistence conflict (every path)', () => {
     async findRequestByTaskCommit(): Promise<VerificationRequest | null> {
       throw new Error('not used in this test');
     }
+    async linkedRepoFullNames(): Promise<string[]> {
+      throw new Error('not used in this test');
+    }
     async createRequest(): Promise<{ request: VerificationRequest; inserted: boolean }> {
       throw new Error('not used in this test');
     }
