@@ -20,10 +20,10 @@ export const PRICING_CURRENCY = 'USD' as const;
 
 /** Source provenance: the repository's authoritative pricing version (NOT independent Hub verification). */
 export const PRICING_SOURCE_VERSION = PRICING_VERSION; // '2026-07-24'
-export const SEED_MIGRATION_ID = '0063_pricing_schedule_v3' as const;
+export const SEED_MIGRATION_ID = '0069_pricing_schedule_v4' as const;
 
-/** Stable sentinel id for the CURRENT seeded schedule (deterministic across environments). v1 (f00d0053…) → v2 (f00d0062…, first google/deepseek models) → v3 (2026-08-15, corrects the Gemini ids to the live-probed gemini-3.1-* names); superseded rows remain as immutable history. */
-export const SEED_SCHEDULE_ID = 'f00d0063-0000-4000-8000-000000000001' as const;
+/** Stable sentinel id for the CURRENT seeded schedule (deterministic across environments). v1 (f00d0053…) → v2 (f00d0062…, first google/deepseek models) → v3 (2026-08-15, corrects the Gemini ids to the live-probed gemini-3.1-* names) → v4 (2026-09-20, Claude Sonnet 5 introductory pricing ended 2026-08-31 → standard $3/$15, open-ended); superseded rows remain as immutable history. */
+export const SEED_SCHEDULE_ID = 'f00d0069-0000-4000-8000-000000000001' as const;
 
 /**
  * IMPORTANT: `PRICING_VERSION` ('2026-07-24') is the source OBSERVATION/provenance date — NOT a
@@ -43,13 +43,13 @@ export const EXCLUDED_MODELS: Readonly<Record<string, string>> = {
 };
 
 /**
- * Per-model validity overrides. claude-sonnet-5 carries INTRODUCTORY pricing that the source states changes
- * on 2026-09-01 ("On 2026-09-01 these become 3_000_000n / 15_000_000n"). The exact UTC boundary is therefore
- * defined by the source (no inference): the introductory entry is valid on [SEED_VALID_FROM, 2026-09-01Z).
+ * Per-model validity overrides. HISTORY: schedule v3 seeded claude-sonnet-5's INTRODUCTORY rate ($2/$10)
+ * with `validUntil` = 2026-09-01Z, because the source stated the introductory price changed on that date.
+ * As of schedule v4 (2026-09-20) MODEL_PRICING carries the STANDARD post-introductory rate ($3/$15), which
+ * the source defines no end date for — so there is no validity override any more (open-ended). The expired
+ * introductory entry remains, immutably, in the v3 schedule rows for historical explainability.
  */
-const VALIDITY_OVERRIDES: Readonly<Record<string, { validUntil: string }>> = {
-  'claude-sonnet-5': { validUntil: '2026-09-01T00:00:00.000Z' },
-};
+const VALIDITY_OVERRIDES: Readonly<Record<string, { validUntil: string }>> = {};
 
 export interface PricingEntry {
   readonly provider: ProviderId;

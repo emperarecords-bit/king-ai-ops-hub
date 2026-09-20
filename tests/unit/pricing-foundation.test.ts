@@ -89,14 +89,14 @@ describe('pricing foundation (P1a)', () => {
     expect(floored).toBe(10n);
   });
 
-  it('Sonnet 5 is valid before its cutoff and rejected at/after it', () => {
+  it('Sonnet 5 standard rate is open-ended (post-introductory; no validity cutoff as of schedule v4)', () => {
     const s5 = entries.find((e) => e.model === 'claude-sonnet-5')!;
-    expect(s5.validUntil).toBe('2026-09-01T00:00:00.000Z');
+    expect(s5.validUntil).toBeNull(); // introductory cutoff is gone; the standard rate has no known end
     expect(isEntryValidAt(s5, '2026-08-31T23:59:59.000Z')).toBe(true);
-    expect(isEntryValidAt(s5, '2026-09-01T00:00:00.000Z')).toBe(false); // boundary is exclusive
-    expect(isEntryValidAt(s5, '2026-09-02T00:00:00.000Z')).toBe(false);
-    // selectPricingEntry fails closed at/after cutoff
-    expect(() => selectPricingEntry(entries, 'anthropic', 'claude-sonnet-5', '2026-09-01T00:00:00.000Z')).toThrow(PricingLookupError);
+    expect(isEntryValidAt(s5, '2026-09-01T00:00:00.000Z')).toBe(true); // now priced at the standard rate
+    expect(isEntryValidAt(s5, '2026-09-02T00:00:00.000Z')).toBe(true);
+    // selectPricingEntry now returns the standard entry at and after 2026-09-01 (no longer fails closed)
+    expect(selectPricingEntry(entries, 'anthropic', 'claude-sonnet-5', '2026-09-01T00:00:00.000Z').model).toBe('claude-sonnet-5');
     expect(selectPricingEntry(entries, 'anthropic', 'claude-sonnet-5', '2026-08-01T00:00:00.000Z').model).toBe('claude-sonnet-5');
   });
 
