@@ -3,7 +3,7 @@
  * so it is testable with in-memory adapters and wired to Drizzle + the object
  * store in production without any change to the logic.
  */
-import type { EvidenceSubmission, IngestDecision, VerificationRequest } from './ingest-types';
+import type { EvidenceSubmission, IngestDecision, NewVerificationRequest, VerificationRequest } from './ingest-types';
 
 /** Retrieval + head for a stored artifact, so the Hub can confirm availability and rehash. */
 export interface StoredArtifactStore {
@@ -26,6 +26,22 @@ export interface PriorEvidence {
 /** Persistence for contracts + idempotent evidence decisions. */
 export interface VerificationStore {
   getRequest(orgId: string, projectId: string, requestId: string): Promise<VerificationRequest | null>;
+  /** True iff `taskId` exists in THIS tenant (org, project) — RLS-scoped, so a task id from another
+   *  project is invisible and reads as absent. Used to bind a contract to a real, in-project task. */
+  taskExistsInTenant(orgId: string, projectId: string, taskId: string): Promise<boolean>;
+  /** The existing contract for the natural key (org, project, task, commit), if any. */
+  findRequestByTaskCommit(orgId: string, projectId: string, taskId: string, commitSha: string): Promise<VerificationRequest | null>;
+  /**
+   * Insert a contract idempotently under the unique (org, project, task_id, expected_commit_sha) key.
+   * `inserted` is true when THIS call created the row; on a concurrent-create race the losing call gets
+   * `inserted: false` and the WINNER's row, so the caller can detect a conflicting contract.
+   */
+  createRequest(
+    orgId: string,
+    projectId: string,
+    createdBy: string,
+    input: NewVerificationRequest,
+  ): Promise<{ request: VerificationRequest; inserted: boolean }>;
   /** Prior evidence for (request, idempotency key), if any — for replay/conflict. */
   findExisting(orgId: string, projectId: string, requestId: string, key: string): Promise<PriorEvidence | null>;
   /**

@@ -3,13 +3,15 @@
  * They exercise the exact orchestrator logic used in production, without a DB or
  * object store. The Drizzle + object-store adapters implement the same ports.
  */
-import type { EvidenceSubmission, IngestDecision, VerificationRequest } from './ingest-types';
+import { randomUUID } from 'node:crypto';
+import type { EvidenceSubmission, IngestDecision, NewVerificationRequest, VerificationRequest } from './ingest-types';
 import type { PriorEvidence, RunnerSecretSource, StoredArtifactStore, VerificationStore } from './ports';
 
 const scope = (orgId: string, projectId: string, ...parts: string[]) => [orgId, projectId, ...parts].join('|');
 
 export class InMemoryVerificationStore implements VerificationStore {
   private readonly requests = new Map<string, VerificationRequest>();
+  private readonly tasks = new Set<string>();
   // Keyed by (org, project, requestId, idempotencyKey) — idempotency is bound to the request.
   private readonly records = new Map<string, PriorEvidence>();
   readonly evidence: { submission: EvidenceSubmission; decision: IngestDecision }[] = [];
@@ -18,8 +20,49 @@ export class InMemoryVerificationStore implements VerificationStore {
     this.requests.set(scope(req.orgId, req.projectId, req.id), req);
   }
 
+  /** Test helper: declare a task as existing in a tenant. */
+  addTask(orgId: string, projectId: string, taskId: string): void {
+    this.tasks.add(scope(orgId, projectId, taskId));
+  }
+
   async getRequest(orgId: string, projectId: string, requestId: string): Promise<VerificationRequest | null> {
     return this.requests.get(scope(orgId, projectId, requestId)) ?? null;
+  }
+
+  async taskExistsInTenant(orgId: string, projectId: string, taskId: string): Promise<boolean> {
+    return this.tasks.has(scope(orgId, projectId, taskId));
+  }
+
+  async findRequestByTaskCommit(orgId: string, projectId: string, taskId: string, commitSha: string): Promise<VerificationRequest | null> {
+    for (const r of this.requests.values()) {
+      if (r.orgId === orgId && r.projectId === projectId && r.taskId === taskId && r.expectedCommitSha === commitSha) return r;
+    }
+    return null;
+  }
+
+  async createRequest(
+    orgId: string,
+    projectId: string,
+    createdBy: string,
+    input: NewVerificationRequest,
+  ): Promise<{ request: VerificationRequest; inserted: boolean }> {
+    const existing = await this.findRequestByTaskCommit(orgId, projectId, input.taskId, input.commitSha);
+    if (existing) return { request: existing, inserted: false };
+    const request: VerificationRequest = {
+      id: randomUUID(),
+      orgId,
+      projectId,
+      taskId: input.taskId,
+      repoFullName: input.repoFullName,
+      expectedCommitSha: input.commitSha,
+      requiredChecks: [...input.requiredChecks],
+      requiredArtifacts: [...input.requiredArtifacts],
+      allowDirty: input.allowDirty,
+      createdBy,
+      createdAt: new Date().toISOString(),
+    };
+    this.requests.set(scope(orgId, projectId, request.id), request);
+    return { request, inserted: true };
   }
 
   async findExisting(orgId: string, projectId: string, requestId: string, key: string): Promise<PriorEvidence | null> {

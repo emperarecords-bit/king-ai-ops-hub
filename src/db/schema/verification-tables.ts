@@ -47,6 +47,9 @@ export const verificationRequests = pgTable(
   },
   (t) => [
     unique('verification_requests_tenant_id_uq').on(t.orgId, t.projectId, t.id),
+    // One contract per (tenant, task, exact commit): makes create idempotent and race-safe, and turns a
+    // second create with a DIFFERENT contract for the same task+commit into an explicit conflict.
+    unique('verification_requests_task_commit_uq').on(t.orgId, t.projectId, t.taskId, t.expectedCommitSha),
     index('verification_requests_task_idx').on(t.orgId, t.projectId, t.taskId),
   ],
 );

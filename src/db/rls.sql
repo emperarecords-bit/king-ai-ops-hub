@@ -1047,7 +1047,12 @@ create constraint trigger trading_risk_checks_tenant_trg after insert or update 
 do $$
 begin
   if to_regclass('public.verification_requests') is not null then
-    grant select, insert, update, delete on verification_requests to app_server;
+    -- The verification CONTRACT is immutable: the app role may INSERT (create) and SELECT (read) only.
+    -- Revoking UPDATE/DELETE prevents silent alteration of an existing contract at the grant layer
+    -- (there is also no update code path). Idempotent-or-conflict on create is enforced in the app +
+    -- a unique (org, project, task_id, expected_commit_sha) constraint.
+    grant select, insert on verification_requests to app_server;
+    revoke update, delete on verification_requests from app_server;
     alter table verification_requests enable row level security;
     alter table verification_requests force row level security;
     drop policy if exists verification_requests_tenant on verification_requests;

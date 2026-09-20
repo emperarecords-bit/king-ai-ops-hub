@@ -1,0 +1,1 @@
+ALTER TABLE "verification_requests" ADD CONSTRAINT "verification_requests_task_commit_uq" UNIQUE("org_id","project_id","task_id","expected_commit_sha");

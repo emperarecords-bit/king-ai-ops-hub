@@ -54,6 +54,20 @@ export interface VerificationRequest {
   readonly createdAt: string;
 }
 
+/**
+ * A validated, normalized request to CREATE a contract. org/project/creator are supplied separately
+ * from the authenticated tenant context — never from here — so a caller can never bind a contract to
+ * another tenant. `commitSha` is a full 40-hex SHA; the lists are de-duplicated and trimmed.
+ */
+export interface NewVerificationRequest {
+  readonly taskId: string;
+  readonly repoFullName: string;
+  readonly commitSha: string;
+  readonly requiredChecks: readonly string[];
+  readonly requiredArtifacts: readonly string[];
+  readonly allowDirty: boolean;
+}
+
 /** The signed bundle a runner submits. */
 export interface EvidenceSubmission {
   readonly requestId: string;
