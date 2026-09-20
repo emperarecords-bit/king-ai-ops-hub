@@ -16,6 +16,7 @@ import { evaluateChecks } from './checks';
 import type { IngestDecision, RejectionCode, SignedEnvelope } from './ingest-types';
 import type { IngestDeps } from './ports';
 import { submissionDigest, verifyEvidenceSignature } from './signing';
+import { isCanonicalTenantKey } from './tenant-key';
 
 export async function ingestEvidence(
   deps: IngestDeps,
@@ -68,6 +69,18 @@ export async function ingestEvidence(
   //    retry returns the ORIGINAL decision; a DIFFERENT submission reusing the key
   //    is an explicit conflict, never a silent overwrite.
   const digest = submissionDigest(payload);
+  // Single persistence path for EVERY outcome (reject or accept). A concurrent
+  // insert that won the (request,key) row with a different submission is detected
+  // by digest mismatch, so a losing changed submission can never inherit the
+  // winner's decision — success or otherwise.
+  const persist = async (d: IngestDecision): Promise<IngestDecision> => {
+    const saved = await deps.store.saveEvidence(ctx.orgId, ctx.projectId, payload, digest, d);
+    if (saved.submissionSha256 !== digest) {
+      return reject('idempotency_conflict', 'A concurrent submission with the same key differed; the first decision is preserved.');
+    }
+    return saved.decision;
+  };
+
   const prior = await deps.store.findExisting(ctx.orgId, ctx.projectId, payload.requestId, payload.idempotencyKey);
   if (prior) {
     if (prior.submissionSha256 === digest) return { ...prior.decision, replayed: true };
@@ -77,21 +90,19 @@ export async function ingestEvidence(
   // 4. Binding.
   const binding = validateBinding(request, payload, ctx);
   if (!binding.ok && binding.rejection) {
-    const rejected = reject(binding.rejection.code, binding.rejection.message);
-    return (await deps.store.saveEvidence(ctx.orgId, ctx.projectId, payload, digest, rejected)).decision;
+    return persist(reject(binding.rejection.code, binding.rejection.message));
   }
 
   // 5. Required checks (declared up front). Structural defects invalidate the submission.
   const checkEvaluation = evaluateChecks(request.requiredChecks, payload.checks, payload.commitSha);
   if (checkEvaluation.problems.length > 0) {
-    const rejected = reject('invalid_checks', `Invalid checks: ${checkEvaluation.problems.join(' ')}`);
-    return (await deps.store.saveEvidence(ctx.orgId, ctx.projectId, payload, digest, { ...rejected, checkEvaluation })).decision;
+    return persist({ ...reject('invalid_checks', `Invalid checks: ${checkEvaluation.problems.join(' ')}`), checkEvaluation });
   }
 
   // 6. Artifact availability (stored, retrievable, hash-matched) — and tenant-bound.
   //    A storageKey outside this tenant's partition is `forbidden` and never
   //    dereferenced, even if the supplied hash matches.
-  const keyAllowed = (key: string): boolean => key.startsWith(`org/${ctx.orgId}/project/${ctx.projectId}/`);
+  const keyAllowed = (key: string): boolean => isCanonicalTenantKey(key, ctx);
   const artifactAvailability = await verifyArtifactAvailability(payload.artifacts, deps.artifacts, keyAllowed);
   const artifactsOk = allArtifactsAvailable(artifactAvailability);
 
@@ -138,12 +149,5 @@ export async function ingestEvidence(
     decidedAt,
     replayed: false,
   };
-  // Persist under the unique (request, key). A concurrent insert with the same
-  // key but a different submission wins the row → detect by digest mismatch and
-  // return a conflict rather than the other submission's decision.
-  const saved = await deps.store.saveEvidence(ctx.orgId, ctx.projectId, payload, digest, decision);
-  if (saved.submissionSha256 !== digest) {
-    return reject('idempotency_conflict', 'A concurrent submission with the same key differed; the first decision is preserved.');
-  }
-  return saved.decision;
+  return persist(decision);
 }

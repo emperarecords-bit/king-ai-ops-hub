@@ -4,14 +4,26 @@
  * object store.
  */
 import { createHmac } from 'node:crypto';
-import { getObjectStore, keyBelongsToTenant, ObjectNotFoundError, type ObjectStore } from '@/domain/documents/object-store';
+import { getObjectStore, ObjectNotFoundError, type ObjectStore } from '@/domain/documents/object-store';
 import type { TenantContext } from '@/types/domain';
 import type { RunnerSecretSource, StoredArtifactStore } from './ports';
+import { assertCanonicalTenantKey, tenantPrefix } from './tenant-key';
+
+/** Stores that can prove a key resolves inside a tenant directory (symlink-safe). */
+interface TenantContainmentStore {
+  keyStaysWithinTenant(key: string, tenantDirKey: string): Promise<boolean>;
+}
+function hasContainment(s: ObjectStore): s is ObjectStore & TenantContainmentStore {
+  return typeof (s as Partial<TenantContainmentStore>).keyStaysWithinTenant === 'function';
+}
 
 /**
- * Artifact availability over the Hub object store, HARD-BOUND to one tenant. A
- * storage key outside `org/<orgId>/project/<projectId>/` is never dereferenced
- * (returns null) — defense in depth beneath the ingest orchestrator's own guard.
+ * Artifact availability over the Hub object store, HARD-BOUND to one tenant.
+ * Two layers of containment: (1) the key must be canonical (no traversal / no
+ * `..` / no backslash) and inside `org/<orgId>/project/<projectId>/` — rejected
+ * BEFORE any access; (2) when the backend can resolve real paths, the key must
+ * also resolve INSIDE the tenant directory, defeating symlink escape. Anything
+ * that fails either check is never dereferenced (returns null).
  * (No retention/expiry signal exists today, so `expired` is false.)
  */
 export function objectStoreArtifactStore(
@@ -20,17 +32,24 @@ export function objectStoreArtifactStore(
 ): StoredArtifactStore {
   let storeP: Promise<ObjectStore> | null = null;
   const store = (): Promise<ObjectStore> => (storeP ??= storeArg ? Promise.resolve(storeArg) : getObjectStore());
-  const allowed = (key: string): boolean => keyBelongsToTenant(key, ctx);
+  const prefixDir = tenantPrefix(ctx.orgId, ctx.projectId);
+  const contained = async (s: ObjectStore, key: string): Promise<boolean> =>
+    !hasContainment(s) || (await s.keyStaysWithinTenant(key, prefixDir));
+
   return {
     async head(storageKey) {
-      if (!allowed(storageKey)) return null;
-      const h = await (await store()).head(storageKey);
+      if (!assertCanonicalTenantKey(storageKey, ctx).ok) return null;
+      const s = await store();
+      if (!(await contained(s, storageKey))) return null;
+      const h = await s.head(storageKey);
       return h ? { sizeBytes: h.size, expired: false } : null;
     },
     async get(storageKey) {
-      if (!allowed(storageKey)) return null;
+      if (!assertCanonicalTenantKey(storageKey, ctx).ok) return null;
+      const s = await store();
+      if (!(await contained(s, storageKey))) return null;
       try {
-        return await (await store()).get(storageKey);
+        return await s.get(storageKey);
       } catch (err) {
         if (err instanceof ObjectNotFoundError) return null;
         throw err;

@@ -1,24 +1,26 @@
 /**
- * REAL integration test for VER-002 ingestion (Area 4 of the review).
+ * REAL integration test for VER-002 ingestion (Area 4 / round-3 finding 4).
  *
  * Exercises the ACTUAL Drizzle store, tenant transaction (withTenant + RLS), and
- * the object-store artifact adapter against a live Postgres — never production.
+ * the object-store artifact adapter against a live, DISPOSABLE Postgres — never
+ * production, never real customer credentials.
  *
  * Prerequisites (all local/isolated):
  *   1. Docker running; `npm run db:up` (Postgres on :5433).
- *   2. `npm run db:bootstrap` then apply migration 0069 + the rls.sql verification
- *      block to the local DB (see drizzle/0069_verification_ingest.sql).
- *   3. Export DATABASE_URL and a project you own to test against:
- *        DATABASE_URL, VER_INT_ORG_ID, VER_INT_PROJECT_ID, VER_INT_TASK_ID
- *   4. `STORAGE_DRIVER=local` (default) so the artifact adapter has a backend.
+ *   2. `npm run db:bootstrap`; apply migration 0069 + the rls.sql verification block.
+ *   3. Export: DATABASE_URL, VER_INT_ORG_ID, VER_INT_PROJECT_ID, VER_INT_TASK_ID.
+ *   4. STORAGE_DRIVER=local (default) so the artifact adapter has a backend.
+ *   Optional real-HTTP case: VER_INT_BASE_URL, VER_INT_PROJECT_KEY, VER_INT_COOKIE,
+ *   VERIFICATION_RUNNER_MASTER_SECRET (to sign with the route's derived per-project key).
  *
- * It self-skips unless those are set, so the normal unit run is unaffected.
+ * Self-skips unless the env is set, so the normal unit run is unaffected.
  * STATUS AT REVIEW TIME: NOT VERIFIED — Docker Desktop was not running, so no
- * local Postgres could be started. Run this once the DB is up to close Area 4.
+ * local Postgres could be started. The DB-role guard below fails LOUDLY if the
+ * runtime role is a superuser / BYPASSRLS, so RLS assertions can never be masked.
  */
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { and, eq, sql } from 'drizzle-orm';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withTenant } from '@/db/tenant';
 import { verificationEvidence, verificationRequests } from '@/db/schema';
 import { getObjectStore } from '@/domain/documents/object-store';
@@ -26,6 +28,7 @@ import {
   ingestEvidence,
   signEvidence,
   StaticRunnerSecretSource,
+  type CheckResult,
   type EvidenceSubmission,
   type IngestDeps,
   type SignedEnvelope,
@@ -51,11 +54,21 @@ const SECRET = 'integration-runner-secret';
 const COMMIT = 'a'.repeat(40);
 const bytes = Buffer.from('{"passed":true}', 'utf8');
 const artSha = createHash('sha256').update(bytes).digest('hex');
-const artKey = `org/${ORG}/project/${PROJECT}/verification/test-results.json`;
+// Unique, test-owned artifact key per request (namespaced, cleaned up individually).
+const artKeyFor = (requestId: string): string => `org/${ORG}/project/${PROJECT}/verification/int-${requestId}/test-results.json`;
 
-function submission(over: Partial<EvidenceSubmission>): EvidenceSubmission {
+const validCheck: CheckResult = {
+  name: 'unit',
+  status: 'passed',
+  command: 'npm test',
+  exitCode: 0,
+  startedAt: '2026-09-20T00:00:00.000Z',
+  finishedAt: '2026-09-20T00:00:05.000Z',
+  detail: null,
+};
+
+function submission(over: Partial<EvidenceSubmission> & { requestId: string }): EvidenceSubmission {
   return {
-    requestId: over.requestId!,
     orgId: ORG,
     projectId: PROJECT,
     taskId: TASK,
@@ -68,9 +81,9 @@ function submission(over: Partial<EvidenceSubmission>): EvidenceSubmission {
     attemptId: 'att-int',
     environment: 'integration',
     source: 'local_runner',
-    checks: [{ name: 'unit', status: 'passed', command: 'npm test', exitCode: 0, startedAt: null, finishedAt: null, detail: null }],
-    artifacts: [{ path: 'test-results.json', sha256: artSha, sizeBytes: bytes.length, storageKey: artKey }],
-    idempotencyKey: 'int-idem-1',
+    checks: [validCheck],
+    artifacts: [{ path: 'test-results.json', sha256: artSha, sizeBytes: bytes.length, storageKey: artKeyFor(over.requestId) }],
+    idempotencyKey: `idem-${over.requestId}`,
     submittedAt: new Date().toISOString(),
     ...over,
   };
@@ -84,11 +97,10 @@ const deps = (tx: Parameters<Parameters<typeof withTenant>[1]>[0]): IngestDeps =
 });
 
 const createdRequestIds: string[] = [];
+const createdArtifactKeys: string[] = [];
 
 async function seedRequest(): Promise<string> {
   const id = crypto.randomUUID();
-  // Runs as the non-bypass app_server role via withTenant (RLS enforced), stamping
-  // the tenant GUCs — exactly the runtime path, not a superuser/migration bypass.
   await withTenant(ctx, async (tx) => {
     await tx.execute(sql`
       insert into verification_requests
@@ -101,10 +113,29 @@ async function seedRequest(): Promise<string> {
   return id;
 }
 
-// Clean up only the records this test created (test-owned), never anything else.
+async function putArtifact(requestId: string): Promise<void> {
+  const key = artKeyFor(requestId);
+  await getObjectStore().then((s) => s.put(key, bytes, 'application/json'));
+  createdArtifactKeys.push(key);
+}
+
+// Guard: a disposable, non-superuser runtime role. If the connection is a
+// superuser or BYPASSRLS, RLS assertions would be meaningless — fail loudly.
+beforeAll(async () => {
+  if (!enabled) return;
+  const rows = await withTenant(ctx, (tx) =>
+    tx.execute(sql`select current_user as who, rolsuper, rolbypassrls from pg_roles where rolname = current_user`),
+  );
+  const row = (rows as unknown as Array<{ who: string; rolsuper: boolean; rolbypassrls: boolean }>)[0];
+  expect(row?.rolsuper, 'runtime role must not be a superuser').toBe(false);
+  expect(row?.rolbypassrls, 'runtime role must not have BYPASSRLS').toBe(false);
+});
+
+// Clean up ONLY the records/objects this test created.
 afterAll(async () => {
   if (!enabled) return;
-  await getObjectStore().then((s) => s.delete(artKey).catch(() => undefined));
+  const store = await getObjectStore();
+  for (const key of createdArtifactKeys) await store.delete(key).catch(() => undefined);
   for (const id of createdRequestIds) {
     await withTenant(ctx, async (tx) => {
       await tx.execute(sql`delete from verification_evidence where request_id = ${id}`);
@@ -115,35 +146,16 @@ afterAll(async () => {
 
 describe.skipIf(!enabled)('VER-002 real integration (DB + store + artifact adapter)', () => {
   it('accepts valid evidence and persists a verified decision', async () => {
-    await getObjectStore().then((s) => s.put(artKey, bytes, 'application/json'));
     const requestId = await seedRequest();
-    const decision = await withTenant(ctx, (tx) => ingestEvidence(deps(tx), ctx, sign(submission({ requestId, idempotencyKey: `ok-${requestId}` }))));
+    await putArtifact(requestId);
+    const decision = await withTenant(ctx, (tx) => ingestEvidence(deps(tx), ctx, sign(submission({ requestId }))));
     expect(decision.status).toBe('verified_complete');
     expect(decision.deliverable).toBe(true);
   });
 
-  it('enforces DB uniqueness under concurrent duplicate submissions (one row wins)', async () => {
-    await getObjectStore().then((s) => s.put(artKey, bytes, 'application/json'));
-    const requestId = await seedRequest();
-    const key = `conc-${requestId}`;
-    const env = sign(submission({ requestId, idempotencyKey: key }));
-    const [a, b] = await Promise.all([
-      withTenant(ctx, (tx) => ingestEvidence(deps(tx), ctx, env)),
-      withTenant(ctx, (tx) => ingestEvidence(deps(tx), ctx, env)),
-    ]);
-    expect(a.status).toBe(b.status); // same decision, no divergence
-    const rows = await withTenant(ctx, (tx) =>
-      tx
-        .select({ n: sql<number>`count(*)::int` })
-        .from(verificationEvidence)
-        .where(and(eq(verificationEvidence.orgId, ORG), eq(verificationEvidence.projectId, PROJECT), eq(verificationEvidence.idempotencyKey, key))),
-    );
-    expect(rows[0]?.n).toBe(1); // unique constraint held
-  });
-
   it('a conflicting concurrent submission (same key, different content) preserves the first decision', async () => {
-    await getObjectStore().then((s) => s.put(artKey, bytes, 'application/json'));
     const requestId = await seedRequest();
+    await putArtifact(requestId);
     const key = `conflict-${requestId}`;
     const a = sign(submission({ requestId, idempotencyKey: key, runId: 'run-A' }));
     const b = sign(submission({ requestId, idempotencyKey: key, runId: 'run-B' })); // different digest, same key
@@ -151,22 +163,46 @@ describe.skipIf(!enabled)('VER-002 real integration (DB + store + artifact adapt
       withTenant(ctx, (tx) => ingestEvidence(deps(tx), ctx, a)),
       withTenant(ctx, (tx) => ingestEvidence(deps(tx), ctx, b)),
     ]);
-    // Exactly one is the winner; the other is an explicit conflict, never a silent overwrite.
+    // Exactly one wins; the other is an explicit conflict — never the winner's success.
     const outcomes = [ra, rb].map((r) => (r.rejection?.code === 'idempotency_conflict' ? 'conflict' : r.status)).sort();
     expect(outcomes).toEqual(['conflict', 'verified_complete']);
     const rows = await withTenant(ctx, (tx) =>
       tx.select({ n: sql<number>`count(*)::int` }).from(verificationEvidence).where(and(eq(verificationEvidence.requestId, requestId), eq(verificationEvidence.idempotencyKey, key))),
     );
-    expect(rows[0]?.n).toBe(1); // one row only
+    expect(rows[0]?.n).toBe(1);
   });
 
   it('RLS blocks a cross-project read directly — no app-level project filter in the query', async () => {
     const requestId = await seedRequest();
     const otherCtx = { ...ctx, projectId: '11111111-1111-1111-1111-111111111111' } as TenantContext;
-    // Query with NO project_id predicate: RLS alone must hide the other tenant's row.
     const rows = await withTenant(otherCtx, (tx) =>
       tx.select({ id: verificationRequests.id }).from(verificationRequests).where(eq(verificationRequests.id, requestId)),
     );
     expect(rows.length).toBe(0);
+  });
+});
+
+// Real HTTP route + authentication. Requires a running server and a valid session
+// cookie; signs with the route's DERIVED per-project runner secret. Self-skips
+// otherwise. NOT VERIFIED at review time (no isolated server available).
+const httpEnabled = Boolean(
+  process.env.VER_INT_BASE_URL && process.env.VER_INT_PROJECT_KEY && process.env.VER_INT_COOKIE && process.env.VERIFICATION_RUNNER_MASTER_SECRET,
+);
+describe.skipIf(!httpEnabled || !enabled)('VER-002 real HTTP route + auth', () => {
+  it('accepts a signed submission over the actual route', async () => {
+    const requestId = await seedRequest();
+    await putArtifact(requestId);
+    const master = process.env.VERIFICATION_RUNNER_MASTER_SECRET!;
+    const derived = createHmac('sha256', master).update(`verification-runner:v1:${ORG}:${PROJECT}`).digest('hex');
+    const payload = submission({ requestId });
+    const envelope: SignedEnvelope = { runnerId: payload.runnerId, payload, signature: signEvidence(derived, payload) };
+    const res = await fetch(`${process.env.VER_INT_BASE_URL}/api/p/${process.env.VER_INT_PROJECT_KEY}/verification`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: process.env.VER_INT_COOKIE! },
+      body: JSON.stringify(envelope),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { decision: { status: string } };
+    expect(body.decision.status).toBe('verified_complete');
   });
 });

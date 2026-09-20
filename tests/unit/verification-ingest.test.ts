@@ -14,8 +14,11 @@ import {
   type EvidenceSubmission,
   type IngestDeps,
   type SignedEnvelope,
+  type IngestDecision,
+  type PriorEvidence,
   type SubmittedArtifact,
   type VerificationRequest,
+  type VerificationStore,
 } from '@/domain/verification';
 import { envRunnerSecretSource } from '@/domain/verification/runtime-adapters';
 
@@ -375,5 +378,90 @@ describe('VER-002 review fixes', () => {
     const empty = await ingestEvidence(deps, ctx, sign(makeSubmission({ artifacts: [], idempotencyKey: 'idem-empty' })));
     expect(empty.status).toBe('verification_failed');
     expect(empty.reasons.some((r) => /Required artifact\(s\) missing/.test(r))).toBe(true);
+  });
+
+  it('F-metadata: empty command / invalid or reversed timestamps are invalid_checks', async () => {
+    const emptyCmd = await ingestEvidence(
+      deps,
+      ctx,
+      sign(makeSubmission({ checks: [passed('unit'), { ...passed('typecheck'), command: '   ' }], idempotencyKey: 'idem-emptycmd' })),
+    );
+    expect(emptyCmd.rejection?.code).toBe('invalid_checks');
+
+    const badTs = await ingestEvidence(
+      deps,
+      ctx,
+      sign(makeSubmission({ checks: [passed('unit'), { ...passed('typecheck'), startedAt: 'not-a-date' }], idempotencyKey: 'idem-badts' })),
+    );
+    expect(badTs.rejection?.code).toBe('invalid_checks');
+
+    const reversed = await ingestEvidence(
+      deps,
+      ctx,
+      sign(makeSubmission({ checks: [passed('unit'), { ...passed('typecheck'), startedAt: '2026-09-20T00:00:09.000Z', finishedAt: '2026-09-20T00:00:01.000Z' }], idempotencyKey: 'idem-rev' })),
+    );
+    expect(reversed.rejection?.code).toBe('invalid_checks');
+  });
+});
+
+describe('VER-002 concurrent persistence conflict (every path)', () => {
+  // A store that reports NO prior at check time but returns a DIFFERENT winner at
+  // save time — simulating a concurrent insert that won the (request,key) row.
+  class ConflictStore implements VerificationStore {
+    constructor(
+      private readonly request: VerificationRequest,
+      private readonly winner: PriorEvidence,
+    ) {}
+    async getRequest(): Promise<VerificationRequest> {
+      return this.request;
+    }
+    async findExisting(): Promise<PriorEvidence | null> {
+      return null;
+    }
+    async saveEvidence(): Promise<PriorEvidence> {
+      return this.winner; // a different submission won; its digest will not match ours
+    }
+  }
+
+  const winnerSuccess: IngestDecision = {
+    accepted: true,
+    rejection: null,
+    status: 'verified_complete',
+    deliverable: true,
+    idempotencyKey: 'idem-1',
+    checkEvaluation: null,
+    artifactAvailability: [],
+    reasons: ['the winner succeeded'],
+    decidedAt: '2026-09-20T00:00:11.000Z',
+    replayed: false,
+  };
+
+  function conflictDeps(): IngestDeps {
+    const s = new InMemoryArtifactStore();
+    s.put(ARTIFACT_KEY, ARTIFACT_BYTES);
+    return {
+      store: new ConflictStore(makeRequest(), { decision: winnerSuccess, submissionSha256: 'A-DIFFERENT-WINNER-DIGEST' }),
+      artifacts: s,
+      secrets: new StaticRunnerSecretSource(new Map([[`${ORG}|${PROJ}`, SECRET]])),
+      now: () => new Date('2026-09-20T00:00:11.000Z'),
+    };
+  }
+
+  it('a losing changed submission never inherits the winner’s success — on the accepted path', async () => {
+    const d = await ingestEvidence(conflictDeps(), ctx, sign(makeSubmission({ idempotencyKey: 'k1' })));
+    expect(d.rejection?.code).toBe('idempotency_conflict');
+    expect(d.status).not.toBe('verified_complete');
+    expect(d.deliverable).toBe(false);
+  });
+
+  it('every rejection path also routes through the conflict check — invalid_checks', async () => {
+    const d = await ingestEvidence(conflictDeps(), ctx, sign(makeSubmission({ checks: [passed('unit'), passed('unit')], idempotencyKey: 'k2' })));
+    expect(d.rejection?.code).toBe('idempotency_conflict'); // not the winner's success, not invalid_checks
+  });
+
+  it('every rejection path also routes through the conflict check — binding failure', async () => {
+    const d = await ingestEvidence(conflictDeps(), ctx, sign(makeSubmission({ repoFullName: 'acme/OTHER', idempotencyKey: 'k3' })));
+    expect(d.rejection?.code).toBe('idempotency_conflict');
+    expect(d.status).not.toBe('verified_complete');
   });
 });

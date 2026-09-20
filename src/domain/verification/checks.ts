@@ -19,8 +19,16 @@ import type { CheckEvaluation, CheckResult } from './ingest-types';
 
 const RAN_STATUSES = new Set(['passed', 'failed', 'errored']);
 
+/** A ran check must carry a NONBLANK command, an exit code, and VALID timestamps
+ *  with finish >= start. Empty strings and reversed/invalid times do not pass. */
 function hasExecutionMetadata(c: CheckResult): boolean {
-  return c.command != null && c.exitCode != null && c.startedAt != null && c.finishedAt != null;
+  if (c.command == null || c.command.trim().length === 0) return false;
+  if (c.exitCode == null) return false;
+  if (c.startedAt == null || c.finishedAt == null) return false;
+  const start = Date.parse(c.startedAt);
+  const finish = Date.parse(c.finishedAt);
+  if (!Number.isFinite(start) || !Number.isFinite(finish)) return false;
+  return finish >= start;
 }
 
 /** A required check is satisfied only with consistent passed status AND exit 0 AND metadata. */
@@ -46,7 +54,7 @@ export function evaluateChecks(
   for (const c of submitted) {
     if (!RAN_STATUSES.has(c.status)) continue;
     if (!hasExecutionMetadata(c)) {
-      problems.push(`Check '${c.name}' claims status '${c.status}' but is missing execution metadata (command/exitCode/timestamps).`);
+      problems.push(`Check '${c.name}' claims status '${c.status}' but has missing or invalid execution metadata (needs a nonblank command, an exit code, and valid timestamps with finish >= start).`);
     }
     if (c.status === 'passed' && c.exitCode !== 0) {
       problems.push(`Check '${c.name}' is contradictory: status 'passed' with exit code ${c.exitCode ?? 'null'}.`);

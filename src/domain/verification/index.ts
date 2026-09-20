@@ -16,6 +16,7 @@ export * from './ingest-types';
 export * from './signing';
 export * from './binding';
 export * from './checks';
+export * from './tenant-key';
 export * from './artifacts-availability';
 export * from './ports';
 export * from './ingest';
