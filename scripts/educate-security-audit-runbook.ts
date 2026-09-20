@@ -47,8 +47,9 @@ async function main() {
     .from(knowledgeItems)
     .where(and(eq(knowledgeItems.projectId, project.id), eq(knowledgeItems.title, TITLE)))
     .limit(1);
-  if (existing.length > 0) {
-    console.log(`'${TITLE}' already present in '${projectKey}' (${existing[0].id}); skipping — Knowledge is versioned.`);
+  const existingItem = existing[0];
+  if (existingItem) {
+    console.log(`'${TITLE}' already present in '${projectKey}' (${existingItem.id}); skipping — Knowledge is versioned.`);
     await sql.end();
     process.exit(0);
   }
@@ -72,6 +73,7 @@ async function main() {
       approvedAt: new Date(),
     })
     .returning({ id: knowledgeItems.id });
+  if (!row) throw new Error(`Insert of '${TITLE}' returned no row.`);
 
   console.log(`Pinned '${TITLE}' into '${projectKey}' (${row.id}).`);
   await sql.end();

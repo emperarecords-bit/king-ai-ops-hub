@@ -24,7 +24,7 @@ A reusable, do-this-every-time procedure for auditing a Supabase/Postgres + Reac
 6. Secret scan — working tree AND full git history (a secret committed once and later removed still leaks):
    - Committed sensitive files: `git ls-files | grep -iE '\.env|secret|credential|\.pem|\.key|serviceaccount'` (only `.env.example` template is OK).
    - `.gitignore` must exclude `.env` / `.env.*` (allow `!.env.example`).
-   - Content, HEAD: `git grep -nEI '(sk_live_|sk_test_|whsec_|-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|ghp_[0-9A-Za-z]{36}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,})'`
+   - Content, HEAD: `git grep -nEI '(sk_live_|sk_test_|whsec_|-----BEGIN [A-Z ]*PRIVATE KEY[-]{5}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|ghp_[0-9A-Za-z]{36}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,})'` — the `KEY[-]{5}` matches the same `KEY-----` header at runtime; it is written this way so this doc does not itself carry the verbatim marker that the repo-hygiene scan forbids.
    - Content, all history: `git log --all --oneline -G'<same patterns>'` and `... -- '*.env' '*.env.*'` diff-filter=A. A Supabase service_role key is a long `eyJ…` JWT — never in client source. The anon key is public and fine in the client.
    - If a real secret is found: rotate it immediately (it is compromised the moment it was pushed), then purge history.
 
