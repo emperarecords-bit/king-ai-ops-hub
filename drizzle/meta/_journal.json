@@ -512,6 +512,13 @@
       "when": 1789927910152,
       "tag": "0072_verification_request_task_commit_uq",
       "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1789937421057,
+      "tag": "0073_verification_evidence_restrict_fks",
+      "breakpoints": true
     }
   ]
 }
