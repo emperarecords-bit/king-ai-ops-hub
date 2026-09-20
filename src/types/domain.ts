@@ -529,3 +529,22 @@ export interface TenantContext {
   readonly orgRole: OrgRole;
   readonly projectRole: ProjectRole;
 }
+
+/**
+ * VER-002 PR-2 — a machine (runner) principal. A CI runner is authenticated by a per-project bearer
+ * credential, NOT a human session, so it deliberately has NO `userId`, `orgRole`, or `projectRole`:
+ * inventing a human identity for a machine would be wrong. It is bound to exactly one tenant/project
+ * (resolved from the credential, never the request payload) and identified by the credential's keyId.
+ */
+export interface RunnerPrincipal {
+  readonly kind: 'runner';
+  readonly runnerKeyId: string;
+  readonly orgId: string;
+  readonly projectId: string;
+}
+
+/** The result of the machine-or-human authentication guard (a discriminated union — never a runner
+ *  masquerading as a user, nor vice versa). */
+export type VerificationCaller =
+  | { readonly kind: 'user'; readonly tenant: TenantContext }
+  | { readonly kind: 'runner'; readonly runner: RunnerPrincipal };

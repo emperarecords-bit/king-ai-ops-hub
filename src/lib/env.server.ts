@@ -40,6 +40,20 @@ const serverEnvSchema = z.object({
   DEFAULT_MONTHLY_SPEND_LIMIT_MICROS: z.coerce.bigint().positive().default(25_000_000n),
 
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error']).default('info'),
+
+  // VER-002 PR-2 — two SEPARATE default-off controls for the machine-auth foundation. Both default
+  // off so the routes/guard can merge without being exercisable before intended. Disabling ISSUANCE
+  // must NOT block revocation of already-issued credentials (revocation ignores this flag by design).
+  VERIFICATION_RUNNER_KEYS_ISSUANCE_ENABLED: z
+    .enum(['0', '1', 'true', 'false'])
+    .default('0')
+    .transform((v) => v === '1' || v === 'true'),
+  // Whether the ingest guard ACCEPTS a bearer runner credential at all. Off ⇒ a presented bearer is
+  // rejected (never falls back to a session), so machine auth can be disabled independently of issuance.
+  VERIFICATION_RUNNER_MACHINE_AUTH_ENABLED: z
+    .enum(['0', '1', 'true', 'false'])
+    .default('0')
+    .transform((v) => v === '1' || v === 'true'),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;

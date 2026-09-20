@@ -1085,3 +1085,65 @@ begin
   end if;
 end
 $$;
+
+-- ─────────────────────── VER-002 PR-2: runner (machine) credentials ───────────────────────
+-- A narrowly-privileged, LOGIN-LESS role that owns the pre-tenant lookup function below. It is not a
+-- superuser; it can read only verification_runner_keys and bypasses RLS solely so the SECURITY
+-- DEFINER lookup can resolve a bearer credential BEFORE any tenant context (GUCs) exists.
+do $$
+begin
+  if not exists (select from pg_roles where rolname = 'verification_key_reader') then
+    create role verification_key_reader nologin nosuperuser bypassrls;
+  end if;
+  alter role verification_key_reader nologin nosuperuser bypassrls nocreatedb nocreaterole;
+end
+$$;
+-- Ownership of a function in schema `app` requires CREATE there; scope the reader to exactly that.
+grant usage, create on schema app to verification_key_reader;
+
+do $$
+begin
+  if to_regclass('public.verification_runner_keys') is not null then
+    -- Issuance (INSERT) and revocation (UPDATE) run under the ADMIN's tenant context, so app_server
+    -- touches only its own project's rows under RLS. No DELETE: credentials are revoked, not deleted.
+    grant select, insert, update on verification_runner_keys to app_server;
+    revoke delete on verification_runner_keys from app_server;
+    alter table verification_runner_keys enable row level security;
+    alter table verification_runner_keys force row level security;
+    drop policy if exists verification_runner_keys_tenant on verification_runner_keys;
+    execute
+      'create policy verification_runner_keys_tenant on verification_runner_keys
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+    -- The narrow reader needs the row read the definer function performs.
+    grant select on verification_runner_keys to verification_key_reader;
+  end if;
+end
+$$;
+
+-- Hardened pre-tenant lookup. SECURITY DEFINER so it resolves a bearer before tenant GUCs exist, but
+-- owned by the narrow verification_key_reader (NOT a superuser); fixed safe search_path; fully
+-- qualified table reference; NO execute for PUBLIC. It returns ONLY the columns authentication needs.
+create or replace function app.lookup_verification_runner_key(p_key_id uuid)
+returns table (org_id uuid, project_id uuid, secret_hash text, secret_salt text, revoked_at timestamptz, expires_at timestamptz)
+language sql stable security definer set search_path = pg_catalog as $fn$
+  select k.org_id, k.project_id, k.secret_hash, k.secret_salt, k.revoked_at, k.expires_at
+  from public.verification_runner_keys k
+  where k.id = p_key_id
+$fn$;
+alter function app.lookup_verification_runner_key(uuid) owner to verification_key_reader;
+revoke all on function app.lookup_verification_runner_key(uuid) from public;
+grant execute on function app.lookup_verification_runner_key(uuid) to app_server;
+
+-- Resolve a project KEY to its (org, project) ids before any tenant context exists, so the guard can
+-- confirm a runner credential's project matches the URL's project key (a key for project A must not
+-- act on project B). Same hardening: narrow owner, fixed search_path, qualified ref, no PUBLIC exec.
+grant select on projects to verification_key_reader;
+create or replace function app.resolve_project_by_key(p_key text)
+returns table (org_id uuid, project_id uuid)
+language sql stable security definer set search_path = pg_catalog as $fn$
+  select p.org_id, p.id from public.projects p where p.key = p_key and p.archived = false
+$fn$;
+alter function app.resolve_project_by_key(text) owner to verification_key_reader;
+revoke all on function app.resolve_project_by_key(text) from public;
+grant execute on function app.resolve_project_by_key(text) to app_server;

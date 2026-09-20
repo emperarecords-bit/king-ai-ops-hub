@@ -98,6 +98,9 @@ export interface SignedEnvelope {
   readonly payload: EvidenceSubmission;
   /** HMAC-SHA256 (hex) of the canonical payload under the project's runner secret. */
   readonly signature: string;
+  /** Which signing-key version produced `signature`. Absent ⇒ treated as the original 'v1' so
+   *  envelopes signed before this field existed keep verifying; an unsupported version is rejected. */
+  readonly signingKeyVersion?: string;
 }
 
 export interface CheckEvaluation {

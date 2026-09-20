@@ -1,7 +1,8 @@
 import 'server-only';
 import { cache } from 'react';
-import { type TenantContext } from '@/types/domain';
+import { type TenantContext, type VerificationCaller } from '@/types/domain';
 import { ForbiddenError, UnauthenticatedError } from '@/lib/errors';
+import { serverEnv } from '@/lib/env.server';
 import {
   findAccessibleProjects,
   findOrgRole,
@@ -10,6 +11,17 @@ import {
   upsertProfile,
   type ProjectAccessRecord,
 } from '@/db/system';
+import {
+  lookupRunnerKeyById,
+  resolveProjectByKey,
+  touchRunnerKeyLastUsed,
+} from '@/db/runner-keys';
+import {
+  hasBearerCredential,
+  isRunnerKeyActive,
+  parseRunnerCredential,
+  verifyRunnerSecret,
+} from './runner-credential';
 import { createSupabaseServerClient } from './supabase';
 
 /**
@@ -90,6 +102,45 @@ export async function requireTenant(projectKey: string): Promise<TenantContext> 
     orgRole,
     projectRole: access.projectRole,
   };
+}
+
+/**
+ * VER-002 PR-2 — the machine-or-human gate for runner-facing verification endpoints. If the request
+ * carries a bearer credential, the MACHINE path is committed: an invalid/rejected bearer is a 401 and
+ * NEVER falls back to session auth (that would let a bad machine credential silently become a human
+ * request). With no bearer, the existing human `requireTenant` path runs unchanged.
+ *
+ * Machine-auth acceptance is behind its own default-off control (`VERIFICATION_RUNNER_MACHINE_AUTH_ENABLED`),
+ * independent of credential issuance — so machine auth can be turned off without touching issuance/revocation.
+ */
+export async function requireRunnerOrTenant(projectKey: string, req: Request): Promise<VerificationCaller> {
+  const authHeader = req.headers.get('authorization');
+  if (hasBearerCredential(authHeader)) {
+    // COMMITTED to the machine path — no session fallback beyond this point.
+    if (!serverEnv().VERIFICATION_RUNNER_MACHINE_AUTH_ENABLED) {
+      throw new UnauthenticatedError();
+    }
+    const cred = parseRunnerCredential(authHeader);
+    if (!cred) throw new UnauthenticatedError(); // malformed/ambiguous bearer
+
+    const key = await lookupRunnerKeyById(cred.keyId);
+    const now = new Date();
+    if (!key || !isRunnerKeyActive({ revokedAt: key.revokedAt, expiresAt: key.expiresAt }, now)) {
+      throw new UnauthenticatedError(); // unknown, revoked, or expired
+    }
+    if (!verifyRunnerSecret(cred.secret, key.secretSalt, key.secretHash)) {
+      throw new UnauthenticatedError(); // wrong secret
+    }
+    // The credential's project must match the URL's project key (a key for A cannot act on B).
+    const proj = await resolveProjectByKey(projectKey);
+    if (!proj || proj.projectId !== key.projectId || proj.orgId !== key.orgId) {
+      throw new ForbiddenError(`Runner credential is not authorized for project key '${projectKey}'`);
+    }
+    await touchRunnerKeyLastUsed({ orgId: key.orgId, projectId: key.projectId }, cred.keyId, now);
+    return { kind: 'runner', runner: { kind: 'runner', runnerKeyId: cred.keyId, orgId: key.orgId, projectId: key.projectId } };
+  }
+  // No bearer → the human session path, exactly as before.
+  return { kind: 'user', tenant: await requireTenant(projectKey) };
 }
 
 export async function listMyProjects(): Promise<ProjectAccessRecord[]> {

@@ -485,3 +485,25 @@ describe('VER-002 concurrent persistence conflict (every path)', () => {
     expect(d.status).not.toBe('verified_complete');
   });
 });
+
+describe('VER-002 PR-2 — signing-key version', () => {
+  it('accepts an envelope with no version (existing envelopes ⇒ v1)', async () => {
+    const d = await ingestEvidence(deps, ctx, sign(makeSubmission({ idempotencyKey: 'sv-absent' })));
+    expect(d.rejection?.code).not.toBe('unsupported_signing_version');
+    expect(d.accepted).toBe(true);
+  });
+  it('accepts an explicit supported version v1', async () => {
+    const env = { ...sign(makeSubmission({ idempotencyKey: 'sv-v1' })), signingKeyVersion: 'v1' };
+    const d = await ingestEvidence(deps, ctx, env);
+    expect(d.rejection?.code).not.toBe('unsupported_signing_version');
+    expect(d.accepted).toBe(true);
+  });
+  it('rejects an unsupported version on the ingest path — distinct from unauthenticated', async () => {
+    // A fully valid signature, but a retired/unknown signing-key version: rejected as a signing-key
+    // retirement, NOT as a bad credential.
+    const env = { ...sign(makeSubmission({ idempotencyKey: 'sv-v2' })), signingKeyVersion: 'v2' };
+    const d = await ingestEvidence(deps, ctx, env);
+    expect(d.accepted).toBe(false);
+    expect(d.rejection?.code).toBe('unsupported_signing_version');
+  });
+});
