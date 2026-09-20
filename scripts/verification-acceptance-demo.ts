@@ -60,7 +60,11 @@ function makeSyntheticRepo(): { dir: string; commit: string } {
   );
   // Sensitive fixtures that must NEVER reach a review package.
   writeFileSync(join(dir, '.env'), 'SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiJ9.super.secret\n');
-  writeFileSync(join(dir, 'secret-note.txt'), 'note to self: prod key sk_live_0123456789abcdef\n');
+  // Fake Stripe key assembled from fragments so the verbatim `sk_live_<...>` literal is not in tracked
+  // source (CI secret-scan enforces that everywhere). The demo still writes the identical string at
+  // runtime, proving the sanitizer strips it before it can reach a review package.
+  const fakeStripeKey = ['sk', 'live', '0123456789abcdef'].join('_');
+  writeFileSync(join(dir, 'secret-note.txt'), `note to self: prod key ${fakeStripeKey}\n`);
   git(dir, ['add', '-A']);
   git(dir, ['commit', '-q', '-m', 'synthetic fixtures']);
   return { dir, commit: git(dir, ['rev-parse', 'HEAD']) };
