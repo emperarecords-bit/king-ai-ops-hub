@@ -40,7 +40,7 @@ staging/prod in this phase.
 
 | # | PR | What it lands | Independently reviewable because | Turns anything on? |
 |---|----|----|----|----|
-| **1** | **Evidence immutability + FK RESTRICT** | `rls.sql` revoke UPDATE/DELETE on `verification_evidence` + `app.forbid_mutation()` trigger; flip verification FKs `cascade → restrict`; journaled migration; `PRODUCTION_PINS` bump; regression. | Pure DB hardening of an existing table; no runner, storage, or auth. Corrects a confirmed current gap. | No |
+| **1** ✅ | **Evidence immutability + FK RESTRICT** — **DONE, merged in #108** | `rls.sql` revoke UPDATE/DELETE on `verification_evidence` + `app.forbid_mutation()` trigger; flip verification FKs `cascade → restrict`; journaled migration `0073`; `PRODUCTION_PINS` bump; regression. | Pure DB hardening of an existing table; no runner, storage, or auth. Corrected a confirmed gap. | No |
 | **2** | **Machine-principal auth foundation** | `verification_runner_keys` table (hash-at-rest); pre-tenant `keyId` lookup (`SECURITY DEFINER` fn); `requireRunnerOrTenant` guard; endpoint permission matrix; signing-key version + revocation checks on both paths. **Credential issuance behind its own default-off enablement gate** (not the signing master). | Auth layer only; human path unchanged; issuance gated default-off. | No |
 | **3** | **Contract retrieval + catalog pin** | `GET …/requests/assigned` (runner-auth, read-only); `catalog_version`/`catalog_digest` columns pinned at creation; ingest rejects `catalog_mismatch` and non-matching commands. **Runner retrieval behind its own default-off gate** (not the signing master). | Extends the existing create/ingest paths; no storage/runner. | No |
 | **4** | **Upload-grant endpoint (mechanism only)** | `POST …/uploads` issuing a presigned PUT via the `ObjectStore` port; opaque server-generated object IDs + validated logical paths; server-generated keys. **Claims no enforcement yet; grant issuance behind its own default-off gate** (not the signing master). | Mechanism behind the existing port; **Gate A** — provider chosen here, not assumed. | No |
@@ -91,9 +91,11 @@ All verified on a disposable `*_test` DB as the non-superuser `app_server` role 
    `verification_evidence` (matching `verification_requests`).
 2. **Direct mutation rejected:** a direct `UPDATE` and a direct `DELETE` on `verification_evidence`
    as `app_server` both raise (grant + `app.forbid_mutation()` trigger).
-3. **Cascade no longer silently deletes evidence:** with FKs at `RESTRICT`, deleting a parent
-   org/project/task/request that has evidence is **blocked** (error), and the evidence row survives;
-   the trigger is confirmed to fire on the cascaded path, not only a direct delete.
+3. **Parent deletion blocked, evidence preserved:** with FKs at `RESTRICT`, deleting a parent
+   org/project/task/request that has evidence is **blocked** by the foreign-key constraint (error),
+   and the evidence row survives. RESTRICT **prevents the cascade** — the delete is rejected before
+   any cascade runs — so this case does **not** exercise the append-only trigger; the trigger is
+   tested separately (item 2, and against a role that holds UPDATE/DELETE grants).
 4. **Happy path unchanged:** the existing ingest `INSERT` (idempotent `onConflictDoNothing` +
    reselect) still succeeds — revoking UPDATE/DELETE is functionally inert for normal operation
    (the verification unit + integration suites stay green).
@@ -157,4 +159,5 @@ hard total-upload deadline is demonstrably enforced.** What is solid vs. unresol
 - Constraints in force: no implementation, no provisioning, no spend, no deploy, no staging/prod
   migration application, no StressProbe. This document is docs-only.
 - Related merged work: contract creation (#104), repository-name consistency (#105), design doc
-  (#106). PR-1 here is the first build step against that design.
+  (#106), and **PR-1 evidence immutability + FK RESTRICT (#108, merged)** — the first build step
+  against this plan is complete.
