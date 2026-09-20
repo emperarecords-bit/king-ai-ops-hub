@@ -16,9 +16,9 @@ export const PRODUCTION_PINS: ReleasePins = {
   databaseIdentity: 'king_ai_ops_hub_production',
   snapshotProvider: FLY_VOLUMES_PROVIDER,
   providerAdapterVersion: FLY_VOLUMES_ADAPTER_VERSION,
-  // Bumped 2026-09-20 (0069 pricing_schedule_v4 — Claude Sonnet 5 standard rate rollover).
-  expectedMigrationEndpoint: '0069_pricing_schedule_v4',
-  expectedCommittedMigrationCount: 70,
-  /** Production deployed through 0067 on 2026-08-18; 0068 and 0069 are pending. */
+  // Bumped 2026-09-20 (0070 pricing_schedule_v5 — Claude Sonnet 5 verified $2/$10 rate, correcting v4).
+  expectedMigrationEndpoint: '0070_pricing_schedule_v5',
+  expectedCommittedMigrationCount: 71,
+  /** Production deployed through 0067 on 2026-08-18; 0068, 0069 and 0070 are pending. */
   defaultAppliedCount: 68,
 } as const;
