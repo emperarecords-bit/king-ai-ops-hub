@@ -22,7 +22,7 @@ export const PRICING_CURRENCY = 'USD' as const;
 export const PRICING_SOURCE_VERSION = PRICING_VERSION; // '2026-07-24'
 export const SEED_MIGRATION_ID = '0070_pricing_schedule_v5' as const;
 
-/** Stable sentinel id for the CURRENT seeded schedule (deterministic across environments). v1 (f00d0053…) → v2 (f00d0062…, first google/deepseek models) → v3 (2026-08-15, corrects the Gemini ids to the live-probed gemini-3.1-* names) → v4 (2026-09-20, WRONG $3/$15 assumption — merged but never applied to any DB) → v5 (2026-09-20 correction, Claude Sonnet 5 verified standard $2/$10, open-ended); superseded rows remain as immutable history. */
+/** Stable sentinel id for the CURRENT seeded schedule (deterministic across environments). v1 (f00d0053…) → v2 (f00d0062…, first google/deepseek models) → v3 (2026-08-15, corrects the Gemini ids to the live-probed gemini-3.1-* names) → v4 (2026-09-20, WRONG $3/$15 assumption — merged to main; whether applied to any live DB is UNCONFIRMED) → v5 (2026-09-20 correction, Claude Sonnet 5 verified standard $2/$10, open-ended); superseded rows remain as immutable history. */
 export const SEED_SCHEDULE_ID = 'f00d0070-0000-4000-8000-000000000001' as const;
 
 /**

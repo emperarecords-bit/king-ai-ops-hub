@@ -28,10 +28,11 @@ const rows = entries
 
 // No schema DDL in this migration — the seed is the whole content.
 const sql = `-- 0070: pricing schedule v5 — CORRECTION of v4 (0069). The verified Claude Sonnet 5 STANDARD rate is
--- $2/$10 per M tokens; v4 wrongly seeded a $3/$15 rise that never took effect. v4 merged to main but was never
--- deployed or applied to any database (no cost was ever recorded at $3/$15), so this is a forward correction, not
--- a data fix. Same immutable-seed design: prior schedule rows are HISTORY and stay untouched; a NEW schedule is
--- inserted and the GLOBAL pointer moves. Data-only migration (no schema change).
+-- $2/$10 per M tokens; v4 (0069) seeded a $3/$15 rise that was never actually in effect. v4 merged to main;
+-- whether it was ever applied to a live (staging/production) database is UNCONFIRMED as of this migration.
+-- This is a forward correction that supersedes v4 regardless of where v4 was applied. Same immutable-seed
+-- design: prior schedule rows are HISTORY and stay untouched; a NEW schedule is inserted and the GLOBAL pointer
+-- moves. Data-only migration (no schema change) — it does not read or modify usage_events.
 
 -- The platform_pricing_state immutability trigger (created by rls.sql, so absent during a fresh-DB
 -- bootstrap) is disabled around the pointer UPDATE — migrations ARE the platform seeding path the trigger's

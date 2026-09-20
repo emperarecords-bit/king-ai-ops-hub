@@ -13,10 +13,10 @@ describe('pricing table', () => {
   it('Claude Sonnet 5 is priced at the verified standard rate of $2/$10 per M tokens', () => {
     // CORRECTION 2026-09-20: the verified standard rate is $2 input / $10 output per M tokens.
     // An earlier tripwire assumed the introductory rate would rise to $3/$15 on 2026-09-01; that
-    // rise never took effect (schedule v4 / migration 0069 encoded the wrong assumption, merged to
-    // main but was never deployed or applied to any DB). Schedule v5 (0070) restores the verified
-    // $2/$10 as the standing rate. If the vendor genuinely changes this, update MODEL_PRICING, add a
-    // new pricing schedule version, and update this expectation.
+    // rise was never actually in effect (schedule v4 / migration 0069 encoded the wrong assumption
+    // and merged to main; whether v4 was ever applied to a live DB is UNCONFIRMED). Schedule v5 (0070)
+    // restores the verified $2/$10 as the standing rate. If the vendor genuinely changes this, update
+    // MODEL_PRICING, add a new pricing schedule version, and update this expectation.
     const sonnet = MODEL_PRICING['claude-sonnet-5']!;
     expect(sonnet.inputMicrosPerM).toBe(2_000_000n);
     expect(sonnet.outputMicrosPerM).toBe(10_000_000n);
