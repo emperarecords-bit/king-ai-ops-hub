@@ -1,57 +1,60 @@
 import { z } from 'zod';
 import { AppError, toPublicMessage } from '@/lib/errors';
 import { log } from '@/lib/log';
-import { requireUser } from '@/domain/auth/guard';
+import { requireUser, listMyProjectsWithOrgRoles } from '@/domain/auth/guard';
 import { getProvider } from '@/providers/registry';
 import { buildPulse, pulseContext } from '@/domain/opschat/pulse';
+import { createOpsChatToolset } from '@/domain/opschat/tools';
 
 /**
- * POST — Ops Chat (chat-first front door, v1 READ-ONLY).
+ * POST — Ops Chat (chat-first front door). v2: the model can call READ tools to
+ * fetch deeper detail on demand (objective criteria + blockers, run failures,
+ * tasks, open questions) and can PROPOSE an answer to an owner-question — which
+ * it never writes itself; a proposal is surfaced for the owner to confirm (the
+ * confirm endpoint performs the one write, re-validated via answerOwnerQuestion).
  *
- * Answers the owner's free-form question from the LIVE hub pulse, streamed as
- * Server-Sent Events so the reply appears word-by-word (like a real chat).
- *
- * Events:
- *   delta  { text }     model output as it is produced
- *   done   { }          the reply is complete
- *   error  { message }  auth/preflight/model failure
- *
- * v1 is strictly read-only: it summarizes and explains, it never changes hub
- * state. (Answering questions / approving / dispatching is v2.)
+ * Events (SSE):
+ *   delta     { text }                  model output as produced
+ *   tool      { name, phase, ok? }      a tool call started / finished (for UI)
+ *   proposal  { questionId, projectKey, workspaceName, question, answer }
+ *   done      { }                       reply complete
+ *   error     { message }
  */
 
-// Reliable for our small, live context. One-line swap to 'claude-opus-4-8' if
-// answers ever come back empty on a larger prompt (see hub execution notes).
 const OPS_CHAT_MODEL = 'claude-sonnet-5';
 
 const Body = z.object({
   message: z.string().trim().min(1).max(4000),
   history: z
-    .array(
-      z.object({
-        role: z.enum(['user', 'assistant']),
-        content: z.string().max(8000),
-      }),
-    )
+    .array(z.object({ role: z.enum(['user', 'assistant']), content: z.string().max(8000) }))
     .max(20)
     .optional(),
 });
 
 const SYSTEM_PROMPT = `You are the Ops Chat for the King AI Ops Hub — the owner's conversational front door to their multi-workspace AI operation. You speak to the owner directly.
 
-You are given a LIVE snapshot of the hub below (what needs the owner, per-workspace health and activity, open questions). Answer the owner's question using ONLY that snapshot.
+You are given a LIVE snapshot of the hub below (what needs the owner, per-workspace health and activity, open questions). For anything the snapshot already answers, answer from it.
+
+You also have TOOLS to fetch deeper detail on demand. Use them instead of saying "I don't have that":
+- get_objective_criteria — an objective's actual success criteria (each with target + met/unmet) and what is blocking the unmet ones. Use for "what are the criteria?", "why isn't it done?", "what would finish it?".
+- list_objectives, list_tasks, get_task_detail (run failure reason + failing step), list_open_questions, list_pending_approvals, get_approval_detail.
+
+You can help the owner take THREE kinds of action. Each PROPOSE tool only prepares a confirmation card — it never writes or runs anything. Never say something is saved/sent/decided/running; say it is "ready for you to confirm below."
+1. ANSWER an owner-question: list_open_questions to find the id, draft the answer in the owner's voice, confirm the wording, then propose_answer_question.
+2. APPROVE or REJECT a pending approval: list_pending_approvals (or get_approval_detail) to find the id and understand the action, confirm the owner's intent, then propose_decide_approval. When rejecting, always include a short rationale in the note — a refusal requires one.
+3. DISPATCH WORK — start new work or re-run a task. This SPENDS money (an AI run uses tokens), so be deliberate and make sure the owner actually wants it. propose_dispatch_task creates a new task (give a clear title + instructions; use list_agents to choose who runs it, or omit to use the first agent); propose_rerun_task re-runs an existing task (e.g. retry a failed one — find it with list_tasks/get_task_detail first).
+To act on several at once (e.g. "approve all three", "answer both duplicates", "retry those tasks"), call the propose tool once per item — each becomes its own confirm card.
 
 Rules:
-- Be concise and plain-spoken. Lead with the answer. Short paragraphs or tight bullet lists; no preamble like "Great question".
-- Use ONLY the numbers and facts in the snapshot. Never invent counts, names, or statuses. If the snapshot does not contain the answer, say so plainly and suggest where in the hub to look (name the workspace).
-- This is a READ-ONLY assistant. You cannot answer owner-questions, approve anything, dispatch work, or change any state. If the owner asks you to DO one of those, explain that acting-by-chat is coming soon and, for now, point them to the right place (e.g. "open the Inbox to approve those").
-- Prefer the owner's plain words ("what needs me", "how's AccurateBids") over internal jargon. When useful, mention the workspace name so they know where to go.
-- If nothing needs the owner, reassure them briefly rather than manufacturing concerns.`;
+- Be concise and plain-spoken. Lead with the answer. Use ONLY real data from the snapshot or tool results — never invent counts, names, criteria, or statuses.
+- Do NOT speculate about connections between unrelated things (e.g. a bookkeeping question and an internal model-call error are not "the same issue" just because both involve the word "reconciliation"). Only link things the data actually links.
+- Name the workspace when useful. Tools accept the workspace name or key.`;
 
 export async function POST(req: Request): Promise<Response> {
-  // Auth resolves BEFORE the stream opens so failures are proper status codes.
+  let auth: Awaited<ReturnType<typeof listMyProjectsWithOrgRoles>>;
   try {
     await requireUser();
+    auth = await listMyProjectsWithOrgRoles();
   } catch (err) {
     return Response.json(
       { error: toPublicMessage(err) },
@@ -66,8 +69,6 @@ export async function POST(req: Request): Promise<Response> {
     return Response.json({ error: 'Invalid request.' }, { status: 400 });
   }
 
-  // Build the live pulse up front so an assembly failure is a clean error, not
-  // a half-open stream.
   let system: string;
   try {
     const pulse = await buildPulse();
@@ -81,6 +82,8 @@ export async function POST(req: Request): Promise<Response> {
     ...(body.history ?? []).map((t) => ({ role: t.role, content: t.content })),
     { role: 'user' as const, content: body.message },
   ];
+
+  const toolset = createOpsChatToolset({ userId: auth.user.id, projects: auth.projects, orgRoles: auth.orgRoles });
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -97,18 +100,17 @@ export async function POST(req: Request): Promise<Response> {
 
       try {
         const provider = getProvider('anthropic');
-        if (!provider.stream) throw new Error('Streaming is not available.');
-        for await (const ev of provider.stream({
-          model: OPS_CHAT_MODEL,
-          system,
-          turns,
-          temperature: 0.3,
-          maxOutputTokens: 1200,
-          timeoutMs: 60_000,
-          signal: req.signal,
-        })) {
+        if (!provider.streamWithTools) throw new Error('Tool-use is not available on this provider.');
+        for await (const ev of provider.streamWithTools(
+          { model: OPS_CHAT_MODEL, system, turns, temperature: 0.3, maxOutputTokens: 1500, timeoutMs: 90_000, signal: req.signal },
+          toolset.tools,
+          toolset.runTool,
+        )) {
           if (ev.kind === 'delta') send('delta', { text: ev.text });
+          else if (ev.kind === 'tool_start') send('tool', { name: ev.name, phase: 'start' });
+          else if (ev.kind === 'tool_end') send('tool', { name: ev.name, phase: 'end', ok: ev.ok });
         }
+        for (const proposal of toolset.getProposals()) send('proposal', proposal);
         send('done', {});
       } catch (err) {
         if (!(err instanceof AppError)) log.error('ops-chat stream failed', { err });

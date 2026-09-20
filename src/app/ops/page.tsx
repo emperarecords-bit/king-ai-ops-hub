@@ -21,7 +21,7 @@ export default async function OpsChatPage() {
   const needsYou = pulse.totals.pendingApprovals + pulse.openQuestions.length;
 
   return (
-    <main className="mx-auto flex min-h-[100dvh] max-w-3xl flex-col p-4 sm:p-6">
+    <main className="mx-auto flex min-h-[100dvh] max-w-5xl flex-col p-4 sm:p-6">
       <header className="mb-4 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <h1 className="text-lg font-bold">Ops Chat</h1>

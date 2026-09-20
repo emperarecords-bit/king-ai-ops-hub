@@ -8,7 +8,21 @@ import {
   type ModelDescriptor,
   ProviderError,
   type TokenUsage,
+  type ToolSpec,
+  type ToolRunner,
+  type ToolLoopEvent,
 } from '@/types/provider';
+
+/** Parse a streamed tool-input JSON string; empty/partial → {} (never throws). */
+function parseToolInput(json: string): unknown {
+  const s = json.trim();
+  if (!s) return {};
+  try {
+    return JSON.parse(s);
+  } catch {
+    return {};
+  }
+}
 import { costForUsage, modelsForProvider } from './pricing';
 
 /**
@@ -159,6 +173,140 @@ export class AnthropicProvider implements AIProvider {
           latencyMs: Date.now() - startedAt,
         },
       };
+    } catch (err) {
+      throw this.mapError(err);
+    }
+  }
+
+  /**
+   * Tool-use conversation loop (Ops Chat v2). The model may call the supplied
+   * tools; `runTool` executes each and its string result is fed back until the
+   * model returns a final text answer or `maxIterations` is reached. All
+   * Anthropic-specific message shapes (tool_use / tool_result blocks) stay
+   * inside this file. Yields text deltas + tool-activity events, then one 'done'.
+   */
+  async *streamWithTools(
+    request: AgentRequest,
+    tools: readonly ToolSpec[],
+    runTool: ToolRunner,
+    maxIterations = 6,
+  ): AsyncIterable<ToolLoopEvent> {
+    try {
+      const anthropicTools: Anthropic.Tool[] = tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
+      }));
+      const messages: Anthropic.MessageParam[] = request.turns.map((t) => ({
+        role: t.role,
+        content: t.content,
+      }));
+
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let stopReason = 'unknown';
+
+      for (let iter = 0; iter < maxIterations; iter++) {
+        const open = (withTemperature: boolean) =>
+          this.client.messages.create(
+            {
+              model: request.model,
+              system: request.system,
+              messages,
+              max_tokens: request.maxOutputTokens,
+              tools: anthropicTools,
+              ...(withTemperature ? { temperature: request.temperature } : {}),
+              stream: true,
+            },
+            { timeout: request.timeoutMs, signal: request.signal },
+          );
+
+        let stream: Awaited<ReturnType<typeof open>>;
+        if (this.noTemperatureModels.has(request.model)) {
+          stream = await open(false);
+        } else {
+          try {
+            stream = await open(true);
+          } catch (err) {
+            if (this.isTemperatureDeprecated(err)) {
+              this.noTemperatureModels.add(request.model);
+              stream = await open(false);
+            } else {
+              throw err;
+            }
+          }
+        }
+
+        // Accumulate assistant content blocks (by stream index) for this turn.
+        type Block =
+          | { type: 'text'; text: string }
+          | { type: 'tool_use'; id: string; name: string; json: string };
+        const blocks: Block[] = [];
+        let curStop = 'unknown';
+
+        for await (const event of stream) {
+          if (event.type === 'message_start') {
+            inputTokens += event.message.usage.input_tokens;
+          } else if (event.type === 'content_block_start') {
+            const cb = event.content_block;
+            if (cb.type === 'text') blocks[event.index] = { type: 'text', text: '' };
+            else if (cb.type === 'tool_use')
+              blocks[event.index] = { type: 'tool_use', id: cb.id, name: cb.name, json: '' };
+          } else if (event.type === 'content_block_delta') {
+            const b = blocks[event.index];
+            if (event.delta.type === 'text_delta' && b?.type === 'text') {
+              b.text += event.delta.text;
+              yield { kind: 'delta', text: event.delta.text };
+            } else if (event.delta.type === 'input_json_delta' && b?.type === 'tool_use') {
+              b.json += event.delta.partial_json;
+            }
+          } else if (event.type === 'message_delta') {
+            outputTokens += event.usage.output_tokens;
+            if (event.delta.stop_reason) curStop = event.delta.stop_reason.toLowerCase();
+          }
+        }
+        stopReason = curStop;
+
+        const present = blocks.filter((b): b is Block => Boolean(b));
+        const toolUses = present.filter(
+          (b): b is { type: 'tool_use'; id: string; name: string; json: string } => b.type === 'tool_use',
+        );
+
+        // Final answer produced (no tool calls) — stop.
+        if (curStop !== 'tool_use' || toolUses.length === 0) break;
+
+        // Record the assistant's turn (text + tool_use), then run each tool and
+        // feed the results back as a user turn.
+        const assistantContent: Anthropic.ContentBlockParam[] = present.map((b) =>
+          b.type === 'text'
+            ? { type: 'text', text: b.text }
+            : { type: 'tool_use', id: b.id, name: b.name, input: parseToolInput(b.json) },
+        );
+        messages.push({ role: 'assistant', content: assistantContent });
+
+        const toolResults: Anthropic.ContentBlockParam[] = [];
+        for (const tu of toolUses) {
+          yield { kind: 'tool_start', name: tu.name };
+          let ok = true;
+          let result: string;
+          try {
+            result = await runTool({ name: tu.name, input: parseToolInput(tu.json) });
+          } catch (e) {
+            ok = false;
+            result = `ERROR: ${e instanceof Error ? e.message : 'tool failed'}`;
+          }
+          yield { kind: 'tool_end', name: tu.name, ok };
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: tu.id,
+            content: result,
+            ...(ok ? {} : { is_error: true }),
+          });
+        }
+        messages.push({ role: 'user', content: toolResults });
+      }
+
+      yield { kind: 'done', usage: { inputTokens, outputTokens }, stopReason };
     } catch (err) {
       throw this.mapError(err);
     }

@@ -61,6 +61,27 @@ export type AgentEvent =
   | { readonly kind: 'delta'; readonly text: string }
   | { readonly kind: 'done'; readonly response: AgentResponse };
 
+/**
+ * A tool the model may call during a tool-use conversation. Provider-neutral:
+ * `inputSchema` is a JSON Schema object the adapter translates to the vendor's
+ * tool format. (Used by Ops Chat v2; not part of the run engine.)
+ */
+export interface ToolSpec {
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: Record<string, unknown>;
+}
+
+/** Executes one tool call and returns its result as a string (JSON or text). */
+export type ToolRunner = (call: { readonly name: string; readonly input: unknown }) => Promise<string>;
+
+/** Events emitted by a tool-use conversation loop (AIProvider.streamWithTools). */
+export type ToolLoopEvent =
+  | { readonly kind: 'delta'; readonly text: string }
+  | { readonly kind: 'tool_start'; readonly name: string }
+  | { readonly kind: 'tool_end'; readonly name: string; readonly ok: boolean }
+  | { readonly kind: 'done'; readonly usage: TokenUsage; readonly stopReason: string };
+
 export const PROVIDER_ERROR_KINDS = [
   'rate_limited',
   'timeout',
@@ -167,6 +188,19 @@ export interface AIProvider {
   readonly authoritativeNotExecuted: AuthoritativeNotExecutedGuarantee;
   execute(request: AgentRequest): Promise<AgentResponse>;
   stream?(request: AgentRequest): AsyncIterable<AgentEvent>;
+  /**
+   * Multi-turn tool-use loop: the model may call the supplied `tools`; `runTool`
+   * executes each call and its string result is fed back until the model returns
+   * a final text answer. Yields text deltas plus tool-activity events. Bounded by
+   * `maxIterations`. Optional capability (Anthropic implements it) — callers must
+   * feature-detect. Used by Ops Chat v2; the run engine does not use it.
+   */
+  streamWithTools?(
+    request: AgentRequest,
+    tools: readonly ToolSpec[],
+    runTool: ToolRunner,
+    maxIterations?: number,
+  ): AsyncIterable<ToolLoopEvent>;
   estimateCost?(model: string, usage: TokenUsage): Money;
   listModels(): readonly ModelDescriptor[];
 }
