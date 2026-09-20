@@ -59,5 +59,7 @@ END
 $$;
 `;
 
-writeFileSync('drizzle/0069_pricing_schedule_v4.sql', sql);
+// Force LF: the G-Backup runtime-migration-set hash is over exact file bytes, and .gitattributes pins
+// drizzle SQL to eol=lf. Emitting CRLF (this .ts file may itself be CRLF on Windows) would break that.
+writeFileSync('drizzle/0069_pricing_schedule_v4.sql', sql.replace(/\r\n/g, '\n'));
 console.log('wrote 0069 seed:', { hash, entries: entries.length });
