@@ -119,10 +119,21 @@ async function putArtifact(requestId: string): Promise<void> {
   createdArtifactKeys.push(key);
 }
 
-// Guard: a disposable, non-superuser runtime role. If the connection is a
+// Guard 1: the DB target must be a disposable LOCAL test database — never prod.
+function assertDisposableDbTarget(): void {
+  const url = new URL(process.env.DATABASE_URL ?? '');
+  const host = url.hostname;
+  const db = url.pathname.replace(/^\//, '');
+  if (!['localhost', '127.0.0.1', '::1'].includes(host)) throw new Error(`refusing non-local DB host: ${host}`);
+  if (!/_test$/.test(db)) throw new Error(`refusing DB that is not a *_test database: ${db}`);
+  if (/prod|production|staging/i.test(db) || /prod|production|staging/i.test(host)) throw new Error(`refusing production/staging target: ${host}/${db}`);
+}
+
+// Guard 2: a disposable, non-superuser runtime role. If the connection is a
 // superuser or BYPASSRLS, RLS assertions would be meaningless — fail loudly.
 beforeAll(async () => {
   if (!enabled) return;
+  assertDisposableDbTarget();
   const rows = await withTenant(ctx, (tx) =>
     tx.execute(sql`select current_user as who, rolsuper, rolbypassrls from pg_roles where rolname = current_user`),
   );
@@ -182,9 +193,48 @@ describe.skipIf(!enabled)('VER-002 real integration (DB + store + artifact adapt
   });
 });
 
-// Real HTTP route + authentication. Requires a running server and a valid session
+// Actual HTTP route — AUTH REJECTION (no valid session needed). Requires only a
+// running local server. Confirms missing/invalid authentication is refused (401)
+// and that requests never follow a redirect outside the allowed local endpoint.
+const routeEnabled = Boolean(process.env.VER_INT_BASE_URL && process.env.VER_INT_PROJECT_KEY);
+function assertLocalHttp(base: string): void {
+  const u = new URL(base);
+  if (u.protocol !== 'http:' || !['localhost', '127.0.0.1', '::1'].includes(u.hostname)) {
+    throw new Error(`refusing non-local HTTP target: ${base}`);
+  }
+}
+describe.skipIf(!routeEnabled)('VER-002 actual HTTP route — authentication rejection', () => {
+  const base = process.env.VER_INT_BASE_URL ?? '';
+  const key = process.env.VER_INT_PROJECT_KEY ?? '';
+  const url = `${base}/api/p/${key}/verification`;
+  const body = JSON.stringify({
+    runnerId: 'r',
+    signature: 'x',
+    payload: submission({ requestId: '00000000-0000-0000-0000-000000000000' }),
+  });
+
+  it('rejects a submission with NO authentication (401), no external redirect', async () => {
+    assertLocalHttp(base);
+    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, redirect: 'error' });
+    expect(res.status).toBe(401);
+    expect(new URL(res.url).hostname).toMatch(/^(localhost|127\.0\.0\.1|::1)$/);
+  });
+
+  it('rejects a submission with an INVALID session cookie (401)', async () => {
+    assertLocalHttp(base);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: 'sb-access-token=bogus; sb-refresh-token=bogus' },
+      body,
+      redirect: 'error',
+    });
+    expect(res.status).toBe(401);
+  });
+});
+
+// Real HTTP route SUCCESS path. Requires a running server and a valid session
 // cookie; signs with the route's DERIVED per-project runner secret. Self-skips
-// otherwise. NOT VERIFIED at review time (no isolated server available).
+// otherwise. NOT VERIFIED (needs a local Supabase auth stack + test session).
 const httpEnabled = Boolean(
   process.env.VER_INT_BASE_URL && process.env.VER_INT_PROJECT_KEY && process.env.VER_INT_COOKIE && process.env.VERIFICATION_RUNNER_MASTER_SECRET,
 );
