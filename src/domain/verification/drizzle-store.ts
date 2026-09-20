@@ -6,12 +6,29 @@
  */
 import { and, eq } from 'drizzle-orm';
 import type { DbTx } from '@/db/client';
-import { verificationEvidence, verificationRequests } from '@/db/schema';
+import { githubRepoLinks, tasks, verificationEvidence, verificationRequests } from '@/db/schema';
 import type { ArtifactAvailability, CheckResult, RejectionCode, SubmittedArtifact, VerificationRequest } from './index';
 import type { PriorEvidence, VerificationStore } from './ports';
 import type { TaskVerificationStatus } from './types';
 
 type EvidenceRow = typeof verificationEvidence.$inferSelect;
+type RequestRow = typeof verificationRequests.$inferSelect;
+
+function rowToRequest(row: RequestRow): VerificationRequest {
+  return {
+    id: row.id,
+    orgId: row.orgId,
+    projectId: row.projectId,
+    taskId: row.taskId,
+    repoFullName: row.repoFullName,
+    expectedCommitSha: row.expectedCommitSha,
+    requiredChecks: row.requiredChecks,
+    requiredArtifacts: row.requiredArtifacts,
+    allowDirty: row.allowDirty,
+    createdBy: row.createdBy ?? '',
+    createdAt: row.createdAt.toISOString(),
+  };
+}
 
 function rowToPrior(row: EvidenceRow): PriorEvidence {
   return {
@@ -47,20 +64,75 @@ export function createDrizzleVerificationStore(tx: DbTx): VerificationStore {
           )
           .limit(1)
       )[0];
-      if (!row) return null;
-      return {
-        id: row.id,
-        orgId: row.orgId,
-        projectId: row.projectId,
-        taskId: row.taskId,
-        repoFullName: row.repoFullName,
-        expectedCommitSha: row.expectedCommitSha,
-        requiredChecks: row.requiredChecks,
-        requiredArtifacts: row.requiredArtifacts,
-        allowDirty: row.allowDirty,
-        createdBy: row.createdBy ?? '',
-        createdAt: row.createdAt.toISOString(),
-      };
+      return row ? rowToRequest(row) : null;
+    },
+
+    async taskExistsInTenant(orgId, projectId, taskId): Promise<boolean> {
+      const row = (
+        await tx
+          .select({ id: tasks.id })
+          .from(tasks)
+          .where(and(eq(tasks.orgId, orgId), eq(tasks.projectId, projectId), eq(tasks.id, taskId)))
+          .limit(1)
+      )[0];
+      return Boolean(row);
+    },
+
+    async linkedRepoFullNames(orgId, projectId): Promise<string[]> {
+      const rows = await tx
+        .select({ repo: githubRepoLinks.repoFullName })
+        .from(githubRepoLinks)
+        .where(and(eq(githubRepoLinks.orgId, orgId), eq(githubRepoLinks.projectId, projectId)));
+      return rows.map((r) => r.repo);
+    },
+
+    async findRequestByTaskCommit(orgId, projectId, taskId, commitSha): Promise<VerificationRequest | null> {
+      const row = (
+        await tx
+          .select()
+          .from(verificationRequests)
+          .where(
+            and(
+              eq(verificationRequests.orgId, orgId),
+              eq(verificationRequests.projectId, projectId),
+              eq(verificationRequests.taskId, taskId),
+              eq(verificationRequests.expectedCommitSha, commitSha),
+            ),
+          )
+          .limit(1)
+      )[0];
+      return row ? rowToRequest(row) : null;
+    },
+
+    async createRequest(orgId, projectId, createdBy, input): Promise<{ request: VerificationRequest; inserted: boolean }> {
+      const inserted = await tx
+        .insert(verificationRequests)
+        .values({
+          orgId,
+          projectId,
+          taskId: input.taskId,
+          repoFullName: input.repoFullName,
+          expectedCommitSha: input.commitSha,
+          requiredChecks: [...input.requiredChecks],
+          requiredArtifacts: [...input.requiredArtifacts],
+          allowDirty: input.allowDirty,
+          createdBy,
+        })
+        // Race-safe: a concurrent create for the same (task, commit) makes this a no-op.
+        .onConflictDoNothing({
+          target: [
+            verificationRequests.orgId,
+            verificationRequests.projectId,
+            verificationRequests.taskId,
+            verificationRequests.expectedCommitSha,
+          ],
+        })
+        .returning();
+      if (inserted[0]) return { request: rowToRequest(inserted[0]), inserted: true };
+      // Lost the race — return the WINNER so the caller can compare contracts.
+      const winner = await this.findRequestByTaskCommit(orgId, projectId, input.taskId, input.commitSha);
+      if (!winner) throw new Error('verification request insert was a no-op but no existing row was found');
+      return { request: winner, inserted: false };
     },
 
     async findExisting(orgId, projectId, requestId, key): Promise<PriorEvidence | null> {

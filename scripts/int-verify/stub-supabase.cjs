@@ -13,8 +13,22 @@ const fs = require('node:fs');
 
 const OWNER_ID = process.env.STUB_USER_ID;
 const OWNER_EMAIL = process.env.STUB_USER_EMAIL || 'owner@example.com';
-const TOKEN = process.env.STUB_TOKEN; // the one valid access token
+const TOKEN = process.env.STUB_TOKEN; // the primary valid access token
+// One OR MORE valid access tokens. Each is a structural JWT whose `sub`/`email` claims identify the
+// user it authenticates — so a test can present a second user's token to exercise a non-member path.
+// Backward compatible: with only STUB_TOKEN set this is exactly the single-token behaviour.
+const VALID_TOKENS = new Set((process.env.STUB_TOKENS || TOKEN || '').split(',').map((t) => t.trim()).filter(Boolean));
 const REFRESH = process.env.STUB_REFRESH || 'REFRESH'; // the one known refresh token
+
+/** Decode the `sub`/`email` claims of a JWT-shaped token (no signature check — this is a local stub). */
+function claimsOf(token) {
+  try {
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+    return { id: typeof payload.sub === 'string' ? payload.sub : OWNER_ID, email: typeof payload.email === 'string' ? payload.email : OWNER_EMAIL };
+  } catch {
+    return { id: OWNER_ID, email: OWNER_EMAIL };
+  }
+}
 const PORT = Number(process.env.STUB_PORT || 54999);
 const LOG_FILE = process.env.STUB_LOG_FILE || '';
 const requestLog = [];
@@ -32,12 +46,12 @@ function record(entry) {
 function nowIso() {
   return new Date().toISOString();
 }
-function user() {
+function user(id = OWNER_ID, email = OWNER_EMAIL) {
   return {
-    id: OWNER_ID,
+    id,
     aud: 'authenticated',
     role: 'authenticated',
-    email: OWNER_EMAIL,
+    email,
     email_confirmed_at: nowIso(),
     phone: '',
     confirmed_at: nowIso(),
@@ -54,7 +68,7 @@ function user() {
 const server = http.createServer((req, res) => {
   const auth = req.headers['authorization'] || '';
   const tokenPresented = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-  const tokenValid = tokenPresented !== null && tokenPresented === TOKEN;
+  const tokenValid = tokenPresented !== null && VALID_TOKENS.has(tokenPresented);
 
   // Debug: the recorded request log (loopback only).
   if (req.method === 'GET' && req.url.startsWith('/debug/requests')) {
@@ -67,7 +81,7 @@ const server = http.createServer((req, res) => {
     const status = tokenValid ? 200 : 401;
     record({ t: nowIso(), method: 'GET', url: '/auth/v1/user', tokenPresented: tokenPresented !== null, tokenValid, status });
     res.writeHead(status, { 'content-type': 'application/json' });
-    res.end(tokenValid ? JSON.stringify(user()) : JSON.stringify({ code: 401, msg: 'invalid token' }));
+    res.end(tokenValid ? JSON.stringify(user(...Object.values(claimsOf(tokenPresented)))) : JSON.stringify({ code: 401, msg: 'invalid token' }));
     return;
   }
 
