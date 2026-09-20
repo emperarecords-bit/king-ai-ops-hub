@@ -34,7 +34,7 @@ export interface SubmittedArtifact {
   readonly storageKey: string;
 }
 
-export type ArtifactAvailabilityState = 'available' | 'unavailable' | 'hash_mismatch' | 'expired';
+export type ArtifactAvailabilityState = 'available' | 'unavailable' | 'hash_mismatch' | 'expired' | 'forbidden';
 
 export interface ArtifactAvailability {
   readonly path: string;
@@ -101,6 +101,7 @@ export interface SignedEnvelope {
 export type RejectionCode =
   | 'unknown_request'
   | 'unauthenticated'
+  | 'expired'
   | 'wrong_tenant'
   | 'wrong_project'
   | 'wrong_repo'

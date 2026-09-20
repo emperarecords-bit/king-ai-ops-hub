@@ -112,7 +112,7 @@ function submission(commit: string, checks: CheckResult[], artSha: string, over:
     environment: 'local-offline',
     source: 'local_runner',
     checks,
-    artifacts: [{ path: 'test-results.json', sha256: artSha, sizeBytes: 1, storageKey: 'art/test-results.json' }],
+    artifacts: [{ path: 'test-results.json', sha256: artSha, sizeBytes: 1, storageKey: `org/${ORG}/project/${PROJ}/art/test-results.json` }],
     idempotencyKey: 'idem-happy',
     submittedAt: new Date().toISOString(),
     ...over,
@@ -139,7 +139,7 @@ async function main(): Promise<void> {
     console.log('Happy path — real passing check + stored artifact');
     const pass = runCheck(dir, 'unit', []);
     const artSha = createHash('sha256').update(pass.bytes).digest('hex');
-    artifacts.put('art/test-results.json', pass.bytes);
+    artifacts.put(`org/${ORG}/project/${PROJ}/art/test-results.json`, pass.bytes);
     const happy = await ingestEvidence(deps, ctx, sign(submission(commit, [pass.check], artSha)));
     check(
       'accepted → verified_complete',
@@ -167,13 +167,13 @@ async function main(): Promise<void> {
     console.log('\nFailing check — real exit 1 cannot verify');
     const fail = runCheck(dir, 'unit', ['--fail']);
     const failSha = createHash('sha256').update(fail.bytes).digest('hex');
-    artifacts.put('art/test-results.json', fail.bytes);
+    artifacts.put(`org/${ORG}/project/${PROJ}/art/test-results.json`, fail.bytes);
     const failed = await ingestEvidence(deps, ctx, sign(submission(commit, [fail.check], failSha, { idempotencyKey: 'idem-fail' })));
     check('verification_failed, not deliverable', failed.status === 'verification_failed' && !failed.deliverable, `check exit=${fail.check.exitCode} → ${failed.status}`);
 
     console.log('\nAltered artifact — hash mismatch cannot verify');
-    artifacts.put('art/test-results.json', pass.bytes); // restore good bytes
-    artifacts.overwrite('art/test-results.json', Buffer.from('TAMPERED', 'utf8')); // then tamper
+    artifacts.put(`org/${ORG}/project/${PROJ}/art/test-results.json`, pass.bytes); // restore good bytes
+    artifacts.overwrite(`org/${ORG}/project/${PROJ}/art/test-results.json`, Buffer.from('TAMPERED', 'utf8')); // then tamper
     const altered = await ingestEvidence(deps, ctx, sign(submission(commit, [pass.check], artSha, { idempotencyKey: 'idem-alt' })));
     check('verification_failed on hash_mismatch', altered.status === 'verification_failed' && altered.artifactAvailability[0]?.state === 'hash_mismatch', `artifact ${altered.artifactAvailability[0]?.state}`);
 

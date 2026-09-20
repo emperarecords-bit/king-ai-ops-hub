@@ -48,9 +48,20 @@ export async function ingestEvidence(
   if (!request) return reject('unknown_request', `No verification contract ${payload.requestId} for this project.`);
 
   // 2. Authenticated signature (per-project runner secret; prose has no signature).
+  //    The secret is fetched with the TRUSTED caller tenant, never the payload's
+  //    claims, so a submission can never widen its own authorized scope.
   const secret = await deps.secrets.getRunnerSecret(ctx.orgId, ctx.projectId);
   if (!secret || !verifyEvidenceSignature(secret, payload, envelope.signature)) {
     return reject('unauthenticated', 'Evidence signature is missing or invalid for this project runner secret.');
+  }
+
+  // 2b. Freshness — the signed timestamp bounds the replay window. A valid HMAC
+  //     authenticates the submitter, not the freshness of a captured envelope.
+  const maxAgeMs = deps.maxSubmissionAgeMs ?? 10 * 60_000;
+  const skewMs = 60_000;
+  const submittedMs = Date.parse(payload.submittedAt);
+  if (!Number.isFinite(submittedMs) || submittedMs > now.getTime() + skewMs || now.getTime() - submittedMs > maxAgeMs) {
+    return reject('expired', `Submission timestamp ${payload.submittedAt} is outside the ${maxAgeMs}ms freshness window.`);
   }
 
   // 3. Replay/idempotency — a duplicate key returns the ORIGINAL decision, unchanged.
@@ -67,8 +78,12 @@ export async function ingestEvidence(
   // 5. Required checks (declared up front on the contract).
   const checkEvaluation = evaluateChecks(request.requiredChecks, payload.checks, payload.commitSha);
 
-  // 6. Artifact availability (stored, retrievable, hash-matched).
-  const artifactAvailability = await verifyArtifactAvailability(payload.artifacts, deps.artifacts);
+  // 6. Artifact availability (stored, retrievable, hash-matched) — and tenant-bound.
+  //    A storageKey outside this tenant's partition is rejected as `forbidden`
+  //    even if the supplied hash matches, so evidence cannot reference another
+  //    tenant's artifacts or arbitrary storage objects.
+  const keyAllowed = (key: string): boolean => key.startsWith(`org/${ctx.orgId}/project/${ctx.projectId}/`);
+  const artifactAvailability = await verifyArtifactAvailability(payload.artifacts, deps.artifacts, keyAllowed);
   const artifactsOk = allArtifactsAvailable(artifactAvailability);
 
   // 7. Adjudicate.

@@ -17,6 +17,7 @@ import {
   type SubmittedArtifact,
   type VerificationRequest,
 } from '@/domain/verification';
+import { envRunnerSecretSource } from '@/domain/verification/runtime-adapters';
 
 const ORG = 'org-1';
 const PROJ = 'proj-1';
@@ -25,6 +26,7 @@ const COMMIT = 'a'.repeat(40);
 const NEWER = 'b'.repeat(40);
 const ARTIFACT_BYTES = Buffer.from('{"passed":true}', 'utf8');
 const ARTIFACT_SHA = createHash('sha256').update(ARTIFACT_BYTES).digest('hex');
+const ARTIFACT_KEY = `org/${ORG}/project/${PROJ}/art/test-results.json`;
 
 function makeRequest(over: Partial<VerificationRequest> = {}): VerificationRequest {
   return {
@@ -57,7 +59,7 @@ function makeSubmission(over: Partial<EvidenceSubmission> = {}): EvidenceSubmiss
     path: 'test-results.json',
     sha256: ARTIFACT_SHA,
     sizeBytes: ARTIFACT_BYTES.length,
-    storageKey: 'artifacts/req-1/test-results.json',
+    storageKey: ARTIFACT_KEY,
   };
   return {
     requestId: 'req-1',
@@ -94,7 +96,7 @@ beforeEach(() => {
   store = new InMemoryVerificationStore();
   store.addRequest(makeRequest());
   artifacts = new InMemoryArtifactStore();
-  artifacts.put('artifacts/req-1/test-results.json', ARTIFACT_BYTES);
+  artifacts.put(ARTIFACT_KEY, ARTIFACT_BYTES);
   deps = {
     store,
     artifacts,
@@ -176,12 +178,12 @@ describe('VER-002 acceptance', () => {
     const gone = await ingestEvidence(
       deps,
       ctx,
-      sign(makeSubmission({ artifacts: [{ path: 'x', sha256: ARTIFACT_SHA, sizeBytes: 1, storageKey: 'artifacts/missing' }], idempotencyKey: 'idem-gone' })),
+      sign(makeSubmission({ artifacts: [{ path: 'x', sha256: ARTIFACT_SHA, sizeBytes: 1, storageKey: `org/${ORG}/project/${PROJ}/missing` }], idempotencyKey: 'idem-gone' })),
     );
     expect(gone.status).toBe('verification_failed');
     expect(gone.artifactAvailability[0]?.state).toBe('unavailable');
 
-    artifacts.overwrite('artifacts/req-1/test-results.json', Buffer.from('TAMPERED', 'utf8'));
+    artifacts.overwrite(ARTIFACT_KEY, Buffer.from('TAMPERED', 'utf8'));
     const altered = await ingestEvidence(deps, ctx, sign(makeSubmission({ idempotencyKey: 'idem-alt' })));
     expect(altered.status).toBe('verification_failed');
     expect(altered.artifactAvailability[0]?.state).toBe('hash_mismatch');
@@ -243,5 +245,80 @@ describe('VER-002 approval details + view', () => {
     expect(view.verification.status).toBe('verification_failed');
     expect(view.remainingBlockers.length).toBeGreaterThan(0);
     expect(view.verification.scannerLimitation).toMatch(/not proof that no secrets exist/);
+  });
+});
+
+describe('VER-002 review fixes', () => {
+  it('F1: runner secret is genuinely per-project and scope comes from ctx, not payload', async () => {
+    const prev = process.env.VERIFICATION_RUNNER_MASTER_SECRET;
+    process.env.VERIFICATION_RUNNER_MASTER_SECRET = 'x'.repeat(48);
+    try {
+      const src = envRunnerSecretSource();
+      const a = await src.getRunnerSecret('org-1', 'proj-A');
+      const b = await src.getRunnerSecret('org-1', 'proj-B');
+      expect(a).toBeTruthy();
+      expect(a).not.toBe(b); // different project → different derived key
+      expect(await src.getRunnerSecret('org-1', 'proj-A')).toBe(a); // deterministic
+
+      // A runner holding project-A's derived key cannot authenticate for project-B.
+      const bStore = new InMemoryVerificationStore();
+      bStore.addRequest(makeRequest({ id: 'req-b', orgId: 'org-1', projectId: 'proj-B', taskId: 'task-b' }));
+      const bDeps: IngestDeps = { store: bStore, artifacts, secrets: src, now: () => new Date('2026-09-20T00:00:11.000Z') };
+      const payload = makeSubmission({ requestId: 'req-b', projectId: 'proj-B', taskId: 'task-b', idempotencyKey: 'idem-b' });
+      const envelope: SignedEnvelope = { runnerId: payload.runnerId, payload, signature: signEvidence(a!, payload) };
+      const d = await ingestEvidence(bDeps, { orgId: 'org-1', projectId: 'proj-B' }, envelope);
+      expect(d.rejection?.code).toBe('unauthenticated');
+    } finally {
+      if (prev === undefined) delete process.env.VERIFICATION_RUNNER_MASTER_SECRET;
+      else process.env.VERIFICATION_RUNNER_MASTER_SECRET = prev;
+    }
+  });
+
+  it('F1: no master secret → ingestion disabled (unauthenticated)', async () => {
+    const prev = process.env.VERIFICATION_RUNNER_MASTER_SECRET;
+    delete process.env.VERIFICATION_RUNNER_MASTER_SECRET;
+    try {
+      expect(await envRunnerSecretSource().getRunnerSecret('o', 'p')).toBeNull();
+    } finally {
+      if (prev !== undefined) process.env.VERIFICATION_RUNNER_MASTER_SECRET = prev;
+    }
+  });
+
+  it('F2: a stale or future signed timestamp is rejected as expired', async () => {
+    const stale = await ingestEvidence(deps, ctx, sign(makeSubmission({ submittedAt: '2026-09-19T00:00:00.000Z', idempotencyKey: 'idem-old' })));
+    expect(stale.rejection?.code).toBe('expired');
+    const future = await ingestEvidence(deps, ctx, sign(makeSubmission({ submittedAt: '2026-09-20T02:00:00.000Z', idempotencyKey: 'idem-future' })));
+    expect(future.rejection?.code).toBe('expired');
+  });
+
+  it('F2: a tampered payload (post-signature) fails authentication', async () => {
+    const payload = makeSubmission({ idempotencyKey: 'idem-tamper' });
+    const envelope = sign(payload);
+    const tampered: SignedEnvelope = { ...envelope, payload: { ...payload, commitSha: 'z'.repeat(40) } };
+    const d = await ingestEvidence(deps, ctx, tampered);
+    expect(d.rejection?.code).toBe('unauthenticated');
+  });
+
+  it('F3: an artifact key in another tenant partition is forbidden even if the hash matches', async () => {
+    // Put real bytes at ANOTHER tenant's key; the guard must never dereference it.
+    const foreignKey = 'org/org-OTHER/project/proj-OTHER/art/test-results.json';
+    artifacts.put(foreignKey, ARTIFACT_BYTES); // hash WOULD match
+    const d = await ingestEvidence(
+      deps,
+      ctx,
+      sign(makeSubmission({ artifacts: [{ path: 'x', sha256: ARTIFACT_SHA, sizeBytes: ARTIFACT_BYTES.length, storageKey: foreignKey }], idempotencyKey: 'idem-cross' })),
+    );
+    expect(d.status).toBe('verification_failed');
+    expect(d.artifactAvailability[0]?.state).toBe('forbidden');
+    expect(d.artifactAvailability[0]?.observedSha256).toBeNull(); // never read
+  });
+
+  it('conflicting reuse of an idempotency key returns the ORIGINAL decision unchanged', async () => {
+    const first = await ingestEvidence(deps, ctx, sign(makeSubmission({ idempotencyKey: 'idem-conflict' })));
+    // Re-sign a DIFFERENT payload under the same key (valid signature, changed runId).
+    const conflict = await ingestEvidence(deps, ctx, sign(makeSubmission({ idempotencyKey: 'idem-conflict', runId: 'run-DIFFERENT' })));
+    expect(conflict.replayed).toBe(true);
+    expect(conflict.status).toBe(first.status);
+    expect(store.evidence.filter((e) => e.submission.idempotencyKey === 'idem-conflict').length).toBe(1);
   });
 });

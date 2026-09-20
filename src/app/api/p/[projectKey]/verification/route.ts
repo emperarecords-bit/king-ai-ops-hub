@@ -88,7 +88,7 @@ export async function POST(
       ingestEvidence(
         {
           store: createDrizzleVerificationStore(tx),
-          artifacts: objectStoreArtifactStore(),
+          artifacts: objectStoreArtifactStore(ctx),
           secrets: envRunnerSecretSource(),
         },
         ctx,

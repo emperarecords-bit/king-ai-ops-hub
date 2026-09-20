@@ -36,4 +36,6 @@ export interface IngestDeps {
   readonly secrets: RunnerSecretSource;
   /** Injectable clock for deterministic tests. */
   readonly now?: () => Date;
+  /** Max age of a submission's signed timestamp before it is rejected as expired (default 10 min). */
+  readonly maxSubmissionAgeMs?: number;
 }

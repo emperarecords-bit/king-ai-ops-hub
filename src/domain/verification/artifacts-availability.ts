@@ -12,9 +12,22 @@ import type { StoredArtifactStore } from './ports';
 export async function verifyArtifactAvailability(
   artifacts: readonly SubmittedArtifact[],
   store: StoredArtifactStore,
+  /** Tenant guard: when supplied, a key it rejects is `forbidden` and never dereferenced. */
+  keyAllowed?: (storageKey: string) => boolean,
 ): Promise<ArtifactAvailability[]> {
   const out: ArtifactAvailability[] = [];
   for (const a of artifacts) {
+    if (keyAllowed && !keyAllowed(a.storageKey)) {
+      out.push({
+        path: a.path,
+        storageKey: a.storageKey,
+        state: 'forbidden',
+        recordedSha256: a.sha256,
+        observedSha256: null,
+        detail: 'Storage key is outside this tenant/project partition — not dereferenced.',
+      });
+      continue;
+    }
     const head = await store.head(a.storageKey);
     if (!head) {
       out.push({
