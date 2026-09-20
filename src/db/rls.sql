@@ -1124,12 +1124,19 @@ $$;
 -- Hardened pre-tenant lookup. SECURITY DEFINER so it resolves a bearer before tenant GUCs exist, but
 -- owned by the narrow verification_key_reader (NOT a superuser); fixed safe search_path; fully
 -- qualified table reference; NO execute for PUBLIC. It returns ONLY the columns authentication needs.
+-- plpgsql (not sql) so the body is late-bound: rls.sql also runs at intermediate migration points
+-- (e.g. an incremental upgrade paused at the penultimate migration) where verification_runner_keys
+-- does not exist yet. A SQL function validates its table refs at CREATE and would fail there; plpgsql
+-- resolves them at first call, by which time the table exists.
 create or replace function app.lookup_verification_runner_key(p_key_id uuid)
 returns table (org_id uuid, project_id uuid, secret_hash text, secret_salt text, revoked_at timestamptz, expires_at timestamptz)
-language sql stable security definer set search_path = pg_catalog as $fn$
-  select k.org_id, k.project_id, k.secret_hash, k.secret_salt, k.revoked_at, k.expires_at
-  from public.verification_runner_keys k
-  where k.id = p_key_id
+language plpgsql stable security definer set search_path = pg_catalog as $fn$
+begin
+  return query
+    select k.org_id, k.project_id, k.secret_hash, k.secret_salt, k.revoked_at, k.expires_at
+    from public.verification_runner_keys k
+    where k.id = p_key_id;
+end
 $fn$;
 alter function app.lookup_verification_runner_key(uuid) owner to verification_key_reader;
 revoke all on function app.lookup_verification_runner_key(uuid) from public;
