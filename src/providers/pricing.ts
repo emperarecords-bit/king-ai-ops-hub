@@ -67,12 +67,12 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPricing>> = {
   'claude-sonnet-5': {
     provider: 'anthropic',
     displayName: 'Claude Sonnet 5',
-    // Introductory pricing ($2/$10) ran through 2026-08-31; the standard rate
-    // ($3/$15) applies from 2026-09-01. Updated 2026-09-20 when the scheduled
-    // tripwire in tests/unit/pricing.test.ts fired — leaving the intro rate in
-    // place after the rise would silently UNDER-bill by 33%.
-    inputMicrosPerM: 3_000_000n, // $3.00 / M — standard (post-introductory, from 2026-09-01)
-    outputMicrosPerM: 15_000_000n, // $15.00 / M — standard (post-introductory, from 2026-09-01)
+    // CORRECTED 2026-07-24: introductory pricing runs through 2026-08-31; the
+    // table previously used the post-introductory rate and OVER-billed by 50%.
+    // On 2026-09-01 these become 3_000_000n / 15_000_000n — a unit test fails
+    // from that date until the change is made, so it cannot be forgotten.
+    inputMicrosPerM: 2_000_000n, // $2.00 / M — verified (introductory)
+    outputMicrosPerM: 10_000_000n, // $10.00 / M — verified (introductory)
     maxOutputTokens: 64_000,
   },
   'claude-haiku-4-5-20251001': {
