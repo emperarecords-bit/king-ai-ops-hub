@@ -219,16 +219,40 @@ describe.skipIf(!routeEnabled)('VER-002 actual HTTP route — authentication rej
     expect(res.status).toBe(401);
     expect(new URL(res.url).hostname).toMatch(/^(localhost|127\.0\.0\.1|::1)$/);
   });
+});
 
-  it('rejects a submission with an INVALID session cookie (401)', async () => {
+// Invalid auth in the ACTUAL @supabase/ssr cookie format, carrying a synthetic
+// INVALID token. Asserts the request is refused (401) AND that the local stub
+// actually RECEIVED the token and REJECTED it (evidence via /debug/requests) —
+// so the 401 is proven to come from the stub validating a bad token, not from a
+// malformed cookie the client silently ignored.
+interface StubReq {
+  readonly method: string;
+  readonly url: string;
+  readonly tokenValid?: boolean;
+  readonly status: number;
+}
+const invalidTokenEnabled = Boolean(routeEnabled && process.env.VER_INT_COOKIE_INVALID && process.env.VER_INT_STUB_URL);
+describe.skipIf(!invalidTokenEnabled)('VER-002 actual HTTP route — SSR-format invalid token', () => {
+  const base = process.env.VER_INT_BASE_URL ?? '';
+  const key = process.env.VER_INT_PROJECT_KEY ?? '';
+  const stub = process.env.VER_INT_STUB_URL ?? '';
+  const url = `${base}/api/p/${key}/verification`;
+  const cookie = process.env.VER_INT_COOKIE_INVALID ?? '';
+  const body = JSON.stringify({ runnerId: 'r', signature: 'x', payload: submission({ requestId: '00000000-0000-0000-0000-000000000000' }) });
+  const stubRequests = async (): Promise<StubReq[]> => {
+    assertLocalHttp(stub);
+    return (await (await fetch(`${stub}/debug/requests`, { redirect: 'error' })).json()) as StubReq[];
+  };
+
+  it('SSR cookie + synthetic invalid token → 401, and the stub received + rejected the token', async () => {
     assertLocalHttp(base);
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: 'sb-access-token=bogus; sb-refresh-token=bogus' },
-      body,
-      redirect: 'error',
-    });
+    const before = await stubRequests();
+    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body, redirect: 'error' });
     expect(res.status).toBe(401);
+    const added = (await stubRequests()).slice(before.length);
+    // The server forwarded the invalid token to the stub's /auth/v1/user, which rejected it (401).
+    expect(added.some((r) => r.url === '/auth/v1/user' && r.tokenValid === false && r.status === 401)).toBe(true);
   });
 });
 
@@ -238,12 +262,12 @@ describe.skipIf(!routeEnabled)('VER-002 actual HTTP route — authentication rej
 // cookie (VER_INT_COOKIE), the runner master secret, and a second project id for
 // the cross-project case. All auth stays on localhost (stub); no real session.
 const OTHER_PROJECT = process.env.VER_INT_OTHER_PROJECT_ID ?? '';
-const authEnabled = Boolean(routeEnabled && enabled && process.env.VER_INT_COOKIE && process.env.VERIFICATION_RUNNER_MASTER_SECRET);
+const authEnabled = Boolean(routeEnabled && enabled && process.env.VER_INT_COOKIE_VALID && process.env.VERIFICATION_RUNNER_MASTER_SECRET);
 describe.skipIf(!authEnabled)('VER-002 actual HTTP route — authenticated success + cross-project', () => {
   const base = process.env.VER_INT_BASE_URL ?? '';
   const key = process.env.VER_INT_PROJECT_KEY ?? '';
   const url = `${base}/api/p/${key}/verification`;
-  const cookie = process.env.VER_INT_COOKIE ?? '';
+  const cookie = process.env.VER_INT_COOKIE_VALID ?? '';
   const derived = createHmac('sha256', process.env.VERIFICATION_RUNNER_MASTER_SECRET ?? '')
     .update(`verification-runner:v1:${ORG}:${PROJECT}`)
     .digest('hex');
