@@ -67,13 +67,13 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPricing>> = {
   'claude-sonnet-5': {
     provider: 'anthropic',
     displayName: 'Claude Sonnet 5',
-    // Introductory pricing ($2/$10) ran through 2026-08-31; the STANDARD rate
-    // ($3/$15) applies from 2026-09-01 (both were documented on 2026-07-24).
-    // Applied 2026-09-20 with pricing schedule v4 (migration 0069) — the expired
-    // intro rate stays, immutably, in the v3 schedule rows for history. Leaving
-    // the intro rate here after the rise would silently UNDER-bill by 33%.
-    inputMicrosPerM: 3_000_000n, // $3.00 / M — standard (post-introductory, from 2026-09-01)
-    outputMicrosPerM: 15_000_000n, // $15.00 / M — standard (post-introductory, from 2026-09-01)
+    // CORRECTION 2026-09-20: the VERIFIED standard rate is $2/$10 per M tokens.
+    // Schedule v4 (migration 0069) wrongly assumed a $3/$15 post-introductory rise
+    // that was never actually in effect; it merged to main, but whether v4 was ever
+    // applied to a live (staging/production) database is UNCONFIRMED. Schedule v5
+    // (0070) restores the verified $2/$10 as the standing rate (open-ended, no cutoff).
+    inputMicrosPerM: 2_000_000n, // $2.00 / M — verified standard
+    outputMicrosPerM: 10_000_000n, // $10.00 / M — verified standard
     maxOutputTokens: 64_000,
   },
   'claude-haiku-4-5-20251001': {
