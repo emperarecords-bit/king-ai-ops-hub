@@ -146,10 +146,20 @@ export function OpsChatClient({ opening }: { opening: string }) {
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const taRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
   }, [messages, streaming, toolActivity]);
+
+  // Auto-grow the composer so a long message is fully visible at a glance,
+  // up to a cap (then it scrolls). Shrinks back to one line after send.
+  useEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 320)}px`;
+  }, [input]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -296,13 +306,15 @@ export function OpsChatClient({ opening }: { opening: string }) {
           <div key={m.id} className={m.role === 'owner' ? 'flex justify-end' : 'flex justify-start'}>
             <div
               className={
-                'max-w-[88%] rounded-lg border px-3 py-2 text-sm leading-relaxed ' +
+                'px-3.5 py-2.5 text-sm leading-relaxed shadow-sm ' +
                 (m.role === 'owner'
-                  ? 'border-[var(--border)] bg-[var(--accent-soft,rgba(120,160,255,0.10))]'
-                  : 'border-[var(--border)] bg-[var(--surface)]')
+                  ? 'max-w-[75%] rounded-2xl rounded-br-sm bg-[var(--accent)] text-[#0b0e14]'
+                  : 'max-w-[85%] rounded-2xl rounded-bl-sm border border-[var(--border)] bg-[var(--surface)]')
               }
             >
-              <div className="mb-1 text-xs opacity-50">{m.role === 'owner' ? 'You' : 'Ops Chat'}</div>
+              <div className={'mb-1 text-xs ' + (m.role === 'owner' ? 'text-[#0b0e14]/60' : 'opacity-50')}>
+                {m.role === 'owner' ? 'You' : 'Ops Chat'}
+              </div>
               {m.content.length > 0 ? (
                 <Rich text={m.content} />
               ) : m.role === 'assistant' && !m.proposals ? (
@@ -411,12 +423,13 @@ export function OpsChatClient({ opening }: { opening: string }) {
         className="flex flex-col gap-2"
       >
         <textarea
+          ref={taRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           rows={2}
           maxLength={4000}
           placeholder="Ask, answer, approve, or start work — all from here…"
-          className="w-full rounded border border-[var(--border)] bg-transparent p-2 text-sm"
+          className="max-h-80 min-h-[3.5rem] w-full resize-none overflow-y-auto rounded border border-[var(--border)] bg-transparent p-2.5 text-sm leading-relaxed"
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
