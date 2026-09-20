@@ -29,8 +29,10 @@ staging/prod in this phase.
 - **Gate B — quota reclamation of un-finalized grants stays UNRESOLVED until a hard upload deadline is
   demonstrably enforced.** A reservation is never released on URL expiry. Size caps, assumed
   throughput, and idle timeouts do **not** establish a hard total-upload deadline, so no timed
-  reclamation is claimed; only **finalize** (a confirmed upload) releases quota until a real deadline
-  mechanism is chosen and its abort is proven (see Gate B detail).
+  reclamation is claimed. Note the terms: **finalize** (a confirmed upload) converts *reserved* bytes
+  to *committed* usage — those bytes now occupy storage and keep counting against quota; **finalize
+  does not free quota**. Freeing quota for bytes that never landed is the unresolved reclamation
+  problem; freeing quota for bytes that *did* land is retention's job (PR-7), not finalize's.
 
 ---
 
@@ -43,7 +45,7 @@ staging/prod in this phase.
 | **3** | **Contract retrieval + catalog pin** | `GET …/requests/assigned` (runner-auth, read-only); `catalog_version`/`catalog_digest` columns pinned at creation; ingest rejects `catalog_mismatch` and non-matching commands. **Runner retrieval behind its own default-off gate** (not the signing master). | Extends the existing create/ingest paths; no storage/runner. | No |
 | **4** | **Upload-grant endpoint (mechanism only)** | `POST …/uploads` issuing a presigned PUT via the `ObjectStore` port; opaque server-generated object IDs + validated logical paths; server-generated keys. **Claims no enforcement yet; grant issuance behind its own default-off gate** (not the signing master). | Mechanism behind the existing port; **Gate A** — provider chosen here, not assumed. | No |
 | **5** | **Provider acceptance tests (§4.7)** | The suite proving size / checksum-encoding / no-overwrite against a **throwaway** bucket + pinned SDK. Flips upload docs from "intended" to "enforced" only when green. | Test-only; **Gate A** unblock. Live run deferred until the owner authorizes a disposable bucket (provisioning/spend — not now). | No |
-| **6** | **Quota accounting + finalize** (timed reclamation deferred) | Atomic reservation + **finalize** on confirmed upload. **Gate B** — timed reclamation of un-finalized grants is left UNRESOLVED until a hard upload-deadline mechanism is chosen and its abort proven; no reclamation-on-expiry. | Builds on PR-4 keys; self-contained accounting. | No |
+| **6** | **Quota accounting + finalize** (timed reclamation deferred) | Atomic reservation + **finalize** (reserved→committed; finalize keeps the bytes counted, it does not free quota). **Gate B** — timed reclamation of un-finalized grants is left UNRESOLVED until a hard upload-deadline mechanism is chosen and its abort proven; no reclamation-on-expiry. | Builds on PR-4 keys; self-contained accounting. | No |
 | **7** | **Recoverable retention path** | `verification_purge_jobs` table; retention role + `SECURITY DEFINER` purge fn; retried/audited object deletion; enables safe parent deletion again. | Closes the deletion side of PR-1's RESTRICT; governed, role-authorized. | No |
 | **8** | **Runner reference client** (external repo/CI) | Two-stage runner: isolated execution harness → attestation (sign + upload + submit). *Design already specifies; build is a later, separate effort — explicitly not now.* | External to the Hub; consumes stable Hub APIs. | No |
 | **9** | **Enablement ceremony** | Set `VERIFICATION_RUNNER_MASTER_SECRET` (≥32 chars) in **staging** behind the signed-receipt migration process; apply the accumulated migrations; run PR-5 acceptance against a disposable bucket; then production. | The only step that goes live. Paused now. | **Yes** |
@@ -129,8 +131,10 @@ so "URL expired" is not proof.
 **Therefore quota reclamation of un-finalized grants is an OPEN problem, deferred within PR-6 until a
 hard total-upload deadline is demonstrably enforced.** What is solid vs. unresolved:
 
-- **Solid:** never release on URL expiry; **finalize** (release-to-committed) on a confirmed,
-  digest/size-matched upload is always safe and is the primary path.
+- **Solid:** never release on URL expiry; **finalize** on a confirmed, digest/size-matched upload is
+  the primary path — it converts *reserved* bytes to *committed* usage. The byte count against quota
+  is unchanged: the object now occupies storage and keeps counting; **finalize does not free quota.**
+  (Quota for landed bytes is freed only when the object is deleted via retention, PR-7.)
 - **Unresolved (must be demonstrated before any timed reclamation):** a mechanism that puts a **hard
   ceiling on a single PUT's total wall-clock**, independent of throughput assumptions — candidates to
   evaluate, not assume: a provider/proxy-enforced maximum-request-duration, refusing plain PUT in
@@ -141,7 +145,8 @@ hard total-upload deadline is demonstrably enforced.** What is solid vs. unresol
 - Until then, un-finalized reservations are either held indefinitely or reclaimed only by an explicit
   operator action, never by an assumed timer.
 
-- **Acceptance (PR-6):** (a) a finalized upload releases correctly; (b) a slow/byte-trickling PUT
+- **Acceptance (PR-6):** (a) a finalized upload converts reserved→committed and **keeps** counting
+  against quota (finalize frees nothing); (b) a slow/byte-trickling PUT
   started before `T_url` is shown to still be able to land after it, demonstrating that expiry is not
   a deadline; (c) no timed reclamation path exists until a hard-deadline mechanism is implemented and
   its abort is proven.
