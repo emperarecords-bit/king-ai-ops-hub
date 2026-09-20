@@ -11,3 +11,14 @@ export * from './access';
 export * from './adjudicate';
 export * from './sanitize';
 export * from './export';
+// VER-002 — external-runner evidence ingestion (Option A).
+export * from './ingest-types';
+export * from './signing';
+export * from './binding';
+export * from './checks';
+export * from './artifacts-availability';
+export * from './ports';
+export * from './ingest';
+export * from './approval-details';
+export * from './view';
+export * from './memory-adapters';

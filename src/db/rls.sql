@@ -1040,3 +1040,31 @@ end $$;
 drop trigger if exists trading_risk_checks_tenant_trg on risk_checks;
 create constraint trigger trading_risk_checks_tenant_trg after insert or update on risk_checks
   deferrable initially immediate for each row execute function app.trg_risk_checks_tenant();
+
+-- VER-002 — external-runner evidence ingestion (migration 0069). to_regclass-guarded
+-- like github_repo_links so an incremental bootstrap tolerates absence until the
+-- tables are applied. Same strict tenant predicate (org_id + project_id GUCs).
+do $$
+begin
+  if to_regclass('public.verification_requests') is not null then
+    grant select, insert, update, delete on verification_requests to app_server;
+    alter table verification_requests enable row level security;
+    alter table verification_requests force row level security;
+    drop policy if exists verification_requests_tenant on verification_requests;
+    execute
+      'create policy verification_requests_tenant on verification_requests
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+  end if;
+  if to_regclass('public.verification_evidence') is not null then
+    grant select, insert, update, delete on verification_evidence to app_server;
+    alter table verification_evidence enable row level security;
+    alter table verification_evidence force row level security;
+    drop policy if exists verification_evidence_tenant on verification_evidence;
+    execute
+      'create policy verification_evidence_tenant on verification_evidence
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+  end if;
+end
+$$;
