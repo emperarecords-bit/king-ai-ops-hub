@@ -1062,7 +1062,12 @@ begin
          with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
   end if;
   if to_regclass('public.verification_evidence') is not null then
-    grant select, insert, update, delete on verification_evidence to app_server;
+    -- Adjudicated evidence is APPEND-ONLY. The app role may INSERT (record a submission's decision)
+    -- and SELECT (read) only; UPDATE/DELETE are revoked at the grant layer, and the trigger below is
+    -- the defense-in-depth that rejects a mutation even from a role that still holds the grant. There
+    -- is intentionally NO delete path until the governed retention feature exists.
+    grant select, insert on verification_evidence to app_server;
+    revoke update, delete on verification_evidence from app_server;
     alter table verification_evidence enable row level security;
     alter table verification_evidence force row level security;
     drop policy if exists verification_evidence_tenant on verification_evidence;
@@ -1070,6 +1075,13 @@ begin
       'create policy verification_evidence_tenant on verification_evidence
          using (org_id = app.current_org_id() and project_id = app.current_project_id())
          with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+    -- Append-only enforcement (fires on UPDATE/DELETE for EVERY role, incl. table owner/superuser —
+    -- triggers are not bypassed by RLS/superuser). Mirrors messages/audit_logs above.
+    execute 'drop trigger if exists verification_evidence_append_only on verification_evidence';
+    execute
+      'create trigger verification_evidence_append_only
+         before update or delete on verification_evidence
+         for each row execute function app.forbid_mutation()';
   end if;
 end
 $$;

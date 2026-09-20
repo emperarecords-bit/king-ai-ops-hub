@@ -24,15 +24,19 @@ export const verificationRequests = pgTable(
   'verification_requests',
   {
     id: uuid('id').primaryKey().defaultRandom(),
+    // Parent FKs are ON DELETE RESTRICT (not cascade): the verification CONTRACT is an immutable,
+    // auditable record, so deleting its org/project/task is BLOCKED while a contract exists — even a
+    // contract with no evidence yet. Removing a contract is only possible through the governed
+    // retention path (a later slice); until then there is no application delete path by design.
     orgId: uuid('org_id')
       .notNull()
-      .references(() => organizations.id, { onDelete: 'cascade' }),
+      .references(() => organizations.id, { onDelete: 'restrict' }),
     projectId: uuid('project_id')
       .notNull()
-      .references(() => projects.id, { onDelete: 'cascade' }),
+      .references(() => projects.id, { onDelete: 'restrict' }),
     taskId: uuid('task_id')
       .notNull()
-      .references(() => tasks.id, { onDelete: 'cascade' }),
+      .references(() => tasks.id, { onDelete: 'restrict' }),
     repoFullName: text('repo_full_name').notNull(),
     /** The exact commit this contract verifies. Stale-commit evidence is rejected. */
     expectedCommitSha: text('expected_commit_sha').notNull(),
@@ -58,18 +62,22 @@ export const verificationEvidence = pgTable(
   'verification_evidence',
   {
     id: uuid('id').primaryKey().defaultRandom(),
+    // Parent FKs are ON DELETE RESTRICT (not cascade): adjudicated evidence is append-only, so a
+    // parent delete must never cascade rows away. With the append-only trigger in place a cascade
+    // would abort mid-delete anyway; RESTRICT makes the block explicit and early. Evidence is removed
+    // only through the governed retention path (a later slice), not by cascading a parent delete.
     orgId: uuid('org_id')
       .notNull()
-      .references(() => organizations.id, { onDelete: 'cascade' }),
+      .references(() => organizations.id, { onDelete: 'restrict' }),
     projectId: uuid('project_id')
       .notNull()
-      .references(() => projects.id, { onDelete: 'cascade' }),
+      .references(() => projects.id, { onDelete: 'restrict' }),
     taskId: uuid('task_id')
       .notNull()
-      .references(() => tasks.id, { onDelete: 'cascade' }),
+      .references(() => tasks.id, { onDelete: 'restrict' }),
     requestId: uuid('request_id')
       .notNull()
-      .references(() => verificationRequests.id, { onDelete: 'cascade' }),
+      .references(() => verificationRequests.id, { onDelete: 'restrict' }),
     repoFullName: text('repo_full_name').notNull(),
     commitSha: text('commit_sha').notNull(),
     dirty: boolean('dirty').notNull().default(false),
