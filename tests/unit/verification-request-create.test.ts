@@ -106,10 +106,25 @@ describe('createVerificationRequest — contract creation', () => {
     expect(out.request).toBeNull();
   });
 
-  it('matches the linked repo case-insensitively', async () => {
+  it('matches the linked repo case-insensitively and stores the canonical (linked) spelling', async () => {
     const store = storeWithTask();
     const out = await createVerificationRequest(store, ctx, validInput({ repoFullName: 'Acme/Widget', commitSha: 'b'.repeat(40) }));
     expect(out.created).toBe(true);
+    expect(out.request!.repoFullName).toBe('acme/widget'); // canonical identity, not the caller's casing
+  });
+
+  it('an identical retry with DIFFERENT repository capitalization is idempotent, never a conflict', async () => {
+    const store = storeWithTask(); // trusted link is 'acme/widget'
+    const first = await createVerificationRequest(store, ctx, validInput());
+    expect(first.created).toBe(true);
+    expect(first.request!.repoFullName).toBe('acme/widget');
+    // Same task+commit, same contract, only the repo capitalization differs — must replay the
+    // existing contract, not raise contract_conflict.
+    const retry = await createVerificationRequest(store, ctx, validInput({ repoFullName: 'ACME/Widget' }));
+    expect(retry.created).toBe(false);
+    expect(retry.rejection).toBeNull();
+    expect(retry.request!.id).toBe(first.request!.id);
+    expect(retry.request!.repoFullName).toBe('acme/widget');
   });
 
   it('fails explicitly when the project has NO linked repository (no authorized binding)', async () => {

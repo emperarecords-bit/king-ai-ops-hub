@@ -17,6 +17,7 @@
 import type { TenantContext } from '@/types/domain';
 import type { NewVerificationRequest, VerificationRequest } from './ingest-types';
 import type { VerificationStore } from './ports';
+import { canonicalRepoIdentity, repoIdentityEquals } from './repo-identity';
 
 /** Untrusted create input (org/project/creator are NOT here — they come from the tenant context). */
 export interface VerificationRequestInput {
@@ -91,7 +92,7 @@ const sameSet = (a: readonly string[], b: readonly string[]): boolean =>
 /** Does the stored contract match the requested one? (list order does not matter). */
 function contractsEqual(a: VerificationRequest, b: NewVerificationRequest): boolean {
   return (
-    a.repoFullName === b.repoFullName &&
+    repoIdentityEquals(a.repoFullName, b.repoFullName) &&
     a.expectedCommitSha === b.commitSha &&
     a.allowDirty === b.allowDirty &&
     sameSet(a.requiredChecks, b.requiredChecks) &&
@@ -129,15 +130,19 @@ export async function createVerificationRequest(
   if (linked.length === 0) {
     return { created: false, request: null, rejection: { code: 'no_repo_binding', message: 'no repository is linked to this project; a verification contract cannot be created' } };
   }
-  const lower = n.repoFullName.toLowerCase();
-  if (!linked.some((l) => l.toLowerCase() === lower)) {
+  if (!linked.some((l) => repoIdentityEquals(l, n.repoFullName))) {
     return { created: false, request: null, rejection: { code: 'repo_not_authorized', message: 'repoFullName is not an authorized repository for this project' } };
   }
 
-  const existing = await store.findRequestByTaskCommit(ctx.orgId, ctx.projectId, n.taskId, n.commitSha);
-  if (existing) return contractsEqual(existing, n) ? { created: false, request: existing, rejection: null } : conflict();
+  // Bind the CANONICAL repository identity (the trusted link's spelling) onto the contract, so a
+  // retry with different capitalization is treated as the same repository (idempotent, never a
+  // conflict) and evidence binds to one stable identity.
+  const contract: NewVerificationRequest = { ...n, repoFullName: canonicalRepoIdentity(n.repoFullName, linked) };
 
-  const { request, inserted } = await store.createRequest(ctx.orgId, ctx.projectId, ctx.userId, n);
-  if (!inserted) return contractsEqual(request, n) ? { created: false, request, rejection: null } : conflict();
+  const existing = await store.findRequestByTaskCommit(ctx.orgId, ctx.projectId, contract.taskId, contract.commitSha);
+  if (existing) return contractsEqual(existing, contract) ? { created: false, request: existing, rejection: null } : conflict();
+
+  const { request, inserted } = await store.createRequest(ctx.orgId, ctx.projectId, ctx.userId, contract);
+  if (!inserted) return contractsEqual(request, contract) ? { created: false, request, rejection: null } : conflict();
   return { created: true, request, rejection: null };
 }
