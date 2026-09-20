@@ -44,10 +44,10 @@ describe('M0a pricing match (exact-only; alias map empty)', () => {
     expect(buildSeedEntries().some((e) => e.model === 'gpt-5.2')).toBe(false);
   });
 
-  it('validity is evaluated at the row timestamp — Sonnet-5 exact before cutoff, unavailable at/after', () => {
+  it('validity is evaluated at the row timestamp — Sonnet-5 exact throughout (standard rate is open-ended as of schedule v4)', () => {
     expect(matchPricing(entries, 'anthropic', 'claude-sonnet-5', '2026-08-31T23:59:59.000Z').state).toBe('exact');
-    expect(matchPricing(entries, 'anthropic', 'claude-sonnet-5', '2026-09-01T00:00:00.000Z').state).toBe('unavailable');
-    expect(matchPricing(entries, 'anthropic', 'claude-sonnet-5', '2026-10-01T00:00:00.000Z').state).toBe('unavailable');
+    expect(matchPricing(entries, 'anthropic', 'claude-sonnet-5', '2026-09-01T00:00:00.000Z').state).toBe('exact'); // standard rate priced, not unavailable
+    expect(matchPricing(entries, 'anthropic', 'claude-sonnet-5', '2026-10-01T00:00:00.000Z').state).toBe('exact');
   });
 
   it('estimate uses CEIL-UP exact-integer arithmetic (P1a), independently per component', () => {

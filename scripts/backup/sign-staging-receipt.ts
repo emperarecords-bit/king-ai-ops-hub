@@ -68,7 +68,9 @@ export const STAGING_PINS: ReleasePins = {
   databaseIdentity: 'king_ai_ops_hub_staging',
   snapshotProvider: FLY_VOLUMES_PROVIDER,
   providerAdapterVersion: FLY_VOLUMES_ADAPTER_VERSION,
-  // Bumped 2026-08-22 for 0068 (knowledge_pinned — pinned knowledge reaches every run).
+  // Bumped 2026-08-22 for 0068 (knowledge_pinned — pinned knowledge reaches every run). STAGING_PINS binds to
+  // the PINNED 0068 staging-release source (a moving HEAD must not redefine it), so it is NOT bumped for a new
+  // migration the way PRODUCTION_PINS is — see tests/unit/gbackup-sign-staging-receipt.test.ts.
   expectedMigrationEndpoint: '0068_knowledge_pinned',
   expectedCommittedMigrationCount: 69,
   /** Staging deployed through 0067; 0068 is the one pending. */

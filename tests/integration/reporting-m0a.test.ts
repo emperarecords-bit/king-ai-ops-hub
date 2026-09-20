@@ -99,7 +99,7 @@ beforeAll(async () => {
   await mkUsage({ runId: null, runStepId: null, taskId: null, model: 'text-embedding-unknown', costMicros: C.u4 }); // run-less + unknown
   await mkUsage({ runId: R1, runStepId: null, costMicros: C.u5 }); // unattributed run usage (no step)
   await mkUsage({ runId: R1, runStepId: s1, model: 'gpt-5.2', costMicros: C.u6 }); // excluded model, retained → A
-  await mkUsage({ runId: R5, runStepId: s5, provider: 'anthropic', model: 'claude-sonnet-5', costMicros: C.u7, createdAt: new Date('2026-09-01T00:00:00Z') }); // expired → price-invalid → A
+  await mkUsage({ runId: R5, runStepId: s5, provider: 'anthropic', model: 'claude-sonnet-5', costMicros: C.u7, createdAt: new Date('2026-09-01T00:00:00Z') }); // standard rate (schedule v4, open-ended) → matched → A
   await mkUsage({ runId: R5, runStepId: s5, provider: 'anthropic', model: 'claude-sonnet-5', costMicros: C.u8, createdAt: new Date('2026-08-01T00:00:00Z') }); // exact → A
   await mkUsage({ runId: R4, runStepId: s4, costMicros: C.u9 }); // → A (task T4 cancelled)
 
@@ -176,11 +176,12 @@ describe('M0a reporting — reconciliation & semantics (DB)', () => {
     // unknown model retained, unavailable.
     expect(row('openai', 'text-embedding-unknown').recordedCostMicros).toBe(C.u4);
 
-    // sonnet-5: one exact (Aug) + one expired (Sep) → mixed → unavailable summary, split counts correct.
+    // sonnet-5: both events now exact — the Aug event and the Sep event (standard rate is open-ended as of
+    // schedule v4, so a 2026-09-01 event is priced, not price-invalid).
     const sonnet = row('anthropic', 'claude-sonnet-5');
     expect(sonnet.recordedCostMicros).toBe(C.u7 + C.u8);
-    expect(sonnet.exactEventCount).toBe(1);
-    expect(sonnet.unavailableEventCount).toBe(1);
+    expect(sonnet.exactEventCount).toBe(2);
+    expect(sonnet.unavailableEventCount).toBe(0);
 
     // gpt-5.4-mini: all exact (u1,u3,u5,u9).
     const mini = row('openai', 'gpt-5.4-mini');
@@ -190,9 +191,9 @@ describe('M0a reporting — reconciliation & semantics (DB)', () => {
     // Coverage: recorded total is authoritative; matched-recorded is the covered subset only (never rescaled).
     expect(coverage.recordedCostMicros).toBe(RECORDED_TOTAL);
     expect(coverage.totalEvents).toBe(9);
-    expect(coverage.matchedEvents).toBe(6); // 4 mini + 1 opus + 1 sonnet(Aug)
-    expect(coverage.unavailableEvents).toBe(3); // embed + gpt5.2 + sonnet(Sep)
-    expect(coverage.matchedRecordedCostMicros).toBe(C.u1 + C.u3 + C.u5 + C.u9 + C.u2 + C.u8);
+    expect(coverage.matchedEvents).toBe(7); // 4 mini + 1 opus + 2 sonnet (Aug + Sep, both priced under v4)
+    expect(coverage.unavailableEvents).toBe(2); // embed + gpt5.2
+    expect(coverage.matchedRecordedCostMicros).toBe(C.u1 + C.u3 + C.u5 + C.u9 + C.u2 + C.u8 + C.u7);
     expect(coverage.matchedRecordedCostMicros).toBeLessThan(coverage.recordedCostMicros);
   });
 
@@ -211,7 +212,7 @@ describe('M0a reporting — reconciliation & semantics (DB)', () => {
     const w = await withTenant(ctx, (tx) => getProjectDataQualityWarnings(tx, ctx.projectId, WINDOW));
     expect(w.unknownModelEvents).toBe(2); // text-embedding-unknown + gpt-5.2 (excluded from schedule)
     expect(w.unknownModelCostMicros).toBe(C.u4 + C.u6);
-    expect(w.priceInvalidEvents).toBe(1); // sonnet-5 at/after cutoff
+    expect(w.priceInvalidEvents).toBe(0); // none — sonnet-5 standard rate is open-ended as of schedule v4
     expect(w.unattributedRunEvents).toBe(1);
     expect(w.runLessEvents).toBe(1);
     expect(w.retriesInstrumented).toBe(false);
