@@ -1,0 +1,37 @@
+/**
+ * Tenant storage-key containment (VER-002, review round 3).
+ *
+ * A prefix test alone is not containment: `org/A/project/P/../OTHER/result`
+ * starts with `org/A/project/P/` yet resolves into project OTHER. This guard
+ * rejects non-canonical and traversal keys BEFORE any storage access, and only
+ * admits a clean, canonical key that stays inside the caller's exact
+ * `org/<orgId>/project/<projectId>/` partition. Symlink escape (a key that is
+ * canonical but resolves out of the tenant directory through a symlink) is caught
+ * separately by the object-store adapter's real-path check.
+ */
+export interface KeyCheck {
+  readonly ok: boolean;
+  readonly reason: string;
+}
+
+export function tenantPrefix(orgId: string, projectId: string): string {
+  return `org/${orgId}/project/${projectId}`;
+}
+
+export function assertCanonicalTenantKey(key: string, ctx: { orgId: string; projectId: string }): KeyCheck {
+  if (typeof key !== 'string' || key.length === 0) return { ok: false, reason: 'empty key' };
+  if (/[\\\x00]/.test(key)) return { ok: false, reason: 'backslash or NUL in key' };
+  if (/[\x00-\x1f]/.test(key)) return { ok: false, reason: 'control character in key' };
+  if (key.startsWith('/') || key.endsWith('/')) return { ok: false, reason: 'leading/trailing slash' };
+  if (key.includes('//')) return { ok: false, reason: 'empty path segment' };
+  const segs = key.split('/');
+  if (segs.some((s) => s === '.' || s === '..')) return { ok: false, reason: 'traversal segment (. or ..)' };
+  const prefix = `${tenantPrefix(ctx.orgId, ctx.projectId)}/`;
+  if (!key.startsWith(prefix)) return { ok: false, reason: 'outside tenant partition' };
+  if (key.length <= prefix.length) return { ok: false, reason: 'no object path under the tenant partition' };
+  return { ok: true, reason: '' };
+}
+
+export function isCanonicalTenantKey(key: string, ctx: { orgId: string; projectId: string }): boolean {
+  return assertCanonicalTenantKey(key, ctx).ok;
+}

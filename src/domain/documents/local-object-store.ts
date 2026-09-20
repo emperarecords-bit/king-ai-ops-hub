@@ -1,5 +1,5 @@
 import 'server-only';
-import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { type ObjectStore, ObjectNotFoundError, type StoredObjectHead } from './object-store';
@@ -19,13 +19,42 @@ export class LocalObjectStore implements ObjectStore {
     this.base = resolve(base ?? process.env.LOCAL_OBJECT_STORE_DIR ?? join(tmpdir(), 'king-object-store'));
   }
 
-  /** Resolve a key to an absolute path, refusing anything that escapes base. */
+  /** Resolve a key to an absolute path, refusing traversal, backslashes, and
+   *  anything that escapes base. `..`/`.` segments are rejected outright rather
+   *  than silently collapsed by resolve(). */
   private pathFor(key: string): string {
+    if (/[\\\x00]/.test(key) || key.split('/').some((s) => s === '.' || s === '..')) {
+      throw new Error('non-canonical object key');
+    }
     const full = resolve(this.base, key);
     if (full !== this.base && !full.startsWith(this.base + sep)) {
       throw new Error('object key escapes storage root');
     }
     return full;
+  }
+
+  /**
+   * Does `key` resolve INSIDE `tenantDirKey` (e.g. `org/A/project/P`)? Follows
+   * symlinks on the real object path and compares against the LEXICAL tenant
+   * directory, so a symlinked tenant dir cannot smuggle in another project's
+   * data. Used by the verification artifact adapter for symlink-escape defense.
+   */
+  async keyStaysWithinTenant(key: string, tenantDirKey: string): Promise<boolean> {
+    let target: string;
+    let tenantDir: string;
+    try {
+      target = this.pathFor(key);
+      tenantDir = this.pathFor(tenantDirKey);
+    } catch {
+      return false;
+    }
+    let real: string;
+    try {
+      real = await realpath(target); // resolves symlinks; only works if it exists
+    } catch {
+      real = target; // not created yet — the lexical path is authoritative
+    }
+    return real === tenantDir || real.startsWith(tenantDir + sep);
   }
 
   async put(key: string, body: Buffer, contentType: string): Promise<void> {

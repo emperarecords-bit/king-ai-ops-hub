@@ -498,6 +498,13 @@
       "when": 1789921612584,
       "tag": "0070_pricing_schedule_v5",
       "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1789923809445,
+      "tag": "0071_verification_ingest",
+      "breakpoints": true
     }
   ]
 }
