@@ -232,27 +232,48 @@ describe.skipIf(!routeEnabled)('VER-002 actual HTTP route — authentication rej
   });
 });
 
-// Real HTTP route SUCCESS path. Requires a running server and a valid session
-// cookie; signs with the route's DERIVED per-project runner secret. Self-skips
-// otherwise. NOT VERIFIED (needs a local Supabase auth stack + test session).
-const httpEnabled = Boolean(
-  process.env.VER_INT_BASE_URL && process.env.VER_INT_PROJECT_KEY && process.env.VER_INT_COOKIE && process.env.VERIFICATION_RUNNER_MASTER_SECRET,
-);
-describe.skipIf(!httpEnabled || !enabled)('VER-002 real HTTP route + auth', () => {
-  it('accepts a signed submission over the actual route', async () => {
+// Actual HTTP route — AUTHENTICATED SUCCESS + cross-project rejection, end to end:
+// session auth (local stub) → tenant resolution (projectKey) → signature check →
+// persistence → response. Requires the running server, a minted test-session
+// cookie (VER_INT_COOKIE), the runner master secret, and a second project id for
+// the cross-project case. All auth stays on localhost (stub); no real session.
+const OTHER_PROJECT = process.env.VER_INT_OTHER_PROJECT_ID ?? '';
+const authEnabled = Boolean(routeEnabled && enabled && process.env.VER_INT_COOKIE && process.env.VERIFICATION_RUNNER_MASTER_SECRET);
+describe.skipIf(!authEnabled)('VER-002 actual HTTP route — authenticated success + cross-project', () => {
+  const base = process.env.VER_INT_BASE_URL ?? '';
+  const key = process.env.VER_INT_PROJECT_KEY ?? '';
+  const url = `${base}/api/p/${key}/verification`;
+  const cookie = process.env.VER_INT_COOKIE ?? '';
+  const derived = createHmac('sha256', process.env.VERIFICATION_RUNNER_MASTER_SECRET ?? '')
+    .update(`verification-runner:v1:${ORG}:${PROJECT}`)
+    .digest('hex');
+  const post = (payload: EvidenceSubmission) =>
+    fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ runnerId: payload.runnerId, payload, signature: signEvidence(derived, payload) }),
+      redirect: 'error',
+    });
+
+  it('authenticated + correctly-signed submission → 200 verified_complete', async () => {
+    assertLocalHttp(base);
     const requestId = await seedRequest();
     await putArtifact(requestId);
-    const master = process.env.VERIFICATION_RUNNER_MASTER_SECRET!;
-    const derived = createHmac('sha256', master).update(`verification-runner:v1:${ORG}:${PROJECT}`).digest('hex');
-    const payload = submission({ requestId });
-    const envelope: SignedEnvelope = { runnerId: payload.runnerId, payload, signature: signEvidence(derived, payload) };
-    const res = await fetch(`${process.env.VER_INT_BASE_URL}/api/p/${process.env.VER_INT_PROJECT_KEY}/verification`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: process.env.VER_INT_COOKIE! },
-      body: JSON.stringify(envelope),
-    });
+    const res = await post(submission({ requestId, idempotencyKey: `auth-ok-${requestId}` }));
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { decision: { status: string } };
+    const body = (await res.json()) as { decision: { status: string; deliverable: boolean } };
     expect(body.decision.status).toBe('verified_complete');
+    expect(body.decision.deliverable).toBe(true);
+  });
+
+  it('authenticated but payload claims a DIFFERENT project → wrong_project rejection', async () => {
+    const requestId = await seedRequest();
+    await putArtifact(requestId);
+    const res = await post(submission({ requestId, projectId: OTHER_PROJECT, idempotencyKey: `auth-xproj-${requestId}` }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { decision: { accepted: boolean; rejection: { code: string } | null } };
+    expect(body.decision.accepted).toBe(false);
+    expect(body.decision.rejection?.code).toBe('wrong_project');
   });
 });
+
