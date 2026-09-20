@@ -134,6 +134,25 @@ describe('sanitize', () => {
     }
     expect(isExcludedPath('src/report.md').excluded).toBe(false);
   });
+
+  it('excludes legacy credential filenames (creds.json, creds.staging.json, …)', () => {
+    for (const p of ['creds.json', 'config/creds.staging.json', 'a/creds-prod.yaml', 'creds/token', '.npmrc', '.aws/credentials', 'service_account.json', 'app.jks']) {
+      expect(isExcludedPath(p).excluded).toBe(true);
+    }
+    expect(isExcludedPath('src/credits.md').excluded).toBe(false); // not a creds file
+  });
+
+  it('detects and redacts structured JSON credential fields incl. lowercase', () => {
+    const json = '{"username":"joe","password":"hunter2secret","aws_secret_access_key":"AKIAABCDEF123456","client_secret":"xyz12345"}';
+    expect(containsSensitive(json)).toBe(true);
+    const out = redact(json);
+    expect(out).not.toMatch(/hunter2secret/);
+    expect(out).not.toMatch(/xyz12345/);
+    expect(out).toContain('"password":"[REDACTED:json_credential]"'); // field preserved, value masked
+    expect(out).toContain('"aws_secret_access_key":"[REDACTED:json_credential]"');
+    expect(out).toContain('"username":"joe"'); // non-secret field untouched
+    expect(containsSensitive(out)).toBe(false);
+  });
 });
 
 describe('review package export', () => {

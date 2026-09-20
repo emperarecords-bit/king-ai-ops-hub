@@ -39,17 +39,27 @@ const SECRET_PATTERNS: readonly SecretPattern[] = [
   { kind: 'google_key', re: /\bAIza[0-9A-Za-z_-]{35}\b/g },
   { kind: 'github_pat', re: /\bghp_[0-9A-Za-z]{36}\b/g },
   { kind: 'slack_token', re: /\bxox[baprs]-[0-9A-Za-z-]{10,}\b/g },
-  // KEY=VALUE style secret assignments (SECRET/TOKEN/PASSWORD/KEY/CREDENTIAL).
-  { kind: 'assigned_secret', re: /\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|KEY|CREDENTIAL)[A-Z0-9_]*)\s*[:=]\s*['"]?([^\s'"]{6,})/g },
+  // KEY=VALUE style secret assignments (SECRET/TOKEN/PASSWORD/KEY/CREDENTIAL), env-var style.
+  // The negative lookahead keeps an already-redacted placeholder from re-matching.
+  { kind: 'assigned_secret', re: /\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|KEY|CREDENTIAL)[A-Z0-9_]*)\s*[:=]\s*['"]?((?!\[REDACTED:)[^\s'"]{6,})/g },
+  // Structured JSON credential fields, case-insensitive incl. lowercase — e.g.
+  // "password": "…", "client_secret": "…", "aws_secret_access_key": "…".
+  {
+    kind: 'json_credential',
+    re: /"([a-z0-9_-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|refresh[_-]?token|auth)[a-z0-9_-]*)"\s*:\s*"((?!\[REDACTED:)[^"]{4,})"/gi,
+  },
 ];
+
+/** Patterns that preserve the field/key and mask only the value. */
+const VALUE_PRESERVING = new Set(['assigned_secret', 'json_credential']);
 
 /** Replace secret-shaped values with a typed placeholder. Idempotent-ish and safe on empty. */
 export function redact(text: string): string {
   let out = text ?? '';
   for (const { kind, re } of SECRET_PATTERNS) {
-    out = out.replace(re, (_match, p1: string | undefined, p2: string | undefined) => {
-      // For KEY=VALUE, keep the key name, mask only the value.
-      if (kind === 'assigned_secret' && p1 && p2) return `${p1}=[REDACTED:${kind}]`;
+    out = out.replace(re, (match: string, _p1: string | undefined, p2: string | undefined) => {
+      // Keep the field/key; mask only the secret VALUE wherever it sits in the match.
+      if (VALUE_PRESERVING.has(kind) && p2) return match.split(p2).join(`[REDACTED:${kind}]`);
       return `[REDACTED:${kind}]`;
     });
   }
@@ -72,7 +82,11 @@ const EXCLUDED_PATH_PATTERNS: readonly RegExp[] = [
   /(^|\/)\.git(\/|$)/i, // git history
   /(^|\/)\.env(\.|$)/i, // env / credentials
   /(^|\/)(secrets?|credentials?)(\/|\.|$)/i,
-  /\.(pem|key|p12|pfx|keystore)$/i, // private keys / keystores
+  // Legacy credential filenames: creds.json, creds.staging.json, creds/*, creds-prod.yaml, etc.
+  /(^|\/)creds?([._-][a-z0-9]+)*\.(json|ya?ml|txt|env|ini|conf|cfg)$/i,
+  /(^|\/)creds?(\/|$)/i,
+  /(^|\/)(service[_-]?account|gcloud|\.aws|\.npmrc|\.netrc|\.pgpass)(\/|\.|$)/i,
+  /\.(pem|key|p12|pfx|keystore|jks)$/i, // private keys / keystores
   /(^|\/)(sessions?|\.session|cookies?)(\/|\.|$)/i, // session artifacts
   /(^|\/)(customers?|customer[_-]?data|pii)(\/|\.|$)/i, // customer data
   /(^|\/)node_modules(\/|$)/i,

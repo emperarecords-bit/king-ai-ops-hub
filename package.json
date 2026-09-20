@@ -25,6 +25,7 @@
     "seed:knowledge-states": "tsx --conditions=react-server scripts/seed-knowledge-states.ts",
     "archive:demo-knowledge": "tsx --conditions=react-server scripts/archive-demo-knowledge.ts",
     "demo:verification": "tsx scripts/verification-acceptance-demo.ts",
+    "demo:verification-ingest": "tsx scripts/verification-ingest-demo.ts",
     "backfill:document-versions": "tsx --conditions=react-server scripts/backfill-document-versions.ts",
     "shadow:retrieval": "tsx --conditions=react-server scripts/shadow-retrieval.ts",
     "set:retrieval-mode": "tsx --conditions=react-server scripts/set-retrieval-mode.ts",
