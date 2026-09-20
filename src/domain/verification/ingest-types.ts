@@ -8,42 +8,26 @@
  * the only ingress is a signed submission.
  */
 import type { TaskVerificationStatus } from './types';
+// Shared contract shapes live in the neutral `types` floor so the DB schema can type its columns
+// with them without importing domain. Re-exported here so domain-side imports are unchanged.
+import type {
+  ArtifactAvailability,
+  CheckResult,
+  CheckStatus,
+  RejectionCode,
+  SubmittedArtifact,
+} from '@/types/verification';
+export type {
+  ArtifactAvailability,
+  ArtifactAvailabilityState,
+  CheckResult,
+  CheckStatus,
+  RejectionCode,
+  SubmittedArtifact,
+} from '@/types/verification';
 
 /** Where evidence came from. Only authenticated sources are admissible. */
 export type EvidenceSource = 'local_runner' | 'github_actions';
-
-/** Result of one named required check within a run. */
-export type CheckStatus = 'passed' | 'failed' | 'skipped' | 'cancelled' | 'errored' | 'missing';
-
-export interface CheckResult {
-  readonly name: string;
-  readonly status: CheckStatus;
-  readonly command: string | null;
-  readonly exitCode: number | null;
-  readonly startedAt: string | null;
-  readonly finishedAt: string | null;
-  readonly detail: string | null;
-}
-
-/** An artifact the runner claims it produced and stored. */
-export interface SubmittedArtifact {
-  readonly path: string;
-  readonly sha256: string;
-  readonly sizeBytes: number;
-  /** Where the runner stored it (object-store key / URL the Hub can retrieve). */
-  readonly storageKey: string;
-}
-
-export type ArtifactAvailabilityState = 'available' | 'unavailable' | 'hash_mismatch' | 'expired' | 'forbidden';
-
-export interface ArtifactAvailability {
-  readonly path: string;
-  readonly storageKey: string;
-  readonly state: ArtifactAvailabilityState;
-  readonly recordedSha256: string;
-  readonly observedSha256: string | null;
-  readonly detail: string;
-}
 
 /**
  * The verification CONTRACT, created BEFORE any results are received. It pins the
@@ -101,19 +85,6 @@ export interface SignedEnvelope {
   /** HMAC-SHA256 (hex) of the canonical payload under the project's runner secret. */
   readonly signature: string;
 }
-
-export type RejectionCode =
-  | 'unknown_request'
-  | 'unauthenticated'
-  | 'expired'
-  | 'wrong_tenant'
-  | 'wrong_project'
-  | 'wrong_repo'
-  | 'wrong_task'
-  | 'stale_commit'
-  | 'dirty_tree'
-  | 'invalid_checks'
-  | 'idempotency_conflict';
 
 export interface CheckEvaluation {
   readonly allRequiredPassed: boolean;

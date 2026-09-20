@@ -15,7 +15,7 @@
 import { boolean, index, jsonb, pgTable, text, timestamp, unique, uuid } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { organizations, profiles, projects, tasks } from './tables';
-import type { ArtifactAvailability, CheckResult, RejectionCode, SubmittedArtifact } from '@/domain/verification';
+import type { ArtifactAvailability, CheckResult, RejectionCode, SubmittedArtifact } from '@/types/verification';
 
 const createdAt = timestamp('created_at', { withTimezone: true }).notNull().default(sql`now()`);
 const updatedAt = timestamp('updated_at', { withTimezone: true }).notNull().default(sql`now()`);

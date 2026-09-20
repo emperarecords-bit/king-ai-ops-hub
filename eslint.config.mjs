@@ -16,10 +16,7 @@ const layerRules = [
         {
           patterns: [
             { group: ['@/app/*', '@/components/*'], message: 'db/lib/types must not import UI.' },
-            // Runtime imports from domain are forbidden (dependencies point downward). TYPE-ONLY imports
-            // are permitted: they are erased at compile time and create no runtime coupling, and a schema
-            // legitimately types its jsonb/text columns with the domain shapes they store.
-            { group: ['@/domain/*'], message: 'db/lib/types must not import domain logic (runtime).', allowTypeImports: true },
+            { group: ['@/domain/*'], message: 'db/lib/types must not import domain logic.' },
             { group: ['@/orchestration/*'], message: 'db/lib/types must not import the engine.' },
             { group: ['@/providers/*'], message: 'db/lib/types must not import provider adapters.' },
           ],
@@ -152,14 +149,21 @@ export default tseslint.config(
   },
   ...layerRules,
   {
-    files: ['tests/**/*.ts', 'scripts/**/*.ts', 'scripts/**/*.cjs', '*.config.ts', '*.config.mjs'],
+    files: ['tests/**/*.ts', 'scripts/**/*.ts', '*.config.ts', '*.config.mjs'],
     rules: {
       'no-console': 'off',
       '@typescript-eslint/no-explicit-any': 'off',
       'no-restricted-imports': 'off',
-      // Standalone CommonJS helper scripts (e.g. scripts/int-verify/*.cjs) use require() — that is the
-      // native module system for .cjs, not a lint smell. App/library code is unaffected.
+    },
+  },
+  {
+    // Standalone CommonJS helper scripts (e.g. scripts/int-verify/*.cjs): require() is the native
+    // module system for .cjs, and they log progress to stdout. Scoped to .cjs ONLY — TypeScript
+    // tests, scripts and config files still enforce no-require-imports.
+    files: ['scripts/**/*.cjs'],
+    rules: {
       '@typescript-eslint/no-require-imports': 'off',
+      'no-console': 'off',
     },
   },
 );
