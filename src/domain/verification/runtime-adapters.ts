@@ -8,9 +8,12 @@ import { link, lstat, mkdir, open, realpath, rm } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { getObjectStore, ObjectNotFoundError, type ObjectStore } from '@/domain/documents/object-store';
 import { LocalObjectStore } from '@/domain/documents/local-object-store';
+import { S3ObjectStore } from '@/domain/documents/s3-object-store';
+import { serverEnv } from '@/lib/env.server';
 import type { TenantContext } from '@/types/domain';
 import type { ExclusiveArtifactWriter, RunnerSecretSource, StagedArtifact, StoredArtifactStore } from './ports';
 import { UnsupportedExclusiveWriteError } from './ports';
+import { PER_ARTIFACT_CAP_BYTES } from './upload-grant';
 import { assertCanonicalTenantKey, tenantPrefix } from './tenant-key';
 
 /** Stores that can prove a key resolves inside a tenant directory (symlink-safe). */
@@ -200,15 +203,52 @@ class LocalExclusiveArtifactWriter implements ExclusiveArtifactWriter {
 }
 
 /**
- * The configured create-only artifact writer. LOCAL store → a real temp-file+link writer. Any other
- * driver → FAIL CLOSED: `stage()` throws `UnsupportedExclusiveWriteError` (never an overwriting put),
- * so uploads on an unproven production adapter cannot silently lose the no-overwrite guarantee. The
- * production adapter's atomic create-only behavior must pass provider acceptance tests before enablement.
+ * Create-only artifact writer over the S3 (production) adapter (VER-002 PR-5). Streams the validated
+ * bytes into a BOUNDED in-memory buffer (capped by the per-artifact cap; larger is aborted while
+ * streaming), then publishes with ONE conditional create-only PUT (`S3ObjectStore.putIfAbsent`, which does
+ * the reconcile/never-unconditional-retry logic). The buffer is released on every outcome via `discard`.
+ * This adapter's request shape + no-overwrite logic are offline-verified; the PROVIDER's enforcement is
+ * NOT VERIFIED until the authorized live acceptance run, so the factory keeps it behind a default-off gate.
+ */
+export function s3ExclusiveArtifactWriter(store: S3ObjectStore): ExclusiveArtifactWriter {
+  return {
+    async stage(finalKey: string): Promise<StagedArtifact> {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      let discarded = false;
+      return {
+        async append(chunk: Buffer): Promise<void> {
+          if (discarded) throw new Error('append after discard');
+          size += chunk.length;
+          if (size > PER_ARTIFACT_CAP_BYTES) throw new Error('staged artifact exceeds the per-artifact cap');
+          chunks.push(Buffer.from(chunk));
+        },
+        async publish(contentType: string): Promise<'created' | 'exists'> {
+          return store.putIfAbsent(finalKey, Buffer.concat(chunks), contentType);
+        },
+        async discard(): Promise<void> {
+          discarded = true;
+          chunks.length = 0;
+        },
+      };
+    },
+  };
+}
+
+/**
+ * The configured create-only artifact writer. LOCAL store → a real temp-file+link writer. S3 store → the
+ * conditional create-only publisher, but ONLY when `VERIFICATION_RUNNER_UPLOAD_S3_ENABLED` is on (default
+ * off — the provider's enforcement is unproven until the live acceptance run, so an unproven S3 adapter is
+ * fail-closed even if uploads were enabled). Any other case → FAIL CLOSED: `stage()` throws
+ * `UnsupportedExclusiveWriteError` (never an overwriting put).
  */
 export async function exclusiveArtifactWriter(storeArg?: ObjectStore): Promise<ExclusiveArtifactWriter> {
   const store = storeArg ?? (await getObjectStore());
   if (store.driver === 'local' && store instanceof LocalObjectStore) {
     return new LocalExclusiveArtifactWriter(store.baseDir);
+  }
+  if (store.driver === 's3' && store instanceof S3ObjectStore && serverEnv().VERIFICATION_RUNNER_UPLOAD_S3_ENABLED) {
+    return s3ExclusiveArtifactWriter(store);
   }
   const driver = store.driver;
   return {
