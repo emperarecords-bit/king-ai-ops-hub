@@ -10,6 +10,21 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import type { EvidenceSubmission } from './ingest-types';
 
+/**
+ * Supported signing-key versions. Only `v1` exists (the version baked into the server-side key
+ * derivation, `verification-runner:v1:org:project`). An envelope declaring any other version is
+ * rejected on BOTH the machine and human ingestion paths. This is signing-key *retirement*, kept
+ * deliberately separate from bearer-credential revocation.
+ */
+export const SUPPORTED_SIGNING_VERSIONS = ['v1'] as const;
+export type SigningKeyVersion = (typeof SUPPORTED_SIGNING_VERSIONS)[number];
+/** Envelopes signed before the version field existed are treated as this original version. */
+export const DEFAULT_SIGNING_VERSION: SigningKeyVersion = 'v1';
+
+export function isSupportedSigningVersion(version: string | undefined): boolean {
+  return (SUPPORTED_SIGNING_VERSIONS as readonly string[]).includes(version ?? DEFAULT_SIGNING_VERSION);
+}
+
 /** Canonical content digest of a submission — the identity used for idempotency:
  *  an identical retry has the same digest; any change produces a different one. */
 export function submissionDigest(payload: EvidenceSubmission): string {

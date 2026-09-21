@@ -12,7 +12,7 @@ import {
  *  stamped as a GUC. A blank or non-UUID GUC would silently make the RLS
  *  helpers return NULL — better to refuse loudly than to run context-less. */
 function assertIdentifiers(
-  boundary: 'withTenant' | 'withOrg' | 'withUser',
+  boundary: 'withTenant' | 'withOrg' | 'withUser' | 'withRunner',
   ctx: { userId?: string; orgId?: string; projectId?: string },
 ): void {
   const bad = invalidTenantFields(ctx);
@@ -57,6 +57,34 @@ export async function withTenant<T>(
     });
   } catch (err) {
     if (isRlsViolation(err)) logRlsRejection('withTenant', ctx, err);
+    throw err;
+  }
+}
+
+/**
+ * VER-002 PR-2 — the tenant boundary for a MACHINE (runner) principal. Identical RLS enforcement to
+ * withTenant, but a runner has no human identity: it stamps org/project and sets an EMPTY app.user_id
+ * (so `app.current_user_id()` is null). The tenant-scoped verification policies key off org/project
+ * only, so this is sufficient and correct; a runner never gains a user identity it doesn't have.
+ */
+export async function withRunner<T>(
+  ctx: { orgId: string; projectId: string },
+  fn: (tx: DbTx) => Promise<T>,
+): Promise<T> {
+  assertIdentifiers('withRunner', { orgId: ctx.orgId, projectId: ctx.projectId });
+  const db = getDb();
+  try {
+    return await db.transaction(async (tx) => {
+      await tx.execute(sql`
+        select
+          set_config('app.user_id', '', true),
+          set_config('app.org_id', ${ctx.orgId}, true),
+          set_config('app.project_id', ${ctx.projectId}, true)
+      `);
+      return fn(tx);
+    });
+  } catch (err) {
+    if (isRlsViolation(err)) logRlsRejection('withRunner', { orgId: ctx.orgId, projectId: ctx.projectId }, err);
     throw err;
   }
 }

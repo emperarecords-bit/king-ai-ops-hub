@@ -15,7 +15,7 @@ import { validateBinding, type TenantContext } from './binding';
 import { evaluateChecks } from './checks';
 import type { IngestDecision, RejectionCode, SignedEnvelope } from './ingest-types';
 import type { IngestDeps } from './ports';
-import { submissionDigest, verifyEvidenceSignature } from './signing';
+import { DEFAULT_SIGNING_VERSION, isSupportedSigningVersion, submissionDigest, verifyEvidenceSignature } from './signing';
 import { isCanonicalTenantKey } from './tenant-key';
 
 export async function ingestEvidence(
@@ -47,6 +47,14 @@ export async function ingestEvidence(
   // 1. Known contract (looked up under the TRUSTED caller tenant, never the payload's claims).
   const request = await deps.store.getRequest(ctx.orgId, ctx.projectId, payload.requestId);
   if (!request) return reject('unknown_request', `No verification contract ${payload.requestId} for this project.`);
+
+  // 1b. Signing-key version. Absent ⇒ 'v1' (envelopes predating the field keep verifying). An
+  //     unsupported version is a signing-key RETIREMENT rejection — distinct from a revoked bearer
+  //     credential (refused earlier, at authentication). Applied on both auth paths (all ingest).
+  const signingVersion = envelope.signingKeyVersion ?? DEFAULT_SIGNING_VERSION;
+  if (!isSupportedSigningVersion(signingVersion)) {
+    return reject('unsupported_signing_version', `Signing-key version '${signingVersion}' is not supported.`);
+  }
 
   // 2. Authenticated signature (per-project runner secret; prose has no signature).
   //    The secret is fetched with the TRUSTED caller tenant, never the payload's

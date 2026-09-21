@@ -44,7 +44,7 @@ export function isRlsViolation(err: unknown): boolean {
 /** Log a database-level security refusal (RLS WITH CHECK, privilege denied)
  *  with identifiers only — never the row or the SQL text. */
 export function logRlsRejection(
-  boundary: 'withTenant' | 'withOrg' | 'withUser',
+  boundary: 'withTenant' | 'withOrg' | 'withUser' | 'withRunner',
   ctx: { userId?: string; orgId?: string; projectId?: string },
   err: unknown,
 ): void {
@@ -60,7 +60,7 @@ export function logRlsRejection(
 /** The tenant context required for a boundary was missing/malformed — fail
  *  closed. `which` names the boundary and `fields` the offending identifiers. */
 export function logTenantContextInvalid(
-  boundary: 'withTenant' | 'withOrg' | 'withUser',
+  boundary: 'withTenant' | 'withOrg' | 'withUser' | 'withRunner',
   fields: string[],
 ): void {
   log.error('tenant.context_invalid', { boundary, fields });

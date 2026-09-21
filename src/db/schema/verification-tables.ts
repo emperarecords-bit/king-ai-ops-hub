@@ -109,3 +109,39 @@ export const verificationEvidence = pgTable(
     index('verification_evidence_request_idx').on(t.requestId),
   ],
 );
+
+/**
+ * VER-002 PR-2 — per-project machine (runner) credentials. A CI runner authenticates to ONE project
+ * with a bearer `keyId.secret`; only the scrypt hash + per-credential salt are stored (the plaintext
+ * is shown once at issuance). The pre-tenant lookup that resolves a bearer before any tenant context
+ * exists goes through a hardened SECURITY DEFINER function (src/db/rls.sql), never a broad grant —
+ * app_server reaches its own rows only under RLS (issuance/revocation run with the admin's tenant
+ * context). This is the BEARER credential; it is deliberately separate from the HMAC *signing* key
+ * (a bearer revocation is not a signing-key retirement, and vice versa).
+ */
+export const verificationRunnerKeys = pgTable(
+  'verification_runner_keys',
+  {
+    /** keyId — the public half of the bearer credential `keyId.secret`. */
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    /** scrypt hash of the secret, hex. Never the plaintext. */
+    secretHash: text('secret_hash').notNull(),
+    /** Per-credential random salt, hex (separate salt per credential). */
+    secretSalt: text('secret_salt').notNull(),
+    label: text('label').notNull().default(''),
+    createdBy: uuid('created_by').references(() => profiles.id, { onDelete: 'set null' }),
+    createdAt,
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    /** 90-day default expiry is set by the issuer; the column itself is required. */
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedBy: uuid('revoked_by').references(() => profiles.id, { onDelete: 'set null' }),
+  },
+  (t) => [index('verification_runner_keys_project_idx').on(t.orgId, t.projectId)],
+);

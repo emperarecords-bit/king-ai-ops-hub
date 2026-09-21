@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { AppError, toPublicMessage } from '@/lib/errors';
-import { requireTenant } from '@/domain/auth/guard';
-import { withTenant } from '@/db/tenant';
+import { requireRunnerOrTenant } from '@/domain/auth/guard';
+import { withRunner, withTenant } from '@/db/tenant';
+import type { DbTx } from '@/db/client';
+import type { VerificationCaller } from '@/types/domain';
 import { ingestEvidence, type SignedEnvelope } from '@/domain/verification';
 import { createDrizzleVerificationStore } from '@/domain/verification/drizzle-store';
 import { envRunnerSecretSource, objectStoreArtifactStore } from '@/domain/verification/runtime-adapters';
@@ -9,11 +11,13 @@ import { envRunnerSecretSource, objectStoreArtifactStore } from '@/domain/verifi
 /**
  * POST — ingest external-runner verification evidence (VER-002, Option A).
  *
- * The runner signs its submission with the project runner secret; this route
- * authenticates the caller's tenant, then hands the signed envelope to the
- * ingest orchestrator inside one tenant transaction (RLS + explicit org/project
- * filters preserve isolation). The Hub never runs commands — it only adjudicates.
- * Agent prose carries no valid signature and is rejected.
+ * Authentication accepts EITHER a machine (runner) bearer credential OR a human session
+ * (`requireRunnerOrTenant`); a runner is a machine principal with no invented user identity. The
+ * signed envelope is then handed to the ingest orchestrator inside one tenant transaction (withRunner
+ * for a machine, withTenant for a human — both stamp org/project GUCs, so RLS + explicit filters
+ * preserve isolation). The Hub never runs commands — it only adjudicates. Agent prose carries no valid
+ * signature and is rejected; an envelope declaring an unsupported signing-key version is rejected on
+ * both paths.
  */
 const checkSchema = z.object({
   name: z.string().min(1),
@@ -53,6 +57,8 @@ const envelopeSchema = z.object({
   runnerId: z.string().min(1),
   payload: payloadSchema,
   signature: z.string(),
+  // Absent ⇒ treated as 'v1' (back-compat); an unsupported version is rejected during ingest.
+  signingKeyVersion: z.string().optional(),
 });
 
 export async function POST(
@@ -61,15 +67,19 @@ export async function POST(
 ): Promise<Response> {
   const { projectKey } = await params;
 
-  let ctx;
+  let caller: VerificationCaller;
   try {
-    ctx = await requireTenant(projectKey);
+    caller = await requireRunnerOrTenant(projectKey, req);
   } catch (err) {
-    return Response.json(
-      { error: toPublicMessage(err) },
-      { status: err instanceof AppError && err.code === 'unauthenticated' ? 401 : 403 },
-    );
+    // unauthenticated → 401; ambiguous credentials (validation) → 400; anything else → 403.
+    const code = err instanceof AppError ? err.code : null;
+    const status = code === 'unauthenticated' ? 401 : code === 'validation' ? 400 : 403;
+    return Response.json({ error: toPublicMessage(err) }, { status });
   }
+  // Both principals carry the trusted (orgId, projectId); the runner has no user identity.
+  const tenant = caller.kind === 'user' ? caller.tenant : caller.runner;
+  const runInTenant = <T>(fn: (tx: DbTx) => Promise<T>): Promise<T> =>
+    caller.kind === 'user' ? withTenant(caller.tenant, fn) : withRunner(caller.runner, fn);
 
   let body: unknown;
   try {
@@ -84,14 +94,14 @@ export async function POST(
   const envelope = parsed.data as SignedEnvelope;
 
   try {
-    const decision = await withTenant(ctx, (tx) =>
+    const decision = await runInTenant((tx) =>
       ingestEvidence(
         {
           store: createDrizzleVerificationStore(tx),
-          artifacts: objectStoreArtifactStore(ctx),
+          artifacts: objectStoreArtifactStore(tenant),
           secrets: envRunnerSecretSource(),
         },
-        ctx,
+        tenant,
         envelope,
       ),
     );

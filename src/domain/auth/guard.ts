@@ -1,7 +1,8 @@
 import 'server-only';
 import { cache } from 'react';
-import { type TenantContext } from '@/types/domain';
-import { ForbiddenError, UnauthenticatedError } from '@/lib/errors';
+import { type TenantContext, type VerificationCaller } from '@/types/domain';
+import { ForbiddenError, UnauthenticatedError, ValidationError } from '@/lib/errors';
+import { serverEnv } from '@/lib/env.server';
 import {
   findAccessibleProjects,
   findOrgRole,
@@ -10,6 +11,17 @@ import {
   upsertProfile,
   type ProjectAccessRecord,
 } from '@/db/system';
+import {
+  lookupRunnerKeyById,
+  resolveProjectByKey,
+  touchRunnerKeyLastUsed,
+} from '@/db/runner-keys';
+import {
+  hasBearerCredential,
+  isRunnerKeyActive,
+  parseRunnerCredential,
+  verifyRunnerSecret,
+} from './runner-credential';
 import { createSupabaseServerClient } from './supabase';
 
 /**
@@ -90,6 +102,60 @@ export async function requireTenant(projectKey: string): Promise<TenantContext> 
     orgRole,
     projectRole: access.projectRole,
   };
+}
+
+/** A Supabase SSR session cookie is present (name `sb-<ref>-auth-token`, possibly chunked `.0`/`.1`). */
+function hasSessionCookie(req: Request): boolean {
+  const cookie = req.headers.get('cookie');
+  return typeof cookie === 'string' && /(?:^|;\s*)sb-[^=;]*-auth-token(?:\.\d+)?=/.test(cookie);
+}
+
+/**
+ * VER-002 PR-2 — the machine-or-human gate for runner-facing verification endpoints.
+ *
+ * Dispatch is unambiguous and case-insensitive:
+ *  - A bearer credential (any casing) commits the request to the MACHINE path — an invalid/rejected
+ *    bearer is a 401 and NEVER falls back to a session (a bad machine credential must not silently
+ *    become a human request).
+ *  - Presenting BOTH a bearer AND a session cookie is rejected (400) as ambiguous — we never guess
+ *    which credential the caller meant.
+ *  - No bearer → the existing human `requireTenant` path, unchanged.
+ *
+ * Machine-auth acceptance is behind its own default-off control (`VERIFICATION_RUNNER_MACHINE_AUTH_ENABLED`),
+ * independent of credential issuance — so machine auth can be turned off without touching issuance/revocation.
+ */
+export async function requireRunnerOrTenant(projectKey: string, req: Request): Promise<VerificationCaller> {
+  const authHeader = req.headers.get('authorization');
+  if (hasBearerCredential(authHeader)) {
+    // Reject simultaneous credentials outright — do not disambiguate a bearer + session combination.
+    if (hasSessionCookie(req)) {
+      throw new ValidationError(['Provide either a runner bearer credential or a session, not both.']);
+    }
+    // COMMITTED to the machine path — no session fallback beyond this point.
+    if (!serverEnv().VERIFICATION_RUNNER_MACHINE_AUTH_ENABLED) {
+      throw new UnauthenticatedError();
+    }
+    const cred = parseRunnerCredential(authHeader);
+    if (!cred) throw new UnauthenticatedError(); // malformed/ambiguous bearer
+
+    const key = await lookupRunnerKeyById(cred.keyId);
+    const now = new Date();
+    if (!key || !isRunnerKeyActive({ revokedAt: key.revokedAt, expiresAt: key.expiresAt }, now)) {
+      throw new UnauthenticatedError(); // unknown, revoked, or expired
+    }
+    if (!verifyRunnerSecret(cred.secret, key.secretSalt, key.secretHash)) {
+      throw new UnauthenticatedError(); // wrong secret
+    }
+    // The credential's project must match the URL's project key (a key for A cannot act on B).
+    const proj = await resolveProjectByKey(projectKey);
+    if (!proj || proj.projectId !== key.projectId || proj.orgId !== key.orgId) {
+      throw new ForbiddenError(`Runner credential is not authorized for project key '${projectKey}'`);
+    }
+    await touchRunnerKeyLastUsed({ orgId: key.orgId, projectId: key.projectId }, cred.keyId);
+    return { kind: 'runner', runner: { kind: 'runner', runnerKeyId: cred.keyId, orgId: key.orgId, projectId: key.projectId } };
+  }
+  // No bearer → the human session path, exactly as before.
+  return { kind: 'user', tenant: await requireTenant(projectKey) };
 }
 
 export async function listMyProjects(): Promise<ProjectAccessRecord[]> {

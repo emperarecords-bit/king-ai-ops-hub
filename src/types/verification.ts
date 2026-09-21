@@ -53,4 +53,7 @@ export type RejectionCode =
   | 'stale_commit'
   | 'dirty_tree'
   | 'invalid_checks'
-  | 'idempotency_conflict';
+  | 'idempotency_conflict'
+  /** The envelope declared a signing-key version the Hub no longer supports (signing-key retirement —
+   *  distinct from a revoked bearer credential, which is refused earlier at authentication). */
+  | 'unsupported_signing_version';
