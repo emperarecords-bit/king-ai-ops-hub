@@ -146,9 +146,18 @@ function amzDateNow(): string {
   return new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
 }
 
+/** The outcome of a create-only publish. `ambiguous` is never returned — it is resolved internally by
+ *  reconciliation (HEAD) into created/exists, or surfaced as a thrown error when it cannot be resolved. */
+export type CreateOnlyResult = 'created' | 'exists';
+
 export class S3ObjectStore implements ObjectStore {
   readonly driver = 's3' as const;
-  constructor(private readonly cfg: S3Config) {}
+  /** `fetchImpl` is injectable ONLY so hermetic tests can drive simulated S3 responses; production uses
+   *  the global fetch. It changes nothing about signing or request shape. */
+  constructor(
+    private readonly cfg: S3Config,
+    private readonly fetchImpl: typeof fetch = fetch,
+  ) {}
 
   static fromEnv(): S3ObjectStore {
     // S3_* is the documented contract; managed platforms (Fly/Tigris) inject the
@@ -182,12 +191,87 @@ export class S3ObjectStore implements ObjectStore {
       amzDate: amzDateNow(),
       extraHeaders: { 'content-type': contentType },
     });
-    const res = await fetch(signed.url, {
+    const res = await this.fetchImpl(signed.url, {
       method: 'PUT',
       headers: signed.headers,
       body: new Uint8Array(body),
     });
     if (!res.ok) throw new Error(`S3 PUT ${key} failed: ${res.status}`);
+  }
+
+  /**
+   * Create-only publish for a verification artifact (VER-002 PR-5). Issues a CONDITIONAL PUT
+   * (`If-None-Match: *`) with the EXACT body and a provider-verified `x-amz-checksum-sha256` (policy P-A:
+   * the adapter ALWAYS sends the checksum, so a missing checksum cannot occur on the write path). Returns
+   * `'created'` (2xx) or `'exists'` (412/409 precondition failed). It NEVER issues an unconditional PUT.
+   *
+   * Ambiguous outcomes (network error / timeout / 5xx) are RECONCILED by HEAD before any retry: a PRESENT
+   * object ⇒ `'exists'` (the caller re-validates it against the grant's size+digest); an ABSENT object ⇒ a
+   * bounded retry of the SAME conditional PUT. Auth/permission failures (401/403) and other 4xx are
+   * non-retryable and throw. A read failure during reconciliation throws — the outcome cannot be confirmed,
+   * so it is never reported as a silent success, and the object is never overwritten.
+   *
+   * ADAPTER guarantee (offline-testable, here): the request shape and the no-unconditional-PUT + reconcile
+   * logic. Whether the PROVIDER actually ENFORCES `If-None-Match`/the checksum (credential-enforced
+   * immutability) is NOT VERIFIED here — that is the authorized live acceptance run.
+   */
+  async putIfAbsent(
+    key: string,
+    body: Buffer,
+    contentType: string,
+    opts: { deadline?: Date; now?: () => Date } = {},
+  ): Promise<CreateOnlyResult> {
+    if (!isCanonicalObjectKey(key)) throw new Error('non-canonical object key');
+    const now = opts.now ?? (() => new Date());
+    const checksum = createHash('sha256').update(body).digest('base64'); // base64 of the RAW digest (NOT hex)
+    const attemptOnce = async (): Promise<CreateOnlyResult | 'ambiguous'> => {
+      let res: Response;
+      try {
+        const signed = signS3Request(this.cfg, {
+          method: 'PUT',
+          key,
+          payloadHash: sha256Hex(body),
+          amzDate: amzDateNow(),
+          // Both headers are SIGNED (signS3Request folds extraHeaders into SignedHeaders), so the provider
+          // is asked to enforce create-only AND the checksum.
+          extraHeaders: { 'content-type': contentType, 'if-none-match': '*', 'x-amz-checksum-sha256': checksum },
+        });
+        res = await this.fetchImpl(signed.url, { method: 'PUT', headers: signed.headers, body: new Uint8Array(body) });
+      } catch {
+        return 'ambiguous'; // network error / timeout — we do not know whether it landed
+      }
+      if (res.ok) return 'created';
+      // 412 Precondition Failed is the STANDARD If-None-Match:* conflict ⇒ the key definitively exists.
+      if (res.status === 412) return 'exists';
+      // 409 Conflict is NOT specific to If-None-Match (providers use it for other conflicts too), so do
+      // NOT assume it means "exists": reconcile it by HEAD like any ambiguous outcome (present ⇒ exists,
+      // absent ⇒ a bounded, expiry-checked conditional retry, read-error ⇒ throw).
+      if (res.status === 409) return 'ambiguous';
+      if (res.status === 401 || res.status === 403) throw new Error(`S3 create-only ${key} denied: ${res.status}`);
+      if (res.status >= 500) return 'ambiguous';
+      throw new Error(`S3 create-only ${key} failed: ${res.status}`); // other 4xx — non-retryable
+    };
+
+    const MAX_ATTEMPTS = 3;
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
+      // Enforce the grant's expiry BEFORE any internal retry — a retry (i>0) after the deadline is a NEW
+      // create attempt the grant no longer authorizes, so stop rather than keep trying past expiry.
+      if (i > 0 && opts.deadline && now().getTime() > opts.deadline.getTime()) {
+        throw new Error(`S3 create-only ${key} not retried: grant expired before the next attempt`);
+      }
+      const outcome = await attemptOnce();
+      if (outcome !== 'ambiguous') return outcome;
+      // Ambiguous ⇒ reconcile by HEAD before any retry; a retry is ONLY ever the same conditional PUT.
+      let head: StoredObjectHead | null;
+      try {
+        head = await this.head(key);
+      } catch (err) {
+        throw new Error(`S3 create-only ${key} ambiguous and reconcile HEAD failed: ${(err as Error).message}`);
+      }
+      if (head) return 'exists'; // it landed (ours or a concurrent writer) — the caller re-validates it
+      // absent ⇒ the write did not land; loop and retry the SAME conditional create-only PUT (bounded).
+    }
+    throw new Error(`S3 create-only ${key} outcome remained ambiguous after ${MAX_ATTEMPTS} attempts`);
   }
 
   async get(key: string): Promise<Buffer> {
@@ -197,7 +281,7 @@ export class S3ObjectStore implements ObjectStore {
       payloadHash: UNSIGNED,
       amzDate: amzDateNow(),
     });
-    const res = await fetch(signed.url, { method: 'GET', headers: signed.headers });
+    const res = await this.fetchImpl(signed.url, { method: 'GET', headers: signed.headers });
     if (res.status === 404) throw new ObjectNotFoundError(key);
     if (!res.ok) throw new Error(`S3 GET ${key} failed: ${res.status}`);
     return Buffer.from(await res.arrayBuffer());
@@ -210,7 +294,7 @@ export class S3ObjectStore implements ObjectStore {
       payloadHash: UNSIGNED,
       amzDate: amzDateNow(),
     });
-    const res = await fetch(signed.url, { method: 'HEAD', headers: signed.headers });
+    const res = await this.fetchImpl(signed.url, { method: 'HEAD', headers: signed.headers });
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`S3 HEAD ${key} failed: ${res.status}`);
     const len = res.headers.get('content-length');
@@ -224,7 +308,7 @@ export class S3ObjectStore implements ObjectStore {
       payloadHash: UNSIGNED,
       amzDate: amzDateNow(),
     });
-    const res = await fetch(signed.url, { method: 'DELETE', headers: signed.headers });
+    const res = await this.fetchImpl(signed.url, { method: 'DELETE', headers: signed.headers });
     // S3 returns 204 on delete; treat 404 as already-gone (idempotent).
     if (!res.ok && res.status !== 404) throw new Error(`S3 DELETE ${key} failed: ${res.status}`);
   }
@@ -244,7 +328,7 @@ export class S3ObjectStore implements ObjectStore {
         query,
         bucketLevel: true,
       });
-      const res = await fetch(signed.url, { method: 'GET', headers: signed.headers });
+      const res = await this.fetchImpl(signed.url, { method: 'GET', headers: signed.headers });
       if (!res.ok) throw new Error(`S3 LIST ${prefix} failed: ${res.status}`);
       const xml = await res.text();
       for (const m of xml.matchAll(/<Key>([^<]*)<\/Key>/g)) keys.push(decodeXmlEntities(m[1]!));

@@ -68,6 +68,14 @@ const serverEnvSchema = z.object({
     .enum(['0', '1', 'true', 'false'])
     .default('0')
     .transform((v) => v === '1' || v === 'true'),
+  // VER-002 PR-5 — whether the S3 (production) create-only artifact writer may be used. Default OFF and
+  // SEPARATE from the upload flag: the S3 provider's create-only + checksum enforcement is NOT VERIFIED
+  // until the authorized live acceptance run passes, so the exclusive writer FAILS CLOSED for the S3 driver
+  // until this is explicitly turned on. Even with uploads enabled, an unproven S3 adapter cannot be used.
+  VERIFICATION_RUNNER_UPLOAD_S3_ENABLED: z
+    .enum(['0', '1', 'true', 'false'])
+    .default('0')
+    .transform((v) => v === '1' || v === 'true'),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;

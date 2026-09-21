@@ -255,7 +255,8 @@ export async function redeemUploadGrant(
   // Not expired: stream to a private temp, validate exactly, then atomic create-only publish.
   let staged;
   try {
-    staged = await deps.writer.stage(grant.objectKey);
+    // The grant's expiry bounds any internal publish retry (e.g. the S3 adapter's ambiguous-outcome retry).
+    staged = await deps.writer.stage(grant.objectKey, { deadline: new Date(Date.parse(grant.expiresAt)) });
   } catch (err) {
     if (err instanceof UnsupportedExclusiveWriteError) {
       await failEvent('storage adapter cannot guarantee atomic create-only writes');
