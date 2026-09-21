@@ -26,6 +26,9 @@ import {
   cleanupAndReport,
   makeAcceptanceKeys,
   makeBudgetedFetch,
+  runDiagAOriginalWrongChecksum,
+  runDiagBAddedSdkAlgo,
+  runDiagCCorrectControl,
   runPG1,
   runPG1Concurrent,
   runPG2,
@@ -91,6 +94,13 @@ describe.skipIf(!OPTED_IN)('VER-002 PR-5 — S3 provider acceptance (LIVE, opt-i
   it('PG2 — GET/HEAD round-trip is byte-exact; absent reads absent', () => runPG2(ctx));
   it('PG3 — a present-but-wrong checksum is rejected (BadDigest); HTTP 200 is a FAILURE', () => runPG3(ctx));
   it('PG5 — adapter overwrite guard + provider conditional-write enforcement', () => runPG5(ctx));
+
+  // PG3 checksum diagnostics — three independent PUTs (A/B/C). A PG3 assertion failure above does not
+  // prevent these (each is its own test). A and B are observational (rejected ⇒ absence-checked); C is a
+  // positive control that must be accepted + byte-exact.
+  it('DIAG-A — original wrong-checksum PUT (observational; rejected ⇒ absent)', () => runDiagAOriginalWrongChecksum(ctx));
+  it('DIAG-B — wrong-checksum PUT + x-amz-sdk-checksum-algorithm (observational; rejected ⇒ absent)', () => runDiagBAddedSdkAlgo(ctx));
+  it('DIAG-C — positive control: B format + correct checksum ⇒ accepted + byte-exact', () => runDiagCCorrectControl(ctx));
 
   it('stays within the request/byte budget and the fuse did not trip', () => {
     const s = budgeted.stats();
