@@ -2,7 +2,7 @@ import 'server-only';
 import { mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { isVerificationArtifactKey, type ObjectStore, ObjectNotFoundError, type StoredObjectHead, VerificationObjectWriteError } from './object-store';
+import { isCanonicalObjectKey, isVerificationArtifactKey, type ObjectStore, ObjectNotFoundError, type StoredObjectHead, VerificationObjectWriteError } from './object-store';
 
 /**
  * Filesystem-backed ObjectStore for dev and hermetic tests (O-23). Keys map to
@@ -29,7 +29,9 @@ export class LocalObjectStore implements ObjectStore {
    *  anything that escapes base. `..`/`.` segments are rejected outright rather
    *  than silently collapsed by resolve(). */
   private pathFor(key: string): string {
-    if (/[\\\x00]/.test(key) || key.split('/').some((s) => s === '.' || s === '..')) {
+    // Reject non-canonical keys (backslash/NUL, `.`/`..`, and — critically — empty `//` segments that
+    // `resolve` would otherwise collapse) so no alias can resolve onto another key's path.
+    if (!isCanonicalObjectKey(key)) {
       throw new Error('non-canonical object key');
     }
     const full = resolve(this.base, key);
@@ -64,6 +66,9 @@ export class LocalObjectStore implements ObjectStore {
   }
 
   async put(key: string, body: Buffer, contentType: string): Promise<void> {
+    // Reject non-canonical keys BEFORE classification, so a doubled-slash (or other) alias that would
+    // collapse onto a verification object cannot dodge the guard below.
+    if (!isCanonicalObjectKey(key)) throw new Error('non-canonical object key');
     // Ordinary put MUST NOT overwrite (or create) a verification artifact object — those are written
     // only through the create-only exclusive publisher. Fail closed rather than clobber one.
     if (isVerificationArtifactKey(key)) throw new VerificationObjectWriteError(key);

@@ -26,19 +26,34 @@ const STATUS: Record<RedeemRejectionCode, number> = {
   write_unsupported: 503,
 };
 
-/** Adapt the web ReadableStream request body to an async iterable of chunks (empty when absent). */
+/**
+ * Adapt the web ReadableStream request body to an async iterable of chunks (empty when absent). On an
+ * EARLY return by the consumer (size-limit abort, checksum failure, etc.) the generator's `return()`
+ * runs the `finally`, which CANCELS the reader — draining/aborting the unread request body rather than
+ * leaking a half-read stream.
+ */
 async function* bodyChunks(req: Request): AsyncIterable<Uint8Array> {
   const body = req.body;
   if (!body) return;
   const reader = body.getReader();
+  let drained = false;
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        drained = true;
+        break;
+      }
       if (value) yield value;
     }
   } finally {
-    reader.releaseLock();
+    if (!drained) {
+      try {
+        await reader.cancel(); // cancel the unread remainder on an early/interrupted return
+      } catch {
+        /* body already errored/closed */
+      }
+    }
   }
 }
 
@@ -88,5 +103,13 @@ export async function PUT(
     );
   } catch (err) {
     return Response.json({ error: toPublicMessage(err) }, { status: 500 });
+  } finally {
+    // Early-return paths (grant not found, expired, already-complete) never read the body — cancel the
+    // unconsumed request stream so it is not left dangling. Locked ⇒ bodyChunks owns/cancels it.
+    try {
+      if (req.body && !req.body.locked) await req.body.cancel();
+    } catch {
+      /* already consumed/errored */
+    }
   }
 }

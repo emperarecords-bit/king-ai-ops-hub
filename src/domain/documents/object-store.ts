@@ -65,10 +65,23 @@ export function keyBelongsToTenant(
 }
 
 /**
+ * A servable object key must be CANONICAL: no backslash/NUL/control bytes, no leading/trailing slash, and
+ * no empty (`//`), `.`, or `..` segments. This is checked BEFORE any classification or path resolution so
+ * a non-canonical alias (e.g. a doubled slash) can never collapse onto — and overwrite — a protected key.
+ */
+export function isCanonicalObjectKey(key: string): boolean {
+  if (typeof key !== 'string' || key.length === 0) return false;
+  if (/[\\\x00-\x1f]/.test(key)) return false;
+  if (key.startsWith('/') || key.endsWith('/')) return false;
+  return !key.split('/').some((s) => s === '' || s === '.' || s === '..');
+}
+
+/**
  * Is `key` a VERIFICATION artifact object (VER-002 PR-4)? These live at
  * `org/<org>/project/<project>/request/<rid>/attempt/<aid>/<objectId>` and are written ONLY through the
  * create-only exclusive publisher — never through the ordinary overwriting `put`. Both adapters refuse
- * `put` for such a key so no ordinary storage-write path can overwrite a verification object.
+ * `put` for such a key so no ordinary storage-write path can overwrite a verification object. Callers must
+ * reject non-canonical keys (`isCanonicalObjectKey`) FIRST, so an alias cannot dodge this classification.
  */
 export function isVerificationArtifactKey(key: string): boolean {
   return /^org\/[^/]+\/project\/[^/]+\/request\/[^/]+\/attempt\/[^/]+\/[^/]+$/.test(key);

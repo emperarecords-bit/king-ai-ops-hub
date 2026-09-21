@@ -13,7 +13,7 @@
  * VER_UP_STORE_DIR, VER_UP_DB_URL.
  */
 import { createHash, createHmac, randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -113,7 +113,7 @@ function signedEnvelope(attemptId: string, artifact: { path: string; sha256: str
     attemptId,
     environment: 'ci',
     source: 'local_runner' as const,
-    checks: [{ name: 'unit', status: 'passed' as const, command: 'run-unit', exitCode: 0, startedAt: '2026-09-21T00:00:00.000Z', finishedAt: '2026-09-21T00:00:01.000Z', detail: null }],
+    checks: [{ name: 'unit', status: 'passed' as const, command: 'npm run unit', exitCode: 0, startedAt: '2026-09-21T00:00:00.000Z', finishedAt: '2026-09-21T00:00:01.000Z', detail: null }],
     artifacts: [artifact],
     catalogVersion: CAT_VERSION,
     catalogDigest: CAT_DIGEST,
@@ -253,6 +253,50 @@ describe.skipIf(!enabled)('VER-002 PR-4 — redemption (stream → atomic create
     expect(expiredPresent.status).toBe(200);
     expect(expiredPresent.json.completed).toBe(true);
     expect(expiredPresent.json.reconciled).toBe(true);
+  });
+
+  it('an ACTUAL interrupted/cancelled stream leaves no object, no completion, and no leftover temp file', async () => {
+    const body = bytes('{"passed":true,"redeem":"cancel"}');
+    const g = (await requestGrant('att-cancel', body)).json.grant as Record<string, unknown>;
+    // A request body that emits one chunk then ERRORS mid-stream — a genuine interrupted upload, not an
+    // undersized-but-complete body.
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"passed"'));
+        setTimeout(() => controller.error(new Error('client reset mid-upload')), 20);
+      },
+    });
+    let clientFailed = false;
+    try {
+      await fetch(`${BASE}${String(g.uploadPath)}`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${RUNNER}`, 'content-type': 'application/octet-stream' },
+        body: stream,
+        // @ts-expect-error Node/undici requires duplex for a streaming request body
+        duplex: 'half',
+        redirect: 'error',
+      });
+    } catch {
+      clientFailed = true; // the errored body aborts the request
+    }
+    expect(clientFailed).toBe(true);
+    // No object was published at the grant's key.
+    expect(existsSync(join(STORE_DIR, String(g.objectKey)))).toBe(false);
+    // The temp file was cleaned up (poll briefly for the server's finally to run).
+    const tmpDir = join(STORE_DIR, '.uploads-tmp');
+    let tmpCount = 1;
+    for (let i = 0; i < 30; i++) {
+      tmpCount = existsSync(tmpDir) ? readdirSync(tmpDir).length : 0;
+      if (tmpCount === 0) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(tmpCount).toBe(0);
+    // The grant was never marked uploaded.
+    const rows = (await sql.unsafe(
+      `select count(*)::int c from verification_upload_grant_events where grant_id = $1 and event_type = 'uploaded'`,
+      [String(g.grantId)],
+    )) as { c: number }[];
+    expect(rows[0]!.c).toBe(0);
   });
 
   it('a later failed retry cannot undo a completion', async () => {
