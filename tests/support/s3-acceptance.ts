@@ -20,13 +20,17 @@ export function parseS3ErrorCode(body: string): string | null {
 
 /** The EXPLICIT allow-list of S3 error codes that DOCUMENT rejection of a wrong `x-amz-checksum-sha256`
  *  VALUE (the checksum header PG3 deliberately corrupts), compared case-insensitively:
- *    - `BadDigest`     — the checksum sent did not match what the server computed for the body.
- *    - `InvalidDigest` — the checksum value sent is not a valid digest.
- *  DELIBERATELY EXCLUDED: `XAmzContentSHA256Mismatch` is a PAYLOAD-SIGNING error (the SigV4
- *  `x-amz-content-sha256` request hash), not a rejection of the checksum header, so it must NOT count as a
- *  PG3 pass. Any other code — a payload-signing error, an auth/5xx/unsupported response, or an
- *  unconfirmed/invented code — FAILS CLOSED, even with a 4xx status. */
-export const CHECKSUM_MISMATCH_CODES: readonly string[] = ['BadDigest', 'InvalidDigest'];
+ *    - `BadDigest` — the checksum sent did not match what the server computed for the body. This is the
+ *      documented MISMATCH semantics PG3 asserts.
+ *  DELIBERATELY EXCLUDED:
+ *    - `InvalidDigest` documents a MALFORMED/invalid checksum value, not a value that is well-formed but
+ *      wrong (the case PG3 probes), so it does not prove mismatch rejection and must NOT count as a pass.
+ *    - `XAmzContentSHA256Mismatch` is a PAYLOAD-SIGNING error (the SigV4 `x-amz-content-sha256` request
+ *      hash), not a rejection of the checksum header.
+ *  Any other code — a malformed-digest error, a payload-signing error, an auth/5xx/unsupported response, or
+ *  an unconfirmed/invented code — FAILS CLOSED, even with a 4xx status. Adding a provider-specific code
+ *  requires documented mismatch semantics first. */
+export const CHECKSUM_MISMATCH_CODES: readonly string[] = ['BadDigest'];
 const isChecksumMismatchCode = (code: string | null): boolean =>
   code !== null && CHECKSUM_MISMATCH_CODES.some((c) => c.toLowerCase() === code.toLowerCase());
 

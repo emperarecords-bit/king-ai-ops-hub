@@ -62,6 +62,9 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
       // about the SigV4 x-amz-content-sha256 request hash, NOT a rejection of the x-amz-checksum-sha256
       // VALUE, so a 400 carrying it must not count as a PG3 pass.
       ['a 400 payload-signing code (XAmzContentSHA256Mismatch)', { mismatchCode: 'XAmzContentSHA256Mismatch' }],
+      // InvalidDigest documents a MALFORMED digest, not a well-formed-but-wrong value, so it does not prove
+      // MISMATCH rejection and must fail closed even at a 400 (only BadDigest is accepted).
+      ['a 400 malformed-digest code (InvalidDigest)', { mismatchCode: 'InvalidDigest' }],
       ['a WRONGLY-ACCEPTED body (200)', { acceptWrongChecksum: true }],
     ])('fails PG3 when a wrong checksum yields %s', async (_label, faults) => {
       const sim = makeInMemoryS3(CFG, faults);
