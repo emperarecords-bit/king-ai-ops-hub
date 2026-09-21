@@ -64,6 +64,24 @@ export function keyBelongsToTenant(
   return key.startsWith(`org/${args.orgId}/project/${args.projectId}/`);
 }
 
+/**
+ * Is `key` a VERIFICATION artifact object (VER-002 PR-4)? These live at
+ * `org/<org>/project/<project>/request/<rid>/attempt/<aid>/<objectId>` and are written ONLY through the
+ * create-only exclusive publisher — never through the ordinary overwriting `put`. Both adapters refuse
+ * `put` for such a key so no ordinary storage-write path can overwrite a verification object.
+ */
+export function isVerificationArtifactKey(key: string): boolean {
+  return /^org\/[^/]+\/project\/[^/]+\/request\/[^/]+\/attempt\/[^/]+\/[^/]+$/.test(key);
+}
+
+/** Thrown when an ordinary `put` targets a verification artifact key (must use the exclusive publisher). */
+export class VerificationObjectWriteError extends Error {
+  constructor(key: string) {
+    super(`refusing ordinary put of a verification artifact object: ${key}`);
+    this.name = 'VerificationObjectWriteError';
+  }
+}
+
 let cached: ObjectStore | null = null;
 
 /** The configured store. STORAGE_DRIVER=s3 → S3ObjectStore (requires the

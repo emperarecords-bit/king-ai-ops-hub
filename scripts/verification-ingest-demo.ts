@@ -17,6 +17,7 @@ import {
   ingestEvidence,
   signEvidence,
   InMemoryArtifactStore,
+  InMemoryUploadGrantStore,
   InMemoryCatalogResolver,
   InMemoryVerificationStore,
   StaticRunnerSecretSource,
@@ -126,7 +127,12 @@ function submission(commit: string, checks: CheckResult[], artSha: string, over:
     ...over,
   };
 }
-const sign = (p: EvidenceSubmission, secret = SECRET): SignedEnvelope => ({ runnerId: p.runnerId, payload: p, signature: signEvidence(secret, p) });
+const grants = new InMemoryUploadGrantStore();
+const sign = (p: EvidenceSubmission, secret = SECRET): SignedEnvelope => {
+  // Seed a matching uploaded grant for each artifact (PR-4 binding), so the happy path still verifies.
+  for (const a of p.artifacts) grants.seedUploaded(p.orgId, p.projectId, p.requestId, p.attemptId, a);
+  return { runnerId: p.runnerId, payload: p, signature: signEvidence(secret, p) };
+};
 
 async function main(): Promise<void> {
   const { dir, commit } = makeRepo();
@@ -142,6 +148,7 @@ async function main(): Promise<void> {
       c.addVersion({ version: DEMO_CAT.version, digest: DEMO_CAT.digest, commands: DEMO_CAT.commands });
       return c;
     })(),
+    grants,
   };
 
   try {

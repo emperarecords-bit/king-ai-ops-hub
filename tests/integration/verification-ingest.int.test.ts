@@ -34,7 +34,7 @@ import {
   type IngestDeps,
   type SignedEnvelope,
 } from '@/domain/verification';
-import { createDrizzleVerificationStore } from '@/domain/verification/drizzle-store';
+import { createDrizzleUploadGrantStore, createDrizzleVerificationStore } from '@/domain/verification/drizzle-store';
 import { objectStoreArtifactStore } from '@/domain/verification/runtime-adapters';
 import type { TenantContext } from '@/types/domain';
 
@@ -103,6 +103,9 @@ const deps = (tx: Parameters<Parameters<typeof withTenant>[1]>[0]): IngestDeps =
     c.addVersion({ version: CAT.version, digest: CAT.digest, commands: CAT.commands });
     return c;
   })(),
+  // Legacy 0071-era test (self-skips unless VER_INT_* set; superseded by verification-upload-grant.int).
+  // The PR-4 grant-binding source is wired for compilation; a full run would also seed uploaded grants.
+  grants: createDrizzleUploadGrantStore(tx),
 });
 
 const createdRequestIds: string[] = [];

@@ -85,10 +85,11 @@ export async function middleware(request: NextRequest) {
   // The runner-facing verification endpoints authenticate with EITHER a runner BEARER credential OR a
   // session (requireRunnerOrTenant / self-gating routes). Like /api/mcp, the Supabase-session check
   // here would 401 a legitimate bearer-only runner, so these pass through to the route's own gate
-  // (which fails closed). Covered: the ingest path, and the contract-retrieval paths
-  // (…/verification/requests and …/verification/requests/<id>). The runner-keys ADMIN subpaths are NOT
-  // covered — they stay session-gated.
-  const isRunnerIngest = /^\/api\/p\/[^/]+\/verification(?:\/requests(?:\/[^/]+)?)?$/.test(pathname);
+  // (which fails closed). Covered: the ingest path, the contract-retrieval paths
+  // (…/verification/requests and …/verification/requests/<id>), and the runner UPLOAD paths
+  // (…/verification/uploads and …/verification/uploads/<grantId>). The runner-keys ADMIN subpaths are
+  // NOT covered — they stay session-gated.
+  const isRunnerIngest = /^\/api\/p\/[^/]+\/verification(?:\/requests(?:\/[^/]+)?|\/uploads(?:\/[^/]+)?)?$/.test(pathname);
   const isPublic =
     pathname === '/login' ||
     pathname.startsWith('/auth') ||

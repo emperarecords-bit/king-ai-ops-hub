@@ -139,6 +139,21 @@ export async function ingestEvidence(
     return persist({ ...reject('invalid_checks', `Invalid checks: ${checkEvaluation.problems.join(' ')}`), checkEvaluation });
   }
 
+  // 5b. Upload-grant binding (VER-002 PR-4). Every SUBMITTED artifact must correspond to a successfully
+  //     `uploaded` grant that binds THIS contract + attempt + logical path to the object key, declared
+  //     size, and declared digest. A same-tenant object from another contract/attempt has no matching
+  //     grant → rejected. This runs BEFORE the physical re-hash: the grant binds provenance, the re-hash
+  //     (step 6) confirms the actual bytes. Both must pass.
+  for (const a of payload.artifacts) {
+    const grant = await deps.grants.findUploadedGrantForArtifact(ctx.orgId, ctx.projectId, request.id, payload.attemptId, a.path);
+    if (!grant) {
+      return persist(reject('artifact_not_granted', `Artifact '${a.path}' has no uploaded grant for this contract attempt.`));
+    }
+    if (grant.objectKey !== a.storageKey || grant.declaredSize !== a.sizeBytes || grant.declaredSha256 !== a.sha256) {
+      return persist(reject('grant_binding_mismatch', `Artifact '${a.path}' does not match its upload grant (key/size/digest).`));
+    }
+  }
+
   // 6. Artifact availability (stored, retrievable, hash-matched) — and tenant-bound.
   //    A storageKey outside this tenant's partition is `forbidden` and never
   //    dereferenced, even if the supplied hash matches.

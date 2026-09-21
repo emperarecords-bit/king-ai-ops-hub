@@ -1086,6 +1086,52 @@ begin
 end
 $$;
 
+-- VER-002 PR-4 — artifact upload grants (migration 0076). to_regclass-guarded like verification_evidence
+-- so an incremental bootstrap tolerates absence until the tables are applied. Same strict tenant
+-- predicate (org_id + project_id GUCs). Grants are IMMUTABLE metadata; the events log is APPEND-ONLY.
+do $$
+begin
+  if to_regclass('public.verification_upload_grants') is not null then
+    -- Immutable grant metadata: the app role may INSERT (issue) and SELECT (read) only; UPDATE/DELETE
+    -- are revoked at the grant layer, and the trigger is the defense-in-depth. Lifecycle lives in the
+    -- append-only events table below, never by mutating a grant row.
+    grant select, insert on verification_upload_grants to app_server;
+    revoke update, delete on verification_upload_grants from app_server;
+    alter table verification_upload_grants enable row level security;
+    alter table verification_upload_grants force row level security;
+    drop policy if exists verification_upload_grants_tenant on verification_upload_grants;
+    execute
+      'create policy verification_upload_grants_tenant on verification_upload_grants
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+    execute 'drop trigger if exists verification_upload_grants_append_only on verification_upload_grants';
+    execute
+      'create trigger verification_upload_grants_append_only
+         before update or delete on verification_upload_grants
+         for each row execute function app.forbid_mutation()';
+  end if;
+  if to_regclass('public.verification_upload_grant_events') is not null then
+    -- Append-only lifecycle events: INSERT (record) and SELECT (read) only; UPDATE/DELETE revoked + the
+    -- trigger below rejects a mutation even from a role that still holds the grant. Uploaded-state is
+    -- derived from the presence of an 'uploaded' event (partial unique index makes it idempotent).
+    grant select, insert on verification_upload_grant_events to app_server;
+    revoke update, delete on verification_upload_grant_events from app_server;
+    alter table verification_upload_grant_events enable row level security;
+    alter table verification_upload_grant_events force row level security;
+    drop policy if exists verification_upload_grant_events_tenant on verification_upload_grant_events;
+    execute
+      'create policy verification_upload_grant_events_tenant on verification_upload_grant_events
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+    execute 'drop trigger if exists verification_upload_grant_events_append_only on verification_upload_grant_events';
+    execute
+      'create trigger verification_upload_grant_events_append_only
+         before update or delete on verification_upload_grant_events
+         for each row execute function app.forbid_mutation()';
+  end if;
+end
+$$;
+
 -- ─────────────────────── VER-002 PR-2: runner (machine) credentials ───────────────────────
 -- A narrowly-privileged, LOGIN-LESS role that owns the pre-tenant lookup function below. It is not a
 -- superuser; it can read only verification_runner_keys and bypasses RLS solely so the SECURITY

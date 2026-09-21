@@ -12,7 +12,7 @@
  * append-only/immutability triggers are applied separately by src/db/rls.sql after
  * migrations (guarded by to_regclass), as with every other tenant table.
  */
-import { boolean, index, jsonb, pgTable, text, timestamp, unique, uuid } from 'drizzle-orm/pg-core';
+import { bigint, boolean, index, jsonb, pgTable, text, timestamp, unique, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { organizations, profiles, projects, tasks } from './tables';
 import type { ArtifactAvailability, CheckResult, RejectionCode, SubmittedArtifact } from '@/types/verification';
@@ -148,4 +148,91 @@ export const verificationRunnerKeys = pgTable(
     revokedBy: uuid('revoked_by').references(() => profiles.id, { onDelete: 'set null' }),
   },
   (t) => [index('verification_runner_keys_project_idx').on(t.orgId, t.projectId)],
+);
+
+/**
+ * VER-002 PR-4 — artifact UPLOAD grants (mechanism only; uploads disabled by default).
+ *
+ * IMMUTABLE metadata written once when a runner requests a grant for one required artifact of one
+ * attempt of one contract. The row binds (tenant, contract, attempt, logical path) to a single
+ * server-derived object key + the DECLARED size and sha256, plus a short TTL (`expiresAt`, governs when
+ * an upload may START) and a recorded `maxUploadMs` (T_max — recorded ONLY; no mechanism enforces it
+ * yet, and it never authorizes quota reclamation). No column is mutated after insert; lifecycle is the
+ * append-only events table below. The dedup key (org, project, request, attempt, logical_path) makes an
+ * identical re-request idempotent and a changed declaration a conflict — one object per (attempt, path).
+ */
+export const verificationUploadGrants = pgTable(
+  'verification_upload_grants',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'restrict' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'restrict' }),
+    requestId: uuid('request_id')
+      .notNull()
+      .references(() => verificationRequests.id, { onDelete: 'restrict' }),
+    /** The runner-declared attempt id (validated to a strict opaque token before it is placed in a key). */
+    attemptId: text('attempt_id').notNull(),
+    /** The logical artifact path (a `requiredArtifacts` entry of the contract). */
+    logicalPath: text('logical_path').notNull(),
+    /** The server-derived canonical object key the runner may write exactly once. */
+    objectKey: text('object_key').notNull(),
+    /** Declared byte length; the upload is rejected unless the streamed bytes total exactly this. */
+    declaredSize: bigint('declared_size', { mode: 'number' }).notNull(),
+    /** Declared sha256 (hex); the upload is rejected unless the streamed bytes hash to exactly this. */
+    declaredSha256: text('declared_sha256').notNull(),
+    contentType: text('content_type').notNull().default('application/octet-stream'),
+    /** When a NEW upload may start (short TTL). See maxUploadMs note for the quota limitation. */
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    /** T_max — recorded only; UNPROVEN (nothing enforces a max upload duration), never a reclaim trigger. */
+    maxUploadMs: bigint('max_upload_ms', { mode: 'number' }).notNull(),
+    createdBy: uuid('created_by').references(() => profiles.id, { onDelete: 'set null' }),
+    createdAt,
+  },
+  (t) => [
+    unique('verification_upload_grants_tenant_id_uq').on(t.orgId, t.projectId, t.id),
+    // Dedup: one grant per (tenant, contract, attempt, logical path). Identical re-request returns this
+    // same row; a changed size/digest for the same key is a conflict (enforced in the app before insert).
+    unique('verification_upload_grants_dedup_uq').on(t.orgId, t.projectId, t.requestId, t.attemptId, t.logicalPath),
+    // A derived object key is unique within a tenant (defense in depth against key reuse).
+    unique('verification_upload_grants_object_key_uq').on(t.orgId, t.projectId, t.objectKey),
+    index('verification_upload_grants_request_idx').on(t.orgId, t.projectId, t.requestId),
+  ],
+);
+
+/**
+ * VER-002 PR-4 — append-only lifecycle events for upload grants. Current state is DERIVED from events,
+ * never by UPDATE-in-place: a grant is "uploaded" iff an `uploaded` event exists (a later
+ * `redemption_failed` can NEVER undo completion). The partial unique index guarantees at most one
+ * `uploaded` event per grant, so concurrent completion recording is idempotent. RLS + revoke
+ * update/delete + the append-only trigger (src/db/rls.sql) keep it immutable.
+ */
+export const verificationUploadGrantEvents = pgTable(
+  'verification_upload_grant_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'restrict' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'restrict' }),
+    grantId: uuid('grant_id')
+      .notNull()
+      .references(() => verificationUploadGrants.id, { onDelete: 'restrict' }),
+    /** 'uploaded' (completion) | 'redemption_failed' (informational; cannot undo a completion). */
+    eventType: text('event_type').notNull(),
+    detail: text('detail'),
+    createdAt,
+  },
+  (t) => [
+    index('verification_upload_grant_events_grant_idx').on(t.orgId, t.projectId, t.grantId),
+    // At most one completion event per grant → idempotent concurrent completion recording.
+    uniqueIndex('verification_upload_grant_events_uploaded_uq')
+      .on(t.grantId)
+      .where(sql`event_type = 'uploaded'`),
+  ],
 );

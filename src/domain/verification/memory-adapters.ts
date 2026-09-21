@@ -6,7 +6,20 @@
 import { randomUUID } from 'node:crypto';
 import type { CatalogResolver, ResolvedCatalog } from './catalog';
 import type { EvidenceSubmission, IngestDecision, NewVerificationRequest, VerificationRequest } from './ingest-types';
-import type { ContractListOptions, ContractSummary, PriorEvidence, RunnerSecretSource, StoredArtifactStore, VerificationStore } from './ports';
+import type {
+  ContractListOptions,
+  ContractSummary,
+  ExclusiveArtifactWriter,
+  NewUploadGrant,
+  PriorEvidence,
+  RunnerSecretSource,
+  StagedArtifact,
+  StoredArtifactStore,
+  UploadGrant,
+  UploadGrantEventType,
+  UploadGrantStore,
+  VerificationStore,
+} from './ports';
 
 const scope = (orgId: string, projectId: string, ...parts: string[]) => [orgId, projectId, ...parts].join('|');
 
@@ -185,6 +198,13 @@ export class InMemoryArtifactStore implements StoredArtifactStore {
     this.objects.set(storageKey, { bytes, expired: cur?.expired ?? false });
   }
 
+  /** Atomic create-only: create the object, or report it already exists (never overwrite). */
+  createOnly(storageKey: string, bytes: Buffer): 'created' | 'exists' {
+    if (this.objects.has(storageKey)) return 'exists';
+    this.objects.set(storageKey, { bytes, expired: false });
+    return 'created';
+  }
+
   async head(storageKey: string): Promise<{ sizeBytes: number; expired: boolean } | null> {
     const o = this.objects.get(storageKey);
     return o ? { sizeBytes: o.bytes.length, expired: o.expired } : null;
@@ -200,5 +220,141 @@ export class StaticRunnerSecretSource implements RunnerSecretSource {
   constructor(private readonly secretsByProject: Map<string, string>) {}
   async getRunnerSecret(orgId: string, projectId: string): Promise<string | null> {
     return this.secretsByProject.get(`${orgId}|${projectId}`) ?? null;
+  }
+}
+
+// ─────────────────────────── VER-002 PR-4 — upload grants (in-memory) ───────────────────────────
+
+interface GrantEvent {
+  readonly type: UploadGrantEventType;
+  readonly detail: string | null;
+}
+
+export class InMemoryUploadGrantStore implements UploadGrantStore {
+  private readonly grants = new Map<string, UploadGrant>(); // by grantId
+  private readonly byDedup = new Map<string, string>(); // dedup key → grantId
+  private readonly events = new Map<string, GrantEvent[]>(); // grantId → events
+
+  private dedupKey(orgId: string, projectId: string, requestId: string, attemptId: string, logicalPath: string): string {
+    return scope(orgId, projectId, requestId, attemptId, logicalPath);
+  }
+
+  async findGrantByDedup(orgId: string, projectId: string, requestId: string, attemptId: string, logicalPath: string): Promise<UploadGrant | null> {
+    const id = this.byDedup.get(this.dedupKey(orgId, projectId, requestId, attemptId, logicalPath));
+    return id ? (this.grants.get(id) ?? null) : null;
+  }
+
+  async getGrantById(orgId: string, projectId: string, grantId: string): Promise<UploadGrant | null> {
+    const g = this.grants.get(grantId);
+    return g && g.orgId === orgId && g.projectId === projectId ? g : null;
+  }
+
+  async insertGrant(orgId: string, projectId: string, _createdBy: string | null, input: NewUploadGrant): Promise<{ grant: UploadGrant; inserted: boolean }> {
+    const dk = this.dedupKey(orgId, projectId, input.requestId, input.attemptId, input.logicalPath);
+    const existingId = this.byDedup.get(dk);
+    if (existingId) return { grant: this.grants.get(existingId)!, inserted: false };
+    const grant: UploadGrant = {
+      id: randomUUID(),
+      orgId,
+      projectId,
+      requestId: input.requestId,
+      attemptId: input.attemptId,
+      logicalPath: input.logicalPath,
+      objectKey: input.objectKey,
+      declaredSize: input.declaredSize,
+      declaredSha256: input.declaredSha256,
+      contentType: input.contentType,
+      expiresAt: input.expiresAt.toISOString(),
+      maxUploadMs: input.maxUploadMs,
+      createdAt: new Date().toISOString(),
+    };
+    this.grants.set(grant.id, grant);
+    this.byDedup.set(dk, grant.id);
+    this.events.set(grant.id, []);
+    return { grant, inserted: true };
+  }
+
+  async isUploaded(_orgId: string, _projectId: string, grantId: string): Promise<boolean> {
+    return (this.events.get(grantId) ?? []).some((e) => e.type === 'uploaded');
+  }
+
+  async appendEvent(_orgId: string, _projectId: string, grantId: string, eventType: UploadGrantEventType, detail: string | null): Promise<void> {
+    const list = this.events.get(grantId) ?? [];
+    // 'uploaded' is idempotent: at most one completion event (mirrors the DB partial unique index).
+    if (eventType === 'uploaded' && list.some((e) => e.type === 'uploaded')) return;
+    list.push({ type: eventType, detail });
+    this.events.set(grantId, list);
+  }
+
+  async findUploadedGrantForArtifact(orgId: string, projectId: string, requestId: string, attemptId: string, logicalPath: string): Promise<UploadGrant | null> {
+    const g = await this.findGrantByDedup(orgId, projectId, requestId, attemptId, logicalPath);
+    if (!g) return null;
+    return (await this.isUploaded(orgId, projectId, g.id)) ? g : null;
+  }
+
+  /** Test helper: seed an already-`uploaded` grant binding an artifact to (contract, attempt, path). */
+  seedUploaded(
+    orgId: string,
+    projectId: string,
+    requestId: string,
+    attemptId: string,
+    a: { path: string; storageKey: string; sizeBytes: number; sha256: string },
+  ): void {
+    const dk = this.dedupKey(orgId, projectId, requestId, attemptId, a.path);
+    if (this.byDedup.has(dk)) return; // idempotent (a submission may be signed more than once in a test)
+    const grant: UploadGrant = {
+      id: randomUUID(),
+      orgId,
+      projectId,
+      requestId,
+      attemptId,
+      logicalPath: a.path,
+      objectKey: a.storageKey,
+      declaredSize: a.sizeBytes,
+      declaredSha256: a.sha256,
+      contentType: 'application/octet-stream',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      maxUploadMs: 60_000,
+      createdAt: new Date().toISOString(),
+    };
+    this.grants.set(grant.id, grant);
+    this.byDedup.set(dk, grant.id);
+    this.events.set(grant.id, [{ type: 'uploaded', detail: null }]);
+  }
+}
+
+/**
+ * In-memory create-only writer backed by an InMemoryArtifactStore, so unit tests exercise the same
+ * redeem orchestrator (stage → append → publish → discard) used in production, including the create-only
+ * `exists` reconciliation path. Optional hooks let a test interrupt a stream between chunks.
+ */
+export class InMemoryExclusiveArtifactWriter implements ExclusiveArtifactWriter {
+  constructor(
+    private readonly artifacts: InMemoryArtifactStore,
+    private readonly hooks: { onAppend?: (bytesSoFar: number) => void | Promise<void> } = {},
+  ) {}
+
+  async stage(finalKey: string): Promise<StagedArtifact> {
+    const chunks: Buffer[] = [];
+    let published = false;
+    let discarded = false;
+    const artifacts = this.artifacts;
+    const hooks = this.hooks;
+    return {
+      async append(chunk: Buffer): Promise<void> {
+        if (discarded) throw new Error('append after discard');
+        chunks.push(Buffer.from(chunk));
+        if (hooks.onAppend) await hooks.onAppend(chunks.reduce((n, c) => n + c.length, 0));
+      },
+      async publish(): Promise<'created' | 'exists'> {
+        published = true;
+        return artifacts.createOnly(finalKey, Buffer.concat(chunks));
+      },
+      async discard(): Promise<void> {
+        discarded = true;
+        chunks.length = 0;
+        void published;
+      },
+    };
   }
 }

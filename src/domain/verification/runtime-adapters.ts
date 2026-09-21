@@ -3,10 +3,14 @@
  * Kept out of the module index so the pure logic and tests never import the DB or
  * object store.
  */
-import { createHmac } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
+import { link, mkdir, open, rm } from 'node:fs/promises';
+import { dirname, join, resolve, sep } from 'node:path';
 import { getObjectStore, ObjectNotFoundError, type ObjectStore } from '@/domain/documents/object-store';
+import { LocalObjectStore } from '@/domain/documents/local-object-store';
 import type { TenantContext } from '@/types/domain';
-import type { RunnerSecretSource, StoredArtifactStore } from './ports';
+import type { ExclusiveArtifactWriter, RunnerSecretSource, StagedArtifact, StoredArtifactStore } from './ports';
+import { UnsupportedExclusiveWriteError } from './ports';
 import { assertCanonicalTenantKey, tenantPrefix } from './tenant-key';
 
 /** Stores that can prove a key resolves inside a tenant directory (symlink-safe). */
@@ -54,6 +58,86 @@ export function objectStoreArtifactStore(
         if (err instanceof ObjectNotFoundError) return null;
         throw err;
       }
+    },
+  };
+}
+
+/**
+ * Create-only artifact writer over the LOCAL object store (VER-002 PR-4). Publishes ONLY complete,
+ * validated bytes: the caller streams into a private temp file under a reserved `.uploads-tmp/` dir
+ * (same filesystem as the store, so it is inaccessible via any canonical tenant key and can be linked),
+ * then `publish()` atomically links it to the final key — link fails with EEXIST → 'exists', never an
+ * overwrite. We never `O_EXCL` the FINAL key and stream into it. An adapter that is not the local store
+ * fails closed (see `exclusiveArtifactWriter`), never falling back to an overwriting put.
+ */
+class LocalExclusiveArtifactWriter implements ExclusiveArtifactWriter {
+  constructor(private readonly base: string) {}
+
+  private pathWithin(key: string): string {
+    if (/[\\\x00]/.test(key) || key.split('/').some((s) => s === '.' || s === '..')) {
+      throw new Error('non-canonical object key');
+    }
+    const full = resolve(this.base, key);
+    if (full !== this.base && !full.startsWith(this.base + sep)) throw new Error('object key escapes storage root');
+    return full;
+  }
+
+  async stage(finalKey: string): Promise<StagedArtifact> {
+    const finalPath = this.pathWithin(finalKey);
+    const tmpDir = join(this.base, '.uploads-tmp');
+    await mkdir(tmpDir, { recursive: true });
+    const tmpPath = join(tmpDir, randomUUID());
+    const fh = await open(tmpPath, 'wx'); // exclusive create of the PRIVATE temp (never the final key)
+    let closed = false;
+    const closeOnce = async (): Promise<void> => {
+      if (!closed) {
+        closed = true;
+        try {
+          await fh.close();
+        } catch {
+          /* already closed */
+        }
+      }
+    };
+    return {
+      async append(chunk: Buffer): Promise<void> {
+        await fh.write(chunk);
+      },
+      async publish(): Promise<'created' | 'exists'> {
+        await fh.sync();
+        await closeOnce();
+        await mkdir(dirname(finalPath), { recursive: true });
+        try {
+          await link(tmpPath, finalPath); // atomic create-only; fails if the final key already exists
+          return 'created';
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'EEXIST') return 'exists';
+          throw err;
+        }
+      },
+      async discard(): Promise<void> {
+        await closeOnce();
+        await rm(tmpPath, { force: true });
+      },
+    };
+  }
+}
+
+/**
+ * The configured create-only artifact writer. LOCAL store → a real temp-file+link writer. Any other
+ * driver → FAIL CLOSED: `stage()` throws `UnsupportedExclusiveWriteError` (never an overwriting put),
+ * so uploads on an unproven production adapter cannot silently lose the no-overwrite guarantee. The
+ * production adapter's atomic create-only behavior must pass provider acceptance tests before enablement.
+ */
+export async function exclusiveArtifactWriter(storeArg?: ObjectStore): Promise<ExclusiveArtifactWriter> {
+  const store = storeArg ?? (await getObjectStore());
+  if (store.driver === 'local' && store instanceof LocalObjectStore) {
+    return new LocalExclusiveArtifactWriter(store.baseDir);
+  }
+  const driver = store.driver;
+  return {
+    async stage(): Promise<StagedArtifact> {
+      throw new UnsupportedExclusiveWriteError(driver);
     },
   };
 }

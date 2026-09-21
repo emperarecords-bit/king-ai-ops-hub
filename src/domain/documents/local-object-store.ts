@@ -2,7 +2,7 @@ import 'server-only';
 import { mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { type ObjectStore, ObjectNotFoundError, type StoredObjectHead } from './object-store';
+import { isVerificationArtifactKey, type ObjectStore, ObjectNotFoundError, type StoredObjectHead, VerificationObjectWriteError } from './object-store';
 
 /**
  * Filesystem-backed ObjectStore for dev and hermetic tests (O-23). Keys map to
@@ -17,6 +17,12 @@ export class LocalObjectStore implements ObjectStore {
 
   constructor(base?: string) {
     this.base = resolve(base ?? process.env.LOCAL_OBJECT_STORE_DIR ?? join(tmpdir(), 'king-object-store'));
+  }
+
+  /** The absolute storage root. Exposed so the verification create-only writer can stage a temp file on
+   *  the SAME filesystem and atomically link it to the final key. */
+  get baseDir(): string {
+    return this.base;
   }
 
   /** Resolve a key to an absolute path, refusing traversal, backslashes, and
@@ -58,6 +64,9 @@ export class LocalObjectStore implements ObjectStore {
   }
 
   async put(key: string, body: Buffer, contentType: string): Promise<void> {
+    // Ordinary put MUST NOT overwrite (or create) a verification artifact object — those are written
+    // only through the create-only exclusive publisher. Fail closed rather than clobber one.
+    if (isVerificationArtifactKey(key)) throw new VerificationObjectWriteError(key);
     const p = this.pathFor(key);
     await mkdir(dirname(p), { recursive: true });
     await writeFile(p, body);

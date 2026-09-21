@@ -74,4 +74,11 @@ describe('VER-002 tenant storage containment (real local store, two projects)', 
     expect(await store.keyStaysWithinTenant(key, 'org/A/project/P')).toBe(false);
     expect(await adapter.get(key)).toBeNull();
   });
+
+  it('ordinary put refuses a verification artifact key (no overwrite of verification objects)', async () => {
+    const verKey = 'org/A/project/P/request/r1/attempt/a1/obj1'; // a verification artifact key shape
+    await expect(store.put(verKey, Buffer.from('x'), 'application/octet-stream')).rejects.toThrow(/verification artifact object/);
+    // A non-verification key under the same tenant is still writable via put.
+    await expect(store.put('org/A/project/P/doc/d1/v1', Buffer.from('ok'), 'text/plain')).resolves.toBeUndefined();
+  });
 });

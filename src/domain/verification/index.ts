@@ -23,6 +23,7 @@ export * from './tenant-key';
 export * from './artifacts-availability';
 export * from './ports';
 export * from './ingest';
+export * from './upload-grant';
 export * from './approval-details';
 export * from './view';
 export * from './memory-adapters';
