@@ -112,6 +112,22 @@ describe('VER-002 PR-5 — S3 create-only publish (adapter, hermetic)', () => {
     const store = new S3ObjectStore(CFG, fetch);
     await expect(store.putIfAbsent(KEY, BODY, 'application/json')).rejects.toThrow(/reconcile HEAD failed/);
   });
+
+  it('a 409 Conflict is handled EXPLICITLY as "exists" (some providers use it for the If-None-Match conflict)', async () => {
+    const { fetch, calls } = simFetch([{ status: 409 }]);
+    const store = new S3ObjectStore(CFG, fetch);
+    expect(await store.putIfAbsent(KEY, BODY, 'application/json')).toBe('exists');
+    expect(puts(calls).length).toBe(1); // never retried
+  });
+
+  it('grant expiry is enforced BEFORE an internal retry — an ambiguous+absent outcome is not retried past the deadline', async () => {
+    const { fetch, calls } = simFetch([{ status: 500 }, { status: 404 }]); // ambiguous, then absent (would retry)
+    const store = new S3ObjectStore(CFG, fetch);
+    const pastDeadline = new Date(Date.now() - 1000);
+    await expect(store.putIfAbsent(KEY, BODY, 'application/json', { deadline: pastDeadline })).rejects.toThrow(/grant expired/);
+    expect(puts(calls).length).toBe(1); // the first attempt ran; the retry was refused because the grant expired
+    expect(heads(calls).length).toBe(1); // it reconciled once (absent) before the deadline blocked the retry
+  });
 });
 
 describe('VER-002 PR-5 — S3 create-only writer + fail-closed factory gate', () => {

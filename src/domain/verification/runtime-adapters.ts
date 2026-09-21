@@ -11,7 +11,7 @@ import { LocalObjectStore } from '@/domain/documents/local-object-store';
 import { S3ObjectStore } from '@/domain/documents/s3-object-store';
 import { serverEnv } from '@/lib/env.server';
 import type { TenantContext } from '@/types/domain';
-import type { ExclusiveArtifactWriter, RunnerSecretSource, StagedArtifact, StoredArtifactStore } from './ports';
+import type { ExclusiveArtifactWriter, RunnerSecretSource, StageOptions, StagedArtifact, StoredArtifactStore } from './ports';
 import { UnsupportedExclusiveWriteError } from './ports';
 import { PER_ARTIFACT_CAP_BYTES } from './upload-grant';
 import { assertCanonicalTenantKey, tenantPrefix } from './tenant-key';
@@ -141,7 +141,8 @@ class LocalExclusiveArtifactWriter implements ExclusiveArtifactWriter {
     return full;
   }
 
-  async stage(finalKey: string): Promise<StagedArtifact> {
+  async stage(finalKey: string, _opts?: StageOptions): Promise<StagedArtifact> {
+    // Local `link()` is atomic with no internal retry, so a deadline is irrelevant here.
     const finalPath = this.pathWithin(finalKey);
     const tmpDir = join(this.base, '.uploads-tmp');
     await mkdir(tmpDir, { recursive: true });
@@ -212,7 +213,7 @@ class LocalExclusiveArtifactWriter implements ExclusiveArtifactWriter {
  */
 export function s3ExclusiveArtifactWriter(store: S3ObjectStore): ExclusiveArtifactWriter {
   return {
-    async stage(finalKey: string): Promise<StagedArtifact> {
+    async stage(finalKey: string, opts: StageOptions = {}): Promise<StagedArtifact> {
       const chunks: Buffer[] = [];
       let size = 0;
       let discarded = false;
@@ -224,7 +225,8 @@ export function s3ExclusiveArtifactWriter(store: S3ObjectStore): ExclusiveArtifa
           chunks.push(Buffer.from(chunk));
         },
         async publish(contentType: string): Promise<'created' | 'exists'> {
-          return store.putIfAbsent(finalKey, Buffer.concat(chunks), contentType);
+          // The grant's expiry bounds putIfAbsent's internal ambiguous-outcome retries.
+          return store.putIfAbsent(finalKey, Buffer.concat(chunks), contentType, { deadline: opts.deadline });
         },
         async discard(): Promise<void> {
           discarded = true;

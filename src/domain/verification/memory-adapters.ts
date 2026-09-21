@@ -13,6 +13,7 @@ import type {
   NewUploadGrant,
   PriorEvidence,
   RunnerSecretSource,
+  StageOptions,
   StagedArtifact,
   StoredArtifactStore,
   UploadGrant,
@@ -334,7 +335,7 @@ export class InMemoryExclusiveArtifactWriter implements ExclusiveArtifactWriter 
     private readonly hooks: { onAppend?: (bytesSoFar: number) => void | Promise<void> } = {},
   ) {}
 
-  async stage(finalKey: string): Promise<StagedArtifact> {
+  async stage(finalKey: string, _opts?: StageOptions): Promise<StagedArtifact> {
     const chunks: Buffer[] = [];
     let published = false;
     let discarded = false;

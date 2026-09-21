@@ -107,13 +107,20 @@ export interface StagedArtifact {
   discard(): Promise<void>;
 }
 
+/** Options for a staged create-only publish. `deadline` bounds any INTERNAL retry (e.g. the S3 adapter's
+ *  ambiguous-outcome retry) to the grant's expiry — a retry after it is a new create the grant no longer
+ *  authorizes. Adapters without internal retries (local link) may ignore it. */
+export interface StageOptions {
+  readonly deadline?: Date;
+}
+
 /**
  * Create-only artifact writer. Publishes ONLY complete, validated bytes, atomically, without
  * replacement. An adapter that cannot guarantee atomic create-only MUST fail closed (throw), never fall
  * back to an overwriting `put`.
  */
 export interface ExclusiveArtifactWriter {
-  stage(finalKey: string): Promise<StagedArtifact>;
+  stage(finalKey: string, opts?: StageOptions): Promise<StagedArtifact>;
 }
 
 /** Thrown by an adapter that cannot guarantee atomic create-only writes — the caller fails closed and

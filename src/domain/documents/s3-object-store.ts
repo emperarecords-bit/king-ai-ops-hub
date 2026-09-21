@@ -215,8 +215,14 @@ export class S3ObjectStore implements ObjectStore {
    * logic. Whether the PROVIDER actually ENFORCES `If-None-Match`/the checksum (credential-enforced
    * immutability) is NOT VERIFIED here — that is the authorized live acceptance run.
    */
-  async putIfAbsent(key: string, body: Buffer, contentType: string): Promise<CreateOnlyResult> {
+  async putIfAbsent(
+    key: string,
+    body: Buffer,
+    contentType: string,
+    opts: { deadline?: Date; now?: () => Date } = {},
+  ): Promise<CreateOnlyResult> {
     if (!isCanonicalObjectKey(key)) throw new Error('non-canonical object key');
+    const now = opts.now ?? (() => new Date());
     const checksum = createHash('sha256').update(body).digest('base64'); // base64 of the RAW digest (NOT hex)
     const attemptOnce = async (): Promise<CreateOnlyResult | 'ambiguous'> => {
       let res: Response;
@@ -235,7 +241,10 @@ export class S3ObjectStore implements ObjectStore {
         return 'ambiguous'; // network error / timeout — we do not know whether it landed
       }
       if (res.ok) return 'created';
-      if (res.status === 412 || res.status === 409) return 'exists'; // precondition failed ⇒ key exists
+      // 412 Precondition Failed is the standard If-None-Match:* conflict; some S3-compatible providers use
+      // 409 Conflict for the same condition. Both mean the key already exists — handled explicitly.
+      if (res.status === 412) return 'exists';
+      if (res.status === 409) return 'exists';
       if (res.status === 401 || res.status === 403) throw new Error(`S3 create-only ${key} denied: ${res.status}`);
       if (res.status >= 500) return 'ambiguous';
       throw new Error(`S3 create-only ${key} failed: ${res.status}`); // other 4xx — non-retryable
@@ -243,6 +252,11 @@ export class S3ObjectStore implements ObjectStore {
 
     const MAX_ATTEMPTS = 3;
     for (let i = 0; i < MAX_ATTEMPTS; i++) {
+      // Enforce the grant's expiry BEFORE any internal retry — a retry (i>0) after the deadline is a NEW
+      // create attempt the grant no longer authorizes, so stop rather than keep trying past expiry.
+      if (i > 0 && opts.deadline && now().getTime() > opts.deadline.getTime()) {
+        throw new Error(`S3 create-only ${key} not retried: grant expired before the next attempt`);
+      }
       const outcome = await attemptOnce();
       if (outcome !== 'ambiguous') return outcome;
       // Ambiguous ⇒ reconcile by HEAD before any retry; a retry is ONLY ever the same conditional PUT.
