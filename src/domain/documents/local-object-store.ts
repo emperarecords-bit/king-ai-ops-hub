@@ -29,9 +29,11 @@ export class LocalObjectStore implements ObjectStore {
    *  anything that escapes base. `..`/`.` segments are rejected outright rather
    *  than silently collapsed by resolve(). */
   private pathFor(key: string): string {
-    // Reject non-canonical keys (backslash/NUL, `.`/`..`, and — critically — empty `//` segments that
-    // `resolve` would otherwise collapse) so no alias can resolve onto another key's path.
-    if (!isCanonicalObjectKey(key)) {
+    // Reject traversal / backslash / NUL. NOTE: this is used for OBJECT keys AND for directory prefixes
+    // (list uses a trailing-slash prefix), so it does NOT reject a trailing slash or empty segments here.
+    // The strict `isCanonicalObjectKey` guard is applied in `put` (before classification), which is where
+    // an alias could otherwise collapse onto — and overwrite — a protected verification object.
+    if (/[\\\x00]/.test(key) || key.split('/').some((s) => s === '.' || s === '..')) {
       throw new Error('non-canonical object key');
     }
     const full = resolve(this.base, key);
