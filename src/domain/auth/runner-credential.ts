@@ -46,12 +46,15 @@ export function parseRunnerCredential(authorizationHeader: string | null | undef
 }
 
 /**
- * True when a header carries a bearer token at all — the signal that commits the request to the
- * MACHINE path. Case-INSENSITIVE on the scheme so a differently-cased header ("bearer …") is still
- * recognized as a bearer attempt and can never slip through to a human session.
+ * True when a header is a bearer-scheme ATTEMPT — the signal that commits the request to the MACHINE
+ * path. Case-INSENSITIVE on the scheme, and it fires even when the token is EMPTY or whitespace-only
+ * ("Bearer", "Bearer ", "BEARER\t"): those are still bearer attempts and must be rejected (401 /
+ * 400-ambiguous), never allowed to fall back to a human session. The `(?=$|[ \t])` lookahead keeps a
+ * different scheme like "Bearerish"/"Basic" from matching. Parsing (below) still rejects the empty/
+ * malformed token, so detection ≠ acceptance.
  */
 export function hasBearerCredential(authorizationHeader: string | null | undefined): boolean {
-  return typeof authorizationHeader === 'string' && /^Bearer[ \t]+\S/i.test(authorizationHeader.trim());
+  return typeof authorizationHeader === 'string' && /^Bearer(?=$|[ \t])/i.test(authorizationHeader.trim());
 }
 
 /** Generate a new (keyId, secret) pair. The secret is returned exactly once. */

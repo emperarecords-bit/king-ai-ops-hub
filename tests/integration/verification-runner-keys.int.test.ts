@@ -38,16 +38,19 @@ function assertLoopback(target: string): void {
 async function post(
   base: string,
   path: string,
-  opts: { cookie?: string; bearer?: string; body?: unknown } = {},
+  opts: { cookie?: string; bearer?: string; authHeaderRaw?: string; body?: unknown } = {},
 ): Promise<{ status: number; json: Record<string, unknown> }> {
   const url = `${base}${path}`;
   assertLoopback(url); // before any request / credential leaves the process
+  // `authHeaderRaw` sets the Authorization header VERBATIM (for odd-cased/empty-token cases); `bearer`
+  // is the convenience form. Either way the request is validated against loopback above before sending.
+  const authorization = opts.authHeaderRaw ?? (opts.bearer ? `Bearer ${opts.bearer}` : undefined);
   const res = await fetch(url, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       ...(opts.cookie ? { cookie: opts.cookie } : {}),
-      ...(opts.bearer ? { authorization: `Bearer ${opts.bearer}` } : {}),
+      ...(authorization !== undefined ? { authorization } : {}),
     },
     body: JSON.stringify(opts.body ?? {}),
     redirect: 'error',
@@ -170,29 +173,33 @@ describe.skipIf(!enabled)('VER-002 PR-2 — auth dispatch (bearer vs session)', 
     const issued = await post(ON, keysPath(KEY), { cookie: ADMIN });
     const cred = String(issued.json.credential);
     // lowercase scheme, no cookie → machine path → guard passes → a decision is returned.
-    const res = await fetch(`${ON}${ingestPath(KEY)}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `bearer ${cred}` },
-      body: JSON.stringify(envelope()),
-      redirect: 'error',
-    });
-    const json = (await res.json()) as Record<string, unknown>;
-    expect(json).toHaveProperty('decision');
-    expect(json).not.toHaveProperty('error');
+    const res = await post(ON, ingestPath(KEY), { authHeaderRaw: `bearer ${cred}`, body: envelope() });
+    expect(res.json).toHaveProperty('decision');
+    expect(res.json).not.toHaveProperty('error');
   });
 
   it('a differently-cased MALFORMED bearer with a valid session is still rejected (never falls back)', async () => {
     // Both present → ambiguous 400 (bearer detected case-insensitively; not silently treated as session).
-    const res = await fetch(`${ON}${ingestPath(KEY)}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: 'BEARER not-a-valid-credential', cookie: ADMIN },
-      body: JSON.stringify(envelope()),
-      redirect: 'error',
-    });
+    const res = await post(ON, ingestPath(KEY), { authHeaderRaw: 'BEARER not-a-valid-credential', cookie: ADMIN, body: envelope() });
     expect(res.status).toBe(400);
-    const json = (await res.json()) as Record<string, unknown>;
-    expect(json).not.toHaveProperty('decision');
+    expect(res.json).not.toHaveProperty('decision');
   });
+
+  // A bearer scheme with an EMPTY or whitespace-only token is still a bearer ATTEMPT: without a session
+  // it is 401 (never a fallback); with a session it is 400 (ambiguous). Covers "Bearer", "Bearer ", "BEARER\t".
+  for (const header of ['Bearer', 'Bearer ', 'BEARER\t']) {
+    const label = JSON.stringify(header);
+    it(`an empty/whitespace bearer token (${label}) with NO session → 401, never a session fallback`, async () => {
+      const res = await post(ON, ingestPath(KEY), { authHeaderRaw: header, body: envelope() });
+      expect(res.status).toBe(401);
+      expect(res.json).not.toHaveProperty('decision');
+    });
+    it(`an empty/whitespace bearer token (${label}) WITH a session → 400 ambiguous`, async () => {
+      const res = await post(ON, ingestPath(KEY), { authHeaderRaw: header, cookie: ADMIN, body: envelope() });
+      expect(res.status).toBe(400);
+      expect(res.json).not.toHaveProperty('decision');
+    });
+  }
 });
 
 // ─────────────────── genuine machine-authenticated ingestion (real signature) ───────────────────
