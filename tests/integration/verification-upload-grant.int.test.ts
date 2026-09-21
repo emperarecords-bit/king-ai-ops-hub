@@ -30,6 +30,7 @@ const STORE_DIR = process.env.VER_UP_STORE_DIR ?? '';
 const DB_URL = process.env.VER_UP_DB_URL ?? '';
 const CAT_VERSION = process.env.VER_UP_CATALOG_VERSION ?? '';
 const CAT_DIGEST = process.env.VER_UP_CATALOG_DIGEST ?? '';
+const ADMIN_COOKIE = process.env.VER_UP_COOKIE_ADMIN ?? ''; // optional: exercises the non-runner path
 const enabled = Boolean(BASE && KEY && RUNNER && MASTER && ORG && PROJECT_ID && CONTRACT && TASK && COMMIT && STORE_DIR && DB_URL && CAT_VERSION && CAT_DIGEST);
 
 const PATH = 'test-results.json';
@@ -297,6 +298,20 @@ describe.skipIf(!enabled)('VER-002 PR-4 — redemption (stream → atomic create
       [String(g.grantId)],
     )) as { c: number }[];
     expect(rows[0]!.c).toBe(0);
+  });
+
+  it.skipIf(!ADMIN_COOKIE)('a non-runner (human session) is refused (403) on the redeem path', async () => {
+    // Runner-only: a human session may not redeem. The body-cancel cleanup on this early return is proven
+    // deterministically by the route-unit tests (tests/unit/verification-upload-redeem-route.test.ts).
+    const body = bytes('{"passed":true,"redeem":"human"}');
+    const g = (await requestGrant('att-human', body)).json.grant as Record<string, unknown>;
+    const res = await fetch(`${BASE}${String(g.uploadPath)}`, {
+      method: 'PUT',
+      headers: { cookie: ADMIN_COOKIE, 'content-type': 'application/octet-stream' },
+      body: new Uint8Array(body),
+      redirect: 'error',
+    });
+    expect(res.status).toBe(403);
   });
 
   it('a later failed retry cannot undo a completion', async () => {

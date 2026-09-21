@@ -4,7 +4,7 @@
  * object store.
  */
 import { createHmac, randomUUID } from 'node:crypto';
-import { link, mkdir, open, realpath, rm } from 'node:fs/promises';
+import { link, lstat, mkdir, open, realpath, rm } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { getObjectStore, ObjectNotFoundError, type ObjectStore } from '@/domain/documents/object-store';
 import { LocalObjectStore } from '@/domain/documents/local-object-store';
@@ -148,6 +148,10 @@ class LocalExclusiveArtifactWriter implements ExclusiveArtifactWriter {
     if (!(await pathStaysWithinBase(finalPath, this.base))) throw new TenantEscapeError(finalKey);
     const tmpPath = join(tmpDir, randomUUID());
     const fh = await open(tmpPath, 'wx'); // exclusive create of the PRIVATE temp (never the final key)
+    // Identity of the exact file that RECEIVES the validated bytes, captured via the open fd. Publication
+    // must link THIS file — not whatever currently sits at tmpPath (which could be substituted after
+    // staging).
+    const stagedStat = await fh.stat();
     let closed = false;
     const base = this.base;
     const closeOnce = async (): Promise<void> => {
@@ -167,8 +171,17 @@ class LocalExclusiveArtifactWriter implements ExclusiveArtifactWriter {
       async publish(): Promise<'created' | 'exists'> {
         await fh.sync();
         await closeOnce();
-        // RE-CHECK containment before mkdir/link — an ancestor could have become a symlink mid-upload.
+        // RE-CHECK destination containment before mkdir/link — an ancestor could have become a symlink
+        // mid-upload.
         if (!(await pathStaysWithinBase(finalPath, base))) throw new TenantEscapeError(finalKey);
+        // SOURCE containment + IDENTITY: the temp path must still resolve inside the store, and must still
+        // be the exact regular file we wrote (same device+inode via the fd's stat). This defeats a
+        // temp-directory or temp-file substitution performed after staging — we never link a swapped file.
+        if (!(await pathStaysWithinBase(tmpPath, base))) throw new TenantEscapeError(tmpPath);
+        const onDisk = await lstat(tmpPath); // lstat: a symlink here is NOT a regular file → rejected
+        if (!onDisk.isFile() || onDisk.ino !== stagedStat.ino || onDisk.dev !== stagedStat.dev) {
+          throw new Error('staged temporary file was substituted before publication');
+        }
         await mkdir(dirname(finalPath), { recursive: true });
         try {
           await link(tmpPath, finalPath); // atomic create-only; fails if the final key already exists

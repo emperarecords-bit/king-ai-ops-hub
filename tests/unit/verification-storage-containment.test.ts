@@ -129,6 +129,36 @@ describe('VER-002 tenant storage containment (real local store, two projects)', 
     await expect(writeFully(stalled, chunk)).rejects.toThrow(/zero-progress/);
   });
 
+  // Finding 1 (round 3): an ordinary put must not FOLLOW a filesystem symlink/junction whose benign-looking
+  // lexical key resolves onto a protected verification object.
+  it.skipIf(!symlinkOk)('ordinary put refuses a filesystem alias (symlink) that resolves onto a verification object', async () => {
+    writeAt('org/A/project/P/request/rr/attempt/aa/obj', 'UPLOADED-BYTES'); // a real verification object
+    // A symlink whose lexical key (`.../valias/obj`) is NOT verification-shaped, but resolves into the object's dir.
+    symlinkSync(join(base, 'org/A/project/P/request/rr/attempt/aa'), join(base, 'org/A/project/P/valias'), 'junction');
+    await expect(store.put('org/A/project/P/valias/obj', Buffer.from('CLOBBER'), 'application/octet-stream')).rejects.toThrow(/verification artifact object/);
+    expect(readFileSync(join(base, 'org/A/project/P/request/rr/attempt/aa/obj'), 'utf8')).toBe('UPLOADED-BYTES');
+  });
+
+  // Finding 2 (round 3): publication must link the SAME temp file that received the validated bytes. A
+  // temp-file substitution after staging is detected (device+inode identity) and refused — never linked.
+  it('exclusive writer refuses to publish a SUBSTITUTED temp file (links only the validated bytes)', async () => {
+    const writer = await exclusiveArtifactWriter(store);
+    const tmpDir = join(base, '.uploads-tmp');
+    const before = existsSync(tmpDir) ? new Set(readdirSync(tmpDir)) : new Set<string>();
+    const staged = await writer.stage('org/A/project/P/request/rs/attempt/as/objs');
+    await staged.append(Buffer.from('VALIDATED-BYTES'));
+    // Substitute the staged temp file (attacker swaps it for different bytes → a NEW inode).
+    const added = readdirSync(tmpDir).filter((n) => !before.has(n));
+    expect(added.length).toBe(1);
+    const tmp = join(tmpDir, added[0]!);
+    rmSync(tmp);
+    writeFileSync(tmp, 'SWAPPED-EVIL-BYTES');
+    await expect(staged.publish('application/octet-stream')).rejects.toThrow(/substituted/);
+    await staged.discard();
+    // The final object was never created from the swapped bytes.
+    expect(existsSync(join(base, 'org/A/project/P/request/rs/attempt/as/objs'))).toBe(false);
+  });
+
   it('the writer temp directory holds no leftover files after publish + discard', async () => {
     const tmpDir = join(base, '.uploads-tmp');
     if (existsSync(tmpDir)) expect(readdirSync(tmpDir).length).toBe(0);

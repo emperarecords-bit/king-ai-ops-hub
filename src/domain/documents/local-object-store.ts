@@ -1,6 +1,6 @@
 import 'server-only';
 import { mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { isCanonicalObjectKey, isVerificationArtifactKey, type ObjectStore, ObjectNotFoundError, type StoredObjectHead, VerificationObjectWriteError } from './object-store';
 
@@ -67,6 +67,36 @@ export class LocalObjectStore implements ObjectStore {
     return real === tenantDir || real.startsWith(tenantDir + sep);
   }
 
+  /**
+   * The EFFECTIVE object key an absolute path resolves to AFTER following any symlinked ancestors — i.e.
+   * realpath the deepest existing ancestor and re-append the remaining (not-yet-created) suffix, then
+   * express it relative to the store base. Used so `put` can refuse a write whose real destination lands
+   * on a verification artifact object even when the LEXICAL key does not look like one. Returns null if it
+   * resolves outside the base.
+   */
+  private async effectiveKey(absTarget: string): Promise<string | null> {
+    const suffix: string[] = [];
+    let cur = absTarget;
+    for (;;) {
+      let real: string | null = null;
+      try {
+        real = await realpath(cur);
+      } catch {
+        real = null; // this ancestor does not exist yet — keep walking up
+      }
+      if (real !== null) {
+        const full = suffix.length ? join(real, ...suffix) : real;
+        const rel = relative(this.base, full);
+        if (rel === '' || rel === '..' || rel.startsWith('..' + sep)) return null; // outside the base
+        return rel.split(sep).join('/');
+      }
+      suffix.unshift(basename(cur));
+      const parent = dirname(cur);
+      if (parent === cur) return null;
+      cur = parent;
+    }
+  }
+
   async put(key: string, body: Buffer, contentType: string): Promise<void> {
     // Reject non-canonical keys BEFORE classification, so a doubled-slash (or other) alias that would
     // collapse onto a verification object cannot dodge the guard below.
@@ -75,6 +105,10 @@ export class LocalObjectStore implements ObjectStore {
     // only through the create-only exclusive publisher. Fail closed rather than clobber one.
     if (isVerificationArtifactKey(key)) throw new VerificationObjectWriteError(key);
     const p = this.pathFor(key);
+    // Defense against FILESYSTEM aliases: a symlinked ancestor can make a benign-looking lexical key
+    // resolve onto a verification artifact object. Refuse when the REAL destination is such an object.
+    const effective = await this.effectiveKey(p);
+    if (effective !== null && isVerificationArtifactKey(effective)) throw new VerificationObjectWriteError(key);
     await mkdir(dirname(p), { recursive: true });
     await writeFile(p, body);
     await writeFile(`${p}.meta`, JSON.stringify({ contentType, size: body.length }));

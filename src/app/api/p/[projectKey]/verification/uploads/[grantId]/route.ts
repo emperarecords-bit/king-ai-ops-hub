@@ -1,5 +1,6 @@
 import { AppError, toPublicMessage } from '@/lib/errors';
 import { requireRunnerOrTenant } from '@/domain/auth/guard';
+import { cancelUnreadRequestBody } from '@/lib/http-body';
 import { serverEnv } from '@/lib/env.server';
 import { withRunner } from '@/db/tenant';
 import type { VerificationCaller } from '@/types/domain';
@@ -61,55 +62,54 @@ export async function PUT(
   req: Request,
   { params }: { params: Promise<{ projectKey: string; grantId: string }> },
 ): Promise<Response> {
-  const { projectKey, grantId } = await params;
-
-  if (!serverEnv().VERIFICATION_RUNNER_UPLOAD_ENABLED) {
-    return Response.json({ error: 'Artifact uploads are disabled.' }, { status: 403 });
-  }
-
-  let caller: VerificationCaller;
+  // One outer finally so EVERY exit — disabled control, authentication rejection, non-runner principal,
+  // a redeem rejection, or a thrown error — cancels an unread request body (bodyChunks owns/cancels it
+  // once the streaming redeem locks it).
   try {
-    caller = await requireRunnerOrTenant(projectKey, req);
-  } catch (err) {
-    const code = err instanceof AppError ? err.code : null;
-    const status = code === 'unauthenticated' ? 401 : code === 'validation' ? 400 : 403;
-    return Response.json({ error: toPublicMessage(err) }, { status });
-  }
-  if (caller.kind !== 'runner') {
-    return Response.json({ error: 'Only a runner credential may redeem an upload grant.' }, { status: 403 });
-  }
-  const runner = caller.runner;
+    const { projectKey, grantId } = await params;
 
-  try {
-    const writer = await exclusiveArtifactWriter();
-    const outcome = await withRunner(runner, (tx) =>
-      redeemUploadGrant(
-        {
-          grants: createDrizzleUploadGrantStore(tx),
-          writer,
-          artifacts: objectStoreArtifactStore(runner),
-        },
-        runner,
-        grantId,
-        bodyChunks(req),
-      ),
-    );
-    if (outcome.rejection) {
-      return Response.json({ error: outcome.rejection.message, code: outcome.rejection.code }, { status: STATUS[outcome.rejection.code] });
+    if (!serverEnv().VERIFICATION_RUNNER_UPLOAD_ENABLED) {
+      return Response.json({ error: 'Artifact uploads are disabled.' }, { status: 403 });
     }
-    return Response.json(
-      { completed: outcome.completed, idempotent: outcome.idempotent, reconciled: outcome.reconciled, objectKey: outcome.objectKey },
-      { status: 200 },
-    );
-  } catch (err) {
-    return Response.json({ error: toPublicMessage(err) }, { status: 500 });
-  } finally {
-    // Early-return paths (grant not found, expired, already-complete) never read the body — cancel the
-    // unconsumed request stream so it is not left dangling. Locked ⇒ bodyChunks owns/cancels it.
+
+    let caller: VerificationCaller;
     try {
-      if (req.body && !req.body.locked) await req.body.cancel();
-    } catch {
-      /* already consumed/errored */
+      caller = await requireRunnerOrTenant(projectKey, req);
+    } catch (err) {
+      const code = err instanceof AppError ? err.code : null;
+      const status = code === 'unauthenticated' ? 401 : code === 'validation' ? 400 : 403;
+      return Response.json({ error: toPublicMessage(err) }, { status });
     }
+    if (caller.kind !== 'runner') {
+      return Response.json({ error: 'Only a runner credential may redeem an upload grant.' }, { status: 403 });
+    }
+    const runner = caller.runner;
+
+    try {
+      const writer = await exclusiveArtifactWriter();
+      const outcome = await withRunner(runner, (tx) =>
+        redeemUploadGrant(
+          {
+            grants: createDrizzleUploadGrantStore(tx),
+            writer,
+            artifacts: objectStoreArtifactStore(runner),
+          },
+          runner,
+          grantId,
+          bodyChunks(req),
+        ),
+      );
+      if (outcome.rejection) {
+        return Response.json({ error: outcome.rejection.message, code: outcome.rejection.code }, { status: STATUS[outcome.rejection.code] });
+      }
+      return Response.json(
+        { completed: outcome.completed, idempotent: outcome.idempotent, reconciled: outcome.reconciled, objectKey: outcome.objectKey },
+        { status: 200 },
+      );
+    } catch (err) {
+      return Response.json({ error: toPublicMessage(err) }, { status: 500 });
+    }
+  } finally {
+    await cancelUnreadRequestBody(req);
   }
 }
