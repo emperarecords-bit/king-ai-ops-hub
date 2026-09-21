@@ -13,8 +13,9 @@
  * VER_RK_COOKIE_ADMIN, VER_RK_COOKIE_MEMBER, VER_RK_COOKIE_VIEWER, VER_RK_CRED_OFF, VER_RK_CRED_OFF_REVOKE,
  * VER_RK_CRED_OFF_REVOKE_ID. Self-skips unless set.
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { signEvidence } from '@/domain/verification';
 
 const ON = process.env.VER_RK_BASE_ON ?? '';
 const OFF = process.env.VER_RK_BASE_OFF ?? '';
@@ -107,11 +108,11 @@ describe.skipIf(!enabled)('VER-002 PR-2 — runner credentials (controls ON)', (
     expect(res.json).not.toHaveProperty('error');
   });
 
-  it('a malformed bearer is 401 and never falls back to a session', async () => {
-    const res = await post(ON, ingestPath(KEY), { bearer: 'not-a-valid-credential', cookie: ADMIN, body: envelope() });
+  it('a malformed bearer (no session) is 401 and never reaches ingest', async () => {
+    const res = await post(ON, ingestPath(KEY), { bearer: 'not-a-valid-credential', body: envelope() });
     expect(res.status).toBe(401);
     expect(res.json).toHaveProperty('error');
-    expect(res.json).not.toHaveProperty('decision'); // no fallback to the admin session
+    expect(res.json).not.toHaveProperty('decision');
   });
 
   it("a credential for one project cannot act on another project's URL (403)", async () => {
@@ -152,5 +153,145 @@ describe.skipIf(!enabled)('VER-002 PR-2 — runner credentials (controls OFF)', 
     const revoked = await post(OFF, `${keysPath(KEY)}/${CRED_OFF_REVOKE_ID}/revoke`, { cookie: ADMIN });
     expect(revoked.status).toBe(200);
     expect(revoked.json).toMatchObject({ revoked: true });
+  });
+});
+
+// ─────────────────── dispatch regressions (with a valid session present) ───────────────────
+describe.skipIf(!enabled)('VER-002 PR-2 — auth dispatch (bearer vs session)', () => {
+  it('a bearer AND a session together is rejected as ambiguous (400) — never disambiguated', async () => {
+    const issued = await post(ON, keysPath(KEY), { cookie: ADMIN });
+    const cred = String(issued.json.credential);
+    const res = await post(ON, ingestPath(KEY), { bearer: cred, cookie: ADMIN, body: envelope() });
+    expect(res.status).toBe(400);
+    expect(res.json).not.toHaveProperty('decision');
+  });
+
+  it('a differently-cased bearer (no session) still commits to the machine path — no session fallback', async () => {
+    const issued = await post(ON, keysPath(KEY), { cookie: ADMIN });
+    const cred = String(issued.json.credential);
+    // lowercase scheme, no cookie → machine path → guard passes → a decision is returned.
+    const res = await fetch(`${ON}${ingestPath(KEY)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `bearer ${cred}` },
+      body: JSON.stringify(envelope()),
+      redirect: 'error',
+    });
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json).toHaveProperty('decision');
+    expect(json).not.toHaveProperty('error');
+  });
+
+  it('a differently-cased MALFORMED bearer with a valid session is still rejected (never falls back)', async () => {
+    // Both present → ambiguous 400 (bearer detected case-insensitively; not silently treated as session).
+    const res = await fetch(`${ON}${ingestPath(KEY)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'BEARER not-a-valid-credential', cookie: ADMIN },
+      body: JSON.stringify(envelope()),
+      redirect: 'error',
+    });
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json).not.toHaveProperty('decision');
+  });
+});
+
+// ─────────────────── genuine machine-authenticated ingestion (real signature) ───────────────────
+const ingestEnabled = Boolean(
+  enabled &&
+    process.env.VER_RK_MASTER &&
+    process.env.VER_RK_ORG &&
+    process.env.VER_RK_PROJECT_ID &&
+    process.env.VER_RK_CONTRACT_ID &&
+    process.env.VER_RK_TASK_ID &&
+    process.env.VER_RK_COMMIT &&
+    process.env.VER_RK_REPO &&
+    process.env.VER_RK_CRED_EXPIRED,
+);
+const M = {
+  master: process.env.VER_RK_MASTER ?? '',
+  org: process.env.VER_RK_ORG ?? '',
+  project: process.env.VER_RK_PROJECT_ID ?? '',
+  contract: process.env.VER_RK_CONTRACT_ID ?? '',
+  task: process.env.VER_RK_TASK_ID ?? '',
+  commit: process.env.VER_RK_COMMIT ?? '',
+  repo: process.env.VER_RK_REPO ?? '',
+  credExpired: process.env.VER_RK_CRED_EXPIRED ?? '',
+};
+const ART_BYTES = Buffer.from('{"passed":true}', 'utf8');
+const ART_SHA = createHash('sha256').update(ART_BYTES).digest('hex');
+/** The exact object key the orchestration wrote the artifact to (canonical tenant key). */
+const artKey = () => `org/${M.org}/project/${M.project}/request/${M.contract}/attempt/att-1/test-results.json`;
+/** Derive the project's runner signing secret the same way the server does (v1). */
+const derivedSecret = () => createHmac('sha256', M.master).update(`verification-runner:v1:${M.org}:${M.project}`).digest('hex');
+function signedEnvelope(over: Record<string, unknown> = {}, signingKeyVersion?: string) {
+  const payload = {
+    requestId: M.contract,
+    orgId: M.org,
+    projectId: M.project,
+    taskId: M.task,
+    repoFullName: M.repo,
+    commitSha: M.commit,
+    dirty: false,
+    uncommittedChangesDigest: null,
+    runnerId: 'runner-real',
+    runId: 'run-real-1',
+    attemptId: 'att-1',
+    environment: 'ci',
+    source: 'local_runner' as const,
+    checks: [{ name: 'unit', status: 'passed' as const, command: 'npm run unit', exitCode: 0, startedAt: '2026-09-20T00:00:00.000Z', finishedAt: '2026-09-20T00:00:05.000Z', detail: null }],
+    artifacts: [{ path: 'test-results.json', sha256: ART_SHA, sizeBytes: ART_BYTES.length, storageKey: artKey() }],
+    idempotencyKey: 'idem-real-1',
+    submittedAt: new Date().toISOString(),
+    ...over,
+  };
+  const env: Record<string, unknown> = { runnerId: payload.runnerId, payload, signature: signEvidence(derivedSecret(), payload as never) };
+  if (signingKeyVersion) env.signingKeyVersion = signingKeyVersion;
+  return env;
+}
+
+describe.skipIf(!ingestEnabled)('VER-002 PR-2 — genuine machine-authenticated ingestion', () => {
+  it('valid signature + passing check + required artifact → verified_complete, and identical retry replays', async () => {
+    const issued = await post(ON, keysPath(KEY), { cookie: ADMIN });
+    const cred = String(issued.json.credential);
+    // Build ONE envelope (unique idempotency key + a single fixed submittedAt) and post it twice, so the
+    // retry is byte-identical (same digest ⇒ a true idempotent replay, not a conflict).
+    const env = signedEnvelope({ idempotencyKey: `idem-${randomUUID()}`, submittedAt: new Date().toISOString() });
+    const first = await post(ON, ingestPath(KEY), { bearer: cred, body: env });
+    const d1 = first.json.decision as { accepted: boolean; status: string; deliverable: boolean } | undefined;
+    expect(d1?.accepted).toBe(true);
+    expect(d1?.status).toBe('verified_complete');
+    expect(d1?.deliverable).toBe(true);
+    // Identical retry → replayed, same decision, not a second row.
+    const again = await post(ON, ingestPath(KEY), { bearer: cred, body: env });
+    const d2 = again.json.decision as { accepted: boolean; status: string; replayed?: boolean } | undefined;
+    expect(d2?.accepted).toBe(true);
+    expect(d2?.status).toBe('verified_complete');
+    expect(d2?.replayed).toBe(true);
+  });
+
+  it('an expired credential is refused (401)', async () => {
+    const res = await post(ON, ingestPath(KEY), { bearer: M.credExpired, body: signedEnvelope({ idempotencyKey: 'idem-exp' }) });
+    expect(res.status).toBe(401);
+    expect(res.json).not.toHaveProperty('decision');
+  });
+
+  it('a wrong secret (valid keyId) is refused (401)', async () => {
+    const issued = await post(ON, keysPath(KEY), { cookie: ADMIN });
+    const keyId = String(issued.json.keyId);
+    const res = await post(ON, ingestPath(KEY), { bearer: `${keyId}.wrongsecretwrongsecretwrongsecret`, body: signedEnvelope({ idempotencyKey: 'idem-wrong' }) });
+    expect(res.status).toBe(401);
+    expect(res.json).not.toHaveProperty('decision');
+  });
+
+  it('an unsupported signing version is rejected on the MACHINE path', async () => {
+    const issued = await post(ON, keysPath(KEY), { cookie: ADMIN });
+    const cred = String(issued.json.credential);
+    const res = await post(ON, ingestPath(KEY), { bearer: cred, body: signedEnvelope({ idempotencyKey: 'idem-v2-m' }, 'v2') });
+    expect((res.json.decision as { rejection?: { code: string } })?.rejection?.code).toBe('unsupported_signing_version');
+  });
+
+  it('an unsupported signing version is rejected on the HUMAN (session) path too', async () => {
+    const res = await post(ON, ingestPath(KEY), { cookie: ADMIN, body: signedEnvelope({ idempotencyKey: 'idem-v2-h' }, 'v2') });
+    expect((res.json.decision as { rejection?: { code: string } })?.rejection?.code).toBe('unsupported_signing_version');
   });
 });

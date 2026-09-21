@@ -35,9 +35,14 @@ describe('runner credential — parsing', () => {
       expect(parseRunnerCredential(h as string | null), String(h)).toBeNull();
     }
   });
-  it('hasBearerCredential detects a bearer token regardless of validity', () => {
+  it('accepts a differently-cased scheme (HTTP schemes are case-insensitive)', () => {
+    expect(parseRunnerCredential(`bearer ${id}.sec`)).toEqual({ keyId: id, secret: 'sec' });
+    expect(parseRunnerCredential(`BEARER ${id}.sec`)).toEqual({ keyId: id, secret: 'sec' });
+  });
+  it('hasBearerCredential detects a bearer token regardless of casing/validity (no session fallback)', () => {
     expect(hasBearerCredential(`Bearer ${id}.x`)).toBe(true);
-    expect(hasBearerCredential('Bearer x')).toBe(true);
+    expect(hasBearerCredential(`bearer ${id}.x`)).toBe(true); // differently cased still committed to machine path
+    expect(hasBearerCredential('BEARER x')).toBe(true);
     expect(hasBearerCredential('Basic abc')).toBe(false);
     expect(hasBearerCredential(null)).toBe(false);
     expect(hasBearerCredential('Bearer ')).toBe(false);

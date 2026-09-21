@@ -71,10 +71,10 @@ export async function POST(
   try {
     caller = await requireRunnerOrTenant(projectKey, req);
   } catch (err) {
-    return Response.json(
-      { error: toPublicMessage(err) },
-      { status: err instanceof AppError && err.code === 'unauthenticated' ? 401 : 403 },
-    );
+    // unauthenticated → 401; ambiguous credentials (validation) → 400; anything else → 403.
+    const code = err instanceof AppError ? err.code : null;
+    const status = code === 'unauthenticated' ? 401 : code === 'validation' ? 400 : 403;
+    return Response.json({ error: toPublicMessage(err) }, { status });
   }
   // Both principals carry the trusted (orgId, projectId); the runner has no user identity.
   const tenant = caller.kind === 'user' ? caller.tenant : caller.runner;

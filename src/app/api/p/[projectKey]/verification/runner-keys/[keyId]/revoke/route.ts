@@ -35,7 +35,7 @@ export async function POST(
   }
 
   try {
-    const revoked = await revokeRunnerKey(ctx, keyId, new Date());
+    const revoked = await revokeRunnerKey(ctx, keyId);
     if (!revoked) {
       // Not in this project, or already revoked.
       return Response.json({ error: 'Runner credential not found or already revoked.' }, { status: 404 });

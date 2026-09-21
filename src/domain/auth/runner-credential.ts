@@ -28,7 +28,10 @@ export interface ParsedRunnerCredential {
  */
 export function parseRunnerCredential(authorizationHeader: string | null | undefined): ParsedRunnerCredential | null {
   if (!authorizationHeader) return null;
-  const m = /^Bearer (.+)$/.exec(authorizationHeader.trim());
+  // The HTTP auth SCHEME is case-insensitive, so "bearer"/"BEARER" are the same scheme as "Bearer".
+  // We match it case-insensitively — combined with case-insensitive detection, a differently-cased
+  // bearer still commits to the machine path (and, if malformed, is rejected — never a session fallback).
+  const m = /^Bearer[ \t]+(.+)$/i.exec(authorizationHeader.trim());
   if (!m) return null;
   const token = m[1]!;
   // Exactly one dot: keyId.secret. Split on the FIRST dot only, then reject if the secret itself
@@ -42,9 +45,13 @@ export function parseRunnerCredential(authorizationHeader: string | null | undef
   return { keyId, secret };
 }
 
-/** True when a header carries a bearer token at all (used to decide auth path before validation). */
+/**
+ * True when a header carries a bearer token at all — the signal that commits the request to the
+ * MACHINE path. Case-INSENSITIVE on the scheme so a differently-cased header ("bearer …") is still
+ * recognized as a bearer attempt and can never slip through to a human session.
+ */
 export function hasBearerCredential(authorizationHeader: string | null | undefined): boolean {
-  return typeof authorizationHeader === 'string' && /^Bearer \S/.test(authorizationHeader.trim());
+  return typeof authorizationHeader === 'string' && /^Bearer[ \t]+\S/i.test(authorizationHeader.trim());
 }
 
 /** Generate a new (keyId, secret) pair. The secret is returned exactly once. */

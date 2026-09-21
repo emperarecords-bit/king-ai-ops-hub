@@ -1,16 +1,18 @@
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import type { TenantContext } from '@/types/domain';
 import { getDb } from './client';
 import { withRunner, withTenant } from './tenant';
-import { verificationRunnerKeys } from './schema';
 
 /**
  * VER-002 PR-2 — data access for runner (machine) credentials.
  *
- * Two PRE-TENANT reads go through hardened SECURITY DEFINER functions (src/db/rls.sql), because they
- * run before any tenant context exists: resolving a bearer's keyId and resolving a project key. Both
- * expose only what authentication needs. Issuance/revocation, by contrast, run under the admin's
- * tenant context (withTenant) so RLS confines them to the admin's own project.
+ * app_server has NO direct table privileges on verification_runner_keys (no select/insert/update/
+ * delete): secret material is never broadly SELECTable and credential fields are never generally
+ * mutable. EVERY operation goes through a narrowly-scoped SECURITY DEFINER function (src/db/rls.sql):
+ *  - the two PRE-TENANT reads (lookup a bearer's keyId, resolve a project key) run before any tenant
+ *    context exists and return only what authentication needs;
+ *  - issue/revoke/touch run under the caller's tenant GUCs (withTenant/withRunner) and derive the
+ *    tenant from those GUCs, so they can only ever act within the caller's own project.
  */
 
 /** getDb().execute() returns a driver-shaped result ({rows} or an array); read the first row uniformly. */
@@ -64,48 +66,32 @@ export async function resolveProjectByKey(projectKey: string): Promise<{ orgId: 
   return r ? { orgId: r.org_id, projectId: r.project_id } : null;
 }
 
-/** Issue a credential row under the admin's tenant context (RLS pins org/project). Returns the keyId. */
+/** Issue a credential via the scoped definer function (tenant/creator taken from the admin's GUCs). */
 export async function insertRunnerKey(
   ctx: TenantContext,
   values: { keyId: string; secretHash: string; secretSalt: string; label: string; expiresAt: Date },
 ): Promise<void> {
   await withTenant(ctx, (tx) =>
-    tx.insert(verificationRunnerKeys).values({
-      id: values.keyId,
-      orgId: ctx.orgId,
-      projectId: ctx.projectId,
-      secretHash: values.secretHash,
-      secretSalt: values.secretSalt,
-      label: values.label,
-      createdBy: ctx.userId,
-      expiresAt: values.expiresAt,
-    }),
+    tx.execute(
+      sql`select app.issue_verification_runner_key(${values.keyId}, ${values.secretHash}, ${values.secretSalt}, ${values.label}, ${values.expiresAt.toISOString()})`,
+    ),
   );
 }
 
-/** Revoke a credential under the admin's tenant context. Returns true if a not-yet-revoked row in
- *  THIS project was revoked. Deliberately independent of the issuance flag. */
-export async function revokeRunnerKey(ctx: TenantContext, keyId: string, now: Date): Promise<boolean> {
-  const rows = await withTenant(ctx, (tx) =>
-    tx
-      .update(verificationRunnerKeys)
-      .set({ revokedAt: now, revokedBy: ctx.userId })
-      .where(and(eq(verificationRunnerKeys.id, keyId), isNull(verificationRunnerKeys.revokedAt)))
-      .returning({ id: verificationRunnerKeys.id }),
+/** Revoke a credential via the scoped definer function. Returns true iff a not-yet-revoked row in the
+ *  caller's OWN project was revoked (cross-project keys never match). Independent of the issuance flag. */
+export async function revokeRunnerKey(ctx: TenantContext, keyId: string): Promise<boolean> {
+  const result = await withTenant(ctx, (tx) =>
+    tx.execute(sql`select app.revoke_verification_runner_key(${keyId}) as revoked`),
   );
-  return rows.length > 0;
+  const r = firstRow<{ revoked: boolean }>(result);
+  return r?.revoked === true;
 }
 
-/** Best-effort last-used stamp after a successful machine auth (runner tenant context). */
-export async function touchRunnerKeyLastUsed(
-  ctx: { orgId: string; projectId: string },
-  keyId: string,
-  now: Date,
-): Promise<void> {
+/** Best-effort last-used stamp after a successful machine auth, via the scoped definer function. */
+export async function touchRunnerKeyLastUsed(ctx: { orgId: string; projectId: string }, keyId: string): Promise<void> {
   try {
-    await withRunner(ctx, (tx) =>
-      tx.update(verificationRunnerKeys).set({ lastUsedAt: now }).where(eq(verificationRunnerKeys.id, keyId)),
-    );
+    await withRunner(ctx, (tx) => tx.execute(sql`select app.touch_verification_runner_key(${keyId})`));
   } catch {
     /* best effort — never fail auth on a stamp */
   }

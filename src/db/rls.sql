@@ -1104,10 +1104,16 @@ grant usage, create on schema app to verification_key_reader;
 do $$
 begin
   if to_regclass('public.verification_runner_keys') is not null then
-    -- Issuance (INSERT) and revocation (UPDATE) run under the ADMIN's tenant context, so app_server
-    -- touches only its own project's rows under RLS. No DELETE: credentials are revoked, not deleted.
-    grant select, insert, update on verification_runner_keys to app_server;
-    revoke delete on verification_runner_keys from app_server;
+    -- NO-DIRECT-ACCESS design: app_server never reads or mutates verification_runner_keys directly —
+    -- secret material must not be broadly SELECTable, and credential fields must not be generally
+    -- mutable. Every operation (lookup, issue, revoke, touch) goes through a narrowly-scoped SECURITY
+    -- DEFINER function below. Revoke any prior grants so re-running rls.sql converges to no access.
+    revoke all on verification_runner_keys from app_server;
+    -- The narrow reader OWNS the definer functions and is the only role that touches the table; it
+    -- needs exactly select/insert/update (no delete — credentials are revoked, never hard-deleted).
+    grant select, insert, update on verification_runner_keys to verification_key_reader;
+    -- RLS stays enabled + FORCEd as defense-in-depth even though only a BYPASSRLS owner reaches the
+    -- table; the definer functions enforce tenant scope explicitly via the org/project GUCs.
     alter table verification_runner_keys enable row level security;
     alter table verification_runner_keys force row level security;
     drop policy if exists verification_runner_keys_tenant on verification_runner_keys;
@@ -1115,8 +1121,6 @@ begin
       'create policy verification_runner_keys_tenant on verification_runner_keys
          using (org_id = app.current_org_id() and project_id = app.current_project_id())
          with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
-    -- The narrow reader needs the row read the definer function performs.
-    grant select on verification_runner_keys to verification_key_reader;
   end if;
 end
 $$;
@@ -1154,3 +1158,64 @@ $fn$;
 alter function app.resolve_project_by_key(text) owner to verification_key_reader;
 revoke all on function app.resolve_project_by_key(text) from public;
 grant execute on function app.resolve_project_by_key(text) to app_server;
+
+-- Narrowly-scoped credential OPERATIONS (the only write paths app_server has). Each is SECURITY
+-- DEFINER, owned by verification_key_reader, and derives the tenant from the transaction GUCs
+-- (app.current_*(), set by withTenant/withRunner) — NOT from parameters — so a caller can only ever
+-- act within its own project. This is what enforces cross-project isolation, and what prevents general
+-- credential-field mutation: issuance sets the tenant/creator itself, revocation touches only
+-- revoked_at/revoked_by, and touch updates only last_used_at. plpgsql for late binding (see above).
+
+-- ISSUE: insert a credential into the CALLER's tenant (org/project/creator from GUCs, never params).
+create or replace function app.issue_verification_runner_key(
+  p_key_id uuid, p_secret_hash text, p_secret_salt text, p_label text, p_expires_at timestamptz)
+returns void
+language plpgsql security definer set search_path = pg_catalog as $fn$
+begin
+  insert into public.verification_runner_keys
+    (id, org_id, project_id, secret_hash, secret_salt, label, created_by, expires_at)
+  values
+    (p_key_id, app.current_org_id(), app.current_project_id(), p_secret_hash, p_secret_salt,
+     coalesce(p_label, ''), app.current_user_id(), p_expires_at);
+end
+$fn$;
+alter function app.issue_verification_runner_key(uuid, text, text, text, timestamptz) owner to verification_key_reader;
+revoke all on function app.issue_verification_runner_key(uuid, text, text, text, timestamptz) from public;
+grant execute on function app.issue_verification_runner_key(uuid, text, text, text, timestamptz) to app_server;
+
+-- REVOKE: mark a credential revoked, scoped to the caller's tenant. Returns true iff a not-yet-revoked
+-- row in THIS project was revoked (a key in another project never matches → cross-project isolation).
+create or replace function app.revoke_verification_runner_key(p_key_id uuid)
+returns boolean
+language plpgsql security definer set search_path = pg_catalog as $fn$
+declare v_count int;
+begin
+  update public.verification_runner_keys
+     set revoked_at = now(), revoked_by = app.current_user_id()
+   where id = p_key_id
+     and org_id = app.current_org_id()
+     and project_id = app.current_project_id()
+     and revoked_at is null;
+  get diagnostics v_count = row_count;
+  return v_count > 0;
+end
+$fn$;
+alter function app.revoke_verification_runner_key(uuid) owner to verification_key_reader;
+revoke all on function app.revoke_verification_runner_key(uuid) from public;
+grant execute on function app.revoke_verification_runner_key(uuid) to app_server;
+
+-- TOUCH: best-effort last-used stamp, scoped to the caller's tenant. Updates ONLY last_used_at.
+create or replace function app.touch_verification_runner_key(p_key_id uuid)
+returns void
+language plpgsql security definer set search_path = pg_catalog as $fn$
+begin
+  update public.verification_runner_keys
+     set last_used_at = now()
+   where id = p_key_id
+     and org_id = app.current_org_id()
+     and project_id = app.current_project_id();
+end
+$fn$;
+alter function app.touch_verification_runner_key(uuid) owner to verification_key_reader;
+revoke all on function app.touch_verification_runner_key(uuid) from public;
+grant execute on function app.touch_verification_runner_key(uuid) to app_server;
