@@ -7,6 +7,7 @@ import {
   describeApprovalDetails,
   InMemoryArtifactStore,
   InMemoryCatalogResolver,
+  InMemoryUploadGrantStore,
   InMemoryVerificationStore,
   ingestEvidence,
   signEvidence,
@@ -94,20 +95,27 @@ function makeSubmission(over: Partial<EvidenceSubmission> = {}): EvidenceSubmiss
   };
 }
 
-function sign(payload: EvidenceSubmission, secret = SECRET): SignedEnvelope {
-  return { runnerId: payload.runnerId, payload, signature: signEvidence(secret, payload) };
-}
-
 let store: InMemoryVerificationStore;
 let artifacts: InMemoryArtifactStore;
+let grants: InMemoryUploadGrantStore;
 let deps: IngestDeps;
 const ctx = { orgId: ORG, projectId: PROJ };
+
+/** Sign a submission AND seed a matching uploaded grant for each of its artifacts (PR-4 binding). Tests
+ *  that specifically exercise the grant-binding rejections seed their own store instead. */
+function sign(payload: EvidenceSubmission, secret = SECRET): SignedEnvelope {
+  for (const a of payload.artifacts) {
+    grants.seedUploaded(payload.orgId, payload.projectId, payload.requestId, payload.attemptId, a);
+  }
+  return { runnerId: payload.runnerId, payload, signature: signEvidence(secret, payload) };
+}
 
 beforeEach(() => {
   store = new InMemoryVerificationStore();
   store.addRequest(makeRequest());
   artifacts = new InMemoryArtifactStore();
   artifacts.put(ARTIFACT_KEY, ARTIFACT_BYTES);
+  grants = new InMemoryUploadGrantStore();
     const catalog = new InMemoryCatalogResolver();
   catalog.addVersion({ version: CAT.version, digest: CAT.digest, commands: CAT.commands });
   deps = {
@@ -115,6 +123,7 @@ beforeEach(() => {
     artifacts,
     secrets: new StaticRunnerSecretSource(new Map([[`${ORG}|${PROJ}`, SECRET]])),
     catalog,
+    grants,
     now: () => new Date('2026-09-20T00:00:11.000Z'),
   };
 });
@@ -293,7 +302,7 @@ describe('VER-002 review fixes', () => {
       // A runner holding project-A's derived key cannot authenticate for project-B.
       const bStore = new InMemoryVerificationStore();
       bStore.addRequest(makeRequest({ id: 'req-b', orgId: 'org-1', projectId: 'proj-B', taskId: 'task-b' }));
-      const bDeps: IngestDeps = { store: bStore, artifacts, secrets: src, catalog: deps.catalog, now: () => new Date('2026-09-20T00:00:11.000Z') };
+      const bDeps: IngestDeps = { store: bStore, artifacts, secrets: src, catalog: deps.catalog, grants: new InMemoryUploadGrantStore(), now: () => new Date('2026-09-20T00:00:11.000Z') };
       const payload = makeSubmission({ requestId: 'req-b', projectId: 'proj-B', taskId: 'task-b', idempotencyKey: 'idem-b' });
       const envelope: SignedEnvelope = { runnerId: payload.runnerId, payload, signature: signEvidence(a!, payload) };
       const d = await ingestEvidence(bDeps, { orgId: 'org-1', projectId: 'proj-B' }, envelope);
@@ -482,6 +491,7 @@ describe('VER-002 concurrent persistence conflict (every path)', () => {
       artifacts: s,
       secrets: new StaticRunnerSecretSource(new Map([[`${ORG}|${PROJ}`, SECRET]])),
       catalog,
+      grants,
       now: () => new Date('2026-09-20T00:00:11.000Z'),
     };
   }

@@ -14,7 +14,7 @@
  * VER_RK_CRED_OFF_REVOKE_ID. Self-skips unless set.
  */
 import { createHash, createHmac, randomUUID } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { signEvidence } from '@/domain/verification';
 
 const ON = process.env.VER_RK_BASE_ON ?? '';
@@ -216,7 +216,10 @@ const ingestEnabled = Boolean(
     process.env.VER_RK_REPO &&
     process.env.VER_RK_CRED_EXPIRED &&
     process.env.VER_RK_CATALOG_VERSION &&
-    process.env.VER_RK_CATALOG_DIGEST,
+    process.env.VER_RK_CATALOG_DIGEST &&
+    // The genuine happy path now requires the REAL upload flow (mandatory grant binding), so uploads
+    // must be enabled on the ON server for this describe to run.
+    process.env.VER_RK_UPLOAD_ENABLED,
 );
 const M = {
   master: process.env.VER_RK_MASTER ?? '',
@@ -232,8 +235,10 @@ const M = {
 };
 const ART_BYTES = Buffer.from('{"passed":true}', 'utf8');
 const ART_SHA = createHash('sha256').update(ART_BYTES).digest('hex');
-/** The exact object key the orchestration wrote the artifact to (canonical tenant key). */
-const artKey = () => `org/${M.org}/project/${M.project}/request/${M.contract}/attempt/att-1/test-results.json`;
+/** The object key the artifact was placed at — set by the REAL upload flow in beforeAll (server-derived,
+ *  opaque leaf), NOT a fixed path or a seeded double. Mandatory upload-grant binding (PR-4) means the
+ *  happy path must ingest an artifact that was genuinely granted + uploaded. */
+let artKey = () => '';
 /** Derive the project's runner signing secret the same way the server does (v1). */
 const derivedSecret = () => createHmac('sha256', M.master).update(`verification-runner:v1:${M.org}:${M.project}`).digest('hex');
 function signedEnvelope(over: Record<string, unknown> = {}, signingKeyVersion?: string) {
@@ -265,6 +270,27 @@ function signedEnvelope(over: Record<string, unknown> = {}, signingKeyVersion?: 
 }
 
 describe.skipIf(!ingestEnabled)('VER-002 PR-2 — genuine machine-authenticated ingestion', () => {
+  // Mandatory upload-grant binding (PR-4): place the required artifact through the REAL upload flow
+  // (POST /uploads → PUT bytes) so ingest binds to a genuine grant. This is NOT a seeded double — the
+  // grant + object are created by the actual endpoints. Requires the ON server to have uploads enabled
+  // (VER_RK_UPLOAD_ENABLED), which the orchestration sets alongside machine-auth.
+  beforeAll(async () => {
+    if (!ingestEnabled) return;
+    const issued = await post(ON, keysPath(KEY), { cookie: ADMIN });
+    const cred = String(issued.json.credential);
+    const grantRes = await post(ON, `/api/p/${KEY}/verification/uploads`, {
+      bearer: cred,
+      body: { requestId: M.contract, attemptId: 'att-1', logicalPath: 'test-results.json', declaredSize: ART_BYTES.length, declaredSha256: ART_SHA },
+    });
+    if (grantRes.status !== 201 && grantRes.status !== 200) throw new Error(`upload grant failed: ${grantRes.status} ${JSON.stringify(grantRes.json)}`);
+    const grant = grantRes.json.grant as { grantId: string; objectKey: string; uploadPath: string };
+    const url = `${ON}${grant.uploadPath}`;
+    assertLoopback(url);
+    const put = await fetch(url, { method: 'PUT', headers: { authorization: `Bearer ${cred}`, 'content-type': 'application/octet-stream' }, body: new Uint8Array(ART_BYTES), redirect: 'error' });
+    if (put.status !== 200) throw new Error(`upload redeem failed: ${put.status} ${await put.text()}`);
+    artKey = () => grant.objectKey; // the server-derived key the artifact was genuinely uploaded to
+  });
+
   it('valid signature + passing check + required artifact → verified_complete, and identical retry replays', async () => {
     const issued = await post(ON, keysPath(KEY), { cookie: ADMIN });
     const cred = String(issued.json.credential);

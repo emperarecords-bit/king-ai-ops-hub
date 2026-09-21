@@ -5,7 +5,7 @@ import { withRunner, withTenant } from '@/db/tenant';
 import type { DbTx } from '@/db/client';
 import type { VerificationCaller } from '@/types/domain';
 import { fileCatalogResolver, ingestEvidence, type SignedEnvelope } from '@/domain/verification';
-import { createDrizzleVerificationStore } from '@/domain/verification/drizzle-store';
+import { createDrizzleUploadGrantStore, createDrizzleVerificationStore } from '@/domain/verification/drizzle-store';
 import { envRunnerSecretSource, objectStoreArtifactStore } from '@/domain/verification/runtime-adapters';
 
 /**
@@ -104,6 +104,7 @@ export async function POST(
           artifacts: objectStoreArtifactStore(tenant),
           secrets: envRunnerSecretSource(),
           catalog: fileCatalogResolver(),
+          grants: createDrizzleUploadGrantStore(tx),
         },
         tenant,
         envelope,

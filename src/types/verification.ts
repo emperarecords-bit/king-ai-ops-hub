@@ -64,4 +64,10 @@ export type RejectionCode =
   | 'catalog_unavailable'
   /** The evidence's declared catalog identity, the contract's pinned identity, and the server-resolved
    *  catalog do not all agree (skew or tampering). */
-  | 'catalog_mismatch';
+  | 'catalog_mismatch'
+  /** A submitted artifact has no successfully-uploaded upload grant binding it to this contract+attempt
+   *  +path (VER-002 PR-4). A same-tenant object from another contract/attempt lands here. Fail closed. */
+  | 'artifact_not_granted'
+  /** A submitted artifact matches an upload grant on (contract, attempt, path) but a bound field
+   *  (object key, declared size, or declared digest) disagrees with the grant (VER-002 PR-4). */
+  | 'grant_binding_mismatch';

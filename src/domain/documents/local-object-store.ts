@@ -1,8 +1,8 @@
 import 'server-only';
 import { mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { type ObjectStore, ObjectNotFoundError, type StoredObjectHead } from './object-store';
+import { isCanonicalObjectKey, isVerificationArtifactKey, type ObjectStore, ObjectNotFoundError, type StoredObjectHead, VerificationObjectWriteError } from './object-store';
 
 /**
  * Filesystem-backed ObjectStore for dev and hermetic tests (O-23). Keys map to
@@ -19,10 +19,20 @@ export class LocalObjectStore implements ObjectStore {
     this.base = resolve(base ?? process.env.LOCAL_OBJECT_STORE_DIR ?? join(tmpdir(), 'king-object-store'));
   }
 
+  /** The absolute storage root. Exposed so the verification create-only writer can stage a temp file on
+   *  the SAME filesystem and atomically link it to the final key. */
+  get baseDir(): string {
+    return this.base;
+  }
+
   /** Resolve a key to an absolute path, refusing traversal, backslashes, and
    *  anything that escapes base. `..`/`.` segments are rejected outright rather
    *  than silently collapsed by resolve(). */
   private pathFor(key: string): string {
+    // Reject traversal / backslash / NUL. NOTE: this is used for OBJECT keys AND for directory prefixes
+    // (list uses a trailing-slash prefix), so it does NOT reject a trailing slash or empty segments here.
+    // The strict `isCanonicalObjectKey` guard is applied in `put` (before classification), which is where
+    // an alias could otherwise collapse onto — and overwrite — a protected verification object.
     if (/[\\\x00]/.test(key) || key.split('/').some((s) => s === '.' || s === '..')) {
       throw new Error('non-canonical object key');
     }
@@ -57,8 +67,48 @@ export class LocalObjectStore implements ObjectStore {
     return real === tenantDir || real.startsWith(tenantDir + sep);
   }
 
+  /**
+   * The EFFECTIVE object key an absolute path resolves to AFTER following any symlinked ancestors — i.e.
+   * realpath the deepest existing ancestor and re-append the remaining (not-yet-created) suffix, then
+   * express it relative to the store base. Used so `put` can refuse a write whose real destination lands
+   * on a verification artifact object even when the LEXICAL key does not look like one. Returns null if it
+   * resolves outside the base.
+   */
+  private async effectiveKey(absTarget: string): Promise<string | null> {
+    const suffix: string[] = [];
+    let cur = absTarget;
+    for (;;) {
+      let real: string | null = null;
+      try {
+        real = await realpath(cur);
+      } catch {
+        real = null; // this ancestor does not exist yet — keep walking up
+      }
+      if (real !== null) {
+        const full = suffix.length ? join(real, ...suffix) : real;
+        const rel = relative(this.base, full);
+        if (rel === '' || rel === '..' || rel.startsWith('..' + sep)) return null; // outside the base
+        return rel.split(sep).join('/');
+      }
+      suffix.unshift(basename(cur));
+      const parent = dirname(cur);
+      if (parent === cur) return null;
+      cur = parent;
+    }
+  }
+
   async put(key: string, body: Buffer, contentType: string): Promise<void> {
+    // Reject non-canonical keys BEFORE classification, so a doubled-slash (or other) alias that would
+    // collapse onto a verification object cannot dodge the guard below.
+    if (!isCanonicalObjectKey(key)) throw new Error('non-canonical object key');
+    // Ordinary put MUST NOT overwrite (or create) a verification artifact object — those are written
+    // only through the create-only exclusive publisher. Fail closed rather than clobber one.
+    if (isVerificationArtifactKey(key)) throw new VerificationObjectWriteError(key);
     const p = this.pathFor(key);
+    // Defense against FILESYSTEM aliases: a symlinked ancestor can make a benign-looking lexical key
+    // resolve onto a verification artifact object. Refuse when the REAL destination is such an object.
+    const effective = await this.effectiveKey(p);
+    if (effective !== null && isVerificationArtifactKey(effective)) throw new VerificationObjectWriteError(key);
     await mkdir(dirname(p), { recursive: true });
     await writeFile(p, body);
     await writeFile(`${p}.meta`, JSON.stringify({ contentType, size: body.length }));

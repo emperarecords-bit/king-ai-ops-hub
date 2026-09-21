@@ -36,6 +36,95 @@ export interface RunnerSecretSource {
   getRunnerSecret(orgId: string, projectId: string): Promise<string | null>;
 }
 
+// ─────────────────────────── VER-002 PR-4 — artifact upload grants ───────────────────────────
+
+/** An immutable upload grant: (tenant, contract, attempt, logical path) bound to one object key + the
+ *  declared size/digest, with a start-TTL and a recorded (unenforced) max-upload-duration. */
+export interface UploadGrant {
+  readonly id: string;
+  readonly orgId: string;
+  readonly projectId: string;
+  readonly requestId: string;
+  readonly attemptId: string;
+  readonly logicalPath: string;
+  readonly objectKey: string;
+  readonly declaredSize: number;
+  readonly declaredSha256: string;
+  readonly contentType: string;
+  readonly expiresAt: string; // ISO — when an upload may START
+  readonly maxUploadMs: number; // T_max, recorded only (unproven; never a reclaim trigger)
+  readonly createdAt: string; // ISO
+}
+
+/** Untrusted-but-validated fields for a new grant (tenant/creator supplied separately from context). */
+export interface NewUploadGrant {
+  readonly requestId: string;
+  readonly attemptId: string;
+  readonly logicalPath: string;
+  readonly objectKey: string;
+  readonly declaredSize: number;
+  readonly declaredSha256: string;
+  readonly contentType: string;
+  readonly expiresAt: Date;
+  readonly maxUploadMs: number;
+}
+
+/** The upload-grant "uploaded" state is DERIVED from a completion event, never a mutable column. */
+export type UploadGrantEventType = 'uploaded' | 'redemption_failed';
+
+/** Read-only binding lookup used at INGEST (a subset of the full store). */
+export interface UploadGrantBindingSource {
+  /** The successfully-`uploaded` grant matching (contract, attempt, logical path), or null. */
+  findUploadedGrantForArtifact(
+    orgId: string,
+    projectId: string,
+    requestId: string,
+    attemptId: string,
+    logicalPath: string,
+  ): Promise<UploadGrant | null>;
+}
+
+/** Persistence for upload grants (immutable metadata + append-only lifecycle events). */
+export interface UploadGrantStore extends UploadGrantBindingSource {
+  findGrantByDedup(orgId: string, projectId: string, requestId: string, attemptId: string, logicalPath: string): Promise<UploadGrant | null>;
+  getGrantById(orgId: string, projectId: string, grantId: string): Promise<UploadGrant | null>;
+  /** Insert idempotently on the dedup unique; `inserted:false` + the WINNER on a concurrent create. */
+  insertGrant(orgId: string, projectId: string, createdBy: string | null, input: NewUploadGrant): Promise<{ grant: UploadGrant; inserted: boolean }>;
+  /** True iff a completion ('uploaded') event exists — state derived from events, not the latest one. */
+  isUploaded(orgId: string, projectId: string, grantId: string): Promise<boolean>;
+  /** Append a lifecycle event. The 'uploaded' insert is idempotent (partial unique → no-op on conflict). */
+  appendEvent(orgId: string, projectId: string, grantId: string, eventType: UploadGrantEventType, detail: string | null): Promise<void>;
+}
+
+/** A private temp sink for streaming validated bytes before an atomic create-only publish. */
+export interface StagedArtifact {
+  /** Append a chunk to the private temp file (never the final key). */
+  append(chunk: Buffer): Promise<void>;
+  /** Atomically publish the temp file at the final key WITHOUT replacement (create-only link).
+   *  'created' = this call created it; 'exists' = an object was already present (no overwrite). */
+  publish(contentType: string): Promise<'created' | 'exists'>;
+  /** Delete the temp file (idempotent). Always called in `finally`. */
+  discard(): Promise<void>;
+}
+
+/**
+ * Create-only artifact writer. Publishes ONLY complete, validated bytes, atomically, without
+ * replacement. An adapter that cannot guarantee atomic create-only MUST fail closed (throw), never fall
+ * back to an overwriting `put`.
+ */
+export interface ExclusiveArtifactWriter {
+  stage(finalKey: string): Promise<StagedArtifact>;
+}
+
+/** Thrown by an adapter that cannot guarantee atomic create-only writes — the caller fails closed and
+ *  never falls back to an overwriting `put`. */
+export class UnsupportedExclusiveWriteError extends Error {
+  constructor(driver: string) {
+    super(`storage driver '${driver}' does not support atomic create-only artifact writes`);
+    this.name = 'UnsupportedExclusiveWriteError';
+  }
+}
+
 /** A prior submission recorded under an idempotency key, with its content digest. */
 export interface PriorEvidence {
   readonly decision: IngestDecision;
@@ -93,6 +182,9 @@ export interface IngestDeps {
   readonly secrets: RunnerSecretSource;
   /** Trusted, server-side command-catalog resolver (never caller-supplied). */
   readonly catalog: CatalogResolver;
+  /** VER-002 PR-4 — binds each submitted artifact to a successfully-uploaded grant (contract+attempt
+   *  +path+key+size+digest) before availability is even checked. */
+  readonly grants: UploadGrantBindingSource;
   /** Injectable clock for deterministic tests. */
   readonly now?: () => Date;
   /** Max age of a submission's signed timestamp before it is rejected as expired (default 10 min). */

@@ -1,6 +1,6 @@
 import 'server-only';
 import { createHash, createHmac } from 'node:crypto';
-import { type ObjectStore, ObjectNotFoundError, type StoredObjectHead } from './object-store';
+import { isCanonicalObjectKey, isVerificationArtifactKey, type ObjectStore, ObjectNotFoundError, type StoredObjectHead, VerificationObjectWriteError } from './object-store';
 
 /**
  * S3-compatible ObjectStore with dependency-free AWS SigV4 (O-23). Works with
@@ -170,6 +170,11 @@ export class S3ObjectStore implements ObjectStore {
   }
 
   async put(key: string, body: Buffer, contentType: string): Promise<void> {
+    // Reject non-canonical keys BEFORE classification so no alias can dodge the verification-object guard.
+    if (!isCanonicalObjectKey(key)) throw new Error('non-canonical object key');
+    // Ordinary put MUST NOT overwrite (or create) a verification artifact object (VER-002 PR-4) — those
+    // are written only through the create-only exclusive publisher. Fail closed rather than clobber one.
+    if (isVerificationArtifactKey(key)) throw new VerificationObjectWriteError(key);
     const signed = signS3Request(this.cfg, {
       method: 'PUT',
       key,

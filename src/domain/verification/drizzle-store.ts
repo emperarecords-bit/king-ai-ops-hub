@@ -6,9 +6,24 @@
  */
 import { and, asc, eq, gt, inArray, sql } from 'drizzle-orm';
 import type { DbTx } from '@/db/client';
-import { githubRepoLinks, tasks, verificationEvidence, verificationRequests } from '@/db/schema';
+import {
+  githubRepoLinks,
+  tasks,
+  verificationEvidence,
+  verificationRequests,
+  verificationUploadGrantEvents,
+  verificationUploadGrants,
+} from '@/db/schema';
 import type { ArtifactAvailability, CheckResult, RejectionCode, SubmittedArtifact, VerificationRequest } from './index';
-import type { ContractSummary, PriorEvidence, VerificationStore } from './ports';
+import type {
+  ContractSummary,
+  NewUploadGrant,
+  PriorEvidence,
+  UploadGrant,
+  UploadGrantEventType,
+  UploadGrantStore,
+  VerificationStore,
+} from './ports';
 import type { TaskVerificationStatus } from './types';
 
 type EvidenceRow = typeof verificationEvidence.$inferSelect;
@@ -268,4 +283,128 @@ export function createDrizzleVerificationStore(tx: DbTx): VerificationStore {
       });
     },
   } as VerificationStore & { summarize(orgId: string, projectId: string, rows: RequestRow[]): Promise<ContractSummary[]> };
+}
+
+// ─────────────────────────── VER-002 PR-4 — upload grants ───────────────────────────
+
+type GrantRow = typeof verificationUploadGrants.$inferSelect;
+
+function rowToGrant(row: GrantRow): UploadGrant {
+  return {
+    id: row.id,
+    orgId: row.orgId,
+    projectId: row.projectId,
+    requestId: row.requestId,
+    attemptId: row.attemptId,
+    logicalPath: row.logicalPath,
+    objectKey: row.objectKey,
+    declaredSize: row.declaredSize,
+    declaredSha256: row.declaredSha256,
+    contentType: row.contentType,
+    expiresAt: row.expiresAt.toISOString(),
+    maxUploadMs: row.maxUploadMs,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+export function createDrizzleUploadGrantStore(tx: DbTx): UploadGrantStore {
+  const G = verificationUploadGrants;
+  const E = verificationUploadGrantEvents;
+  const store: UploadGrantStore = {
+    async findGrantByDedup(orgId, projectId, requestId, attemptId, logicalPath): Promise<UploadGrant | null> {
+      const row = (
+        await tx
+          .select()
+          .from(G)
+          .where(
+            and(
+              eq(G.orgId, orgId),
+              eq(G.projectId, projectId),
+              eq(G.requestId, requestId),
+              eq(G.attemptId, attemptId),
+              eq(G.logicalPath, logicalPath),
+            ),
+          )
+          .limit(1)
+      )[0];
+      return row ? rowToGrant(row) : null;
+    },
+
+    async getGrantById(orgId, projectId, grantId): Promise<UploadGrant | null> {
+      const row = (
+        await tx
+          .select()
+          .from(G)
+          .where(and(eq(G.orgId, orgId), eq(G.projectId, projectId), eq(G.id, grantId)))
+          .limit(1)
+      )[0];
+      return row ? rowToGrant(row) : null;
+    },
+
+    async insertGrant(orgId, projectId, createdBy, input: NewUploadGrant): Promise<{ grant: UploadGrant; inserted: boolean }> {
+      const inserted = await tx
+        .insert(G)
+        .values({
+          orgId,
+          projectId,
+          requestId: input.requestId,
+          attemptId: input.attemptId,
+          logicalPath: input.logicalPath,
+          objectKey: input.objectKey,
+          declaredSize: input.declaredSize,
+          declaredSha256: input.declaredSha256,
+          contentType: input.contentType,
+          expiresAt: input.expiresAt,
+          maxUploadMs: input.maxUploadMs,
+          createdBy,
+        })
+        // Race-safe on the dedup unique (org, project, request, attempt, logical_path).
+        .onConflictDoNothing({ target: [G.orgId, G.projectId, G.requestId, G.attemptId, G.logicalPath] })
+        .returning();
+      if (inserted[0]) return { grant: rowToGrant(inserted[0]), inserted: true };
+      const winner = await this.findGrantByDedup(orgId, projectId, input.requestId, input.attemptId, input.logicalPath);
+      if (!winner) throw new Error('upload grant insert was a no-op but no existing row was found');
+      return { grant: winner, inserted: false };
+    },
+
+    async isUploaded(orgId, projectId, grantId): Promise<boolean> {
+      const row = (
+        await tx
+          .select({ id: E.id })
+          .from(E)
+          .where(and(eq(E.orgId, orgId), eq(E.projectId, projectId), eq(E.grantId, grantId), eq(E.eventType, 'uploaded')))
+          .limit(1)
+      )[0];
+      return Boolean(row);
+    },
+
+    async appendEvent(orgId, projectId, grantId, eventType: UploadGrantEventType, detail): Promise<void> {
+      await tx
+        .insert(E)
+        .values({ orgId, projectId, grantId, eventType, detail })
+        // The 'uploaded' completion is idempotent via the partial unique index; a duplicate is a no-op.
+        .onConflictDoNothing();
+    },
+
+    async findUploadedGrantForArtifact(orgId, projectId, requestId, attemptId, logicalPath): Promise<UploadGrant | null> {
+      const row = (
+        await tx
+          .select()
+          .from(G)
+          .where(
+            and(
+              eq(G.orgId, orgId),
+              eq(G.projectId, projectId),
+              eq(G.requestId, requestId),
+              eq(G.attemptId, attemptId),
+              eq(G.logicalPath, logicalPath),
+              sql`exists (select 1 from ${E} ev where ev.grant_id = ${G.id} and ev.event_type = 'uploaded')`,
+            ),
+          )
+          .limit(1)
+      )[0];
+      return row ? rowToGrant(row) : null;
+    },
+  };
+  return store;
 }

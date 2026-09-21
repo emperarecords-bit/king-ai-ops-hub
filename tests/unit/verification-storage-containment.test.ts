@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { LocalObjectStore } from '@/domain/documents/local-object-store';
-import { objectStoreArtifactStore } from '@/domain/verification/runtime-adapters';
+import { exclusiveArtifactWriter, objectStoreArtifactStore, TenantEscapeError, writeFully } from '@/domain/verification/runtime-adapters';
 
 /**
  * Finding 1 (round 3): tenant storage containment against a REAL LocalObjectStore
@@ -73,5 +73,94 @@ describe('VER-002 tenant storage containment (real local store, two projects)', 
     const key = 'org/A/project/P/jdir/secret'; // canonical + in-partition, real path → OTHER
     expect(await store.keyStaysWithinTenant(key, 'org/A/project/P')).toBe(false);
     expect(await adapter.get(key)).toBeNull();
+  });
+
+  it('ordinary put refuses a verification artifact key (no overwrite of verification objects)', async () => {
+    const verKey = 'org/A/project/P/request/r1/attempt/a1/obj1'; // a verification artifact key shape
+    await expect(store.put(verKey, Buffer.from('x'), 'application/octet-stream')).rejects.toThrow(/verification artifact object/);
+    // A non-verification key under the same tenant is still writable via put.
+    await expect(store.put('org/A/project/P/doc/d1/v1', Buffer.from('ok'), 'text/plain')).resolves.toBeUndefined();
+  });
+
+  // Finding 2: a non-canonical alias (doubled slash) must not overwrite a protected verification object.
+  it('a doubled-slash alias cannot overwrite an uploaded verification artifact', async () => {
+    const verKey = 'org/A/project/P/request/r2/attempt/a2/obj2';
+    writeAt(verKey, 'UPLOADED-BYTES'); // an already-published verification object (written out of band)
+    const alias = 'org/A/project/P/request/r2/attempt/a2//obj2'; // collapses onto verKey via resolve()
+    await expect(store.put(alias, Buffer.from('CLOBBER'), 'application/octet-stream')).rejects.toThrow(/non-canonical/);
+    // The protected object's bytes are unchanged.
+    expect(readFileSync(join(base, verKey), 'utf8')).toBe('UPLOADED-BYTES');
+  });
+
+  // Finding 1: the exclusive writer must reject a destination whose ancestor is a symlink/junction that
+  // escapes the tenant partition — before writing OR publishing — and never write into another project.
+  it.skipIf(!symlinkOk)('exclusive writer rejects a junction-escaping destination (real filesystem)', async () => {
+    const writer = await exclusiveArtifactWriter(store);
+    // `org/A/project/P/jdir` is a junction to project OTHER; a key under it escapes the partition.
+    await expect(writer.stage('org/A/project/P/jdir/request/r/attempt/a/obj')).rejects.toBeInstanceOf(TenantEscapeError);
+    // Nothing was written into OTHER via the escaping key.
+    expect(existsSync(join(base, 'org/A/project/OTHER/request'))).toBe(false);
+    // A legitimate verification key (ancestors not yet created) is accepted and publishes create-only.
+    const staged = await writer.stage('org/A/project/P/request/rw/attempt/aw/objw');
+    await staged.append(Buffer.from('OK'));
+    expect(await staged.publish('application/octet-stream')).toBe('created');
+    await staged.discard();
+    expect(readFileSync(join(base, 'org/A/project/P/request/rw/attempt/aw/objw'), 'utf8')).toBe('OK');
+  });
+
+  // Finding 3: writeFully must loop over partial FileHandle.write() results and fail on zero progress, so
+  // truncated bytes can never be treated as fully stored (which would let a completion be recorded).
+  it('writeFully writes an entire chunk across partial writes and fails safely on zero progress', async () => {
+    const chunk = Buffer.from('abcdefghij');
+    const written: number[] = [];
+    // A handle that writes at most 3 bytes per call.
+    const partial = {
+      async write(buf: Buffer, off: number, len: number) {
+        const n = Math.min(3, len);
+        written.push(...buf.subarray(off, off + n));
+        return { bytesWritten: n };
+      },
+    };
+    await writeFully(partial, chunk);
+    expect(Buffer.from(written).toString()).toBe('abcdefghij'); // every byte stored, in order
+
+    // A handle that makes zero progress must throw (never silently drop bytes).
+    const stalled = { async write() { return { bytesWritten: 0 }; } };
+    await expect(writeFully(stalled, chunk)).rejects.toThrow(/zero-progress/);
+  });
+
+  // Finding 1 (round 3): an ordinary put must not FOLLOW a filesystem symlink/junction whose benign-looking
+  // lexical key resolves onto a protected verification object.
+  it.skipIf(!symlinkOk)('ordinary put refuses a filesystem alias (symlink) that resolves onto a verification object', async () => {
+    writeAt('org/A/project/P/request/rr/attempt/aa/obj', 'UPLOADED-BYTES'); // a real verification object
+    // A symlink whose lexical key (`.../valias/obj`) is NOT verification-shaped, but resolves into the object's dir.
+    symlinkSync(join(base, 'org/A/project/P/request/rr/attempt/aa'), join(base, 'org/A/project/P/valias'), 'junction');
+    await expect(store.put('org/A/project/P/valias/obj', Buffer.from('CLOBBER'), 'application/octet-stream')).rejects.toThrow(/verification artifact object/);
+    expect(readFileSync(join(base, 'org/A/project/P/request/rr/attempt/aa/obj'), 'utf8')).toBe('UPLOADED-BYTES');
+  });
+
+  // Finding 2 (round 3): publication must link the SAME temp file that received the validated bytes. A
+  // temp-file substitution after staging is detected (device+inode identity) and refused — never linked.
+  it('exclusive writer refuses to publish a SUBSTITUTED temp file (links only the validated bytes)', async () => {
+    const writer = await exclusiveArtifactWriter(store);
+    const tmpDir = join(base, '.uploads-tmp');
+    const before = existsSync(tmpDir) ? new Set(readdirSync(tmpDir)) : new Set<string>();
+    const staged = await writer.stage('org/A/project/P/request/rs/attempt/as/objs');
+    await staged.append(Buffer.from('VALIDATED-BYTES'));
+    // Substitute the staged temp file (attacker swaps it for different bytes → a NEW inode).
+    const added = readdirSync(tmpDir).filter((n) => !before.has(n));
+    expect(added.length).toBe(1);
+    const tmp = join(tmpDir, added[0]!);
+    rmSync(tmp);
+    writeFileSync(tmp, 'SWAPPED-EVIL-BYTES');
+    await expect(staged.publish('application/octet-stream')).rejects.toThrow(/substituted/);
+    await staged.discard();
+    // The final object was never created from the swapped bytes.
+    expect(existsSync(join(base, 'org/A/project/P/request/rs/attempt/as/objs'))).toBe(false);
+  });
+
+  it('the writer temp directory holds no leftover files after publish + discard', async () => {
+    const tmpDir = join(base, '.uploads-tmp');
+    if (existsSync(tmpDir)) expect(readdirSync(tmpDir).length).toBe(0);
   });
 });

@@ -60,6 +60,14 @@ const serverEnvSchema = z.object({
     .enum(['0', '1', 'true', 'false'])
     .default('0')
     .transform((v) => v === '1' || v === 'true'),
+  // VER-002 PR-4 — whether a MACHINE (runner) may request and redeem artifact UPLOAD grants. Its own
+  // default-off control, independent of issuance/machine-auth/retrieval and the ingestion master secret
+  // (each capability gates itself). Off ⇒ both the grant-request and the redemption endpoints return 403
+  // and do nothing. Uploads stay disabled until the provider, quota, and enablement gates are all met.
+  VERIFICATION_RUNNER_UPLOAD_ENABLED: z
+    .enum(['0', '1', 'true', 'false'])
+    .default('0')
+    .transform((v) => v === '1' || v === 'true'),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;
