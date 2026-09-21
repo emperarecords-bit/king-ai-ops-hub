@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { S3ObjectStore } from '@/domain/documents/s3-object-store';
 import { isVerificationArtifactKey } from '@/domain/documents/object-store';
-import { cleanupAndVerify, makeAcceptanceKeys, makeBudgetedFetch, makeInMemoryS3, runAcceptanceScenarios, type BudgetLimits } from '../support/s3-acceptance';
+import { cleanupAndReport, cleanupAndVerify, makeAcceptanceKeys, makeBudgetedFetch, makeInMemoryS3, runAcceptanceScenarios, runPG1Concurrent, runPG3, runPG5, type AcceptanceCtx, type BudgetLimits, type RunTotals } from '../support/s3-acceptance';
 
 /**
  * OFFLINE exercise of the LIVE acceptance harness's own logic (key selection, scenarios, budgets,
@@ -74,6 +74,75 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
       await expect(
         runAcceptanceScenarios({ store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: () => {} }),
       ).rejects.toThrow();
+    });
+  });
+
+  describe('independent per-guarantee steps (a PG3 failure must not block PG5)', () => {
+    it('evaluates PG5 even after a PG3 assertion failure; an assertion failure does NOT trip the fuse', async () => {
+      // Provider ACCEPTS the wrong checksum (returns 200) → PG3's BadDigest-only assertion FAILS. PG5 must
+      // still run and pass, and the budget/safety fuse must stay untripped (an assertion failure is not a
+      // budget/safety stop). This is the offline proof of the live harness's per-`it()` independence.
+      const sim = makeInMemoryS3(CFG, { acceptWrongChecksum: true });
+      const bf = makeBudgetedFetch(sim.fetch, LIMITS);
+      const store = new S3ObjectStore(CFG, bf.fetch);
+      const keys = makeAcceptanceKeys();
+      const created: string[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: (k) => created.push(k) };
+
+      await expect(runPG3(ctx)).rejects.toThrow(/PG3: expected a checksum 4xx \(got 200\)/); // PG3 fails (200 accepted)
+      await expect(runPG5(ctx)).resolves.toBeUndefined(); // PG5 STILL evaluated and passes
+      expect(bf.stats().tripped).toBe(false); // an ordinary assertion failure never trips the safety fuse
+
+      await cleanupAndVerify({ store, prefix: keys.prefix, created, enterCleanupPhase: bf.enterCleanupPhase });
+      expect(sim.objectCount()).toBe(0); // both the accepted wrong-checksum object and the PG5 object removed
+    });
+
+    it('cleanupAndReport reports final counters in a finally EVEN WHEN cleanup FAILS', async () => {
+      const sim = makeInMemoryS3(CFG);
+      const bf = makeBudgetedFetch(sim.fetch, LIMITS);
+      const store = new S3ObjectStore(CFG, bf.fetch);
+      const keys = makeAcceptanceKeys();
+      // Create an object but DON'T track it → cleanup deletes nothing, the prefix LIST stays non-empty, and
+      // cleanupAndVerify throws. The report must STILL fire (in finally) with final counters.
+      await store.putIfAbsent(keys.key('leak'), Buffer.from('{"x":1}', 'utf8'), 'application/json');
+      const reports: RunTotals[] = [];
+      const totals = await cleanupAndReport({ store, prefix: keys.prefix, created: [], budgeted: bf, report: (t) => reports.push(t) });
+
+      expect(totals.cleanupSucceeded).toBe(false); // cleanup genuinely failed (object left behind)
+      expect(totals.cleanupError).toBeDefined();
+      expect(reports).toHaveLength(1); // reported despite the failure
+      expect(reports[0]!.cleanupSucceeded).toBe(false);
+      expect(reports[0]!.preCleanup.requests).toBeGreaterThan(0); // pre-cleanup counters captured
+      expect(reports[0]!.final.requests).toBeGreaterThanOrEqual(reports[0]!.preCleanup.requests); // final ≥ pre (a LIST ran)
+    });
+
+    it('runPG1Concurrent waits for BOTH writes to settle before propagating a failure (no sibling races cleanup)', async () => {
+      // The first write rejects fast; the sibling settles LATER. The step must not propagate the failure
+      // until the delayed sibling has settled, so no in-flight write outlives the step to race cleanup.
+      let calls = 0;
+      let siblingSettled = false;
+      const fakeStore = {
+        putIfAbsent: async (): Promise<'created' | 'exists'> => {
+          calls += 1;
+          if (calls === 1) throw new Error('fast write rejection');
+          await new Promise((r) => setTimeout(r, 25)); // the sibling settles later than the fast rejection
+          siblingSettled = true;
+          return 'created';
+        },
+      } as unknown as S3ObjectStore;
+      const keys = makeAcceptanceKeys();
+      const ctx: AcceptanceCtx = {
+        store: fakeStore,
+        cfg: CFG,
+        fetchImpl: (async () => new Response(null)) as unknown as typeof fetch,
+        key: keys.key,
+        track: () => {},
+      };
+
+      await expect(runPG1Concurrent(ctx)).rejects.toThrow(/fast write rejection/);
+      // With allSettled the step only rejects AFTER the delayed sibling settled; Promise.all would have
+      // rejected while the sibling was still pending (siblingSettled === false).
+      expect(siblingSettled).toBe(true);
     });
   });
 
@@ -158,6 +227,62 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
       // Cleanup keeps the reserved allowance: a no-body DELETE still fits and completes after the failure.
       b.enterCleanupPhase();
       await expect(b.fetch('https://ok.test/cleanup', { method: 'DELETE' })).resolves.toBeDefined();
+    });
+
+    it('a budget-exhaustion safety stop TRIPS the fuse and refuses further TEST requests (cleanup still allowed)', async () => {
+      let innerCalls = 0;
+      const inner = (async () => {
+        innerCalls += 1;
+        return new Response('x', { status: 200, headers: { 'content-length': '1' } });
+      }) as unknown as typeof fetch;
+      const b = makeBudgetedFetch(inner, { maxRequests: 3, maxBytes: 1024 * 1024, cleanupReserve: 1, cleanupByteReserve: 0 });
+      // test-phase request ceiling = maxRequests - cleanupReserve = 2
+      await b.fetch('https://ok.test/1');
+      await b.fetch('https://ok.test/2');
+      const before = innerCalls;
+      await expect(b.fetch('https://ok.test/3')).rejects.toThrow(/request budget exceeded/); // hits the ceiling → trips
+      expect(b.stats().tripped).toBe(true);
+      // subsequent TEST requests are refused deterministically WITHOUT touching the network
+      await expect(b.fetch('https://ok.test/4')).rejects.toThrow(/halted/i);
+      expect(innerCalls).toBe(before); // no further inner calls in the test phase
+      // cleanup phase is NOT fuse-gated: it still runs within its reserve
+      b.enterCleanupPhase();
+      await expect(b.fetch('https://ok.test/cleanup', { method: 'DELETE' })).resolves.toBeDefined();
+      expect(innerCalls).toBe(before + 1);
+    });
+
+    it('an unsafe redirect (unsafe configuration) TRIPS the fuse and halts further TEST requests', async () => {
+      let n = 0;
+      const inner = (async () => {
+        n += 1;
+        return new Response('', { status: 302, headers: { location: 'https://evil.test' } });
+      }) as unknown as typeof fetch;
+      const b = makeBudgetedFetch(inner, { maxRequests: 60, maxBytes: 1024 * 1024, cleanupReserve: 5, cleanupByteReserve: 0 });
+      await expect(b.fetch('https://ok.test/a')).rejects.toThrow(/redirect/); // unsafe response → trips
+      expect(b.stats().tripped).toBe(true);
+      await expect(b.fetch('https://ok.test/b')).rejects.toThrow(/halted/i); // halted without a network call
+      expect(n).toBe(1); // only the first reached inner
+    });
+
+    it('a real redirect/network REJECTION (redirect:error throws, not a returned 302) also trips the fuse; bounded cleanup stays available', async () => {
+      // fetch with `redirect: 'error'` REJECTS on a redirect (a network error), it does not return a 3xx.
+      // The fuse must trip on that rejection path too, not only on a mocked returned-302.
+      let calls = 0;
+      const inner = (async () => {
+        calls += 1;
+        if (calls === 1) throw new TypeError('failed to fetch: redirect not allowed'); // models redirect:'error' rejection
+        return new Response(null, { status: 204 }); // a later (cleanup) call succeeds
+      }) as unknown as typeof fetch;
+      const b = makeBudgetedFetch(inner, { maxRequests: 60, maxBytes: 1024 * 1024, cleanupReserve: 5, cleanupByteReserve: 0 });
+      await expect(b.fetch('https://ok.test/a')).rejects.toThrow(/redirect|failed to fetch/i); // inner rejected → trips
+      expect(b.stats().tripped).toBe(true);
+      // subsequent TEST request is blocked WITHOUT reaching inner
+      await expect(b.fetch('https://ok.test/b')).rejects.toThrow(/halted/i);
+      expect(calls).toBe(1);
+      // cleanup is NOT fuse-gated: the request reaches inner (bounded by the reserve) and completes
+      b.enterCleanupPhase();
+      await expect(b.fetch('https://ok.test/cleanup', { method: 'DELETE' })).resolves.toBeDefined();
+      expect(calls).toBe(2);
     });
   });
 });
