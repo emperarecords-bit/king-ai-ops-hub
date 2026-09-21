@@ -2,8 +2,13 @@
  * Shared VER-002 PR-5 acceptance logic, used by BOTH the strict opt-in live harness
  * (tests/integration/verification-s3-acceptance.int.test.ts) and the offline simulation
  * (tests/unit/verification-s3-acceptance-offline.test.ts). Extracting it means the live harness's
- * key-selection and cleanup behaviour is exercised against a simulated provider WITHOUT cloud access, so
- * those bugs are caught in CI rather than only when the live run is authorized.
+ * key-selection, budget, and cleanup behaviour is exercised against a simulated provider WITHOUT cloud
+ * access, so those bugs are caught in CI rather than only when the live run is authorized.
+ *
+ * The provider guarantees are exposed as INDEPENDENT per-guarantee steps (runPG1…runPG5) so a single
+ * guarantee's assertion failure (e.g. PG3 on a provider that accepts a wrong checksum) does not prevent the
+ * others (notably PG5) from being evaluated. `runAcceptanceScenarios` remains a sequential convenience
+ * wrapper (fails fast) for the positive all-pass path.
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { expect } from 'vitest';
@@ -29,7 +34,8 @@ export function parseS3ErrorCode(body: string): string | null {
  *      hash), not a rejection of the checksum header.
  *  Any other code — a malformed-digest error, a payload-signing error, an auth/5xx/unsupported response, or
  *  an unconfirmed/invented code — FAILS CLOSED, even with a 4xx status. Adding a provider-specific code
- *  requires documented mismatch semantics first. */
+ *  requires documented mismatch semantics first. Alternative checksum request forms (declared
+ *  checksum-algorithm, trailing checksums, Content-MD5) are intentionally left to a separate proposal. */
 export const CHECKSUM_MISMATCH_CODES: readonly string[] = ['BadDigest'];
 const isChecksumMismatchCode = (code: string | null): boolean =>
   code !== null && CHECKSUM_MISMATCH_CODES.some((c) => c.toLowerCase() === code.toLowerCase());
@@ -52,23 +58,58 @@ export interface BudgetLimits {
   readonly cleanupByteReserve: number; // BYTES reserved so cleanup has a FINITE allowance (never unlimited)
 }
 
+/** Live counters. `tripped` latches once a TEST-phase request hit a budget/safety stop (see the fuse). */
+export interface FetchStats {
+  readonly requests: number;
+  readonly uploadBytes: number;
+  readonly downloadBytes: number;
+  readonly tripped: boolean;
+}
+
+export interface BudgetedFetch {
+  readonly fetch: typeof fetch;
+  readonly enterCleanupPhase: () => void;
+  readonly stats: () => FetchStats;
+}
+
 /**
- * Wrap a fetch with: request budget (reserving `cleanupReserve` for the cleanup phase), combined
- * upload+download byte budget, HTTPS enforcement, and redirect rejection.
+ * Wrap a fetch with: a request budget (reserving `cleanupReserve` for the cleanup phase), a combined
+ * upload+download byte budget (reserving `cleanupByteReserve`), HTTPS enforcement, and redirect rejection.
+ *
+ * SAFETY FUSE: when a TEST-phase request hits a budget ceiling OR an unsafe response (non-HTTPS URL, a
+ * redirect), the fuse LATCHES (`tripped`) and every subsequent TEST-phase request is refused DETERMINISTICALLY
+ * without touching the network — so budget exhaustion or an unsafe configuration STOPS further test traffic
+ * rather than repeatedly hammering the provider. The CLEANUP phase is never gated by the fuse: it keeps its
+ * reserved allowance (bounded) so cleanup still runs after a test-phase stop. (HTTPS/redirect safety still
+ * applies in both phases — the fuse only governs whether further TEST requests are attempted at all.)
  */
-export function makeBudgetedFetch(inner: typeof fetch, limits: BudgetLimits) {
+export function makeBudgetedFetch(inner: typeof fetch, limits: BudgetLimits): BudgetedFetch {
   let requests = 0;
   let uploadBytes = 0;
   let downloadBytes = 0;
   let cleanupPhase = false;
+  let tripped = false;
   const total = (): number => uploadBytes + downloadBytes;
+  // Latch the fuse for a test-phase stop; a no-op in cleanup (cleanup is never fuse-gated).
+  const trip = (): void => {
+    if (!cleanupPhase) tripped = true;
+  };
   const fetchImpl = (async (url: string, init: RequestInit = {}): Promise<Response> => {
     const u = String(url);
-    if (!u.startsWith('https://')) throw new Error(`live acceptance refuses a non-HTTPS URL: ${u}`);
+    // Safety: HTTPS only, in BOTH phases. An unsafe URL trips the fuse.
+    if (!u.startsWith('https://')) {
+      trip();
+      throw new Error(`live acceptance refuses a non-HTTPS URL: ${u}`);
+    }
+    // Fuse: once tripped in the test phase, refuse further TEST requests without any network call.
+    if (!cleanupPhase && tripped) throw new Error('live acceptance halted: budget/safety fuse tripped; no further test requests');
     // Check the request ceiling BEFORE counting, so a request rejected for exceeding the budget does not
     // itself consume budget (the reserved cleanup capacity stays intact even after a failure).
     const ceiling = cleanupPhase ? limits.maxRequests : limits.maxRequests - limits.cleanupReserve;
-    if (requests + 1 > ceiling) throw new Error(`request budget exceeded (phase=${cleanupPhase ? 'cleanup' : 'test'}, ceiling=${ceiling})`);
+    if (requests + 1 > ceiling) {
+      trip();
+      throw new Error(`request budget exceeded (phase=${cleanupPhase ? 'cleanup' : 'test'}, ceiling=${ceiling})`);
+    }
     const method = String(init.method ?? 'GET');
     const body = init.body as Uint8Array | undefined;
     const bodyLen = body?.byteLength ?? 0;
@@ -77,12 +118,16 @@ export function makeBudgetedFetch(inner: typeof fetch, limits: BudgetLimits) {
     const byteCeiling = cleanupPhase ? limits.maxBytes : limits.maxBytes - limits.cleanupByteReserve;
     // Reject an oversized OUTGOING body BEFORE calling fetch (never send bytes we cannot afford).
     if (bodyLen > 0 && total() + bodyLen > byteCeiling) {
+      trip();
       throw new Error(`outgoing body would exceed the byte budget (received ${total()}, +${bodyLen} > ${byteCeiling})`);
     }
     requests += 1;
     uploadBytes += bodyLen;
     const res = await inner(u, { ...init, redirect: 'error' }); // never follow a redirect to another host
-    if (res.status >= 300 && res.status < 400) throw new Error(`live acceptance rejects a redirect (${res.status})`);
+    if (res.status >= 300 && res.status < 400) {
+      trip();
+      throw new Error(`live acceptance rejects a redirect (${res.status})`);
+    }
     // Count ACTUAL response-body bytes AS THEY ARE CONSUMED into the SHARED counter (do not trust
     // Content-Length; it may be missing). Each chunk is accounted BEFORE the check, so bytes already
     // received — even on a failed or cancelled read — are counted HONESTLY. The check uses the LIVE shared
@@ -99,6 +144,7 @@ export function makeBudgetedFetch(inner: typeof fetch, limits: BudgetLimits) {
           downloadBytes += value.byteLength; // account as consumed, into the shared counter
           chunks.push(value);
           if (total() > byteCeiling) {
+            trip();
             await reader.cancel(); // stop pulling more; the received bytes stay counted (honest)
             throw new Error(`byte budget exceeded (received ${total()} > ${byteCeiling})`);
           }
@@ -114,43 +160,47 @@ export function makeBudgetedFetch(inner: typeof fetch, limits: BudgetLimits) {
     enterCleanupPhase: (): void => {
       cleanupPhase = true;
     },
-    stats: (): { requests: number; uploadBytes: number; downloadBytes: number } => ({ requests, uploadBytes, downloadBytes }),
+    stats: (): FetchStats => ({ requests, uploadBytes, downloadBytes, tripped }),
   };
 }
 
-/**
- * Run the provider acceptance scenarios against a store (real or simulated). Every CREATED object key is
- * reported through `track` so cleanup can delete exactly what was made. Proves PG1 (create-only + 412),
- * PG1-concurrent (exactly one create), PG2 (round-trip), PG3 (present-but-WRONG checksum rejected), and
- * PG5 (immutability: ADAPTER overwrite-prevention SEPARATED from CREDENTIAL/provider enforcement).
- */
-export async function runAcceptanceScenarios(args: {
-  store: S3ObjectStore;
-  cfg: S3Config;
-  fetchImpl: typeof fetch;
-  key: (attempt: string) => string;
-  track: (key: string) => void;
-}): Promise<void> {
-  const { store, cfg, fetchImpl, key, track } = args;
+/** Context shared by every acceptance step. Each step tracks the keys it creates (BEFORE sending) so
+ *  cleanup can delete exactly what was made, even on a step that fails. */
+export interface AcceptanceCtx {
+  readonly store: S3ObjectStore;
+  readonly cfg: S3Config;
+  readonly fetchImpl: typeof fetch;
+  readonly key: (attempt: string) => string;
+  readonly track: (key: string) => void;
+}
 
-  // PG1 — create when absent; a second create-only is rejected as exists (never a silent overwrite).
+/** PG1 — create-only / no-overwrite: create when absent; a second create-only is rejected as exists. */
+export async function runPG1(ctx: AcceptanceCtx): Promise<void> {
+  const { store, key, track } = ctx;
   const k1 = key('pg1');
   track(k1);
   const b1 = Buffer.from('{"pg1":true}', 'utf8');
   expect(await store.putIfAbsent(k1, b1, 'application/json')).toBe('created');
   expect(await store.putIfAbsent(k1, Buffer.from('{"pg1":"different"}', 'utf8'), 'application/json')).toBe('exists');
+}
 
-  // PG1-concurrent — two concurrent create-only to the SAME key ⇒ exactly one 'created', one 'exists'.
+/** PG1-concurrent — two concurrent create-only to the SAME key ⇒ exactly one 'created', one 'exists'. */
+export async function runPG1Concurrent(ctx: AcceptanceCtx): Promise<void> {
+  const { store, key, track } = ctx;
   const kC = key('pg1-concurrent');
   track(kC);
+  const b1 = Buffer.from('{"pg1":true}', 'utf8');
   const [rc1, rc2] = await Promise.all([
     store.putIfAbsent(kC, b1, 'application/json'),
     store.putIfAbsent(kC, b1, 'application/json'),
   ]);
   expect([rc1, rc2].filter((r) => r === 'created')).toHaveLength(1);
   expect([rc1, rc2].filter((r) => r === 'exists')).toHaveLength(1);
+}
 
-  // PG2 — GET/HEAD round-trip correctness; an absent key reads as absent.
+/** PG2 — GET/HEAD round-trip correctness; an absent key reads as absent. */
+export async function runPG2(ctx: AcceptanceCtx): Promise<void> {
+  const { store, key, track } = ctx;
   const k2 = key('pg2');
   track(k2);
   const b2 = Buffer.from('{"pg2":"round-trip"}', 'utf8');
@@ -158,12 +208,18 @@ export async function runAcceptanceScenarios(args: {
   expect((await store.head(k2))?.size).toBe(b2.length);
   expect((await store.get(k2)).equals(b2)).toBe(true);
   expect(await store.head(key('pg2-absent'))).toBeNull(); // never created ⇒ nothing to track
+}
 
-  // PG3 — a present-but-WRONG checksum must be rejected by the provider with a CHECKSUM-SPECIFIC error.
-  // A low-level probe deliberately sends a checksum that does not match the body (the normal putIfAbsent
-  // always sends the correct one). Track the probe key BEFORE sending (so a wrongly-accepted object is
-  // still cleaned up), and verify the object is ABSENT afterward. Auth failures (401/403), 5xx, and
-  // unsupported (405) must NOT count as a pass — the rejection must specifically be about the checksum.
+/**
+ * PG3 — a present-but-WRONG checksum must be rejected by the provider with a CHECKSUM-SPECIFIC error.
+ * A low-level probe deliberately sends a checksum that does not match the body (the normal putIfAbsent
+ * always sends the correct one). Track the probe key BEFORE sending (so a wrongly-accepted object is still
+ * cleaned up), and verify the object is ABSENT afterward. The BadDigest-only expectation is PRESERVED: an
+ * HTTP 200 (provider accepted the mismatch) is a FAILURE, not a pass. Auth (401/403), 5xx, unsupported
+ * (405), and any UNKNOWN/other code (incl. a generic 400) all FAIL CLOSED.
+ */
+export async function runPG3(ctx: AcceptanceCtx): Promise<void> {
+  const { store, cfg, fetchImpl, key, track } = ctx;
   const k3 = key('pg3');
   track(k3);
   const b3 = Buffer.from('{"pg3":"bytes"}', 'utf8');
@@ -179,20 +235,23 @@ export async function runAcceptanceScenarios(args: {
   const status = wrongRes.status;
   const errorBody = await wrongRes.text().catch(() => '');
   const code = parseS3ErrorCode(errorBody);
-  // Must be a CHECKSUM-SPECIFIC 4xx: the status is a checksum client error AND the parsed provider error
-  // code is on the explicit allow-list. Auth (401/403), 5xx, unsupported (405), and any UNKNOWN error code
-  // (e.g. a generic 400) all FAIL CLOSED here.
   expect([400, 422], `PG3: expected a checksum 4xx (got ${status})`).toContain(status);
   expect(isChecksumMismatchCode(code), `PG3: error code '${code}' is not an allow-listed checksum-mismatch code`).toBe(true);
   expect(await store.head(k3), 'PG3: a wrong-checksum object must never land').toBeNull();
+}
 
-  // PG5 — immutability, with the two mechanisms it actually proves kept SEPARATE and accurately labelled:
-  //   (a) ADAPTER overwrite-prevention: the Hub's ordinary `put` refuses a verification-shaped key (no
-  //       provider involved), so the Hub has no unconditional-overwrite code path.
-  //   (b) PROVIDER conditional-write enforcement: a second conditional create-only PUT is rejected.
-  // What is NOT proven here (remains NOT VERIFIED): a CREDENTIAL-LEVEL prohibition of an unconditional
-  // overwrite — i.e. that the credential itself would be DENIED a raw PUT without If-None-Match. That
-  // needs a bucket policy / Object Lock and is out of PR-5's scope.
+/**
+ * PG5 — "adapter overwrite guard + provider conditional-write enforcement". Proves exactly two mechanisms:
+ *   (a) ADAPTER overwrite guard: the Hub's ordinary `put` refuses a verification-shaped key (no provider
+ *       involved), so the Hub has no unconditional-overwrite code path.
+ *   (b) PROVIDER conditional-write enforcement: a second conditional create-only PUT is rejected (→ exists).
+ * It does NOT establish CREDENTIAL-LEVEL unconditional-overwrite protection — i.e. that the credential
+ * itself would be DENIED a raw PUT WITHOUT If-None-Match. That requires a bucket policy / Object Lock and a
+ * separate negative test; and Object Lock alone would not establish it either. So credential-level
+ * unconditional-overwrite protection remains NOT VERIFIED regardless of this step's result.
+ */
+export async function runPG5(ctx: AcceptanceCtx): Promise<void> {
+  const { store, key, track } = ctx;
   const k5 = key('pg5');
   track(k5);
   const b5 = Buffer.from('{"pg5":"immutable"}', 'utf8');
@@ -200,6 +259,22 @@ export async function runAcceptanceScenarios(args: {
   await expect(store.put(k5, Buffer.from('{"pg5":"tampered"}', 'utf8'), 'application/json')).rejects.toThrow(/verification artifact object/); // (a)
   expect(await store.putIfAbsent(k5, Buffer.from('{"pg5":"tampered"}', 'utf8'), 'application/json')).toBe('exists'); // (b)
   expect((await store.get(k5)).equals(b5)).toBe(true); // original bytes intact
+}
+
+/** The ordered acceptance steps. The live harness runs EACH in its OWN test so one step's assertion failure
+ *  does not prevent the others (notably PG5) from being evaluated. */
+export const ACCEPTANCE_STEPS: ReadonlyArray<{ name: string; run: (ctx: AcceptanceCtx) => Promise<void> }> = [
+  { name: 'PG1 — create-only / 412-on-exists', run: runPG1 },
+  { name: 'PG1-concurrent — exactly one create', run: runPG1Concurrent },
+  { name: 'PG2 — GET/HEAD round-trip', run: runPG2 },
+  { name: 'PG3 — wrong-checksum rejected (BadDigest only)', run: runPG3 },
+  { name: 'PG5 — adapter overwrite guard + provider conditional-write enforcement', run: runPG5 },
+];
+
+/** Sequential convenience wrapper (FAILS FAST at the first failing step). Used by the offline all-pass path;
+ *  the live harness uses per-step tests instead so failures are isolated. */
+export async function runAcceptanceScenarios(ctx: AcceptanceCtx): Promise<void> {
+  for (const step of ACCEPTANCE_STEPS) await step.run(ctx);
 }
 
 /** Delete every tracked object, then LIST the run prefix and assert nothing remains. */
@@ -214,6 +289,49 @@ export async function cleanupAndVerify(args: { store: S3ObjectStore; prefix: str
   }
   const remaining = typeof args.store.list === 'function' ? await args.store.list(args.prefix) : [];
   expect(remaining, `leftover objects under ${args.prefix}`).toEqual([]);
+}
+
+export interface RunTotals {
+  readonly preCleanup: FetchStats;
+  readonly final: FetchStats;
+  readonly cleanupSucceeded: boolean;
+  readonly cleanupError?: unknown;
+}
+
+/**
+ * Run cleanup and ALWAYS report totals. Snapshots the PRE-CLEANUP counters, runs cleanup, and — in a
+ * `finally`, so it happens EVEN IF cleanup throws — snapshots the FINAL counters and reports both plus
+ * whether cleanup succeeded. Never throws for a cleanup failure; the caller inspects `cleanupSucceeded`
+ * (the live harness asserts it true so a leftover object fails the suite). The default reporter logs counts
+ * and a success boolean only (never the raw error, to avoid surfacing anything sensitive).
+ */
+export async function cleanupAndReport(args: {
+  store: S3ObjectStore;
+  prefix: string;
+  created: readonly string[];
+  budgeted: BudgetedFetch;
+  report?: (totals: RunTotals) => void;
+}): Promise<RunTotals> {
+  const preCleanup = args.budgeted.stats();
+  let cleanupSucceeded = false;
+  let cleanupError: unknown;
+  let final: FetchStats = preCleanup;
+  try {
+    await cleanupAndVerify({ store: args.store, prefix: args.prefix, created: args.created, enterCleanupPhase: args.budgeted.enterCleanupPhase });
+    cleanupSucceeded = true;
+  } catch (e) {
+    cleanupError = e;
+  } finally {
+    final = args.budgeted.stats();
+    const totals: RunTotals = { preCleanup, final, cleanupSucceeded, cleanupError };
+    const report =
+      args.report ??
+      ((t: RunTotals): void => {
+        console.log(`VER_S3_TOTALS ${JSON.stringify({ preCleanup: t.preCleanup, final: t.final, cleanupSucceeded: t.cleanupSucceeded })}`);
+      });
+    report(totals);
+  }
+  return { preCleanup, final, cleanupSucceeded, cleanupError };
 }
 
 /**
@@ -253,8 +371,8 @@ export function makeInMemoryS3(
     if (method === 'PUT') {
       const body = Buffer.from((init.body as Uint8Array) ?? new Uint8Array());
       // Checksum verification (a mismatch is a hard reject — models provider PG3). Fault injection lets the
-      // OFFLINE negative tests model a provider that mis-handles a mismatch (auth/5xx/unsupported, or a
-      // wrongly-accepted body) so the PG3 assertions are shown to catch those.
+      // OFFLINE negative tests model a provider that mis-handles a mismatch (auth/5xx/unsupported, a
+      // wrongly-accepted body, or a specific non-mismatch code) so the PG3 assertions are shown to catch it.
       const declared = headers['x-amz-checksum-sha256'];
       if (declared && declared !== createHash('sha256').update(body).digest('base64')) {
         if (faults.acceptWrongChecksum) {

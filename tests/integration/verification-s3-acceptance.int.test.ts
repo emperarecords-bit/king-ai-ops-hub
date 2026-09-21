@@ -7,17 +7,33 @@
  *    silent skip). The endpoint (HTTPS) and bucket are validated against the APPROVED allow-list BEFORE
  *    any credential is used.
  *  - It makes REAL calls to the approved provider, bounded by request/byte budgets (with a reserved
- *    cleanup allowance), writes only PRODUCTION-SHAPED verification keys under a random per-run prefix in
- *    the approved DISPOSABLE bucket, deletes exactly what it created, and verifies cleanup.
+ *    cleanup allowance) and a safety fuse, writes only PRODUCTION-SHAPED verification keys under a random
+ *    per-run prefix in the approved DISPOSABLE bucket, deletes exactly what it created, and verifies cleanup.
+ *
+ * Each provider guarantee (PG1, PG1-concurrent, PG2, PG3, PG5) runs in its OWN test, so one guarantee's
+ * assertion failure (e.g. PG3 on a provider that accepts a wrong checksum) does NOT prevent PG5 from being
+ * evaluated. A single shared budgeted fetch (one counter + fuse) and one shared `created[]` span all tests,
+ * and a single afterAll runs cleanup and ALWAYS reports pre-cleanup + final totals.
  *
  * The scenario/cleanup logic lives in tests/support/s3-acceptance.ts and is ALSO exercised offline against
  * a simulated provider (tests/unit/verification-s3-acceptance-offline.test.ts). This file only wires the
- * REAL store + a budgeted global fetch. It proves the PROVIDER guarantees the hermetic tests cannot; it is
- * authorized to run ONLY after the owner approves A1–A5.
+ * REAL store + a budgeted global fetch. It proves PROVIDER guarantees the hermetic tests cannot; it is
+ * authorized to run ONLY after the owner approves a live run.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { S3ObjectStore } from '@/domain/documents/s3-object-store';
-import { cleanupAndVerify, makeAcceptanceKeys, makeBudgetedFetch, runAcceptanceScenarios } from '../support/s3-acceptance';
+import {
+  cleanupAndReport,
+  makeAcceptanceKeys,
+  makeBudgetedFetch,
+  runPG1,
+  runPG1Concurrent,
+  runPG2,
+  runPG3,
+  runPG5,
+  type AcceptanceCtx,
+  type BudgetedFetch,
+} from '../support/s3-acceptance';
 
 const OPTED_IN = process.env.VER_S3_ACCEPTANCE === '1';
 
@@ -34,7 +50,8 @@ const ENV = {
 const LIMITS = { maxRequests: 60, maxBytes: 30 * 1024 * 1024, cleanupReserve: 15, cleanupByteReserve: 1 * 1024 * 1024 };
 
 let store: S3ObjectStore;
-let budgeted: ReturnType<typeof makeBudgetedFetch>;
+let budgeted: BudgetedFetch;
+let ctx: AcceptanceCtx;
 const KEYS = makeAcceptanceKeys();
 const created: string[] = [];
 
@@ -52,31 +69,33 @@ beforeAll(() => {
   if (!OPTED_IN) return;
   validatePrerequisitesOrFail(); // endpoint + bucket validated BEFORE the credential goes into the store
   budgeted = makeBudgetedFetch(fetch, LIMITS);
-  store = new S3ObjectStore(
-    { endpoint: ENV.endpoint, region: ENV.region, bucket: ENV.bucket, accessKeyId: ENV.accessKeyId, secretAccessKey: ENV.secretAccessKey },
-    budgeted.fetch,
-  );
+  const cfg = { endpoint: ENV.endpoint, region: ENV.region, bucket: ENV.bucket, accessKeyId: ENV.accessKeyId, secretAccessKey: ENV.secretAccessKey };
+  store = new S3ObjectStore(cfg, budgeted.fetch);
+  ctx = { store, cfg, fetchImpl: budgeted.fetch, key: KEYS.key, track: (k) => created.push(k) };
 });
 
 afterAll(async () => {
   if (!OPTED_IN || !store) return;
-  await cleanupAndVerify({ store, prefix: KEYS.prefix, created, enterCleanupPhase: budgeted.enterCleanupPhase });
+  // Cleanup ALWAYS reports pre-cleanup + final totals (in a finally, even if cleanup fails); a cleanup
+  // failure (leftover object) fails the suite here, AFTER the totals have been reported.
+  const totals = await cleanupAndReport({ store, prefix: KEYS.prefix, created, budgeted });
+  expect(totals.cleanupSucceeded, `cleanup must delete everything and verify the prefix '${KEYS.prefix}' empty`).toBe(true);
 });
 
 describe.skipIf(!OPTED_IN)('VER-002 PR-5 — S3 provider acceptance (LIVE, opt-in)', () => {
-  it('proves PG1, PG1-concurrent, PG2, PG3, PG5 against the approved disposable bucket', async () => {
-    await runAcceptanceScenarios({
-      store,
-      cfg: { endpoint: ENV.endpoint, region: ENV.region, bucket: ENV.bucket, accessKeyId: ENV.accessKeyId, secretAccessKey: ENV.secretAccessKey },
-      fetchImpl: budgeted.fetch,
-      key: KEYS.key,
-      track: (k) => created.push(k),
-    });
-  });
+  // Each guarantee is an INDEPENDENT test: an ordinary assertion failure in one (e.g. PG3) does not stop
+  // the others (notably PG5) from being evaluated. Order is preserved; the shared budgeted fetch and
+  // created[] persist across them.
+  it('PG1 — create-only publish; a second create-only is rejected as exists', () => runPG1(ctx));
+  it('PG1-concurrent — two concurrent create-only writes yield exactly one create', () => runPG1Concurrent(ctx));
+  it('PG2 — GET/HEAD round-trip is byte-exact; absent reads absent', () => runPG2(ctx));
+  it('PG3 — a present-but-wrong checksum is rejected (BadDigest); HTTP 200 is a FAILURE', () => runPG3(ctx));
+  it('PG5 — adapter overwrite guard + provider conditional-write enforcement', () => runPG5(ctx));
 
-  it('stays within the request/byte budget', () => {
+  it('stays within the request/byte budget and the fuse did not trip', () => {
     const s = budgeted.stats();
     expect(s.requests).toBeLessThanOrEqual(LIMITS.maxRequests);
     expect(s.uploadBytes + s.downloadBytes).toBeLessThanOrEqual(LIMITS.maxBytes);
+    expect(s.tripped, 'the budget/safety fuse must not have tripped during the run').toBe(false);
   });
 });
