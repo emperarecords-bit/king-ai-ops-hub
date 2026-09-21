@@ -82,11 +82,13 @@ export async function middleware(request: NextRequest) {
   // has no cookie/session path by design — the Supabase-session check here
   // would 401 every legitimate MCP client, so it passes through to the route's
   // authenticateMcp gate (which fails closed without a valid token).
-  // /api/p/<key>/verification (POST) ingests external-runner evidence and authenticates with EITHER a
-  // runner BEARER credential OR a session (requireRunnerOrTenant). Like /api/mcp, the Supabase-session
-  // check here would 401 a legitimate bearer-only runner, so it passes through to the route's own gate
-  // (which fails closed). Only the exact ingest path — the runner-keys admin subpaths stay session-gated.
-  const isRunnerIngest = /^\/api\/p\/[^/]+\/verification$/.test(pathname);
+  // The runner-facing verification endpoints authenticate with EITHER a runner BEARER credential OR a
+  // session (requireRunnerOrTenant / self-gating routes). Like /api/mcp, the Supabase-session check
+  // here would 401 a legitimate bearer-only runner, so these pass through to the route's own gate
+  // (which fails closed). Covered: the ingest path, and the contract-retrieval paths
+  // (…/verification/requests and …/verification/requests/<id>). The runner-keys ADMIN subpaths are NOT
+  // covered — they stay session-gated.
+  const isRunnerIngest = /^\/api\/p\/[^/]+\/verification(?:\/requests(?:\/[^/]+)?)?$/.test(pathname);
   const isPublic =
     pathname === '/login' ||
     pathname.startsWith('/auth') ||

@@ -526,6 +526,13 @@
       "when": 1789940283077,
       "tag": "0074_verification_runner_keys",
       "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1789954973567,
+      "tag": "0075_verification_catalog_pin",
+      "breakpoints": true
     }
   ]
 }

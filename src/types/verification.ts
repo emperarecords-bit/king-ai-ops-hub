@@ -56,4 +56,12 @@ export type RejectionCode =
   | 'idempotency_conflict'
   /** The envelope declared a signing-key version the Hub no longer supports (signing-key retirement —
    *  distinct from a revoked bearer credential, which is refused earlier at authentication). */
-  | 'unsupported_signing_version';
+  | 'unsupported_signing_version'
+  /** The contract predates catalog pinning (carries the 'unpinned' sentinel) — rejected, fail closed. */
+  | 'catalog_unpinned'
+  /** The contract's pinned catalog version can no longer be resolved server-side (missing snapshot) —
+   *  fail closed rather than verify against an unknown catalog. */
+  | 'catalog_unavailable'
+  /** The evidence's declared catalog identity, the contract's pinned identity, and the server-resolved
+   *  catalog do not all agree (skew or tampering). */
+  | 'catalog_mismatch';

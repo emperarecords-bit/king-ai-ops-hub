@@ -85,6 +85,8 @@ const envelope = () => ({
     source: 'local_runner',
     checks: [],
     artifacts: [],
+    catalogVersion: 'x',
+    catalogDigest: 'x',
     idempotencyKey: 'idem-int-1',
     submittedAt: new Date().toISOString(),
   },
@@ -212,7 +214,9 @@ const ingestEnabled = Boolean(
     process.env.VER_RK_TASK_ID &&
     process.env.VER_RK_COMMIT &&
     process.env.VER_RK_REPO &&
-    process.env.VER_RK_CRED_EXPIRED,
+    process.env.VER_RK_CRED_EXPIRED &&
+    process.env.VER_RK_CATALOG_VERSION &&
+    process.env.VER_RK_CATALOG_DIGEST,
 );
 const M = {
   master: process.env.VER_RK_MASTER ?? '',
@@ -223,6 +227,8 @@ const M = {
   commit: process.env.VER_RK_COMMIT ?? '',
   repo: process.env.VER_RK_REPO ?? '',
   credExpired: process.env.VER_RK_CRED_EXPIRED ?? '',
+  catalogVersion: process.env.VER_RK_CATALOG_VERSION ?? '',
+  catalogDigest: process.env.VER_RK_CATALOG_DIGEST ?? '',
 };
 const ART_BYTES = Buffer.from('{"passed":true}', 'utf8');
 const ART_SHA = createHash('sha256').update(ART_BYTES).digest('hex');
@@ -247,6 +253,8 @@ function signedEnvelope(over: Record<string, unknown> = {}, signingKeyVersion?: 
     source: 'local_runner' as const,
     checks: [{ name: 'unit', status: 'passed' as const, command: 'npm run unit', exitCode: 0, startedAt: '2026-09-20T00:00:00.000Z', finishedAt: '2026-09-20T00:00:05.000Z', detail: null }],
     artifacts: [{ path: 'test-results.json', sha256: ART_SHA, sizeBytes: ART_BYTES.length, storageKey: artKey() }],
+    catalogVersion: M.catalogVersion,
+    catalogDigest: M.catalogDigest,
     idempotencyKey: 'idem-real-1',
     submittedAt: new Date().toISOString(),
     ...over,

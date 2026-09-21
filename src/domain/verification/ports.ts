@@ -3,7 +3,27 @@
  * so it is testable with in-memory adapters and wired to Drizzle + the object
  * store in production without any change to the logic.
  */
+import type { CatalogResolver } from './catalog';
 import type { EvidenceSubmission, IngestDecision, NewVerificationRequest, VerificationRequest } from './ingest-types';
+
+/**
+ * A contract plus policy-NEUTRAL evidence facts for retrieval. `acceptedEvidenceCount`/
+ * `hasVerifiedComplete` are counts, NOT a verdict — "open" (no accepted evidence yet) deliberately
+ * does not encode the unresolved conflicting-attempt resolution policy.
+ */
+export interface ContractSummary {
+  readonly request: VerificationRequest;
+  readonly acceptedEvidenceCount: number;
+  readonly hasVerifiedComplete: boolean;
+}
+
+/** Bounded, deterministic keyset pagination over a project's contracts (ordered by contract id). */
+export interface ContractListOptions {
+  readonly limit: number;
+  readonly afterId?: string | null;
+  /** When true, return only contracts with NO accepted evidence yet (awaiting a first result). */
+  readonly openOnly: boolean;
+}
 
 /** Retrieval + head for a stored artifact, so the Hub can confirm availability and rehash. */
 export interface StoredArtifactStore {
@@ -60,12 +80,19 @@ export interface VerificationStore {
     submissionSha256: string,
     decision: IngestDecision,
   ): Promise<PriorEvidence>;
+  /** Project-scoped contract retrieval (PR-3): a bounded page of this project's contracts + evidence
+   *  facts. Project-scoped — all of a project's credentials share read access; not runner-specific. */
+  listRequests(orgId: string, projectId: string, opts: ContractListOptions): Promise<ContractSummary[]>;
+  /** One contract by id, with the same evidence facts, or null when absent in this tenant. */
+  getRequestSummary(orgId: string, projectId: string, requestId: string): Promise<ContractSummary | null>;
 }
 
 export interface IngestDeps {
   readonly store: VerificationStore;
   readonly artifacts: StoredArtifactStore;
   readonly secrets: RunnerSecretSource;
+  /** Trusted, server-side command-catalog resolver (never caller-supplied). */
+  readonly catalog: CatalogResolver;
   /** Injectable clock for deterministic tests. */
   readonly now?: () => Date;
   /** Max age of a submission's signed timestamp before it is rejected as expired (default 10 min). */

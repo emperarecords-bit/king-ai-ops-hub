@@ -6,6 +6,7 @@ import {
   describeAccess,
   describeApprovalDetails,
   InMemoryArtifactStore,
+  InMemoryCatalogResolver,
   InMemoryVerificationStore,
   ingestEvidence,
   signEvidence,
@@ -27,6 +28,8 @@ const PROJ = 'proj-1';
 const SECRET = 'runner-secret-abc';
 const COMMIT = 'a'.repeat(40);
 const NEWER = 'b'.repeat(40);
+// A fixed trusted catalog the contract pins and the submission declares. Commands match the checks.
+const CAT = { version: 'test-cat-v1', digest: 'testdigest0001', commands: { unit: 'npm run unit', typecheck: 'npm run typecheck' } } as const;
 const ARTIFACT_BYTES = Buffer.from('{"passed":true}', 'utf8');
 const ARTIFACT_SHA = createHash('sha256').update(ARTIFACT_BYTES).digest('hex');
 const ARTIFACT_KEY = `org/${ORG}/project/${PROJ}/art/test-results.json`;
@@ -42,6 +45,8 @@ function makeRequest(over: Partial<VerificationRequest> = {}): VerificationReque
     requiredChecks: ['unit', 'typecheck'],
     requiredArtifacts: ['test-results.json'],
     allowDirty: false,
+    catalogVersion: CAT.version,
+    catalogDigest: CAT.digest,
     createdBy: 'user-1',
     createdAt: '2026-09-20T00:00:00.000Z',
     ...over,
@@ -81,6 +86,8 @@ function makeSubmission(over: Partial<EvidenceSubmission> = {}): EvidenceSubmiss
     source: 'local_runner',
     checks: [passed('unit'), passed('typecheck')],
     artifacts: [artifact],
+    catalogVersion: CAT.version,
+    catalogDigest: CAT.digest,
     idempotencyKey: 'idem-1',
     submittedAt: '2026-09-20T00:00:10.000Z',
     ...over,
@@ -101,10 +108,13 @@ beforeEach(() => {
   store.addRequest(makeRequest());
   artifacts = new InMemoryArtifactStore();
   artifacts.put(ARTIFACT_KEY, ARTIFACT_BYTES);
+    const catalog = new InMemoryCatalogResolver();
+  catalog.addVersion({ version: CAT.version, digest: CAT.digest, commands: CAT.commands });
   deps = {
     store,
     artifacts,
     secrets: new StaticRunnerSecretSource(new Map([[`${ORG}|${PROJ}`, SECRET]])),
+    catalog,
     now: () => new Date('2026-09-20T00:00:11.000Z'),
   };
 });
@@ -283,7 +293,7 @@ describe('VER-002 review fixes', () => {
       // A runner holding project-A's derived key cannot authenticate for project-B.
       const bStore = new InMemoryVerificationStore();
       bStore.addRequest(makeRequest({ id: 'req-b', orgId: 'org-1', projectId: 'proj-B', taskId: 'task-b' }));
-      const bDeps: IngestDeps = { store: bStore, artifacts, secrets: src, now: () => new Date('2026-09-20T00:00:11.000Z') };
+      const bDeps: IngestDeps = { store: bStore, artifacts, secrets: src, catalog: deps.catalog, now: () => new Date('2026-09-20T00:00:11.000Z') };
       const payload = makeSubmission({ requestId: 'req-b', projectId: 'proj-B', taskId: 'task-b', idempotencyKey: 'idem-b' });
       const envelope: SignedEnvelope = { runnerId: payload.runnerId, payload, signature: signEvidence(a!, payload) };
       const d = await ingestEvidence(bDeps, { orgId: 'org-1', projectId: 'proj-B' }, envelope);
@@ -441,6 +451,12 @@ describe('VER-002 concurrent persistence conflict (every path)', () => {
     async createRequest(): Promise<{ request: VerificationRequest; inserted: boolean }> {
       throw new Error('not used in this test');
     }
+    async listRequests(): Promise<never> {
+      throw new Error('not used in this test');
+    }
+    async getRequestSummary(): Promise<never> {
+      throw new Error('not used in this test');
+    }
   }
 
   const winnerSuccess: IngestDecision = {
@@ -459,10 +475,13 @@ describe('VER-002 concurrent persistence conflict (every path)', () => {
   function conflictDeps(): IngestDeps {
     const s = new InMemoryArtifactStore();
     s.put(ARTIFACT_KEY, ARTIFACT_BYTES);
+    const catalog = new InMemoryCatalogResolver();
+    catalog.addVersion({ version: CAT.version, digest: CAT.digest, commands: CAT.commands });
     return {
       store: new ConflictStore(makeRequest(), { decision: winnerSuccess, submissionSha256: 'A-DIFFERENT-WINNER-DIGEST' }),
       artifacts: s,
       secrets: new StaticRunnerSecretSource(new Map([[`${ORG}|${PROJ}`, SECRET]])),
+      catalog,
       now: () => new Date('2026-09-20T00:00:11.000Z'),
     };
   }
@@ -505,5 +524,53 @@ describe('VER-002 PR-2 — signing-key version', () => {
     const d = await ingestEvidence(deps, ctx, env);
     expect(d.accepted).toBe(false);
     expect(d.rejection?.code).toBe('unsupported_signing_version');
+  });
+});
+
+describe('VER-002 PR-3 — catalog pinning', () => {
+  it('rejects a LEGACY unpinned contract (fail closed)', async () => {
+    store.addRequest(makeRequest({ id: 'req-unpinned', catalogVersion: 'unpinned', catalogDigest: 'unpinned' }));
+    const d = await ingestEvidence(deps, ctx, sign(makeSubmission({ requestId: 'req-unpinned', idempotencyKey: 'idem-unpinned' })));
+    expect(d.accepted).toBe(false);
+    expect(d.rejection?.code).toBe('catalog_unpinned');
+  });
+
+  it('fails closed when the contract’s pinned catalog version no longer resolves', async () => {
+    store.addRequest(makeRequest({ id: 'req-gone', catalogVersion: 'gone-v9', catalogDigest: 'x' }));
+    const d = await ingestEvidence(
+      deps,
+      ctx,
+      sign(makeSubmission({ requestId: 'req-gone', catalogVersion: 'gone-v9', catalogDigest: 'x', idempotencyKey: 'idem-gone' })),
+    );
+    expect(d.rejection?.code).toBe('catalog_unavailable');
+  });
+
+  it('rejects caller-supplied catalog tampering (payload digest ≠ contract/server)', async () => {
+    const d = await ingestEvidence(deps, ctx, sign(makeSubmission({ catalogDigest: 'TAMPERED', idempotencyKey: 'idem-tamper' })));
+    expect(d.rejection?.code).toBe('catalog_mismatch');
+  });
+
+  it('rejects a required check whose command does not EXACTLY match the pinned catalog entry', async () => {
+    const d = await ingestEvidence(
+      deps,
+      ctx,
+      sign(makeSubmission({ checks: [{ ...passed('unit'), command: 'rm -rf /' }, passed('typecheck')], idempotencyKey: 'idem-cmd' })),
+    );
+    expect(d.rejection?.code).toBe('invalid_checks');
+  });
+
+  it('a contract pinned to an OLD catalog version still verifies after the catalog updates', async () => {
+    const older = { version: 'old-v0', digest: 'olddigest', commands: { unit: 'npm run unit', typecheck: 'npm run typecheck' } };
+    (deps.catalog as InMemoryCatalogResolver).addVersion(older);
+    // A newer version exists (and would be the default), with a DIFFERENT command — must not be used.
+    (deps.catalog as InMemoryCatalogResolver).addVersion({ version: 'new-v2', digest: 'newdigest', commands: { unit: 'DIFFERENT', typecheck: 'x' } });
+    store.addRequest(makeRequest({ id: 'req-old', catalogVersion: older.version, catalogDigest: older.digest }));
+    const d = await ingestEvidence(
+      deps,
+      ctx,
+      sign(makeSubmission({ requestId: 'req-old', catalogVersion: older.version, catalogDigest: older.digest, idempotencyKey: 'idem-old' })),
+    );
+    expect(d.accepted).toBe(true);
+    expect(d.status).toBe('verified_complete');
   });
 });

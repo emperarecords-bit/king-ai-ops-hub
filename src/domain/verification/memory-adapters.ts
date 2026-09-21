@@ -4,8 +4,9 @@
  * object store. The Drizzle + object-store adapters implement the same ports.
  */
 import { randomUUID } from 'node:crypto';
+import type { CatalogResolver, ResolvedCatalog } from './catalog';
 import type { EvidenceSubmission, IngestDecision, NewVerificationRequest, VerificationRequest } from './ingest-types';
-import type { PriorEvidence, RunnerSecretSource, StoredArtifactStore, VerificationStore } from './ports';
+import type { ContractListOptions, ContractSummary, PriorEvidence, RunnerSecretSource, StoredArtifactStore, VerificationStore } from './ports';
 
 const scope = (orgId: string, projectId: string, ...parts: string[]) => [orgId, projectId, ...parts].join('|');
 
@@ -16,6 +17,8 @@ export class InMemoryVerificationStore implements VerificationStore {
   // Keyed by (org, project, requestId, idempotencyKey) — idempotency is bound to the request.
   private readonly records = new Map<string, PriorEvidence>();
   readonly evidence: { submission: EvidenceSubmission; decision: IngestDecision }[] = [];
+  // Parallel metadata for policy-neutral evidence counts (tenant + requestId + accepted/verified).
+  private readonly evidenceMeta: { orgId: string; projectId: string; requestId: string; accepted: boolean; verified: boolean }[] = [];
 
   addRequest(req: VerificationRequest): void {
     this.requests.set(scope(req.orgId, req.projectId, req.id), req);
@@ -71,11 +74,45 @@ export class InMemoryVerificationStore implements VerificationStore {
       requiredChecks: [...input.requiredChecks],
       requiredArtifacts: [...input.requiredArtifacts],
       allowDirty: input.allowDirty,
+      catalogVersion: input.catalogVersion,
+      catalogDigest: input.catalogDigest,
       createdBy,
       createdAt: new Date().toISOString(),
     };
     this.requests.set(scope(orgId, projectId, request.id), request);
     return { request, inserted: true };
+  }
+
+  private summary(orgId: string, projectId: string, request: VerificationRequest): ContractSummary {
+    let acceptedEvidenceCount = 0;
+    let hasVerifiedComplete = false;
+    for (const m of this.evidenceMeta) {
+      if (m.orgId === orgId && m.projectId === projectId && m.requestId === request.id && m.accepted) {
+        acceptedEvidenceCount += 1;
+        if (m.verified) hasVerifiedComplete = true;
+      }
+    }
+    return { request, acceptedEvidenceCount, hasVerifiedComplete };
+  }
+
+  async listRequests(orgId: string, projectId: string, opts: ContractListOptions): Promise<ContractSummary[]> {
+    const all = [...this.requests.values()]
+      .filter((r) => r.orgId === orgId && r.projectId === projectId)
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)); // deterministic keyset order by id
+    const out: ContractSummary[] = [];
+    for (const r of all) {
+      if (opts.afterId && r.id <= opts.afterId) continue;
+      const s = this.summary(orgId, projectId, r);
+      if (opts.openOnly && s.acceptedEvidenceCount > 0) continue;
+      out.push(s);
+      if (out.length >= opts.limit) break;
+    }
+    return out;
+  }
+
+  async getRequestSummary(orgId: string, projectId: string, requestId: string): Promise<ContractSummary | null> {
+    const r = this.requests.get(scope(orgId, projectId, requestId));
+    return r ? this.summary(orgId, projectId, r) : null;
   }
 
   async findExisting(orgId: string, projectId: string, requestId: string, key: string): Promise<PriorEvidence | null> {
@@ -97,7 +134,41 @@ export class InMemoryVerificationStore implements VerificationStore {
     const record: PriorEvidence = { decision, submissionSha256 };
     this.records.set(k, record);
     this.evidence.push({ submission, decision });
+    this.evidenceMeta.push({
+      orgId,
+      projectId,
+      requestId: submission.requestId,
+      accepted: decision.accepted,
+      verified: decision.status === 'verified_complete',
+    });
     return record;
+  }
+}
+
+/**
+ * In-memory catalog resolver for tests: register versions and set the current one (per project or a
+ * default). Mirrors the trusted file resolver's contract without touching the filesystem.
+ */
+export class InMemoryCatalogResolver implements CatalogResolver {
+  private readonly versions = new Map<string, ResolvedCatalog>();
+  private defaultVersion: string | null = null;
+  private readonly perProject = new Map<string, string>();
+
+  addVersion(cat: ResolvedCatalog): void {
+    this.versions.set(cat.version, cat);
+  }
+  setDefault(version: string): void {
+    this.defaultVersion = version;
+  }
+  setForProject(projectId: string, version: string): void {
+    this.perProject.set(projectId, version);
+  }
+  current(projectId: string): ResolvedCatalog | null {
+    const v = this.perProject.get(projectId) ?? this.defaultVersion;
+    return v ? this.versions.get(v) ?? null : null;
+  }
+  byVersion(version: string): ResolvedCatalog | null {
+    return this.versions.get(version) ?? null;
   }
 }
 

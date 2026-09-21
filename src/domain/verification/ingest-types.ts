@@ -50,6 +50,10 @@ export interface VerificationRequest {
   /** Reserved. Dirty working trees are rejected in this initial integration
    *  regardless of this flag (a future release may bind to a real content snapshot). */
   readonly allowDirty: boolean;
+  /** The trusted command-catalog identity pinned at creation (server-resolved). Legacy contracts
+   *  carry the 'unpinned' sentinel and are rejected at ingest (fail closed). */
+  readonly catalogVersion: string;
+  readonly catalogDigest: string;
   readonly createdBy: string;
   readonly createdAt: string;
 }
@@ -66,6 +70,9 @@ export interface NewVerificationRequest {
   readonly requiredChecks: readonly string[];
   readonly requiredArtifacts: readonly string[];
   readonly allowDirty: boolean;
+  /** Server-resolved trusted catalog identity to pin (never caller-supplied). */
+  readonly catalogVersion: string;
+  readonly catalogDigest: string;
 }
 
 /** The signed bundle a runner submits. */
@@ -87,6 +94,10 @@ export interface EvidenceSubmission {
   readonly source: EvidenceSource;
   readonly checks: readonly CheckResult[];
   readonly artifacts: readonly SubmittedArtifact[];
+  /** The catalog identity the runner executed under, INSIDE the signed payload (D4). Ingest checks it
+   *  against the contract's pinned identity AND against the server-re-resolved catalog on both paths. */
+  readonly catalogVersion: string;
+  readonly catalogDigest: string;
   /** Replay/duplicate guard — same key must never change the result. */
   readonly idempotencyKey: string;
   readonly submittedAt: string;

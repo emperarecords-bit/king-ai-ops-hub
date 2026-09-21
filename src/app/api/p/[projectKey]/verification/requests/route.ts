@@ -1,8 +1,11 @@
 import { z } from 'zod';
 import { AppError, toPublicMessage } from '@/lib/errors';
-import { requireTenant } from '@/domain/auth/guard';
-import { withTenant } from '@/db/tenant';
-import { createVerificationRequest } from '@/domain/verification';
+import { requireRunnerOrTenant, requireTenant } from '@/domain/auth/guard';
+import { serverEnv } from '@/lib/env.server';
+import { withRunner, withTenant } from '@/db/tenant';
+import type { DbTx } from '@/db/client';
+import type { VerificationCaller } from '@/types/domain';
+import { createVerificationRequest, fileCatalogResolver, type ContractSummary } from '@/domain/verification';
 import { createDrizzleVerificationStore } from '@/domain/verification/drizzle-store';
 
 /**
@@ -63,15 +66,99 @@ export async function POST(
 
   try {
     const outcome = await withTenant(ctx, (tx) =>
-      createVerificationRequest(createDrizzleVerificationStore(tx), ctx, parsed.data),
+      createVerificationRequest(createDrizzleVerificationStore(tx), fileCatalogResolver(), ctx, parsed.data),
     );
     if (outcome.rejection) {
       const code = outcome.rejection.code;
       const status =
-        code === 'invalid_input' ? 400 : code === 'task_not_in_project' ? 404 : code === 'repo_not_authorized' ? 403 : 409; // no_repo_binding, contract_conflict
+        code === 'invalid_input'
+          ? 400
+          : code === 'task_not_in_project'
+            ? 404
+            : code === 'repo_not_authorized'
+              ? 403
+              : code === 'catalog_unavailable'
+                ? 503 // no trusted catalog configured — fail closed, not the caller's fault
+                : 409; // no_repo_binding, contract_conflict
       return Response.json({ error: outcome.rejection.message, code }, { status });
     }
     return Response.json({ request: outcome.request, created: outcome.created }, { status: outcome.created ? 201 : 200 });
+  } catch (err) {
+    return Response.json({ error: toPublicMessage(err) }, { status: 500 });
+  }
+}
+
+/** Serialize a contract summary for retrieval — only the fields a caller needs (no secrets/evidence). */
+function toContractView(s: ContractSummary): Record<string, unknown> {
+  const r = s.request;
+  return {
+    id: r.id,
+    taskId: r.taskId,
+    repoFullName: r.repoFullName,
+    expectedCommitSha: r.expectedCommitSha,
+    requiredChecks: r.requiredChecks,
+    requiredArtifacts: r.requiredArtifacts,
+    allowDirty: r.allowDirty,
+    catalogVersion: r.catalogVersion,
+    catalogDigest: r.catalogDigest,
+    createdAt: r.createdAt,
+    // Policy-neutral facts (NOT a verdict): "open" means acceptedEvidenceCount === 0.
+    acceptedEvidenceCount: s.acceptedEvidenceCount,
+    hasVerifiedComplete: s.hasVerifiedComplete,
+  };
+}
+
+const MAX_PAGE = 100;
+const DEFAULT_PAGE = 50;
+const CURSOR_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * GET — list this PROJECT's verification contracts (VER-002 PR-3). Project-scoped: every credential
+ * with read access to the project sees the same contracts (not a runner-specific assignment). Humans
+ * (any member, incl. viewer) may always read; a MACHINE principal additionally requires the retrieval
+ * control (`VERIFICATION_RUNNER_RETRIEVAL_ENABLED`) to be on. Bounded keyset pagination by contract id.
+ * `?state=open` filters to contracts with no accepted evidence yet (a policy-neutral definition).
+ */
+export async function GET(
+  req: Request,
+  { params }: { params: Promise<{ projectKey: string }> },
+): Promise<Response> {
+  const { projectKey } = await params;
+
+  let caller: VerificationCaller;
+  try {
+    caller = await requireRunnerOrTenant(projectKey, req);
+  } catch (err) {
+    const code = err instanceof AppError ? err.code : null;
+    const status = code === 'unauthenticated' ? 401 : code === 'validation' ? 400 : 403;
+    return Response.json({ error: toPublicMessage(err) }, { status });
+  }
+  if (caller.kind === 'runner' && !serverEnv().VERIFICATION_RUNNER_RETRIEVAL_ENABLED) {
+    return Response.json({ error: 'Machine contract retrieval is disabled.' }, { status: 403 });
+  }
+  const tenant = caller.kind === 'user' ? caller.tenant : caller.runner;
+  const runInTenant = <T>(fn: (tx: DbTx) => Promise<T>): Promise<T> =>
+    caller.kind === 'user' ? withTenant(caller.tenant, fn) : withRunner(caller.runner, fn);
+
+  const url = new URL(req.url);
+  const openOnly = url.searchParams.get('state') === 'open';
+  const afterId = url.searchParams.get('cursor') || null;
+  // Validate the cursor as a UUID BEFORE it reaches the uuid column — a malformed cursor is a client
+  // error (400), not a database-driven 500.
+  if (afterId !== null && !CURSOR_RE.test(afterId)) {
+    return Response.json({ error: 'Invalid pagination cursor.' }, { status: 400 });
+  }
+  const limitRaw = Number(url.searchParams.get('limit') ?? DEFAULT_PAGE);
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), MAX_PAGE) : DEFAULT_PAGE;
+
+  try {
+    const summaries = await runInTenant((tx) =>
+      createDrizzleVerificationStore(tx).listRequests(tenant.orgId, tenant.projectId, { limit, afterId, openOnly }),
+    );
+    const items = summaries.map(toContractView);
+    // nextCursor is the last id only when the page was full (more may remain).
+    const nextCursor = summaries.length === limit ? summaries[summaries.length - 1]!.request.id : null;
+    return Response.json({ items, nextCursor }, { status: 200 });
   } catch (err) {
     return Response.json({ error: toPublicMessage(err) }, { status: 500 });
   }
