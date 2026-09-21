@@ -18,17 +18,15 @@ export function parseS3ErrorCode(body: string): string | null {
   return body.match(/<Code>([^<]+)<\/Code>/)?.[1]?.trim() ?? null;
 }
 
-/** The EXPLICIT allow-list of S3-family error codes that mean "the checksum did not match" (compared
- *  case-insensitively). Any OTHER code — even with a 4xx status — FAILS CLOSED for PG3, so a generic bad
- *  request cannot masquerade as a checksum rejection. */
-export const CHECKSUM_MISMATCH_CODES: readonly string[] = [
-  'BadDigest',
-  'InvalidDigest',
-  'BadChecksum',
-  'InvalidChecksum',
-  'XAmzContentChecksumMismatch',
-  'XAmzContentSHA256Mismatch',
-];
+/** The EXPLICIT allow-list of S3 error codes that DOCUMENT rejection of a wrong `x-amz-checksum-sha256`
+ *  VALUE (the checksum header PG3 deliberately corrupts), compared case-insensitively:
+ *    - `BadDigest`     — the checksum sent did not match what the server computed for the body.
+ *    - `InvalidDigest` — the checksum value sent is not a valid digest.
+ *  DELIBERATELY EXCLUDED: `XAmzContentSHA256Mismatch` is a PAYLOAD-SIGNING error (the SigV4
+ *  `x-amz-content-sha256` request hash), not a rejection of the checksum header, so it must NOT count as a
+ *  PG3 pass. Any other code — a payload-signing error, an auth/5xx/unsupported response, or an
+ *  unconfirmed/invented code — FAILS CLOSED, even with a 4xx status. */
+export const CHECKSUM_MISMATCH_CODES: readonly string[] = ['BadDigest', 'InvalidDigest'];
 const isChecksumMismatchCode = (code: string | null): boolean =>
   code !== null && CHECKSUM_MISMATCH_CODES.some((c) => c.toLowerCase() === code.toLowerCase());
 
@@ -223,7 +221,7 @@ export async function cleanupAndVerify(args: { store: S3ObjectStore; prefix: str
  */
 export function makeInMemoryS3(
   cfg: S3Config,
-  faults: { checksumMismatchStatus?: number; acceptWrongChecksum?: boolean } = {},
+  faults: { checksumMismatchStatus?: number; acceptWrongChecksum?: boolean; mismatchCode?: string } = {},
 ): { fetch: typeof fetch; objectCount: () => number } {
   const objects = new Map<string, { body: Buffer; contentType: string }>();
   const bucketPath = `/${encodeURIComponent(cfg.bucket)}`;
@@ -258,6 +256,12 @@ export function makeInMemoryS3(
         if (faults.acceptWrongChecksum) {
           objects.set(key, { body, contentType: headers['content-type'] ?? 'application/octet-stream' });
           return new Response('', { status: 200, headers: { 'content-length': '0' } });
+        }
+        // Emit a SPECIFIC error code (e.g. the payload-signing code XAmzContentSHA256Mismatch) with a 4xx
+        // status, so a PG3 negative test can prove that code fails closed despite a checksum-class status.
+        if (faults.mismatchCode) {
+          const xml = `<Error><Code>${faults.mismatchCode}</Code></Error>`;
+          return new Response(xml, { status: faults.checksumMismatchStatus ?? 400, headers: { 'content-length': String(xml.length) } });
         }
         if (faults.checksumMismatchStatus) {
           return new Response('<Error><Code>NotAChecksumError</Code></Error>', { status: faults.checksumMismatchStatus });

@@ -58,6 +58,10 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
       // ('NotAChecksumError' — note it CONTAINS the substring "Checksum"). The status alone would pass, so
       // the allow-list parse must FAIL CLOSED. A substring test would have wrongly passed this.
       ['a 400 with a NON-checksum <Code> (NotAChecksumError)', { checksumMismatchStatus: 400 }],
+      // The narrowed allow-list must FAIL CLOSED on the PAYLOAD-SIGNING code: XAmzContentSHA256Mismatch is
+      // about the SigV4 x-amz-content-sha256 request hash, NOT a rejection of the x-amz-checksum-sha256
+      // VALUE, so a 400 carrying it must not count as a PG3 pass.
+      ['a 400 payload-signing code (XAmzContentSHA256Mismatch)', { mismatchCode: 'XAmzContentSHA256Mismatch' }],
       ['a WRONGLY-ACCEPTED body (200)', { acceptWrongChecksum: true }],
     ])('fails PG3 when a wrong checksum yields %s', async (_label, faults) => {
       const sim = makeInMemoryS3(CFG, faults);
