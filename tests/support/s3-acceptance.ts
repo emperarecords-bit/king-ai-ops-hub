@@ -39,20 +39,51 @@ export function makeBudgetedFetch(inner: typeof fetch, limits: BudgetLimits) {
   let uploadBytes = 0;
   let downloadBytes = 0;
   let cleanupPhase = false;
+  const total = (): number => uploadBytes + downloadBytes;
   const fetchImpl = (async (url: string, init: RequestInit = {}): Promise<Response> => {
     const u = String(url);
     if (!u.startsWith('https://')) throw new Error(`live acceptance refuses a non-HTTPS URL: ${u}`);
-    // Check the ceiling BEFORE counting, so a request rejected for exceeding the budget does not itself
-    // consume budget (leaving the reserved cleanup capacity intact).
+    // Check the request ceiling BEFORE counting, so a request rejected for exceeding the budget does not
+    // itself consume budget (the reserved cleanup capacity stays intact even after a failure).
     const ceiling = cleanupPhase ? limits.maxRequests : limits.maxRequests - limits.cleanupReserve;
     if (requests + 1 > ceiling) throw new Error(`request budget exceeded (phase=${cleanupPhase ? 'cleanup' : 'test'}, ceiling=${ceiling})`);
-    requests += 1;
+    const method = String(init.method ?? 'GET');
     const body = init.body as Uint8Array | undefined;
-    if (body) uploadBytes += body.byteLength ?? 0;
+    const bodyLen = body?.byteLength ?? 0;
+    // Reject an oversized OUTGOING body BEFORE calling fetch (never send bytes we cannot afford). The byte
+    // budget is NOT enforced during cleanup, so cleanup capacity survives a test-phase budget failure.
+    if (!cleanupPhase && bodyLen > 0 && total() + bodyLen > limits.maxBytes) {
+      throw new Error(`outgoing body would exceed the byte budget (${limits.maxBytes})`);
+    }
+    requests += 1;
+    uploadBytes += bodyLen;
     const res = await inner(u, { ...init, redirect: 'error' }); // never follow a redirect to another host
     if (res.status >= 300 && res.status < 400) throw new Error(`live acceptance rejects a redirect (${res.status})`);
-    downloadBytes += Number(res.headers.get('content-length') ?? 0) || 0;
-    if (uploadBytes + downloadBytes > limits.maxBytes) throw new Error(`byte budget exceeded (${limits.maxBytes})`);
+    // Count the ACTUAL response-body bytes with a BOUNDED read + cancellation (do not trust Content-Length,
+    // which may be missing). HEAD carries no body — its content-length is the OBJECT size (metadata), which
+    // must NOT be counted as transfer. We CONSUME the original body (a clone/tee would deadlock when only
+    // one branch is read) and rebuild an equivalent Response so the caller can still read it.
+    if (method !== 'HEAD' && res.body) {
+      const remaining = cleanupPhase ? Number.POSITIVE_INFINITY : limits.maxBytes - total();
+      const reader = res.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let got = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          got += value.byteLength;
+          if (got > remaining) {
+            await reader.cancel();
+            throw new Error(`response body exceeded the byte budget (${limits.maxBytes})`);
+          }
+          chunks.push(value);
+        }
+      }
+      downloadBytes += got;
+      const merged = Buffer.concat(chunks.map((c) => Buffer.from(c)));
+      return new Response(merged.byteLength ? new Uint8Array(merged) : null, { status: res.status, statusText: res.statusText, headers: res.headers });
+    }
     return res;
   }) as unknown as typeof fetch;
   return {
@@ -105,9 +136,13 @@ export async function runAcceptanceScenarios(args: {
   expect((await store.get(k2)).equals(b2)).toBe(true);
   expect(await store.head(key('pg2-absent'))).toBeNull(); // never created ⇒ nothing to track
 
-  // PG3 — present-but-WRONG checksum is REJECTED by the provider. A low-level probe that deliberately
-  // sends a checksum that does not match the body (normal putIfAbsent always sends the correct one).
+  // PG3 — a present-but-WRONG checksum must be rejected by the provider with a CHECKSUM-SPECIFIC error.
+  // A low-level probe deliberately sends a checksum that does not match the body (the normal putIfAbsent
+  // always sends the correct one). Track the probe key BEFORE sending (so a wrongly-accepted object is
+  // still cleaned up), and verify the object is ABSENT afterward. Auth failures (401/403), 5xx, and
+  // unsupported (405) must NOT count as a pass — the rejection must specifically be about the checksum.
   const k3 = key('pg3');
+  track(k3);
   const b3 = Buffer.from('{"pg3":"bytes"}', 'utf8');
   const wrongChecksum = rawChecksumB64(Buffer.from('completely different bytes', 'utf8'));
   const signed = signS3Request(cfg, {
@@ -118,18 +153,29 @@ export async function runAcceptanceScenarios(args: {
     extraHeaders: { 'content-type': 'application/json', 'if-none-match': '*', 'x-amz-checksum-sha256': wrongChecksum },
   });
   const wrongRes = await fetchImpl(signed.url, { method: 'PUT', headers: signed.headers, body: new Uint8Array(b3) });
-  if (wrongRes.ok) track(k3); // if the provider WRONGLY accepted it, still clean it up
-  expect(wrongRes.ok, 'provider must reject a body whose checksum does not match').toBe(false);
+  const status = wrongRes.status;
+  const errorBody = await wrongRes.text().catch(() => '');
+  expect(status, `PG3: an auth failure must not pass (got ${status})`).not.toBe(401);
+  expect(status, `PG3: an auth failure must not pass (got ${status})`).not.toBe(403);
+  expect(status, `PG3: an unsupported op must not pass (got ${status})`).not.toBe(405);
+  expect(status, `PG3: a 5xx must not pass (got ${status})`).toBeLessThan(500);
+  expect([400, 422], `PG3: expected a checksum-specific 4xx (got ${status})`).toContain(status);
+  expect(/digest|checksum/i.test(errorBody), `PG3: expected a checksum-specific error, got: ${errorBody.slice(0, 160)}`).toBe(true);
+  expect(await store.head(k3), 'PG3: a wrong-checksum object must never land').toBeNull();
 
-  // PG5 — immutability, with the two mechanisms kept SEPARATE:
+  // PG5 — immutability, with the two mechanisms it actually proves kept SEPARATE and accurately labelled:
+  //   (a) ADAPTER overwrite-prevention: the Hub's ordinary `put` refuses a verification-shaped key (no
+  //       provider involved), so the Hub has no unconditional-overwrite code path.
+  //   (b) PROVIDER conditional-write enforcement: a second conditional create-only PUT is rejected.
+  // What is NOT proven here (remains NOT VERIFIED): a CREDENTIAL-LEVEL prohibition of an unconditional
+  // overwrite — i.e. that the credential itself would be DENIED a raw PUT without If-None-Match. That
+  // needs a bucket policy / Object Lock and is out of PR-5's scope.
   const k5 = key('pg5');
   track(k5);
   const b5 = Buffer.from('{"pg5":"immutable"}', 'utf8');
   await store.putIfAbsent(k5, b5, 'application/json');
-  // (a) ADAPTER overwrite-prevention (no provider needed): ordinary put refuses a verification-shaped key.
-  await expect(store.put(k5, Buffer.from('{"pg5":"tampered"}', 'utf8'), 'application/json')).rejects.toThrow(/verification artifact object/);
-  // (b) CREDENTIAL/PROVIDER enforcement: a second conditional create-only is rejected by the provider.
-  expect(await store.putIfAbsent(k5, Buffer.from('{"pg5":"tampered"}', 'utf8'), 'application/json')).toBe('exists');
+  await expect(store.put(k5, Buffer.from('{"pg5":"tampered"}', 'utf8'), 'application/json')).rejects.toThrow(/verification artifact object/); // (a)
+  expect(await store.putIfAbsent(k5, Buffer.from('{"pg5":"tampered"}', 'utf8'), 'application/json')).toBe('exists'); // (b)
   expect((await store.get(k5)).equals(b5)).toBe(true); // original bytes intact
 }
 
@@ -154,7 +200,10 @@ export async function cleanupAndVerify(args: { store: S3ObjectStore; prefix: str
  * NOT a substitute for the live provider run — it only lets the harness's OWN key-selection/cleanup/budget
  * logic be tested without cloud access.
  */
-export function makeInMemoryS3(cfg: S3Config): { fetch: typeof fetch; objectCount: () => number } {
+export function makeInMemoryS3(
+  cfg: S3Config,
+  faults: { checksumMismatchStatus?: number; acceptWrongChecksum?: boolean } = {},
+): { fetch: typeof fetch; objectCount: () => number } {
   const objects = new Map<string, { body: Buffer; contentType: string }>();
   const bucketPath = `/${encodeURIComponent(cfg.bucket)}`;
   const decodeKey = (pathname: string): string =>
@@ -180,10 +229,19 @@ export function makeInMemoryS3(cfg: S3Config): { fetch: typeof fetch; objectCoun
     const key = decodeKey(u.pathname);
     if (method === 'PUT') {
       const body = Buffer.from((init.body as Uint8Array) ?? new Uint8Array());
-      // Checksum verification (a mismatch is a hard reject — models provider PG3).
+      // Checksum verification (a mismatch is a hard reject — models provider PG3). Fault injection lets the
+      // OFFLINE negative tests model a provider that mis-handles a mismatch (auth/5xx/unsupported, or a
+      // wrongly-accepted body) so the PG3 assertions are shown to catch those.
       const declared = headers['x-amz-checksum-sha256'];
       if (declared && declared !== createHash('sha256').update(body).digest('base64')) {
-        return new Response('<Error><Code>BadDigest</Code></Error>', { status: 400 });
+        if (faults.acceptWrongChecksum) {
+          objects.set(key, { body, contentType: headers['content-type'] ?? 'application/octet-stream' });
+          return new Response('', { status: 200, headers: { 'content-length': '0' } });
+        }
+        if (faults.checksumMismatchStatus) {
+          return new Response('<Error><Code>NotAChecksumError</Code></Error>', { status: faults.checksumMismatchStatus });
+        }
+        return new Response('<Error><Code>BadDigest</Code></Error>', { status: 400, headers: { 'content-length': String('<Error><Code>BadDigest</Code></Error>'.length) } });
       }
       // Create-only: If-None-Match:* fails if the key exists (models provider PG1).
       if (headers['if-none-match'] === '*' && objects.has(key)) {

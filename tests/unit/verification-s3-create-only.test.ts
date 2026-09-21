@@ -54,12 +54,13 @@ describe('VER-002 PR-5 — S3 create-only publish (adapter, hermetic)', () => {
     expect(heads(calls).length).toBe(0); // a clean create needs no reconcile
   });
 
-  it('created (2xx) → "created"; existing (412 and 409) → "exists"; never an unconditional PUT', async () => {
-    for (const [status, expected] of [[200, 'created'], [412, 'exists'], [409, 'exists']] as const) {
+  it('created (2xx) → "created"; a 412 precondition failure → "exists" (definitive); never an unconditional PUT', async () => {
+    for (const [status, expected] of [[200, 'created'], [412, 'exists']] as const) {
       const { fetch, calls } = simFetch([{ status }]);
       const store = new S3ObjectStore(CFG, fetch);
       expect(await store.putIfAbsent(KEY, BODY, 'application/json')).toBe(expected);
       expect(allPutsAreConditional(calls)).toBe(true);
+      expect(heads(calls).length).toBe(0); // 412 is definitive — no reconcile needed
     }
   });
 
@@ -113,11 +114,35 @@ describe('VER-002 PR-5 — S3 create-only publish (adapter, hermetic)', () => {
     await expect(store.putIfAbsent(KEY, BODY, 'application/json')).rejects.toThrow(/reconcile HEAD failed/);
   });
 
-  it('a 409 Conflict is handled EXPLICITLY as "exists" (some providers use it for the If-None-Match conflict)', async () => {
-    const { fetch, calls } = simFetch([{ status: 409 }]);
-    const store = new S3ObjectStore(CFG, fetch);
-    expect(await store.putIfAbsent(KEY, BODY, 'application/json')).toBe('exists');
-    expect(puts(calls).length).toBe(1); // never retried
+  describe('a 409 Conflict is RECONCILED (not assumed to mean exists)', () => {
+    it('409 then a PRESENT object on reconcile → "exists"', async () => {
+      const { fetch, calls } = simFetch([{ status: 409 }, { status: 200, headers: { 'content-length': String(BODY.length) } }]);
+      const store = new S3ObjectStore(CFG, fetch);
+      expect(await store.putIfAbsent(KEY, BODY, 'application/json')).toBe('exists');
+      expect(puts(calls).length).toBe(1);
+      expect(heads(calls).length).toBe(1); // reconciled by HEAD, not assumed
+    });
+
+    it('409 then ABSENT → a bounded, still-conditional retry → "created"', async () => {
+      const { fetch, calls } = simFetch([{ status: 409 }, { status: 404 }, { status: 200 }]);
+      const store = new S3ObjectStore(CFG, fetch);
+      expect(await store.putIfAbsent(KEY, BODY, 'application/json')).toBe('created');
+      expect(puts(calls).length).toBe(2);
+      expect(allPutsAreConditional(calls)).toBe(true);
+    });
+
+    it('409 then a reconcile READ error → throws (outcome unconfirmed)', async () => {
+      const { fetch } = simFetch([{ status: 409 }, { status: 503 }]); // HEAD 503 → head() throws
+      const store = new S3ObjectStore(CFG, fetch);
+      await expect(store.putIfAbsent(KEY, BODY, 'application/json')).rejects.toThrow(/reconcile HEAD failed/);
+    });
+
+    it('409 then ABSENT past the grant deadline → NOT retried (expiry-bounded)', async () => {
+      const { fetch, calls } = simFetch([{ status: 409 }, { status: 404 }, { status: 200 }]);
+      const store = new S3ObjectStore(CFG, fetch);
+      await expect(store.putIfAbsent(KEY, BODY, 'application/json', { deadline: new Date(Date.now() - 1000) })).rejects.toThrow(/grant expired/);
+      expect(puts(calls).length).toBe(1); // reconciled once, then the expired grant blocked the retry
+    });
   });
 
   it('grant expiry is enforced BEFORE an internal retry — an ambiguous+absent outcome is not retried past the deadline', async () => {

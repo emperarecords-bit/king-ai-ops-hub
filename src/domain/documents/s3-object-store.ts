@@ -241,10 +241,12 @@ export class S3ObjectStore implements ObjectStore {
         return 'ambiguous'; // network error / timeout — we do not know whether it landed
       }
       if (res.ok) return 'created';
-      // 412 Precondition Failed is the standard If-None-Match:* conflict; some S3-compatible providers use
-      // 409 Conflict for the same condition. Both mean the key already exists — handled explicitly.
+      // 412 Precondition Failed is the STANDARD If-None-Match:* conflict ⇒ the key definitively exists.
       if (res.status === 412) return 'exists';
-      if (res.status === 409) return 'exists';
+      // 409 Conflict is NOT specific to If-None-Match (providers use it for other conflicts too), so do
+      // NOT assume it means "exists": reconcile it by HEAD like any ambiguous outcome (present ⇒ exists,
+      // absent ⇒ a bounded, expiry-checked conditional retry, read-error ⇒ throw).
+      if (res.status === 409) return 'ambiguous';
       if (res.status === 401 || res.status === 403) throw new Error(`S3 create-only ${key} denied: ${res.status}`);
       if (res.status >= 500) return 'ambiguous';
       throw new Error(`S3 create-only ${key} failed: ${res.status}`); // other 4xx — non-retryable

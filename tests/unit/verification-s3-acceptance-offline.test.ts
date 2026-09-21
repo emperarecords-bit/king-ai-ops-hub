@@ -23,16 +23,18 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
     await runAcceptanceScenarios({ store, cfg: CFG, fetchImpl: budgeted.fetch, key: keys.key, track: (k) => created.push(k) });
 
     // Every tracked key is a production-shaped verification artifact key (would trip the `put` guard).
-    expect(created.length).toBeGreaterThanOrEqual(4);
+    expect(created.length).toBeGreaterThanOrEqual(5); // PG1, PG1-concurrent, PG2, PG3 (rejected but tracked), PG5
     for (const k of created) {
       expect(k, k).toMatch(VERIFICATION_KEY);
       expect(isVerificationArtifactKey(k), k).toBe(true);
       expect(k.startsWith(keys.prefix)).toBe(true);
     }
-    expect(sim.objectCount()).toBe(created.length); // the rejected wrong-checksum object was NOT stored
+    // The rejected wrong-checksum probe (PG3) is tracked but was NOT stored, so ≤ created.length landed.
+    expect(sim.objectCount()).toBeLessThanOrEqual(created.length);
+    expect(sim.objectCount()).toBeGreaterThan(0);
 
     await cleanupAndVerify({ store, prefix: keys.prefix, created, enterCleanupPhase: budgeted.enterCleanupPhase });
-    expect(sim.objectCount()).toBe(0); // cleanup removed exactly what was created
+    expect(sim.objectCount()).toBe(0); // cleanup removed everything created (deletes of the never-stored probe are no-ops)
     expect(budgeted.stats().requests).toBeLessThanOrEqual(LIMITS.maxRequests);
   });
 
@@ -44,6 +46,24 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
     await store.putIfAbsent(keys.key('untracked'), Buffer.from('x'), 'application/json');
     await expect(cleanupAndVerify({ store, prefix: keys.prefix, created: [] })).rejects.toThrow();
     expect(sim.objectCount()).toBe(1); // proof the leak was real
+  });
+
+  describe('negative: the acceptance assertions CATCH a mishandled wrong-checksum (PG3)', () => {
+    it.each([
+      ['an auth failure (401)', { checksumMismatchStatus: 401 }],
+      ['an auth failure (403)', { checksumMismatchStatus: 403 }],
+      ['a 5xx (503)', { checksumMismatchStatus: 503 }],
+      ['an unsupported op (405)', { checksumMismatchStatus: 405 }],
+      ['a WRONGLY-ACCEPTED body (200)', { acceptWrongChecksum: true }],
+    ])('fails PG3 when a wrong checksum yields %s', async (_label, faults) => {
+      const sim = makeInMemoryS3(CFG, faults);
+      const bf = makeBudgetedFetch(sim.fetch, LIMITS);
+      const store = new S3ObjectStore(CFG, bf.fetch);
+      const keys = makeAcceptanceKeys();
+      await expect(
+        runAcceptanceScenarios({ store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: () => {} }),
+      ).rejects.toThrow();
+    });
   });
 
   describe('budgeted fetch', () => {
@@ -73,11 +93,40 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
       await expect(b.fetch('https://ok.test/6')).rejects.toThrow(/request budget exceeded \(phase=cleanup/);
     });
 
-    it('counts BOTH upload and download bytes toward the byte budget', async () => {
-      const innerBig = (async () => new Response('', { status: 200, headers: { 'content-length': '600' } })) as unknown as typeof fetch;
-      const b = makeBudgetedFetch(innerBig, { maxRequests: 60, maxBytes: 1000, cleanupReserve: 5 });
-      // 500 uploaded + 600 downloaded = 1100 > 1000 → byte budget exceeded (proves both are counted).
-      await expect(b.fetch('https://ok.test/x', { method: 'PUT', body: new Uint8Array(500) })).rejects.toThrow(/byte budget exceeded/);
+    it('counts ACTUAL response-body bytes with NO Content-Length header toward the byte budget', async () => {
+      // A response with a real 1200-byte body and NO content-length must still be counted by actual bytes
+      // and blow a 1000-byte budget (proves missing-Content-Length is handled by reading the body).
+      const innerNoCl = (async () => new Response(new Uint8Array(1200), { status: 200 })) as unknown as typeof fetch;
+      const b = makeBudgetedFetch(innerNoCl, { maxRequests: 60, maxBytes: 1000, cleanupReserve: 5 });
+      await expect(b.fetch('https://ok.test/x')).rejects.toThrow(/response body exceeded the byte budget/);
+    });
+
+    it('excludes HEAD object-size metadata from the byte budget', async () => {
+      // HEAD carries no body; its content-length is the OBJECT size (metadata) and must not be counted.
+      const innerHead = (async () => new Response(null, { status: 200, headers: { 'content-length': '9999999' } })) as unknown as typeof fetch;
+      const b = makeBudgetedFetch(innerHead, { maxRequests: 60, maxBytes: 1000, cleanupReserve: 5 });
+      await b.fetch('https://ok.test/x', { method: 'HEAD' });
+      expect(b.stats().downloadBytes).toBe(0);
+    });
+
+    it('rejects an oversized OUTGOING body BEFORE calling fetch', async () => {
+      let innerCalled = 0;
+      const inner = (async () => {
+        innerCalled += 1;
+        return new Response('', { status: 200, headers: { 'content-length': '0' } });
+      }) as unknown as typeof fetch;
+      const b = makeBudgetedFetch(inner, { maxRequests: 60, maxBytes: 100, cleanupReserve: 5 });
+      await expect(b.fetch('https://ok.test/x', { method: 'PUT', body: new Uint8Array(200) })).rejects.toThrow(/outgoing body would exceed/);
+      expect(innerCalled).toBe(0); // never sent
+    });
+
+    it('preserves cleanup capacity after a byte-budget failure', async () => {
+      const inner = (async () => new Response('x', { status: 200, headers: { 'content-length': '1' } })) as unknown as typeof fetch;
+      const b = makeBudgetedFetch(inner, { maxRequests: 60, maxBytes: 100, cleanupReserve: 5 });
+      await expect(b.fetch('https://ok.test/big', { method: 'PUT', body: new Uint8Array(200) })).rejects.toThrow(/outgoing body would exceed/);
+      // Cleanup is exempt from the byte budget so it always completes.
+      b.enterCleanupPhase();
+      await expect(b.fetch('https://ok.test/cleanup', { method: 'DELETE' })).resolves.toBeDefined();
     });
   });
 });
