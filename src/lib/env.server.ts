@@ -54,6 +54,12 @@ const serverEnvSchema = z.object({
     .enum(['0', '1', 'true', 'false'])
     .default('0')
     .transform((v) => v === '1' || v === 'true'),
+  // VER-002 PR-3 — whether a MACHINE (runner) principal may retrieve a project's contracts. Default
+  // off; human members can always read their own project's contracts regardless of this flag.
+  VERIFICATION_RUNNER_RETRIEVAL_ENABLED: z
+    .enum(['0', '1', 'true', 'false'])
+    .default('0')
+    .transform((v) => v === '1' || v === 'true'),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;

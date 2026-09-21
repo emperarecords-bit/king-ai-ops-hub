@@ -15,6 +15,7 @@
  *    an existing contract can never be silently altered.
  */
 import type { TenantContext } from '@/types/domain';
+import type { CatalogResolver } from './catalog';
 import type { NewVerificationRequest, VerificationRequest } from './ingest-types';
 import type { VerificationStore } from './ports';
 import { canonicalRepoIdentity, repoIdentityEquals } from './repo-identity';
@@ -35,7 +36,13 @@ export type CreateRequestRejectionCode =
   | 'task_not_in_project'
   | 'repo_not_authorized'
   | 'no_repo_binding'
+  /** The server could not resolve a trusted catalog for this project — fail closed, never create an
+   *  unpinnable contract. */
+  | 'catalog_unavailable'
   | 'contract_conflict';
+
+/** Fields normalized from untrusted input, before the server-resolved catalog identity is pinned. */
+type NormalizedInput = Omit<NewVerificationRequest, 'catalogVersion' | 'catalogDigest'>;
 
 export interface CreateRequestOutcome {
   /** true = this call created a new contract; false = an identical contract already existed (idempotent). */
@@ -72,7 +79,7 @@ function validateList(
   return { ok: true, value: out };
 }
 
-function validate(input: VerificationRequestInput): { ok: true; value: NewVerificationRequest } | { ok: false; message: string } {
+function validate(input: VerificationRequestInput): { ok: true; value: NormalizedInput } | { ok: false; message: string } {
   const taskId = (input.taskId ?? '').trim();
   if (!UUID_RE.test(taskId)) return { ok: false, message: 'taskId must be a UUID' };
   const repoFullName = (input.repoFullName ?? '').trim();
@@ -95,6 +102,8 @@ function contractsEqual(a: VerificationRequest, b: NewVerificationRequest): bool
     repoIdentityEquals(a.repoFullName, b.repoFullName) &&
     a.expectedCommitSha === b.commitSha &&
     a.allowDirty === b.allowDirty &&
+    a.catalogVersion === b.catalogVersion &&
+    a.catalogDigest === b.catalogDigest &&
     sameSet(a.requiredChecks, b.requiredChecks) &&
     sameSet(a.requiredArtifacts, b.requiredArtifacts)
   );
@@ -111,6 +120,7 @@ const conflict = (): CreateRequestOutcome => ({
 
 export async function createVerificationRequest(
   store: VerificationStore,
+  catalog: CatalogResolver,
   ctx: Pick<TenantContext, 'orgId' | 'projectId' | 'userId'>,
   input: VerificationRequestInput,
 ): Promise<CreateRequestOutcome> {
@@ -120,6 +130,18 @@ export async function createVerificationRequest(
 
   if (!(await store.taskExistsInTenant(ctx.orgId, ctx.projectId, n.taskId))) {
     return { created: false, request: null, rejection: { code: 'task_not_in_project', message: 'task does not exist in this project' } };
+  }
+
+  // Resolve the trusted, server-side catalog for this project and pin its (version, digest). The
+  // catalog is NEVER supplied by the caller. If none resolves, fail closed rather than create an
+  // unpinnable contract. Every required check name must exist in the pinned catalog (D4).
+  const resolved = catalog.current(ctx.projectId);
+  if (!resolved) {
+    return { created: false, request: null, rejection: { code: 'catalog_unavailable', message: 'no trusted command catalog is configured for this project' } };
+  }
+  const unknown = n.requiredChecks.filter((name) => !(name in resolved.commands));
+  if (unknown.length > 0) {
+    return { created: false, request: null, rejection: { code: 'invalid_input', message: `unknown required check name(s) not in catalog ${resolved.version}: ${unknown.join(', ')}` } };
   }
 
   // The repository must be one the project has a TRUSTED link to (github_repo_links). No links at all is
@@ -134,10 +156,15 @@ export async function createVerificationRequest(
     return { created: false, request: null, rejection: { code: 'repo_not_authorized', message: 'repoFullName is not an authorized repository for this project' } };
   }
 
-  // Bind the CANONICAL repository identity (the trusted link's spelling) onto the contract, so a
-  // retry with different capitalization is treated as the same repository (idempotent, never a
-  // conflict) and evidence binds to one stable identity.
-  const contract: NewVerificationRequest = { ...n, repoFullName: canonicalRepoIdentity(n.repoFullName, linked) };
+  // Bind the CANONICAL repository identity (the trusted link's spelling) and the server-resolved
+  // catalog identity onto the contract, so a retry is idempotent and evidence binds to one stable
+  // identity. Neither the repo casing nor the catalog identity comes from the caller's payload.
+  const contract: NewVerificationRequest = {
+    ...n,
+    repoFullName: canonicalRepoIdentity(n.repoFullName, linked),
+    catalogVersion: resolved.version,
+    catalogDigest: resolved.digest,
+  };
 
   const existing = await store.findRequestByTaskCommit(ctx.orgId, ctx.projectId, contract.taskId, contract.commitSha);
   if (existing) return contractsEqual(existing, contract) ? { created: false, request: existing, rejection: null } : conflict();

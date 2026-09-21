@@ -4,11 +4,11 @@
  * isolation; every query also filters org+project explicitly (defense in depth).
  * Kept out of the module index so the pure logic stays DB-free for tests.
  */
-import { and, eq } from 'drizzle-orm';
+import { and, asc, eq, gt, inArray, sql } from 'drizzle-orm';
 import type { DbTx } from '@/db/client';
 import { githubRepoLinks, tasks, verificationEvidence, verificationRequests } from '@/db/schema';
 import type { ArtifactAvailability, CheckResult, RejectionCode, SubmittedArtifact, VerificationRequest } from './index';
-import type { PriorEvidence, VerificationStore } from './ports';
+import type { ContractSummary, PriorEvidence, VerificationStore } from './ports';
 import type { TaskVerificationStatus } from './types';
 
 type EvidenceRow = typeof verificationEvidence.$inferSelect;
@@ -25,6 +25,8 @@ function rowToRequest(row: RequestRow): VerificationRequest {
     requiredChecks: row.requiredChecks,
     requiredArtifacts: row.requiredArtifacts,
     allowDirty: row.allowDirty,
+    catalogVersion: row.catalogVersion,
+    catalogDigest: row.catalogDigest,
     createdBy: row.createdBy ?? '',
     createdAt: row.createdAt.toISOString(),
   };
@@ -116,6 +118,8 @@ export function createDrizzleVerificationStore(tx: DbTx): VerificationStore {
           requiredChecks: [...input.requiredChecks],
           requiredArtifacts: [...input.requiredArtifacts],
           allowDirty: input.allowDirty,
+          catalogVersion: input.catalogVersion,
+          catalogDigest: input.catalogDigest,
           createdBy,
         })
         // Race-safe: a concurrent create for the same (task, commit) makes this a no-op.
@@ -197,5 +201,71 @@ export function createDrizzleVerificationStore(tx: DbTx): VerificationStore {
       const stored = await this.findExisting(orgId, projectId, submission.requestId, submission.idempotencyKey);
       return stored ?? { decision, submissionSha256 };
     },
-  };
+
+    async listRequests(orgId, projectId, opts): Promise<ContractSummary[]> {
+      const conds = [eq(verificationRequests.orgId, orgId), eq(verificationRequests.projectId, projectId)];
+      if (opts.afterId) conds.push(gt(verificationRequests.id, opts.afterId));
+      if (opts.openOnly) {
+        // "open" = no ACCEPTED evidence yet (policy-neutral; does not encode a verdict).
+        conds.push(
+          sql`not exists (select 1 from ${verificationEvidence} e where e.org_id = ${orgId} and e.project_id = ${projectId} and e.request_id = ${verificationRequests.id} and e.accepted)`,
+        );
+      }
+      const rows = await tx
+        .select()
+        .from(verificationRequests)
+        .where(and(...conds))
+        .orderBy(asc(verificationRequests.id)) // deterministic keyset order (by contract id)
+        .limit(opts.limit);
+      return this.summarize(orgId, projectId, rows);
+    },
+
+    async getRequestSummary(orgId, projectId, requestId): Promise<ContractSummary | null> {
+      const row = (
+        await tx
+          .select()
+          .from(verificationRequests)
+          .where(
+            and(
+              eq(verificationRequests.orgId, orgId),
+              eq(verificationRequests.projectId, projectId),
+              eq(verificationRequests.id, requestId),
+            ),
+          )
+          .limit(1)
+      )[0];
+      if (!row) return null;
+      return (await this.summarize(orgId, projectId, [row]))[0] ?? null;
+    },
+
+    /** Attach policy-neutral evidence facts (accepted count, has-verified-complete) to a set of rows. */
+    async summarize(orgId: string, projectId: string, rows: RequestRow[]): Promise<ContractSummary[]> {
+      if (rows.length === 0) return [];
+      const ids = rows.map((r) => r.id);
+      const agg = await tx
+        .select({
+          requestId: verificationEvidence.requestId,
+          acceptedCount: sql<number>`count(*) filter (where ${verificationEvidence.accepted})`,
+          verifiedCount: sql<number>`count(*) filter (where ${verificationEvidence.accepted} and ${verificationEvidence.status} = 'verified_complete')`,
+        })
+        .from(verificationEvidence)
+        .where(
+          and(
+            eq(verificationEvidence.orgId, orgId),
+            eq(verificationEvidence.projectId, projectId),
+            inArray(verificationEvidence.requestId, ids),
+          ),
+        )
+        .groupBy(verificationEvidence.requestId);
+      const byId = new Map(agg.map((a) => [a.requestId, a]));
+      return rows.map((r) => {
+        const a = byId.get(r.id);
+        return {
+          request: rowToRequest(r),
+          acceptedEvidenceCount: Number(a?.acceptedCount ?? 0),
+          hasVerifiedComplete: Number(a?.verifiedCount ?? 0) > 0,
+        };
+      });
+    },
+  } as VerificationStore & { summarize(orgId: string, projectId: string, rows: RequestRow[]): Promise<ContractSummary[]> };
 }

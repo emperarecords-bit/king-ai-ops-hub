@@ -16,6 +16,7 @@ import { evaluateChecks } from './checks';
 import type { IngestDecision, RejectionCode, SignedEnvelope } from './ingest-types';
 import type { IngestDeps } from './ports';
 import { DEFAULT_SIGNING_VERSION, isSupportedSigningVersion, submissionDigest, verifyEvidenceSignature } from './signing';
+import { UNPINNED_CATALOG_VERSION } from './catalog';
 import { isCanonicalTenantKey } from './tenant-key';
 
 export async function ingestEvidence(
@@ -99,6 +100,33 @@ export async function ingestEvidence(
   const binding = validateBinding(request, payload, ctx);
   if (!binding.ok && binding.rejection) {
     return persist(reject(binding.rejection.code, binding.rejection.message));
+  }
+
+  // 4b. Catalog identity (D1/D4). The contract pins a trusted catalog (version, digest) resolved
+  //     server-side at creation. Re-resolve the PINNED version here and require the contract, the
+  //     server-resolved catalog, and the SIGNED payload to all agree — the caller can never supply
+  //     catalog contents or an authoritative digest. A legacy 'unpinned' contract, or a pinned version
+  //     that no longer resolves, fails CLOSED. Applied on both auth paths (all ingest).
+  if (request.catalogVersion === UNPINNED_CATALOG_VERSION) {
+    return persist(reject('catalog_unpinned', 'This contract predates catalog pinning; it cannot be verified until re-created against a pinned catalog.'));
+  }
+  const catalog = deps.catalog.byVersion(request.catalogVersion);
+  if (!catalog) {
+    return persist(reject('catalog_unavailable', `The contract's pinned catalog version '${request.catalogVersion}' can no longer be resolved.`));
+  }
+  if (
+    catalog.digest !== request.catalogDigest ||
+    payload.catalogVersion !== request.catalogVersion ||
+    payload.catalogDigest !== request.catalogDigest
+  ) {
+    return persist(reject('catalog_mismatch', 'The evidence catalog identity does not match the contract’s pinned, server-resolved catalog.'));
+  }
+  // 4c. Exact command binding: a required check's reported command must equal the pinned catalog entry.
+  for (const name of request.requiredChecks) {
+    const submitted = payload.checks.find((c) => c.name === name);
+    if (submitted && submitted.command !== catalog.commands[name]) {
+      return persist(reject('invalid_checks', `Check '${name}' reported a command that does not match the pinned catalog '${catalog.version}'.`));
+    }
   }
 
   // 5. Required checks (declared up front). Structural defects invalidate the submission.

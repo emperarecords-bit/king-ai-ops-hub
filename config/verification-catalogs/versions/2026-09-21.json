@@ -1,0 +1,8 @@
+{
+  "version": "2026-09-21",
+  "checks": {
+    "unit": { "command": "npm run test:unit" },
+    "typecheck": { "command": "npm run typecheck" },
+    "lint": { "command": "npm run lint" }
+  }
+}

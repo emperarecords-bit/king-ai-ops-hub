@@ -1,0 +1,2 @@
+ALTER TABLE "verification_requests" ADD COLUMN "catalog_version" text DEFAULT 'unpinned' NOT NULL;--> statement-breakpoint
+ALTER TABLE "verification_requests" ADD COLUMN "catalog_digest" text DEFAULT 'unpinned' NOT NULL;

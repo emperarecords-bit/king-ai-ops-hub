@@ -17,6 +17,7 @@ import {
   ingestEvidence,
   signEvidence,
   InMemoryArtifactStore,
+  InMemoryCatalogResolver,
   InMemoryVerificationStore,
   StaticRunnerSecretSource,
   type CheckResult,
@@ -30,6 +31,8 @@ const ORG = 'org-demo';
 const PROJ = 'proj-demo';
 const SECRET = 'demo-runner-secret';
 const REPO = 'synthetic/demo';
+// Trusted catalog the demo pins/declares; the 'unit' command matches the happy-path check exactly.
+const DEMO_CAT = { version: 'demo-cat-v1', digest: 'demodigest01', commands: { unit: 'node run-tests.js' } } as const;
 const ctx = { orgId: ORG, projectId: PROJ };
 
 let failures = 0;
@@ -92,6 +95,8 @@ function makeRequest(over: Partial<VerificationRequest>): VerificationRequest {
     requiredChecks: ['unit'],
     requiredArtifacts: ['test-results.json'],
     allowDirty: false,
+    catalogVersion: DEMO_CAT.version,
+    catalogDigest: DEMO_CAT.digest,
     createdBy: 'owner',
     createdAt: new Date().toISOString(),
     ...over,
@@ -114,6 +119,8 @@ function submission(commit: string, checks: CheckResult[], artSha: string, over:
     source: 'local_runner',
     checks,
     artifacts: [{ path: 'test-results.json', sha256: artSha, sizeBytes: 1, storageKey: `org/${ORG}/project/${PROJ}/art/test-results.json` }],
+    catalogVersion: DEMO_CAT.version,
+    catalogDigest: DEMO_CAT.digest,
     idempotencyKey: 'idem-happy',
     submittedAt: new Date().toISOString(),
     ...over,
@@ -130,6 +137,11 @@ async function main(): Promise<void> {
     store,
     artifacts,
     secrets: new StaticRunnerSecretSource(new Map([[`${ORG}|${PROJ}`, SECRET]])),
+    catalog: (() => {
+      const c = new InMemoryCatalogResolver();
+      c.addVersion({ version: DEMO_CAT.version, digest: DEMO_CAT.digest, commands: DEMO_CAT.commands });
+      return c;
+    })(),
   };
 
   try {

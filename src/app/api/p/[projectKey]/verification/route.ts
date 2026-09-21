@@ -4,7 +4,7 @@ import { requireRunnerOrTenant } from '@/domain/auth/guard';
 import { withRunner, withTenant } from '@/db/tenant';
 import type { DbTx } from '@/db/client';
 import type { VerificationCaller } from '@/types/domain';
-import { ingestEvidence, type SignedEnvelope } from '@/domain/verification';
+import { fileCatalogResolver, ingestEvidence, type SignedEnvelope } from '@/domain/verification';
 import { createDrizzleVerificationStore } from '@/domain/verification/drizzle-store';
 import { envRunnerSecretSource, objectStoreArtifactStore } from '@/domain/verification/runtime-adapters';
 
@@ -50,6 +50,9 @@ const payloadSchema = z.object({
   source: z.enum(['local_runner', 'github_actions']),
   checks: z.array(checkSchema),
   artifacts: z.array(artifactSchema),
+  // The catalog identity the runner ran under, inside the signed payload (validated at ingest).
+  catalogVersion: z.string().min(1),
+  catalogDigest: z.string().min(1),
   idempotencyKey: z.string().min(8),
   submittedAt: z.string(),
 });
@@ -100,6 +103,7 @@ export async function POST(
           store: createDrizzleVerificationStore(tx),
           artifacts: objectStoreArtifactStore(tenant),
           secrets: envRunnerSecretSource(),
+          catalog: fileCatalogResolver(),
         },
         tenant,
         envelope,

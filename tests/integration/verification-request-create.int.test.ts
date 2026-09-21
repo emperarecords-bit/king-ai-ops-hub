@@ -18,7 +18,7 @@ import { eq, sql } from 'drizzle-orm';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { withTenant } from '@/db/tenant';
 import { verificationRequests } from '@/db/schema';
-import { createVerificationRequest } from '@/domain/verification';
+import { createVerificationRequest, fileCatalogResolver } from '@/domain/verification';
 import { createDrizzleVerificationStore } from '@/domain/verification/drizzle-store';
 import type { TenantContext } from '@/types/domain';
 
@@ -64,7 +64,7 @@ const input = (over: Record<string, unknown> = {}) => ({
 describe.skipIf(!enabled)('VER-002 request creation — DB (createVerificationRequest under app_server + RLS)', () => {
   it('creates a contract bound to the tenant + creator; a direct UPDATE/DELETE is rejected (immutable)', async () => {
     const commit = 'c'.repeat(40);
-    const out = await withTenant(ctx, (tx) => createVerificationRequest(createDrizzleVerificationStore(tx), ctx, input({ commitSha: commit })));
+    const out = await withTenant(ctx, (tx) => createVerificationRequest(createDrizzleVerificationStore(tx), fileCatalogResolver(), ctx, input({ commitSha: commit })));
     expect(out.created).toBe(true);
     const id = out.request!.id;
     expect(out.request!.orgId).toBe(ORG);
@@ -81,27 +81,27 @@ describe.skipIf(!enabled)('VER-002 request creation — DB (createVerificationRe
 
   it('idempotent identical re-create returns the same contract; a divergent one conflicts', async () => {
     const commit = 'd'.repeat(40);
-    const first = await withTenant(ctx, (tx) => createVerificationRequest(createDrizzleVerificationStore(tx), ctx, input({ commitSha: commit })));
+    const first = await withTenant(ctx, (tx) => createVerificationRequest(createDrizzleVerificationStore(tx), fileCatalogResolver(), ctx, input({ commitSha: commit })));
     expect(first.created).toBe(true);
-    const same = await withTenant(ctx, (tx) => createVerificationRequest(createDrizzleVerificationStore(tx), ctx, input({ commitSha: commit })));
+    const same = await withTenant(ctx, (tx) => createVerificationRequest(createDrizzleVerificationStore(tx), fileCatalogResolver(), ctx, input({ commitSha: commit })));
     expect(same.created).toBe(false);
     expect(same.request!.id).toBe(first.request!.id);
     const conflict = await withTenant(ctx, (tx) =>
-      createVerificationRequest(createDrizzleVerificationStore(tx), ctx, input({ commitSha: commit, requiredChecks: ['unit', 'lint'] })),
+      createVerificationRequest(createDrizzleVerificationStore(tx), fileCatalogResolver(), ctx, input({ commitSha: commit, requiredChecks: ['unit', 'lint'] })),
     );
     expect(conflict.rejection?.code).toBe('contract_conflict');
   });
 
   it.skipIf(!OTHER_TASK)('a REAL task belonging to another project cannot be bound (tenant-scoped)', async () => {
     const out = await withTenant(ctx, (tx) =>
-      createVerificationRequest(createDrizzleVerificationStore(tx), ctx, input({ taskId: OTHER_TASK, commitSha: 'e'.repeat(40) })),
+      createVerificationRequest(createDrizzleVerificationStore(tx), fileCatalogResolver(), ctx, input({ taskId: OTHER_TASK, commitSha: 'e'.repeat(40) })),
     );
     expect(out.rejection?.code).toBe('task_not_in_project');
   });
 
   it('rejects a repository not linked to the project (unrelated repo)', async () => {
     const out = await withTenant(ctx, (tx) =>
-      createVerificationRequest(createDrizzleVerificationStore(tx), ctx, input({ repoFullName: 'evil/other', commitSha: 'f'.repeat(40) })),
+      createVerificationRequest(createDrizzleVerificationStore(tx), fileCatalogResolver(), ctx, input({ repoFullName: 'evil/other', commitSha: 'f'.repeat(40) })),
     );
     expect(out.rejection?.code).toBe('repo_not_authorized');
   });

@@ -26,6 +26,7 @@ import { verificationEvidence, verificationRequests } from '@/db/schema';
 import { getObjectStore } from '@/domain/documents/object-store';
 import {
   ingestEvidence,
+  InMemoryCatalogResolver,
   signEvidence,
   StaticRunnerSecretSource,
   type CheckResult,
@@ -51,6 +52,7 @@ const ctx = {
 } as unknown as TenantContext;
 
 const SECRET = 'integration-runner-secret';
+const CAT = { version: 'int-cat-v1', digest: 'intdigest01', commands: { unit: 'npm test' } } as const;
 const COMMIT = 'a'.repeat(40);
 const bytes = Buffer.from('{"passed":true}', 'utf8');
 const artSha = createHash('sha256').update(bytes).digest('hex');
@@ -83,6 +85,8 @@ function submission(over: Partial<EvidenceSubmission> & { requestId: string }): 
     source: 'local_runner',
     checks: [validCheck],
     artifacts: [{ path: 'test-results.json', sha256: artSha, sizeBytes: bytes.length, storageKey: artKeyFor(over.requestId) }],
+    catalogVersion: CAT.version,
+    catalogDigest: CAT.digest,
     idempotencyKey: `idem-${over.requestId}`,
     submittedAt: new Date().toISOString(),
     ...over,
@@ -94,6 +98,11 @@ const deps = (tx: Parameters<Parameters<typeof withTenant>[1]>[0]): IngestDeps =
   store: createDrizzleVerificationStore(tx),
   artifacts: objectStoreArtifactStore(ctx),
   secrets: new StaticRunnerSecretSource(new Map([[`${ORG}|${PROJECT}`, SECRET]])),
+  catalog: (() => {
+    const c = new InMemoryCatalogResolver();
+    c.addVersion({ version: CAT.version, digest: CAT.digest, commands: CAT.commands });
+    return c;
+  })(),
 });
 
 const createdRequestIds: string[] = [];
@@ -104,10 +113,10 @@ async function seedRequest(): Promise<string> {
   await withTenant(ctx, async (tx) => {
     await tx.execute(sql`
       insert into verification_requests
-        (id, org_id, project_id, task_id, repo_full_name, expected_commit_sha, required_checks, required_artifacts, allow_dirty)
+        (id, org_id, project_id, task_id, repo_full_name, expected_commit_sha, required_checks, required_artifacts, allow_dirty, catalog_version, catalog_digest)
       values
         (${id}, ${ORG}, ${PROJECT}, ${TASK}, 'acme/widget', ${COMMIT},
-         ${JSON.stringify(['unit'])}::jsonb, ${JSON.stringify(['test-results.json'])}::jsonb, false)`);
+         ${JSON.stringify(['unit'])}::jsonb, ${JSON.stringify(['test-results.json'])}::jsonb, false, ${CAT.version}, ${CAT.digest})`);
   });
   createdRequestIds.push(id);
   return id;

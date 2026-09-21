@@ -14,6 +14,7 @@ export * from './export';
 // VER-002 — external-runner evidence ingestion (Option A).
 export * from './ingest-types';
 export * from './repo-identity';
+export * from './catalog';
 export * from './create-request';
 export * from './signing';
 export * from './binding';

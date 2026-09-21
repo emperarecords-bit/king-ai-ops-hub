@@ -42,6 +42,10 @@ export const verificationRequests = pgTable(
     expectedCommitSha: text('expected_commit_sha').notNull(),
     /** Every check that must PASS, declared before any results arrive. */
     requiredChecks: jsonb('required_checks').$type<string[]>().notNull(),
+    /** The trusted command-catalog identity pinned at creation (server-resolved, never caller-supplied).
+     *  Legacy rows carry the 'unpinned' sentinel and are rejected at ingest (fail closed). Immutable. */
+    catalogVersion: text('catalog_version').notNull().default('unpinned'),
+    catalogDigest: text('catalog_digest').notNull().default('unpinned'),
     /** Artifact paths that MUST be present and available, declared before execution. */
     requiredArtifacts: jsonb('required_artifacts').$type<string[]>().notNull().default([]),
     allowDirty: boolean('allow_dirty').notNull().default(false),

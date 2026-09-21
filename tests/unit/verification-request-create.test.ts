@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { createVerificationRequest, type VerificationRequestInput } from '@/domain/verification';
+import { createVerificationRequest, InMemoryCatalogResolver, type VerificationRequestInput } from '@/domain/verification';
 import { InMemoryVerificationStore } from '@/domain/verification/memory-adapters';
 
 const ORG = randomUUID();
@@ -17,6 +17,11 @@ function storeWithTask(): InMemoryVerificationStore {
   s.addRepo(ORG, PROJECT, 'acme/widget'); // the project's trusted (linked) repo
   return s;
 }
+const CAT = { version: 'cat-v1', digest: 'catdigest01', commands: { unit: 'npm run unit', typecheck: 'npm run typecheck', lint: 'npm run lint' } } as const;
+const catalog = new InMemoryCatalogResolver();
+catalog.addVersion({ version: CAT.version, digest: CAT.digest, commands: CAT.commands });
+catalog.setDefault(CAT.version);
+
 const validInput = (over: Partial<VerificationRequestInput> = {}): VerificationRequestInput => ({
   taskId: TASK,
   repoFullName: 'acme/widget',
@@ -29,7 +34,7 @@ const validInput = (over: Partial<VerificationRequestInput> = {}): VerificationR
 describe('createVerificationRequest — contract creation', () => {
   it('creates a contract bound to the authenticated tenant + creator (never the payload)', async () => {
     const store = storeWithTask();
-    const out = await createVerificationRequest(store, ctx, validInput());
+    const out = await createVerificationRequest(store, catalog, ctx, validInput());
     expect(out.created).toBe(true);
     expect(out.rejection).toBeNull();
     const r = out.request!;
@@ -46,8 +51,8 @@ describe('createVerificationRequest — contract creation', () => {
 
   it('is idempotent: an identical re-create returns the SAME contract, does not duplicate', async () => {
     const store = storeWithTask();
-    const first = await createVerificationRequest(store, ctx, validInput());
-    const again = await createVerificationRequest(store, ctx, validInput({ requiredChecks: ['typecheck', 'unit'] }));
+    const first = await createVerificationRequest(store, catalog, ctx, validInput());
+    const again = await createVerificationRequest(store, catalog, ctx, validInput({ requiredChecks: ['typecheck', 'unit'] }));
     expect(again.created).toBe(false);
     expect(again.rejection).toBeNull();
     expect(again.request!.id).toBe(first.request!.id);
@@ -55,20 +60,20 @@ describe('createVerificationRequest — contract creation', () => {
 
   it('REJECTS a conflicting re-create (same task+commit, different contract) — never silently alters', async () => {
     const store = storeWithTask();
-    await createVerificationRequest(store, ctx, validInput());
-    const conflict = await createVerificationRequest(store, ctx, validInput({ requiredChecks: ['unit'] }));
+    await createVerificationRequest(store, catalog, ctx, validInput());
+    const conflict = await createVerificationRequest(store, catalog, ctx, validInput({ requiredChecks: ['unit'] }));
     expect(conflict.created).toBe(false);
     expect(conflict.request).toBeNull();
     expect(conflict.rejection?.code).toBe('contract_conflict');
     // A different required-artifacts set is also a conflict.
-    const conflict2 = await createVerificationRequest(store, ctx, validInput({ requiredArtifacts: ['other.json'] }));
+    const conflict2 = await createVerificationRequest(store, catalog, ctx, validInput({ requiredArtifacts: ['other.json'] }));
     expect(conflict2.rejection?.code).toBe('contract_conflict');
   });
 
   it('a different commit for the same task is a NEW contract (not a conflict)', async () => {
     const store = storeWithTask();
-    await createVerificationRequest(store, ctx, validInput());
-    const other = await createVerificationRequest(store, ctx, validInput({ commitSha: 'b'.repeat(40) }));
+    await createVerificationRequest(store, catalog, ctx, validInput());
+    const other = await createVerificationRequest(store, catalog, ctx, validInput({ commitSha: 'b'.repeat(40) }));
     expect(other.created).toBe(true);
     expect(other.rejection).toBeNull();
   });
@@ -76,7 +81,7 @@ describe('createVerificationRequest — contract creation', () => {
   it('rejects a task that is not in this project (tenant-scoped)', async () => {
     const store = storeWithTask(); // task exists only in (ORG, PROJECT)
     // Same task id, but the caller is acting in OTHER_PROJECT where the task does not exist.
-    const out = await createVerificationRequest(store, { ...ctx, projectId: OTHER_PROJECT }, validInput());
+    const out = await createVerificationRequest(store, catalog, { ...ctx, projectId: OTHER_PROJECT }, validInput());
     expect(out.rejection?.code).toBe('task_not_in_project');
     expect(out.request).toBeNull();
   });
@@ -93,7 +98,7 @@ describe('createVerificationRequest — contract creation', () => {
       ['bad repo', validInput({ repoFullName: 'no-slash' })],
     ];
     for (const [label, input] of cases) {
-      const out = await createVerificationRequest(store, ctx, input);
+      const out = await createVerificationRequest(store, catalog, ctx, input);
       expect(out.rejection?.code, label).toBe('invalid_input');
       expect(out.request, label).toBeNull();
     }
@@ -101,26 +106,26 @@ describe('createVerificationRequest — contract creation', () => {
 
   it('rejects a repository not linked to the project (unrelated repo)', async () => {
     const store = storeWithTask(); // links acme/widget only
-    const out = await createVerificationRequest(store, ctx, validInput({ repoFullName: 'evil/other', commitSha: 'b'.repeat(40) }));
+    const out = await createVerificationRequest(store, catalog, ctx, validInput({ repoFullName: 'evil/other', commitSha: 'b'.repeat(40) }));
     expect(out.rejection?.code).toBe('repo_not_authorized');
     expect(out.request).toBeNull();
   });
 
   it('matches the linked repo case-insensitively and stores the canonical (linked) spelling', async () => {
     const store = storeWithTask();
-    const out = await createVerificationRequest(store, ctx, validInput({ repoFullName: 'Acme/Widget', commitSha: 'b'.repeat(40) }));
+    const out = await createVerificationRequest(store, catalog, ctx, validInput({ repoFullName: 'Acme/Widget', commitSha: 'b'.repeat(40) }));
     expect(out.created).toBe(true);
     expect(out.request!.repoFullName).toBe('acme/widget'); // canonical identity, not the caller's casing
   });
 
   it('an identical retry with DIFFERENT repository capitalization is idempotent, never a conflict', async () => {
     const store = storeWithTask(); // trusted link is 'acme/widget'
-    const first = await createVerificationRequest(store, ctx, validInput());
+    const first = await createVerificationRequest(store, catalog, ctx, validInput());
     expect(first.created).toBe(true);
     expect(first.request!.repoFullName).toBe('acme/widget');
     // Same task+commit, same contract, only the repo capitalization differs — must replay the
     // existing contract, not raise contract_conflict.
-    const retry = await createVerificationRequest(store, ctx, validInput({ repoFullName: 'ACME/Widget' }));
+    const retry = await createVerificationRequest(store, catalog, ctx, validInput({ repoFullName: 'ACME/Widget' }));
     expect(retry.created).toBe(false);
     expect(retry.rejection).toBeNull();
     expect(retry.request!.id).toBe(first.request!.id);
@@ -130,7 +135,7 @@ describe('createVerificationRequest — contract creation', () => {
   it('fails explicitly when the project has NO linked repository (no authorized binding)', async () => {
     const store = new InMemoryVerificationStore();
     store.addTask(ORG, PROJECT, TASK); // task exists, but no repo linked
-    const out = await createVerificationRequest(store, ctx, validInput());
+    const out = await createVerificationRequest(store, catalog, ctx, validInput());
     expect(out.rejection?.code).toBe('no_repo_binding');
     expect(out.request).toBeNull();
   });
@@ -143,7 +148,7 @@ describe('createVerificationRequest — contract creation', () => {
       validInput({ requiredArtifacts: ['ok.json', ''] }),
       validInput({ requiredArtifacts: ['ok.json', '  '] }),
     ]) {
-      const out = await createVerificationRequest(store, ctx, bad);
+      const out = await createVerificationRequest(store, catalog, ctx, bad);
       expect(out.rejection?.code).toBe('invalid_input');
       expect(out.request).toBeNull();
     }
@@ -151,7 +156,7 @@ describe('createVerificationRequest — contract creation', () => {
 
   it('supports an explicitly empty required-artifacts list', async () => {
     const store = storeWithTask();
-    const out = await createVerificationRequest(store, ctx, validInput({ requiredArtifacts: [], commitSha: 'b'.repeat(40) }));
+    const out = await createVerificationRequest(store, catalog, ctx, validInput({ requiredArtifacts: [], commitSha: 'b'.repeat(40) }));
     expect(out.created).toBe(true);
     expect(out.request!.requiredArtifacts).toEqual([]);
   });
@@ -160,11 +165,35 @@ describe('createVerificationRequest — contract creation', () => {
     const store = storeWithTask();
     const out = await createVerificationRequest(
       store,
+      catalog,
       ctx,
       validInput({ commitSha: 'A'.repeat(40), requiredChecks: [' unit ', 'lint'] }),
     );
     expect(out.created).toBe(true);
     expect(out.request!.expectedCommitSha).toBe('a'.repeat(40));
     expect([...out.request!.requiredChecks].sort()).toEqual(['lint', 'unit']);
+  });
+
+  it('pins the SERVER-resolved catalog identity onto the contract (never caller-supplied)', async () => {
+    const store = storeWithTask();
+    const out = await createVerificationRequest(store, catalog, ctx, validInput());
+    expect(out.created).toBe(true);
+    expect(out.request!.catalogVersion).toBe(CAT.version);
+    expect(out.request!.catalogDigest).toBe(CAT.digest);
+  });
+
+  it('rejects a required check name that is not in the pinned catalog (D4)', async () => {
+    const store = storeWithTask();
+    const out = await createVerificationRequest(store, catalog, ctx, validInput({ requiredChecks: ['unit', 'not-a-catalog-check'] }));
+    expect(out.rejection?.code).toBe('invalid_input');
+    expect(out.request).toBeNull();
+  });
+
+  it('fails CLOSED when no trusted catalog resolves for the project', async () => {
+    const store = storeWithTask();
+    const empty = new InMemoryCatalogResolver(); // no versions / no default
+    const out = await createVerificationRequest(store, empty, ctx, validInput({ commitSha: 'c'.repeat(40) }));
+    expect(out.rejection?.code).toBe('catalog_unavailable');
+    expect(out.request).toBeNull();
   });
 });
