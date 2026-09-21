@@ -220,3 +220,45 @@ describe.skipIf(!enabled)('VER-002 PR-3 — catalog pinning at ingest (machine p
     writeCatalog('rc-v1', 'run-unit', 'rc-v2');
   });
 });
+
+describe.skipIf(!enabled)('VER-002 PR-3 — retrieval isolation + human paths', () => {
+  it('a project-A runner credential is refused on project B (403)', async () => {
+    const res = await req('GET', ON, `/api/p/${KEY_B}/verification/requests`, { bearer: RUNNER });
+    expect(res.status).toBe(403);
+    expect(res.json).not.toHaveProperty('items');
+  });
+
+  it('a project-A human (viewer) is refused on project B (403)', async () => {
+    const res = await req('GET', ON, `/api/p/${KEY_B}/verification/requests`, { cookie: VIEWER });
+    expect(res.status).toBe(403);
+  });
+
+  it('a project-B contract id requested through project A is 404 (tenant-scoped)', async () => {
+    // VER_RC_CONTRACT_B is a contract seeded in project B; project A must not be able to read it.
+    const res = await req('GET', ON, `${reqPath}/${process.env.VER_RC_CONTRACT_B}`, { cookie: ADMIN });
+    expect(res.status).toBe(404);
+  });
+
+  it('unauthenticated list and detail requests are 401', async () => {
+    expect((await req('GET', ON, reqPath)).status).toBe(401);
+    expect((await req('GET', ON, `${reqPath}/${String(contractV1.id)}`)).status).toBe(401);
+  });
+
+  it('a malformed pagination cursor is 400 (validated before the uuid column)', async () => {
+    const res = await req('GET', ON, `${reqPath}?cursor=not-a-uuid`, { cookie: ADMIN });
+    expect(res.status).toBe(400);
+  });
+
+  it('catalog mismatch is enforced on the HUMAN (session) ingestion path too', async () => {
+    const env = signedEnvelope(contractV1, 'run-unit', { catalogDigest: 'TAMPERED-HUMAN' });
+    const res = await req('POST', ON, ingest, { cookie: ADMIN, body: env });
+    expect((res.json.decision as { rejection?: { code: string } })?.rejection?.code).toBe('catalog_mismatch');
+  });
+
+  it.skipIf(!process.env.VER_RC_OFF_ENABLED)('human retrieval still works while MACHINE retrieval is disabled', async () => {
+    // OFF server: machine retrieval is off, but a human member must still read their project's contracts.
+    const res = await req('GET', OFF, reqPath, { cookie: ADMIN });
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.json.items)).toBe(true);
+  });
+});

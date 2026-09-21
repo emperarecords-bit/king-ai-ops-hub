@@ -189,6 +189,15 @@ describe('createVerificationRequest — contract creation', () => {
     expect(out.request).toBeNull();
   });
 
+  it('rejects prototype-chain check names (toString / constructor / __proto__) — own-property only', async () => {
+    const store = storeWithTask();
+    for (const name of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+      const out = await createVerificationRequest(store, catalog, ctx, validInput({ requiredChecks: ['unit', name] }));
+      expect(out.rejection?.code, name).toBe('invalid_input');
+      expect(out.request, name).toBeNull();
+    }
+  });
+
   it('fails CLOSED when no trusted catalog resolves for the project', async () => {
     const store = storeWithTask();
     const empty = new InMemoryCatalogResolver(); // no versions / no default

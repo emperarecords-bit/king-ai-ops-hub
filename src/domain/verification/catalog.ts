@@ -50,9 +50,13 @@ function loadVersion(version: string): ResolvedCatalog | null {
   if (!parsed || typeof parsed !== 'object') return null;
   const obj = parsed as { version?: unknown; checks?: unknown };
   if (obj.version !== version || !obj.checks || typeof obj.checks !== 'object') return null;
-  const commands: Record<string, string> = {};
-  for (const [name, def] of Object.entries(obj.checks as Record<string, unknown>)) {
-    const cmd = (def as { command?: unknown } | null)?.command;
+  // Prototype-safe map: no inherited keys, so `toString`/`constructor`/`__proto__` are never present
+  // unless explicitly declared as own catalog entries. Only OWN, non-'__proto__' keys are copied.
+  const commands: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const name of Object.keys(obj.checks as Record<string, unknown>)) {
+    if (name === '__proto__') return null; // reject a catalog that tries to declare a proto key
+    const def = (obj.checks as Record<string, unknown>)[name] as { command?: unknown } | null;
+    const cmd = def?.command;
     if (typeof cmd !== 'string' || cmd.trim() === '') return null;
     commands[name] = cmd;
   }

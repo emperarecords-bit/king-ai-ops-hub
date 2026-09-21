@@ -139,7 +139,9 @@ export async function createVerificationRequest(
   if (!resolved) {
     return { created: false, request: null, rejection: { code: 'catalog_unavailable', message: 'no trusted command catalog is configured for this project' } };
   }
-  const unknown = n.requiredChecks.filter((name) => !(name in resolved.commands));
+  // OWN-property membership only — a check name like 'toString'/'constructor'/'__proto__' is NOT an
+  // approved catalog entry just because it exists on Object.prototype.
+  const unknown = n.requiredChecks.filter((name) => !Object.prototype.hasOwnProperty.call(resolved.commands, name));
   if (unknown.length > 0) {
     return { created: false, request: null, rejection: { code: 'invalid_input', message: `unknown required check name(s) not in catalog ${resolved.version}: ${unknown.join(', ')}` } };
   }

@@ -110,6 +110,7 @@ function toContractView(s: ContractSummary): Record<string, unknown> {
 
 const MAX_PAGE = 100;
 const DEFAULT_PAGE = 50;
+const CURSOR_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * GET — list this PROJECT's verification contracts (VER-002 PR-3). Project-scoped: every credential
@@ -142,6 +143,11 @@ export async function GET(
   const url = new URL(req.url);
   const openOnly = url.searchParams.get('state') === 'open';
   const afterId = url.searchParams.get('cursor') || null;
+  // Validate the cursor as a UUID BEFORE it reaches the uuid column — a malformed cursor is a client
+  // error (400), not a database-driven 500.
+  if (afterId !== null && !CURSOR_RE.test(afterId)) {
+    return Response.json({ error: 'Invalid pagination cursor.' }, { status: 400 });
+  }
   const limitRaw = Number(url.searchParams.get('limit') ?? DEFAULT_PAGE);
   const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), MAX_PAGE) : DEFAULT_PAGE;
 

@@ -122,9 +122,13 @@ export async function ingestEvidence(
     return persist(reject('catalog_mismatch', 'The evidence catalog identity does not match the contract’s pinned, server-resolved catalog.'));
   }
   // 4c. Exact command binding: a required check's reported command must equal the pinned catalog entry.
+  //     OWN-property lookup only — an unapproved name (e.g. 'toString') has no catalog command, so any
+  //     submitted command for it fails to match (invalid_checks).
   for (const name of request.requiredChecks) {
     const submitted = payload.checks.find((c) => c.name === name);
-    if (submitted && submitted.command !== catalog.commands[name]) {
+    if (!submitted) continue; // a missing required check is caught by the checks evaluation below
+    const approved = Object.prototype.hasOwnProperty.call(catalog.commands, name) ? catalog.commands[name] : undefined;
+    if (submitted.command !== approved) {
       return persist(reject('invalid_checks', `Check '${name}' reported a command that does not match the pinned catalog '${catalog.version}'.`));
     }
   }
