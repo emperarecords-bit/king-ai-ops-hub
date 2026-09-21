@@ -9,7 +9,7 @@ import { cleanupAndVerify, makeAcceptanceKeys, makeBudgetedFetch, makeInMemoryS3
  * does NOT verify the real provider; the provider guarantees remain NOT VERIFIED until the authorized run.
  */
 const CFG = { endpoint: 'https://sim.test', region: 'auto', bucket: 'king-verification-acceptance-test', accessKeyId: 'AKIASIM', secretAccessKey: 'sim-secret' } as const;
-const LIMITS: BudgetLimits = { maxRequests: 60, maxBytes: 30 * 1024 * 1024, cleanupReserve: 15 };
+const LIMITS: BudgetLimits = { maxRequests: 60, maxBytes: 30 * 1024 * 1024, cleanupReserve: 15, cleanupByteReserve: 1024 * 1024 };
 const VERIFICATION_KEY = /^org\/[^/]+\/project\/[^/]+\/request\/[^/]+\/attempt\/[^/]+\/[^/]+$/;
 
 describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () => {
@@ -54,6 +54,10 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
       ['an auth failure (403)', { checksumMismatchStatus: 403 }],
       ['a 5xx (503)', { checksumMismatchStatus: 503 }],
       ['an unsupported op (405)', { checksumMismatchStatus: 405 }],
+      // The decisive regression for finding 1: a 400 whose <Code> is NOT a checksum-mismatch code
+      // ('NotAChecksumError' — note it CONTAINS the substring "Checksum"). The status alone would pass, so
+      // the allow-list parse must FAIL CLOSED. A substring test would have wrongly passed this.
+      ['a 400 with a NON-checksum <Code> (NotAChecksumError)', { checksumMismatchStatus: 400 }],
       ['a WRONGLY-ACCEPTED body (200)', { acceptWrongChecksum: true }],
     ])('fails PG3 when a wrong checksum yields %s', async (_label, faults) => {
       const sim = makeInMemoryS3(CFG, faults);
@@ -81,7 +85,7 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
     });
 
     it('reserves cleanup capacity: the test phase stops short of the reserve, cleanup uses it', async () => {
-      const limits: BudgetLimits = { maxRequests: 5, maxBytes: 1024, cleanupReserve: 2 };
+      const limits: BudgetLimits = { maxRequests: 5, maxBytes: 1024, cleanupReserve: 2, cleanupByteReserve: 0 };
       const b = makeBudgetedFetch(inner200, limits);
       await b.fetch('https://ok.test/1');
       await b.fetch('https://ok.test/2');
@@ -97,14 +101,34 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
       // A response with a real 1200-byte body and NO content-length must still be counted by actual bytes
       // and blow a 1000-byte budget (proves missing-Content-Length is handled by reading the body).
       const innerNoCl = (async () => new Response(new Uint8Array(1200), { status: 200 })) as unknown as typeof fetch;
-      const b = makeBudgetedFetch(innerNoCl, { maxRequests: 60, maxBytes: 1000, cleanupReserve: 5 });
-      await expect(b.fetch('https://ok.test/x')).rejects.toThrow(/response body exceeded the byte budget/);
+      const b = makeBudgetedFetch(innerNoCl, { maxRequests: 60, maxBytes: 1000, cleanupReserve: 5, cleanupByteReserve: 0 });
+      await expect(b.fetch('https://ok.test/x')).rejects.toThrow(/byte budget exceeded/);
+      // The bytes already received are reported honestly (counted before the cancellation).
+      expect(b.stats().downloadBytes).toBeGreaterThanOrEqual(1000);
+    });
+
+    it('enforces SHARED accounting across concurrent responses (one budget, cancel on exhaustion)', async () => {
+      // Two concurrent 600-byte responses total 1200 > the 1000-byte test ceiling; the shared counter makes
+      // at least one exceed and cancel, and the received bytes are reported honestly.
+      const inner600 = (async () => new Response(new Uint8Array(600), { status: 200 })) as unknown as typeof fetch;
+      const b = makeBudgetedFetch(inner600, { maxRequests: 60, maxBytes: 1000, cleanupReserve: 5, cleanupByteReserve: 0 });
+      const results = await Promise.allSettled([b.fetch('https://ok.test/a'), b.fetch('https://ok.test/b')]);
+      expect(results.some((r) => r.status === 'rejected')).toBe(true);
+      expect(b.stats().downloadBytes).toBeGreaterThan(1000); // honest: includes the over-threshold bytes
+    });
+
+    it('keeps a FINITE cleanup byte allowance (cleanup is not unlimited)', async () => {
+      const inner = (async () => new Response(new Uint8Array(200), { status: 200 })) as unknown as typeof fetch;
+      const b = makeBudgetedFetch(inner, { maxRequests: 60, maxBytes: 100, cleanupReserve: 5, cleanupByteReserve: 50 });
+      b.enterCleanupPhase();
+      // Even in cleanup, a 200-byte response exceeds the finite maxBytes (100) → rejected.
+      await expect(b.fetch('https://ok.test/cleanup-big')).rejects.toThrow(/byte budget exceeded/);
     });
 
     it('excludes HEAD object-size metadata from the byte budget', async () => {
       // HEAD carries no body; its content-length is the OBJECT size (metadata) and must not be counted.
       const innerHead = (async () => new Response(null, { status: 200, headers: { 'content-length': '9999999' } })) as unknown as typeof fetch;
-      const b = makeBudgetedFetch(innerHead, { maxRequests: 60, maxBytes: 1000, cleanupReserve: 5 });
+      const b = makeBudgetedFetch(innerHead, { maxRequests: 60, maxBytes: 1000, cleanupReserve: 5, cleanupByteReserve: 0 });
       await b.fetch('https://ok.test/x', { method: 'HEAD' });
       expect(b.stats().downloadBytes).toBe(0);
     });
@@ -115,16 +139,16 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
         innerCalled += 1;
         return new Response('', { status: 200, headers: { 'content-length': '0' } });
       }) as unknown as typeof fetch;
-      const b = makeBudgetedFetch(inner, { maxRequests: 60, maxBytes: 100, cleanupReserve: 5 });
+      const b = makeBudgetedFetch(inner, { maxRequests: 60, maxBytes: 100, cleanupReserve: 5, cleanupByteReserve: 0 });
       await expect(b.fetch('https://ok.test/x', { method: 'PUT', body: new Uint8Array(200) })).rejects.toThrow(/outgoing body would exceed/);
       expect(innerCalled).toBe(0); // never sent
     });
 
     it('preserves cleanup capacity after a byte-budget failure', async () => {
       const inner = (async () => new Response('x', { status: 200, headers: { 'content-length': '1' } })) as unknown as typeof fetch;
-      const b = makeBudgetedFetch(inner, { maxRequests: 60, maxBytes: 100, cleanupReserve: 5 });
+      const b = makeBudgetedFetch(inner, { maxRequests: 60, maxBytes: 100, cleanupReserve: 5, cleanupByteReserve: 0 });
       await expect(b.fetch('https://ok.test/big', { method: 'PUT', body: new Uint8Array(200) })).rejects.toThrow(/outgoing body would exceed/);
-      // Cleanup is exempt from the byte budget so it always completes.
+      // Cleanup keeps the reserved allowance: a no-body DELETE still fits and completes after the failure.
       b.enterCleanupPhase();
       await expect(b.fetch('https://ok.test/cleanup', { method: 'DELETE' })).resolves.toBeDefined();
     });

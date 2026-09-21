@@ -13,6 +13,25 @@ const rawChecksumB64 = (b: Buffer): string => createHash('sha256').update(b).dig
 const sha256Hex = (b: Buffer): string => createHash('sha256').update(b).digest('hex');
 const amzDateNow = (): string => new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
 
+/** Parse the `<Code>…</Code>` from an S3 XML error body, or null if none. */
+export function parseS3ErrorCode(body: string): string | null {
+  return body.match(/<Code>([^<]+)<\/Code>/)?.[1]?.trim() ?? null;
+}
+
+/** The EXPLICIT allow-list of S3-family error codes that mean "the checksum did not match" (compared
+ *  case-insensitively). Any OTHER code — even with a 4xx status — FAILS CLOSED for PG3, so a generic bad
+ *  request cannot masquerade as a checksum rejection. */
+export const CHECKSUM_MISMATCH_CODES: readonly string[] = [
+  'BadDigest',
+  'InvalidDigest',
+  'BadChecksum',
+  'InvalidChecksum',
+  'XAmzContentChecksumMismatch',
+  'XAmzContentSHA256Mismatch',
+];
+const isChecksumMismatchCode = (code: string | null): boolean =>
+  code !== null && CHECKSUM_MISMATCH_CODES.some((c) => c.toLowerCase() === code.toLowerCase());
+
 /**
  * A PRODUCTION-SHAPED verification artifact key factory: keys are `org/<o>/project/<p>/request/<r>/attempt/
  * <a>/<obj>` — the exact shape production uses — under a run-scoped random tenant, so acceptance exercises
@@ -28,6 +47,7 @@ export interface BudgetLimits {
   readonly maxRequests: number;
   readonly maxBytes: number; // upload + download combined
   readonly cleanupReserve: number; // requests reserved so cleanup always fits within maxRequests
+  readonly cleanupByteReserve: number; // BYTES reserved so cleanup has a FINITE allowance (never unlimited)
 }
 
 /**
@@ -50,37 +70,38 @@ export function makeBudgetedFetch(inner: typeof fetch, limits: BudgetLimits) {
     const method = String(init.method ?? 'GET');
     const body = init.body as Uint8Array | undefined;
     const bodyLen = body?.byteLength ?? 0;
-    // Reject an oversized OUTGOING body BEFORE calling fetch (never send bytes we cannot afford). The byte
-    // budget is NOT enforced during cleanup, so cleanup capacity survives a test-phase budget failure.
-    if (!cleanupPhase && bodyLen > 0 && total() + bodyLen > limits.maxBytes) {
-      throw new Error(`outgoing body would exceed the byte budget (${limits.maxBytes})`);
+    // The byte ceiling for THIS phase. Cleanup keeps a FINITE allowance (maxBytes), not unlimited; the test
+    // phase reserves `cleanupByteReserve` so cleanup can still transfer after a test-phase budget failure.
+    const byteCeiling = cleanupPhase ? limits.maxBytes : limits.maxBytes - limits.cleanupByteReserve;
+    // Reject an oversized OUTGOING body BEFORE calling fetch (never send bytes we cannot afford).
+    if (bodyLen > 0 && total() + bodyLen > byteCeiling) {
+      throw new Error(`outgoing body would exceed the byte budget (received ${total()}, +${bodyLen} > ${byteCeiling})`);
     }
     requests += 1;
     uploadBytes += bodyLen;
     const res = await inner(u, { ...init, redirect: 'error' }); // never follow a redirect to another host
     if (res.status >= 300 && res.status < 400) throw new Error(`live acceptance rejects a redirect (${res.status})`);
-    // Count the ACTUAL response-body bytes with a BOUNDED read + cancellation (do not trust Content-Length,
-    // which may be missing). HEAD carries no body — its content-length is the OBJECT size (metadata), which
-    // must NOT be counted as transfer. We CONSUME the original body (a clone/tee would deadlock when only
-    // one branch is read) and rebuild an equivalent Response so the caller can still read it.
+    // Count ACTUAL response-body bytes AS THEY ARE CONSUMED into the SHARED counter (do not trust
+    // Content-Length; it may be missing). Each chunk is accounted BEFORE the check, so bytes already
+    // received — even on a failed or cancelled read — are counted HONESTLY. The check uses the LIVE shared
+    // total, so concurrent responses share one budget. HEAD carries no body; its content-length is the
+    // OBJECT size (metadata) and must NOT be counted. We consume the original (a clone/tee would deadlock)
+    // and rebuild an equivalent Response so the caller can still read it.
     if (method !== 'HEAD' && res.body) {
-      const remaining = cleanupPhase ? Number.POSITIVE_INFINITY : limits.maxBytes - total();
       const reader = res.body.getReader();
       const chunks: Uint8Array[] = [];
-      let got = 0;
       for (;;) {
-        const { done, value } = await reader.read();
+        const { done, value } = await reader.read(); // a rejected read propagates with bytes already counted
         if (done) break;
         if (value) {
-          got += value.byteLength;
-          if (got > remaining) {
-            await reader.cancel();
-            throw new Error(`response body exceeded the byte budget (${limits.maxBytes})`);
-          }
+          downloadBytes += value.byteLength; // account as consumed, into the shared counter
           chunks.push(value);
+          if (total() > byteCeiling) {
+            await reader.cancel(); // stop pulling more; the received bytes stay counted (honest)
+            throw new Error(`byte budget exceeded (received ${total()} > ${byteCeiling})`);
+          }
         }
       }
-      downloadBytes += got;
       const merged = Buffer.concat(chunks.map((c) => Buffer.from(c)));
       return new Response(merged.byteLength ? new Uint8Array(merged) : null, { status: res.status, statusText: res.statusText, headers: res.headers });
     }
@@ -155,12 +176,12 @@ export async function runAcceptanceScenarios(args: {
   const wrongRes = await fetchImpl(signed.url, { method: 'PUT', headers: signed.headers, body: new Uint8Array(b3) });
   const status = wrongRes.status;
   const errorBody = await wrongRes.text().catch(() => '');
-  expect(status, `PG3: an auth failure must not pass (got ${status})`).not.toBe(401);
-  expect(status, `PG3: an auth failure must not pass (got ${status})`).not.toBe(403);
-  expect(status, `PG3: an unsupported op must not pass (got ${status})`).not.toBe(405);
-  expect(status, `PG3: a 5xx must not pass (got ${status})`).toBeLessThan(500);
-  expect([400, 422], `PG3: expected a checksum-specific 4xx (got ${status})`).toContain(status);
-  expect(/digest|checksum/i.test(errorBody), `PG3: expected a checksum-specific error, got: ${errorBody.slice(0, 160)}`).toBe(true);
+  const code = parseS3ErrorCode(errorBody);
+  // Must be a CHECKSUM-SPECIFIC 4xx: the status is a checksum client error AND the parsed provider error
+  // code is on the explicit allow-list. Auth (401/403), 5xx, unsupported (405), and any UNKNOWN error code
+  // (e.g. a generic 400) all FAIL CLOSED here.
+  expect([400, 422], `PG3: expected a checksum 4xx (got ${status})`).toContain(status);
+  expect(isChecksumMismatchCode(code), `PG3: error code '${code}' is not an allow-listed checksum-mismatch code`).toBe(true);
   expect(await store.head(k3), 'PG3: a wrong-checksum object must never land').toBeNull();
 
   // PG5 — immutability, with the two mechanisms it actually proves kept SEPARATE and accurately labelled:

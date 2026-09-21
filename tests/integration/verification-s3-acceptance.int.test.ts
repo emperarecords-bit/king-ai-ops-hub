@@ -31,7 +31,7 @@ const ENV = {
   approvedBucket: process.env.VER_S3_APPROVED_BUCKET ?? '',
 };
 
-const LIMITS = { maxRequests: 60, maxBytes: 30 * 1024 * 1024, cleanupReserve: 15 };
+const LIMITS = { maxRequests: 60, maxBytes: 30 * 1024 * 1024, cleanupReserve: 15, cleanupByteReserve: 1 * 1024 * 1024 };
 
 let store: S3ObjectStore;
 let budgeted: ReturnType<typeof makeBudgetedFetch>;
