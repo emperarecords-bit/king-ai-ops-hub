@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { S3ObjectStore } from '@/domain/documents/s3-object-store';
 import { isVerificationArtifactKey } from '@/domain/documents/object-store';
-import { cleanupAndReport, cleanupAndVerify, makeAcceptanceKeys, makeBudgetedFetch, makeInMemoryS3, runAcceptanceScenarios, runPG3, runPG5, type AcceptanceCtx, type BudgetLimits, type RunTotals } from '../support/s3-acceptance';
+import { cleanupAndReport, cleanupAndVerify, makeAcceptanceKeys, makeBudgetedFetch, makeInMemoryS3, runAcceptanceScenarios, runPG1Concurrent, runPG3, runPG5, type AcceptanceCtx, type BudgetLimits, type RunTotals } from '../support/s3-acceptance';
 
 /**
  * OFFLINE exercise of the LIVE acceptance harness's own logic (key selection, scenarios, budgets,
@@ -114,6 +114,35 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
       expect(reports[0]!.cleanupSucceeded).toBe(false);
       expect(reports[0]!.preCleanup.requests).toBeGreaterThan(0); // pre-cleanup counters captured
       expect(reports[0]!.final.requests).toBeGreaterThanOrEqual(reports[0]!.preCleanup.requests); // final ≥ pre (a LIST ran)
+    });
+
+    it('runPG1Concurrent waits for BOTH writes to settle before propagating a failure (no sibling races cleanup)', async () => {
+      // The first write rejects fast; the sibling settles LATER. The step must not propagate the failure
+      // until the delayed sibling has settled, so no in-flight write outlives the step to race cleanup.
+      let calls = 0;
+      let siblingSettled = false;
+      const fakeStore = {
+        putIfAbsent: async (): Promise<'created' | 'exists'> => {
+          calls += 1;
+          if (calls === 1) throw new Error('fast write rejection');
+          await new Promise((r) => setTimeout(r, 25)); // the sibling settles later than the fast rejection
+          siblingSettled = true;
+          return 'created';
+        },
+      } as unknown as S3ObjectStore;
+      const keys = makeAcceptanceKeys();
+      const ctx: AcceptanceCtx = {
+        store: fakeStore,
+        cfg: CFG,
+        fetchImpl: (async () => new Response(null)) as unknown as typeof fetch,
+        key: keys.key,
+        track: () => {},
+      };
+
+      await expect(runPG1Concurrent(ctx)).rejects.toThrow(/fast write rejection/);
+      // With allSettled the step only rejects AFTER the delayed sibling settled; Promise.all would have
+      // rejected while the sibling was still pending (siblingSettled === false).
+      expect(siblingSettled).toBe(true);
     });
   });
 
@@ -233,6 +262,27 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
       expect(b.stats().tripped).toBe(true);
       await expect(b.fetch('https://ok.test/b')).rejects.toThrow(/halted/i); // halted without a network call
       expect(n).toBe(1); // only the first reached inner
+    });
+
+    it('a real redirect/network REJECTION (redirect:error throws, not a returned 302) also trips the fuse; bounded cleanup stays available', async () => {
+      // fetch with `redirect: 'error'` REJECTS on a redirect (a network error), it does not return a 3xx.
+      // The fuse must trip on that rejection path too, not only on a mocked returned-302.
+      let calls = 0;
+      const inner = (async () => {
+        calls += 1;
+        if (calls === 1) throw new TypeError('failed to fetch: redirect not allowed'); // models redirect:'error' rejection
+        return new Response(null, { status: 204 }); // a later (cleanup) call succeeds
+      }) as unknown as typeof fetch;
+      const b = makeBudgetedFetch(inner, { maxRequests: 60, maxBytes: 1024 * 1024, cleanupReserve: 5, cleanupByteReserve: 0 });
+      await expect(b.fetch('https://ok.test/a')).rejects.toThrow(/redirect|failed to fetch/i); // inner rejected → trips
+      expect(b.stats().tripped).toBe(true);
+      // subsequent TEST request is blocked WITHOUT reaching inner
+      await expect(b.fetch('https://ok.test/b')).rejects.toThrow(/halted/i);
+      expect(calls).toBe(1);
+      // cleanup is NOT fuse-gated: the request reaches inner (bounded by the reserve) and completes
+      b.enterCleanupPhase();
+      await expect(b.fetch('https://ok.test/cleanup', { method: 'DELETE' })).resolves.toBeDefined();
+      expect(calls).toBe(2);
     });
   });
 });

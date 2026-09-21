@@ -123,7 +123,17 @@ export function makeBudgetedFetch(inner: typeof fetch, limits: BudgetLimits): Bu
     }
     requests += 1;
     uploadBytes += bodyLen;
-    const res = await inner(u, { ...init, redirect: 'error' }); // never follow a redirect to another host
+    // A redirect under `redirect: 'error'` (and any network failure) REJECTS here rather than returning a
+    // 3xx, so the rejection would otherwise bypass the fuse. Trip on it too — a real redirect/network error
+    // must halt further TEST requests. The mocked-3xx status check below is kept as defence-in-depth for a
+    // simulator that RETURNS a 3xx instead of rejecting.
+    let res: Response;
+    try {
+      res = await inner(u, { ...init, redirect: 'error' }); // never follow a redirect to another host
+    } catch (err) {
+      trip();
+      throw err;
+    }
     if (res.status >= 300 && res.status < 400) {
       trip();
       throw new Error(`live acceptance rejects a redirect (${res.status})`);
@@ -190,12 +200,19 @@ export async function runPG1Concurrent(ctx: AcceptanceCtx): Promise<void> {
   const kC = key('pg1-concurrent');
   track(kC);
   const b1 = Buffer.from('{"pg1":true}', 'utf8');
-  const [rc1, rc2] = await Promise.all([
+  // Wait for BOTH writes to SETTLE before propagating any failure. Promise.all rejects the moment one
+  // rejects, letting the sibling keep writing/retrying past the step and race cleanup (a delete/list before
+  // it finishes → a wrong empty-prefix result or incomplete counters). allSettled guarantees no in-flight
+  // sibling outlives the step.
+  const settled = await Promise.allSettled([
     store.putIfAbsent(kC, b1, 'application/json'),
     store.putIfAbsent(kC, b1, 'application/json'),
   ]);
-  expect([rc1, rc2].filter((r) => r === 'created')).toHaveLength(1);
-  expect([rc1, rc2].filter((r) => r === 'exists')).toHaveLength(1);
+  const rejected = settled.find((s): s is PromiseRejectedResult => s.status === 'rejected');
+  if (rejected) throw rejected.reason;
+  const results = settled.map((s) => (s as PromiseFulfilledResult<'created' | 'exists'>).value);
+  expect(results.filter((r) => r === 'created')).toHaveLength(1);
+  expect(results.filter((r) => r === 'exists')).toHaveLength(1);
 }
 
 /** PG2 — GET/HEAD round-trip correctness; an absent key reads as absent. */
