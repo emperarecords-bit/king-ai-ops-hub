@@ -74,7 +74,15 @@ beforeAll(() => {
   budgeted = makeBudgetedFetch(fetch, LIMITS);
   const cfg = { endpoint: ENV.endpoint, region: ENV.region, bucket: ENV.bucket, accessKeyId: ENV.accessKeyId, secretAccessKey: ENV.secretAccessKey };
   store = new S3ObjectStore(cfg, budgeted.fetch);
-  ctx = { store, cfg, fetchImpl: budgeted.fetch, key: KEYS.key, track: (k) => created.push(k) };
+  ctx = {
+    store,
+    cfg,
+    fetchImpl: budgeted.fetch,
+    key: KEYS.key,
+    track: (k) => created.push(k),
+    // Emit sanitized diagnostic evidence to the run log (label/status/code/outcome only — no credentials).
+    emit: (ev) => console.log(`VER_S3_DIAG ${JSON.stringify(ev)}`),
+  };
 });
 
 afterAll(async () => {
