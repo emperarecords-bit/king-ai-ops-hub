@@ -29,10 +29,13 @@ import {
   runDiagAOriginalWrongChecksum,
   runDiagBAddedSdkAlgo,
   runDiagCCorrectControl,
+  runN1WrongContentMd5,
+  runN2WrongPayloadHash,
+  runP1ContentMd5Control,
+  runP2PayloadHashControl,
   runPG1,
   runPG1Concurrent,
   runPG2,
-  runPG3,
   runPG5,
   type AcceptanceCtx,
   type BudgetedFetch,
@@ -100,8 +103,15 @@ describe.skipIf(!OPTED_IN)('VER-002 PR-5 — S3 provider acceptance (LIVE, opt-i
   it('PG1 — create-only publish; a second create-only is rejected as exists', () => runPG1(ctx));
   it('PG1-concurrent — two concurrent create-only writes yield exactly one create', () => runPG1Concurrent(ctx));
   it('PG2 — GET/HEAD round-trip is byte-exact; absent reads absent', () => runPG2(ctx));
-  it('PG3 — a present-but-wrong checksum is rejected (BadDigest); HTTP 200 is a FAILURE', () => runPG3(ctx));
   it('PG5 — adapter overwrite guard + provider conditional-write enforcement', () => runPG5(ctx));
+
+  // Provider-verified integrity-at-write (Content-MD5 + payload-hash), replacing old PG3. Each negative
+  // passes ONLY on its own specific status + error code (other errors do not satisfy); each positive control
+  // must write successfully and read back byte-exact.
+  it('N1 — wrong Content-MD5 → 400 BadDigest, object absent', () => runN1WrongContentMd5(ctx));
+  it('P1 — correct Content-MD5 → accepted + byte-exact read-back', () => runP1ContentMd5Control(ctx));
+  it('N2 — wrong x-amz-content-sha256 → 400 XAmzContentSHA256Mismatch, object absent', () => runN2WrongPayloadHash(ctx));
+  it('P2 — correct x-amz-content-sha256 → accepted + byte-exact read-back', () => runP2PayloadHashControl(ctx));
 
   // PG3 checksum diagnostics — three independent PUTs (A/B/C). A PG3 assertion failure above does not
   // prevent these (each is its own test). A and B are observational (rejected ⇒ absence-checked); C is a

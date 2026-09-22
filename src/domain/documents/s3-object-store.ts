@@ -201,9 +201,11 @@ export class S3ObjectStore implements ObjectStore {
 
   /**
    * Create-only publish for a verification artifact (VER-002 PR-5). Issues a CONDITIONAL PUT
-   * (`If-None-Match: *`) with the EXACT body and a provider-verified `x-amz-checksum-sha256` (policy P-A:
-   * the adapter ALWAYS sends the checksum, so a missing checksum cannot occur on the write path). Returns
-   * `'created'` (2xx) or `'exists'` (412/409 precondition failed). It NEVER issues an unconditional PUT.
+   * (`If-None-Match: *`) with the EXACT body and integrity headers the adapter ALWAYS sends: `Content-MD5`
+   * and the SigV4 `x-amz-content-sha256` (both provider-verified — a mismatch is rejected at write), plus
+   * `x-amz-checksum-sha256`, which is sent for forward-compatibility but is NOT necessarily provider-verified
+   * (e.g. Tigris stores it as-is; enforcement is on their roadmap). Returns `'created'` (2xx) or `'exists'`
+   * (412/409 precondition failed). It NEVER issues an unconditional PUT.
    *
    * Ambiguous outcomes (network error / timeout / 5xx) are RECONCILED by HEAD before any retry: a PRESENT
    * object ⇒ `'exists'` (the caller re-validates it against the grant's size+digest); an ABSENT object ⇒ a
@@ -212,8 +214,9 @@ export class S3ObjectStore implements ObjectStore {
    * so it is never reported as a silent success, and the object is never overwritten.
    *
    * ADAPTER guarantee (offline-testable, here): the request shape and the no-unconditional-PUT + reconcile
-   * logic. Whether the PROVIDER actually ENFORCES `If-None-Match`/the checksum (credential-enforced
-   * immutability) is NOT VERIFIED here — that is the authorized live acceptance run.
+   * logic. Whether the PROVIDER actually ENFORCES `If-None-Match` / a given integrity header
+   * (credential-enforced immutability + rejection) is NOT VERIFIED here — that is the authorized live
+   * acceptance run.
    */
   async putIfAbsent(
     key: string,
@@ -223,7 +226,8 @@ export class S3ObjectStore implements ObjectStore {
   ): Promise<CreateOnlyResult> {
     if (!isCanonicalObjectKey(key)) throw new Error('non-canonical object key');
     const now = opts.now ?? (() => new Date());
-    const checksum = createHash('sha256').update(body).digest('base64'); // base64 of the RAW digest (NOT hex)
+    const checksum = createHash('sha256').update(body).digest('base64'); // base64 of the RAW SHA-256 digest (NOT hex)
+    const contentMd5 = createHash('md5').update(body).digest('base64'); // base64 of the RAW MD5 digest
     const attemptOnce = async (): Promise<CreateOnlyResult | 'ambiguous'> => {
       let res: Response;
       try {
@@ -232,9 +236,12 @@ export class S3ObjectStore implements ObjectStore {
           key,
           payloadHash: sha256Hex(body),
           amzDate: amzDateNow(),
-          // Both headers are SIGNED (signS3Request folds extraHeaders into SignedHeaders), so the provider
-          // is asked to enforce create-only AND the checksum.
-          extraHeaders: { 'content-type': contentType, 'if-none-match': '*', 'x-amz-checksum-sha256': checksum },
+          // All of these headers are SIGNED (signS3Request folds extraHeaders into SignedHeaders). `Content-MD5`
+          // is an ADDITIONAL integrity-at-write check the provider verifies today (mismatch ⇒ 400 BadDigest);
+          // it does NOT replace the declared-SHA-256 requirement or the ingest re-hash. `x-amz-checksum-sha256`
+          // is still sent (stored as-is on providers that don't yet enforce it). The SigV4 `x-amz-content-sha256`
+          // is verified against the bytes. `If-None-Match: *` keeps the write create-only.
+          extraHeaders: { 'content-type': contentType, 'if-none-match': '*', 'x-amz-checksum-sha256': checksum, 'content-md5': contentMd5 },
         });
         res = await this.fetchImpl(signed.url, { method: 'PUT', headers: signed.headers, body: new Uint8Array(body) });
       } catch {

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { S3ObjectStore } from '@/domain/documents/s3-object-store';
 import { isVerificationArtifactKey } from '@/domain/documents/object-store';
-import { createHash } from 'node:crypto';
-import { cleanupAndReport, cleanupAndVerify, makeAcceptanceKeys, makeBudgetedFetch, makeInMemoryS3, runAcceptanceScenarios, runDiagAOriginalWrongChecksum, runDiagBAddedSdkAlgo, runDiagCCorrectControl, runPG1Concurrent, runPG3, runPG5, type AcceptanceCtx, type BudgetLimits, type DiagEvidence, type RunTotals } from '../support/s3-acceptance';
+import { createHash, createHmac } from 'node:crypto';
+import { cleanupAndReport, cleanupAndVerify, makeAcceptanceKeys, makeBudgetedFetch, makeInMemoryS3, runAcceptanceScenarios, runDiagAOriginalWrongChecksum, runDiagBAddedSdkAlgo, runDiagCCorrectControl, runN1WrongContentMd5, runN2WrongPayloadHash, runP1ContentMd5Control, runP2PayloadHashControl, runPG1Concurrent, runPG3, runPG5, type AcceptanceCtx, type BudgetLimits, type DiagEvidence, type RunTotals } from '../support/s3-acceptance';
 
 /**
  * OFFLINE exercise of the LIVE acceptance harness's own logic (key selection, scenarios, budgets,
@@ -24,18 +24,19 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
     await runAcceptanceScenarios({ store, cfg: CFG, fetchImpl: budgeted.fetch, key: keys.key, track: (k) => created.push(k) });
 
     // Every tracked key is a production-shaped verification artifact key (would trip the `put` guard).
-    expect(created.length).toBeGreaterThanOrEqual(5); // PG1, PG1-concurrent, PG2, PG3 (rejected but tracked), PG5
+    expect(created.length).toBeGreaterThanOrEqual(8); // PG1, PG1-concurrent, PG2, PG5, N1, P1, N2, P2
     for (const k of created) {
       expect(k, k).toMatch(VERIFICATION_KEY);
       expect(isVerificationArtifactKey(k), k).toBe(true);
       expect(k.startsWith(keys.prefix)).toBe(true);
     }
-    // The rejected wrong-checksum probe (PG3) is tracked but was NOT stored, so ≤ created.length landed.
+    // The rejected N1 (wrong Content-MD5) and N2 (wrong payload hash) are tracked but NOT stored, so the
+    // number of landed objects is ≤ created.length.
     expect(sim.objectCount()).toBeLessThanOrEqual(created.length);
     expect(sim.objectCount()).toBeGreaterThan(0);
 
     await cleanupAndVerify({ store, prefix: keys.prefix, created, enterCleanupPhase: budgeted.enterCleanupPhase });
-    expect(sim.objectCount()).toBe(0); // cleanup removed everything created (deletes of the never-stored probe are no-ops)
+    expect(sim.objectCount()).toBe(0); // cleanup removed everything created (deletes of the never-stored negatives are no-ops)
     expect(budgeted.stats().requests).toBeLessThanOrEqual(LIMITS.maxRequests);
   });
 
@@ -49,32 +50,242 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
     expect(sim.objectCount()).toBe(1); // proof the leak was real
   });
 
-  describe('negative: the acceptance assertions CATCH a mishandled wrong-checksum (PG3)', () => {
-    it.each([
-      ['an auth failure (401)', { checksumMismatchStatus: 401 }],
-      ['an auth failure (403)', { checksumMismatchStatus: 403 }],
-      ['a 5xx (503)', { checksumMismatchStatus: 503 }],
-      ['an unsupported op (405)', { checksumMismatchStatus: 405 }],
-      // The decisive regression for finding 1: a 400 whose <Code> is NOT a checksum-mismatch code
-      // ('NotAChecksumError' — note it CONTAINS the substring "Checksum"). The status alone would pass, so
-      // the allow-list parse must FAIL CLOSED. A substring test would have wrongly passed this.
-      ['a 400 with a NON-checksum <Code> (NotAChecksumError)', { checksumMismatchStatus: 400 }],
-      // The narrowed allow-list must FAIL CLOSED on the PAYLOAD-SIGNING code: XAmzContentSHA256Mismatch is
-      // about the SigV4 x-amz-content-sha256 request hash, NOT a rejection of the x-amz-checksum-sha256
-      // VALUE, so a 400 carrying it must not count as a PG3 pass.
-      ['a 400 payload-signing code (XAmzContentSHA256Mismatch)', { mismatchCode: 'XAmzContentSHA256Mismatch' }],
-      // InvalidDigest documents a MALFORMED digest, not a well-formed-but-wrong value, so it does not prove
-      // MISMATCH rejection and must fail closed even at a 400 (only BadDigest is accepted).
-      ['a 400 malformed-digest code (InvalidDigest)', { mismatchCode: 'InvalidDigest' }],
-      ['a WRONGLY-ACCEPTED body (200)', { acceptWrongChecksum: true }],
-    ])('fails PG3 when a wrong checksum yields %s', async (_label, faults) => {
+  describe('provider-verified integrity-at-write — Content-MD5 (N1/P1) + payload-hash (N2/P2)', () => {
+    const freshCtx = (faults?: Parameters<typeof makeInMemoryS3>[1]) => {
       const sim = makeInMemoryS3(CFG, faults);
       const bf = makeBudgetedFetch(sim.fetch, LIMITS);
       const store = new S3ObjectStore(CFG, bf.fetch);
       const keys = makeAcceptanceKeys();
-      await expect(
-        runAcceptanceScenarios({ store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: () => {} }),
-      ).rejects.toThrow();
+      const created: string[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: (k) => created.push(k) };
+      return { sim, bf, store, keys, created, ctx };
+    };
+
+    // ── request capture + an INDEPENDENT SigV4 verifier (re-implements signing; does NOT call signS3Request) ──
+    const lowerHeaders = (h: HeadersInit | undefined): Record<string, string> => {
+      const out: Record<string, string> = {};
+      if (!h) return out;
+      if (h instanceof Headers) h.forEach((v, k) => (out[k.toLowerCase()] = v));
+      else if (Array.isArray(h)) for (const [k, v] of h) out[String(k).toLowerCase()] = String(v);
+      else for (const [k, v] of Object.entries(h)) out[k.toLowerCase()] = String(v);
+      return out;
+    };
+    type CapturedPut = { url: string; headers: Record<string, string>; body: Buffer };
+    const recordingCtx = (faults?: Parameters<typeof makeInMemoryS3>[1]) => {
+      const sim = makeInMemoryS3(CFG, faults);
+      const puts: CapturedPut[] = [];
+      const recording = (async (url: string, init: RequestInit = {}) => {
+        if (String(init.method) === 'PUT') puts.push({ url: String(url), headers: lowerHeaders(init.headers as HeadersInit), body: Buffer.from((init.body as Uint8Array) ?? new Uint8Array()) });
+        return sim.fetch(url, init);
+      }) as unknown as typeof fetch;
+      const store = new S3ObjectStore(CFG, recording);
+      const keys = makeAcceptanceKeys();
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: recording, key: keys.key, track: () => {} };
+      return { sim, puts, store, keys, ctx };
+    };
+    const hmac = (k: Buffer | string, d: string): Buffer => createHmac('sha256', k).update(d, 'utf8').digest();
+    /** Independently recompute the SigV4 signature from a captured request and return it with the captured one. */
+    const verifySigV4 = (put: CapturedPut): { computed: string; captured: string; payloadHash: string } => {
+      const h = put.headers; // lowercased
+      const auth = h['authorization'] ?? '';
+      const signedHeaders = auth.match(/SignedHeaders=([^,]+)/)?.[1] ?? '';
+      const captured = auth.match(/Signature=([0-9a-f]+)/)?.[1] ?? '';
+      const amzDate = h['x-amz-date'] ?? '';
+      const dateStamp = amzDate.slice(0, 8);
+      const scope = `${dateStamp}/${CFG.region}/s3/aws4_request`;
+      const uri = new URL(put.url);
+      const payloadHash = h['x-amz-content-sha256'] ?? '';
+      const canonicalHeaders = signedHeaders.split(';').map((n) => `${n}:${String(h[n]).trim()}\n`).join('');
+      const canonicalRequest = ['PUT', uri.pathname, uri.search.replace(/^\?/, ''), canonicalHeaders, signedHeaders, payloadHash].join('\n');
+      const stringToSign = ['AWS4-HMAC-SHA256', amzDate, scope, createHash('sha256').update(canonicalRequest).digest('hex')].join('\n');
+      const kSigning = hmac(hmac(hmac(hmac(`AWS4${CFG.secretAccessKey}`, dateStamp), CFG.region), 's3'), 'aws4_request');
+      const computed = createHmac('sha256', kSigning).update(stringToSign, 'utf8').digest('hex');
+      return { computed, captured, payloadHash };
+    };
+    const BODY = Buffer.from('{"integrity":"probe"}', 'utf8');
+    const WRONG = Buffer.from('completely different bytes', 'utf8');
+
+    it('N1 rejects a wrong Content-MD5 (400 BadDigest, absent); P1 correct is stored + read back', async () => {
+      const { sim, bf, store, keys, created, ctx } = freshCtx();
+      await expect(runN1WrongContentMd5(ctx)).resolves.toBeUndefined();
+      await expect(runP1ContentMd5Control(ctx)).resolves.toBeUndefined();
+      expect(sim.objectCount()).toBe(1); // only P1 landed; N1 rejected
+      await cleanupAndVerify({ store, prefix: keys.prefix, created, enterCleanupPhase: bf.enterCleanupPhase });
+      expect(sim.objectCount()).toBe(0);
+    });
+
+    it('N2 rejects a wrong x-amz-content-sha256 (400 XAmzContentSHA256Mismatch, absent); P2 correct is stored + read back', async () => {
+      const { sim, bf, store, keys, created, ctx } = freshCtx();
+      await expect(runN2WrongPayloadHash(ctx)).resolves.toBeUndefined();
+      await expect(runP2PayloadHashControl(ctx)).resolves.toBeUndefined();
+      expect(sim.objectCount()).toBe(1); // only P2 landed; N2 rejected
+      await cleanupAndVerify({ store, prefix: keys.prefix, created, enterCleanupPhase: bf.enterCleanupPhase });
+      expect(sim.objectCount()).toBe(0);
+    });
+
+    it('N1 passes ONLY on its own 400 BadDigest — a provider that accepts a wrong Content-MD5 (200) fails N1', async () => {
+      const { ctx } = freshCtx({ acceptWrongContentMd5: true });
+      await expect(runN1WrongContentMd5(ctx)).rejects.toThrow(/N1: expected HTTP 400/);
+    });
+
+    it('N2 passes ONLY on its own 400 XAmzContentSHA256Mismatch — a provider that accepts a wrong hash (200) fails N2', async () => {
+      const { ctx } = freshCtx({ acceptWrongPayloadHash: true });
+      await expect(runN2WrongPayloadHash(ctx)).rejects.toThrow(/N2: expected HTTP 400/);
+    });
+
+    it('request capture: N1/P1 and N2/P2 use identical bodies + fresh keys; only the intended digest differs (+ derived signing)', async () => {
+      const { puts, ctx } = recordingCtx();
+      await runN1WrongContentMd5(ctx);
+      await runP1ContentMd5Control(ctx);
+      await runN2WrongPayloadHash(ctx);
+      await runP2PayloadHashControl(ctx);
+      const [n1, p1, n2, p2] = puts;
+      const md5 = (b: Buffer) => createHash('md5').update(b).digest('base64');
+      const shaHex = (b: Buffer) => createHash('sha256').update(b).digest('hex');
+      const checkB64 = (b: Buffer) => createHash('sha256').update(b).digest('base64');
+      const sig = (p: CapturedPut) => p.headers['authorization']!.match(/Signature=([0-9a-f]+)/)?.[1] ?? '';
+
+      // All four: identical bodies, distinct (fresh) keys, correct signed x-amz-checksum-sha256, and if-none-match:*.
+      for (const p of [n1!, p1!, n2!, p2!]) {
+        expect(p.body.equals(BODY)).toBe(true);
+        expect(p.headers['x-amz-checksum-sha256']).toBe(checkB64(BODY));
+        expect(p.headers['if-none-match']).toBe('*');
+      }
+      expect(new Set([n1!, p1!, n2!, p2!].map((p) => new URL(p.url).pathname)).size).toBe(4);
+
+      // N1 ↔ P1 differ ONLY by content-md5 (+ derived signature); content-sha256/content-type identical.
+      expect(n1!.headers['content-md5']).toBe(md5(WRONG));
+      expect(p1!.headers['content-md5']).toBe(md5(BODY));
+      expect(n1!.headers['x-amz-content-sha256']).toBe(shaHex(BODY));
+      expect(p1!.headers['x-amz-content-sha256']).toBe(shaHex(BODY));
+      expect(n1!.headers['content-type']).toBe(p1!.headers['content-type']);
+      expect(sig(n1!)).not.toBe(sig(p1!));
+
+      // N2 ↔ P2 differ ONLY by x-amz-content-sha256 (+ derived signature); content-md5 identical.
+      expect(n2!.headers['x-amz-content-sha256']).toBe(shaHex(WRONG));
+      expect(p2!.headers['x-amz-content-sha256']).toBe(shaHex(BODY));
+      expect(n2!.headers['content-md5']).toBe(md5(BODY));
+      expect(p2!.headers['content-md5']).toBe(md5(BODY));
+      expect(sig(n2!)).not.toBe(sig(p2!));
+    });
+
+    it('N2 outgoing request is CORRECTLY SigV4-signed (independent verifier); the wrong hash is consistent in the header + canonical payload field', async () => {
+      const { puts, ctx } = recordingCtx();
+      await runN2WrongPayloadHash(ctx); // captures the actual N2 PUT
+      const n2 = puts[0]!;
+      const wrongHex = createHash('sha256').update(WRONG).digest('hex');
+      // The declared payload hash is the wrong value...
+      expect(n2.headers['x-amz-content-sha256']).toBe(wrongHex);
+      // ...and an INDEPENDENT SigV4 recomputation (using the header value as BOTH the signed x-amz-content-sha256
+      // and the canonical payload-hash field) MATCHES the captured signature — proving ONLY that the request is
+      // validly signed for the wrong hash as sent, with that hash consistent in the header and the canonical
+      // payload field. It does NOT establish what any LIVE rejection means; N2's live pass criterion is the
+      // exact status + code (HTTP 400 XAmzContentSHA256Mismatch), asserted separately by runN2.
+      const v = verifySigV4(n2);
+      expect(v.payloadHash).toBe(wrongHex);
+      expect(v.captured).toMatch(/^[0-9a-f]{64}$/);
+      expect(v.computed).toBe(v.captured);
+    });
+
+    it('EMITS sanitized N1/P1/N2/P2 evidence (label/status/code/outcome/absence/read-back)', async () => {
+      const sim = makeInMemoryS3(CFG);
+      const bf = makeBudgetedFetch(sim.fetch, LIMITS);
+      const store = new S3ObjectStore(CFG, bf.fetch);
+      const keys = makeAcceptanceKeys();
+      const created: string[] = [];
+      const events: DiagEvidence[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: (k) => created.push(k), emit: (e) => events.push(e) };
+      await runN1WrongContentMd5(ctx);
+      await runP1ContentMd5Control(ctx);
+      await runN2WrongPayloadHash(ctx);
+      await runP2PayloadHashControl(ctx);
+      expect(events.map((e) => e.label)).toEqual(['N1', 'P1', 'N2', 'P2']);
+      expect(events[0]).toMatchObject({ status: 400, code: 'BadDigest', outcome: 'rejected-absent', absentAfterReject: true });
+      expect(events[1]).toMatchObject({ status: 200, outcome: 'accepted-readback-ok', readBackOk: true });
+      expect(events[2]).toMatchObject({ status: 400, code: 'XAmzContentSHA256Mismatch', outcome: 'rejected-absent', absentAfterReject: true });
+      expect(events[3]).toMatchObject({ status: 200, outcome: 'accepted-readback-ok', readBackOk: true });
+      await cleanupAndVerify({ store, prefix: keys.prefix, created, enterCleanupPhase: bf.enterCleanupPhase });
+    });
+
+    it('EMITS N1 evidence even when a later check fails — received status/code preserved', async () => {
+      // Provider ACCEPTS a wrong Content-MD5 (200) → N1's 400 assertion fails; the emit in `finally` must
+      // still fire with the received status.
+      const sim = makeInMemoryS3(CFG, { acceptWrongContentMd5: true });
+      const bf = makeBudgetedFetch(sim.fetch, LIMITS);
+      const store = new S3ObjectStore(CFG, bf.fetch);
+      const keys = makeAcceptanceKeys();
+      const events: DiagEvidence[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: () => {}, emit: (e) => events.push(e) };
+      await expect(runN1WrongContentMd5(ctx)).rejects.toThrow(/N1: expected HTTP 400/);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ label: 'N1', status: 200, outcome: 'accepted' });
+    });
+
+    it('EMITS N2 evidence even when a later check fails — received status/code preserved', async () => {
+      const sim = makeInMemoryS3(CFG, { acceptWrongPayloadHash: true });
+      const bf = makeBudgetedFetch(sim.fetch, LIMITS);
+      const store = new S3ObjectStore(CFG, bf.fetch);
+      const keys = makeAcceptanceKeys();
+      const events: DiagEvidence[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: () => {}, emit: (e) => events.push(e) };
+      await expect(runN2WrongPayloadHash(ctx)).rejects.toThrow(/N2: expected HTTP 400/);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ label: 'N2', status: 200, outcome: 'accepted' });
+    });
+
+    it('EMITS N1 evidence when the absence-check HEAD itself fails — received 400/BadDigest preserved', async () => {
+      // The PUT is correctly rejected (400 BadDigest), but the follow-up absence-check HEAD throws. The
+      // received status/code must still be emitted (in finally) before the HEAD error propagates.
+      const inner = (async (_url: string, init: RequestInit = {}) => {
+        const method = String(init.method ?? 'GET');
+        if (method === 'PUT') return new Response('<Error><Code>BadDigest</Code></Error>', { status: 400, headers: { 'content-length': '38' } });
+        if (method === 'HEAD') throw new TypeError('simulated HEAD failure');
+        return new Response(null, { status: 404 });
+      }) as unknown as typeof fetch;
+      const store = new S3ObjectStore(CFG, inner);
+      const keys = makeAcceptanceKeys();
+      const events: DiagEvidence[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: inner, key: keys.key, track: () => {}, emit: (e) => events.push(e) };
+      await expect(runN1WrongContentMd5(ctx)).rejects.toThrow(/simulated HEAD failure/);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ label: 'N1', status: 400, code: 'BadDigest' });
+    });
+
+    it('EMITS P1 evidence when the positive-control read-back GET BYTE-MISMATCHES — received 200 preserved', async () => {
+      // The PUT is accepted (200), but the read-back GET returns DIFFERENT bytes, so the byte-exact assertion
+      // fails. The received status must still be emitted, with the mismatch outcome.
+      const inner = (async (_url: string, init: RequestInit = {}) => {
+        const method = String(init.method ?? 'GET');
+        if (method === 'PUT') return new Response('', { status: 200, headers: { 'content-length': '0' } });
+        if (method === 'GET') return new Response(new Uint8Array(Buffer.from('DIFFERENT')), { status: 200, headers: { 'content-length': '9' } });
+        if (method === 'HEAD') return new Response(null, { status: 200, headers: { 'content-length': '9' } });
+        return new Response(null, { status: 404 });
+      }) as unknown as typeof fetch;
+      const store = new S3ObjectStore(CFG, inner);
+      const keys = makeAcceptanceKeys();
+      const events: DiagEvidence[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: inner, key: keys.key, track: () => {}, emit: (e) => events.push(e) };
+      await expect(runP1ContentMd5Control(ctx)).rejects.toThrow(/P1: byte-exact read-back/);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ label: 'P1', status: 200, outcome: 'accepted-readback-mismatch', readBackOk: false });
+    });
+
+    it('EMITS P2 evidence when the positive-control read-back GET FAILS — received 200 preserved', async () => {
+      // The PUT is accepted (200), but the read-back GET fails (500), so store.get throws. The received status
+      // must still be emitted before the error propagates.
+      const inner = (async (_url: string, init: RequestInit = {}) => {
+        const method = String(init.method ?? 'GET');
+        if (method === 'PUT') return new Response('', { status: 200, headers: { 'content-length': '0' } });
+        if (method === 'GET') return new Response('<Error/>', { status: 500 });
+        return new Response(null, { status: 404 });
+      }) as unknown as typeof fetch;
+      const store = new S3ObjectStore(CFG, inner);
+      const keys = makeAcceptanceKeys();
+      const events: DiagEvidence[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: inner, key: keys.key, track: () => {}, emit: (e) => events.push(e) };
+      await expect(runP2PayloadHashControl(ctx)).rejects.toThrow(/S3 GET .* failed: 500/);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ label: 'P2', status: 200, outcome: 'accepted' });
     });
   });
 

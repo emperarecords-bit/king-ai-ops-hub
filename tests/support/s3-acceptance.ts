@@ -16,7 +16,9 @@ import { signS3Request, type S3Config, type S3ObjectStore } from '@/domain/docum
 
 const rawChecksumB64 = (b: Buffer): string => createHash('sha256').update(b).digest('base64');
 const sha256Hex = (b: Buffer): string => createHash('sha256').update(b).digest('hex');
+const md5B64 = (b: Buffer): string => createHash('md5').update(b).digest('base64');
 const amzDateNow = (): string => new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
+const INTEGRITY_WRONG_SRC = Buffer.from('completely different bytes', 'utf8'); // source for well-formed-but-wrong digests
 
 /** Parse the `<Code>…</Code>` from an S3 XML error body, or null if none. */
 export function parseS3ErrorCode(body: string): string | null {
@@ -388,14 +390,139 @@ export const DIAGNOSTIC_STEPS: ReadonlyArray<{ name: string; run: (ctx: Acceptan
   { name: 'DIAG-C — positive control: B format + correct checksum', run: runDiagCCorrectControl },
 ];
 
+// ───────────── Provider-verified integrity-at-write (Content-MD5 + payload-hash) — VER-002 §5b ─────────────
+// Tigris confirmed (support, recorded 2026-09-22) that it does NOT enforce x-amz-checksum-sha256, but DOES
+// enforce Content-MD5 (mismatch → 400 BadDigest) and x-amz-content-sha256 (mismatch → 400
+// XAmzContentSHA256Mismatch). These replace the old PG3 (x-amz-checksum-sha256 rejection) as the provider
+// integrity-at-write acceptance. Each pass is decided by the negative's OWN status + error code — never
+// inferred from its positive control; other errors (generic 4xx, auth/signature, 5xx, network) do NOT count.
+// The expected codes are PROVIDER-STATED (Tigris), verified here only against the offline simulator.
+const INTEGRITY_BODY = Buffer.from('{"integrity":"probe"}', 'utf8');
+
+/** Raw create-only PUT for N1/N2 + P1/P2. It mirrors the adapter's create-only shape: it ALWAYS sends the
+ *  correct, signed `x-amz-checksum-sha256` and `content-type`/`if-none-match`, so the ONLY difference between
+ *  a negative and its positive control is the single digest under test (`content-md5` or the payload hash)
+ *  plus the SigV4 signature derived from it. Does NOT track — the step tracks. */
+async function integrityPut(ctx: AcceptanceCtx, key: string, opts: { contentMd5: string; payloadHash: string }): Promise<Response> {
+  const signed = signS3Request(ctx.cfg, {
+    method: 'PUT',
+    key,
+    payloadHash: opts.payloadHash, // SigV4 folds this into BOTH the x-amz-content-sha256 header AND the signature
+    amzDate: amzDateNow(),
+    extraHeaders: {
+      'content-type': 'application/json',
+      'if-none-match': '*',
+      'content-md5': opts.contentMd5,
+      'x-amz-checksum-sha256': rawChecksumB64(INTEGRITY_BODY), // always CORRECT + signed (mirrors the adapter)
+    },
+  });
+  return ctx.fetchImpl(signed.url, { method: 'PUT', headers: signed.headers, body: new Uint8Array(INTEGRITY_BODY) });
+}
+
+/** N1 — a WRONG Content-MD5 (well-formed but not matching the body; every other integrity header correct)
+ *  must be rejected with HTTP 400 BadDigest, and the object must be absent afterward. The pass is decided by
+ *  N1's OWN status + code — a generic 4xx, auth/signature, 5xx, or network failure does NOT satisfy it. The
+ *  received status/code + outcome are EMITTED in a `finally` (sanitized), so they survive a failing check. */
+export async function runN1WrongContentMd5(ctx: AcceptanceCtx): Promise<void> {
+  const { store, key, track, emit } = ctx;
+  const k = key('n1');
+  track(k);
+  const res = await integrityPut(ctx, k, { contentMd5: md5B64(INTEGRITY_WRONG_SRC), payloadHash: sha256Hex(INTEGRITY_BODY) });
+  const status = res.status;
+  const code = parseS3ErrorCode(await res.text().catch(() => ''));
+  let absentAfterReject: boolean | null = null;
+  let outcome = status < 300 ? 'accepted' : 'rejected';
+  try {
+    expect(status, `N1: expected HTTP 400 (got ${status})`).toBe(400);
+    expect(code, `N1: expected error code BadDigest (got ${code})`).toBe('BadDigest');
+    absentAfterReject = (await store.head(k)) === null;
+    outcome = absentAfterReject ? 'rejected-absent' : 'rejected-present';
+    expect(absentAfterReject, 'N1: a wrong-Content-MD5 write must leave nothing').toBe(true);
+  } finally {
+    emit?.({ label: 'N1', status, code, outcome, absentAfterReject, readBackOk: null });
+  }
+}
+
+/** P1 — positive control for N1: identical request (fresh key) with the CORRECT Content-MD5 → accepted +
+ *  byte-exact read-back. Establishes only that a matching-Content-MD5 request works. Evidence emitted in
+ *  `finally`. */
+export async function runP1ContentMd5Control(ctx: AcceptanceCtx): Promise<void> {
+  const { store, key, track, emit } = ctx;
+  const k = key('p1');
+  track(k);
+  const res = await integrityPut(ctx, k, { contentMd5: md5B64(INTEGRITY_BODY), payloadHash: sha256Hex(INTEGRITY_BODY) });
+  const status = res.status;
+  const code = parseS3ErrorCode(await res.text().catch(() => ''));
+  let readBackOk: boolean | null = null;
+  let outcome = status < 300 ? 'accepted' : 'rejected';
+  try {
+    expect(status, `P1: a correct Content-MD5 must be accepted (got ${status})`).toBeLessThan(300);
+    readBackOk = (await store.get(k)).equals(INTEGRITY_BODY);
+    outcome = readBackOk ? 'accepted-readback-ok' : 'accepted-readback-mismatch';
+    expect(readBackOk, 'P1: byte-exact read-back').toBe(true);
+  } finally {
+    emit?.({ label: 'P1', status, code, outcome, absentAfterReject: null, readBackOk });
+  }
+}
+
+/** N2 — a WRONG x-amz-content-sha256 must be rejected with HTTP 400 XAmzContentSHA256Mismatch, object absent.
+ *  The SAME well-formed-but-wrong hash is placed in BOTH the header and the canonical request's payload-hash
+ *  field BEFORE signing (via `payloadHash`), so the SigV4 signature is computed over that value. Pass decided
+ *  by N2's OWN status + code only. Evidence emitted in `finally`. */
+export async function runN2WrongPayloadHash(ctx: AcceptanceCtx): Promise<void> {
+  const { store, key, track, emit } = ctx;
+  const k = key('n2');
+  track(k);
+  const res = await integrityPut(ctx, k, { contentMd5: md5B64(INTEGRITY_BODY), payloadHash: sha256Hex(INTEGRITY_WRONG_SRC) });
+  const status = res.status;
+  const code = parseS3ErrorCode(await res.text().catch(() => ''));
+  let absentAfterReject: boolean | null = null;
+  let outcome = status < 300 ? 'accepted' : 'rejected';
+  try {
+    expect(status, `N2: expected HTTP 400 (got ${status})`).toBe(400);
+    expect(code, `N2: expected error code XAmzContentSHA256Mismatch (got ${code})`).toBe('XAmzContentSHA256Mismatch');
+    absentAfterReject = (await store.head(k)) === null;
+    outcome = absentAfterReject ? 'rejected-absent' : 'rejected-present';
+    expect(absentAfterReject, 'N2: a wrong-payload-hash write must leave nothing').toBe(true);
+  } finally {
+    emit?.({ label: 'N2', status, code, outcome, absentAfterReject, readBackOk: null });
+  }
+}
+
+/** P2 — positive control for N2: identical request (fresh key) with the CORRECT x-amz-content-sha256 →
+ *  accepted + byte-exact read-back. Establishes only that a matching-payload-hash request works. Evidence
+ *  emitted in `finally`. */
+export async function runP2PayloadHashControl(ctx: AcceptanceCtx): Promise<void> {
+  const { store, key, track, emit } = ctx;
+  const k = key('p2');
+  track(k);
+  const res = await integrityPut(ctx, k, { contentMd5: md5B64(INTEGRITY_BODY), payloadHash: sha256Hex(INTEGRITY_BODY) });
+  const status = res.status;
+  const code = parseS3ErrorCode(await res.text().catch(() => ''));
+  let readBackOk: boolean | null = null;
+  let outcome = status < 300 ? 'accepted' : 'rejected';
+  try {
+    expect(status, `P2: a correct x-amz-content-sha256 must be accepted (got ${status})`).toBeLessThan(300);
+    readBackOk = (await store.get(k)).equals(INTEGRITY_BODY);
+    outcome = readBackOk ? 'accepted-readback-ok' : 'accepted-readback-mismatch';
+    expect(readBackOk, 'P2: byte-exact read-back').toBe(true);
+  } finally {
+    emit?.({ label: 'P2', status, code, outcome, absentAfterReject: null, readBackOk });
+  }
+}
+
 /** The ordered acceptance steps. The live harness runs EACH in its OWN test so one step's assertion failure
- *  does not prevent the others (notably PG5) from being evaluated. */
+ *  does not prevent the others from being evaluated. (Old PG3 — x-amz-checksum-sha256 rejection — is removed:
+ *  Tigris does not enforce that header; provider integrity-at-write is now N1 Content-MD5 + N2 payload-hash.) */
 export const ACCEPTANCE_STEPS: ReadonlyArray<{ name: string; run: (ctx: AcceptanceCtx) => Promise<void> }> = [
   { name: 'PG1 — create-only / 412-on-exists', run: runPG1 },
   { name: 'PG1-concurrent — exactly one create', run: runPG1Concurrent },
   { name: 'PG2 — GET/HEAD round-trip', run: runPG2 },
-  { name: 'PG3 — wrong-checksum rejected (BadDigest only)', run: runPG3 },
   { name: 'PG5 — adapter overwrite guard + provider conditional-write enforcement', run: runPG5 },
+  { name: 'N1 — wrong Content-MD5 → 400 BadDigest + absent', run: runN1WrongContentMd5 },
+  { name: 'P1 — correct Content-MD5 → accepted + byte-exact read-back', run: runP1ContentMd5Control },
+  { name: 'N2 — wrong x-amz-content-sha256 → 400 XAmzContentSHA256Mismatch + absent', run: runN2WrongPayloadHash },
+  { name: 'P2 — correct x-amz-content-sha256 → accepted + byte-exact read-back', run: runP2PayloadHashControl },
 ];
 
 /** Sequential convenience wrapper (FAILS FAST at the first failing step). Used by the offline all-pass path;
@@ -470,7 +597,7 @@ export async function cleanupAndReport(args: {
  */
 export function makeInMemoryS3(
   cfg: S3Config,
-  faults: { checksumMismatchStatus?: number; acceptWrongChecksum?: boolean; mismatchCode?: string } = {},
+  faults: { checksumMismatchStatus?: number; acceptWrongChecksum?: boolean; mismatchCode?: string; acceptWrongContentMd5?: boolean; acceptWrongPayloadHash?: boolean } = {},
 ): { fetch: typeof fetch; objectCount: () => number } {
   const objects = new Map<string, { body: Buffer; contentType: string }>();
   const bucketPath = `/${encodeURIComponent(cfg.bucket)}`;
@@ -497,7 +624,22 @@ export function makeInMemoryS3(
     const key = decodeKey(u.pathname);
     if (method === 'PUT') {
       const body = Buffer.from((init.body as Uint8Array) ?? new Uint8Array());
-      // Checksum verification (a mismatch is a hard reject — models provider PG3). Fault injection lets the
+      // Payload-hash verification (models Tigris x-amz-content-sha256): a well-formed hash that does not
+      // match the body ⇒ 400 XAmzContentSHA256Mismatch. 'UNSIGNED' (used by GET/HEAD/DELETE) is skipped.
+      const contentSha = headers['x-amz-content-sha256'];
+      if (!faults.acceptWrongPayloadHash && contentSha && contentSha !== 'UNSIGNED' && contentSha !== createHash('sha256').update(body).digest('hex')) {
+        const xml = '<Error><Code>XAmzContentSHA256Mismatch</Code></Error>';
+        return new Response(xml, { status: 400, headers: { 'content-length': String(xml.length) } });
+      }
+      // Content-MD5 verification (models Tigris Content-MD5): a mismatch ⇒ 400 BadDigest. `acceptWrongContentMd5`
+      // models a provider that fails to enforce it, so the N1 assertion is shown to catch that.
+      const md5 = headers['content-md5'];
+      if (!faults.acceptWrongContentMd5 && md5 && md5 !== createHash('md5').update(body).digest('base64')) {
+        const xml = '<Error><Code>BadDigest</Code></Error>';
+        return new Response(xml, { status: 400, headers: { 'content-length': String(xml.length) } });
+      }
+      // x-amz-checksum-sha256 handling is a TEST-DOUBLE behaviour for the (retained) diagnostics only — the
+      // REAL Tigris does NOT enforce this header (see §5b). Fault injection lets the diagnostic tests model
       // OFFLINE negative tests model a provider that mis-handles a mismatch (auth/5xx/unsupported, a
       // wrongly-accepted body, or a specific non-mismatch code) so the PG3 assertions are shown to catch it.
       const declared = headers['x-amz-checksum-sha256'];
