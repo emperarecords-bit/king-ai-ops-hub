@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { S3ObjectStore } from '@/domain/documents/s3-object-store';
 import { isVerificationArtifactKey } from '@/domain/documents/object-store';
-import { cleanupAndReport, cleanupAndVerify, makeAcceptanceKeys, makeBudgetedFetch, makeInMemoryS3, runAcceptanceScenarios, runPG1Concurrent, runPG3, runPG5, type AcceptanceCtx, type BudgetLimits, type RunTotals } from '../support/s3-acceptance';
+import { createHash } from 'node:crypto';
+import { cleanupAndReport, cleanupAndVerify, makeAcceptanceKeys, makeBudgetedFetch, makeInMemoryS3, runAcceptanceScenarios, runDiagAOriginalWrongChecksum, runDiagBAddedSdkAlgo, runDiagCCorrectControl, runPG1Concurrent, runPG3, runPG5, type AcceptanceCtx, type BudgetLimits, type DiagEvidence, type RunTotals } from '../support/s3-acceptance';
 
 /**
  * OFFLINE exercise of the LIVE acceptance harness's own logic (key selection, scenarios, budgets,
@@ -143,6 +144,213 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
       // With allSettled the step only rejects AFTER the delayed sibling settled; Promise.all would have
       // rejected while the sibling was still pending (siblingSettled === false).
       expect(siblingSettled).toBe(true);
+    });
+  });
+
+  describe('PG3 checksum diagnostics A / B / C', () => {
+    const lowerHeaders = (h: HeadersInit | undefined): Record<string, string> => {
+      const out: Record<string, string> = {};
+      if (!h) return out;
+      if (h instanceof Headers) {
+        h.forEach((v, k) => (out[k.toLowerCase()] = v));
+      } else if (Array.isArray(h)) {
+        for (const [k, v] of h) out[String(k).toLowerCase()] = String(v);
+      } else {
+        for (const [k, v] of Object.entries(h)) out[k.toLowerCase()] = String(v);
+      }
+      return out;
+    };
+    const b64 = (b: Buffer): string => createHash('sha256').update(b).digest('base64');
+
+    it('the three diagnostic PUTs match on body + payload hash and differ ONLY where intended (signed headers)', async () => {
+      const sim = makeInMemoryS3(CFG);
+      const puts: Array<{ headers: Record<string, string>; body: Buffer }> = [];
+      const recording = (async (url: string, init: RequestInit = {}) => {
+        if (String(init.method) === 'PUT') puts.push({ headers: lowerHeaders(init.headers as HeadersInit), body: Buffer.from((init.body as Uint8Array) ?? new Uint8Array()) });
+        return sim.fetch(url, init);
+      }) as unknown as typeof fetch;
+      const store = new S3ObjectStore(CFG, recording);
+      const keys = makeAcceptanceKeys();
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: recording, key: keys.key, track: () => {} };
+
+      await runDiagAOriginalWrongChecksum(ctx);
+      await runDiagBAddedSdkAlgo(ctx);
+      await runDiagCCorrectControl(ctx);
+
+      expect(puts).toHaveLength(3);
+      const [a, b, c] = puts;
+      const pg3Payload = Buffer.from('{"pg3":"bytes"}', 'utf8');
+      const wrong = b64(Buffer.from('completely different bytes', 'utf8'));
+      const correct = b64(pg3Payload);
+      const payloadHashHex = createHash('sha256').update(pg3Payload).digest('hex');
+      const signedHeaders = (auth: string): string[] => (auth.match(/SignedHeaders=([^,]+)/)?.[1] ?? '').split(';');
+      const signature = (auth: string): string => auth.match(/Signature=([0-9a-f]+)/)?.[1] ?? '';
+
+      // BODIES — all three send the ORIGINAL PG3 payload, byte-identical
+      expect(a!.body.equals(pg3Payload)).toBe(true);
+      expect(b!.body.equals(pg3Payload)).toBe(true);
+      expect(c!.body.equals(pg3Payload)).toBe(true);
+
+      // PAYLOAD HASH (x-amz-content-sha256) — identical across all three (same body)
+      expect(a!.headers['x-amz-content-sha256']).toBe(payloadHashHex);
+      expect(b!.headers['x-amz-content-sha256']).toBe(payloadHashHex);
+      expect(c!.headers['x-amz-content-sha256']).toBe(payloadHashHex);
+
+      // A ↔ B differ ONLY by the SDK-algorithm header (same wrong checksum, same content-type/if-none-match)
+      expect(a!.headers['x-amz-checksum-sha256']).toBe(wrong);
+      expect(b!.headers['x-amz-checksum-sha256']).toBe(wrong);
+      expect(a!.headers['x-amz-sdk-checksum-algorithm']).toBeUndefined();
+      expect(b!.headers['x-amz-sdk-checksum-algorithm']).toBe('SHA256');
+      expect(a!.headers['content-type']).toBe(b!.headers['content-type']);
+      expect(a!.headers['if-none-match']).toBe('*');
+      expect(b!.headers['if-none-match']).toBe('*');
+
+      // B ↔ C differ ONLY by the checksum value (+ derived signing); SDK header + content-type + if-none-match same
+      expect(c!.headers['x-amz-sdk-checksum-algorithm']).toBe('SHA256');
+      expect(c!.headers['x-amz-checksum-sha256']).toBe(correct);
+      expect(c!.headers['x-amz-checksum-sha256']).not.toBe(b!.headers['x-amz-checksum-sha256']);
+      expect(c!.headers['content-type']).toBe(b!.headers['content-type']);
+      expect(c!.headers['if-none-match']).toBe('*');
+
+      // SIGNED HEADERS — B and C sign the SDK-algorithm header; A does not. All sign the checksum + content hash.
+      const shA = signedHeaders(a!.headers['authorization'] ?? '');
+      const shB = signedHeaders(b!.headers['authorization'] ?? '');
+      const shC = signedHeaders(c!.headers['authorization'] ?? '');
+      expect(shA).not.toContain('x-amz-sdk-checksum-algorithm');
+      expect(shB).toContain('x-amz-sdk-checksum-algorithm');
+      expect(shC).toContain('x-amz-sdk-checksum-algorithm');
+      for (const sh of [shA, shB, shC]) {
+        expect(sh).toContain('x-amz-checksum-sha256');
+        expect(sh).toContain('x-amz-content-sha256');
+      }
+      // Signatures differ across all three (fresh key + differing signed content)
+      expect(new Set([signature(a!.headers['authorization'] ?? ''), signature(b!.headers['authorization'] ?? ''), signature(c!.headers['authorization'] ?? '')]).size).toBe(3);
+    });
+
+    it('a rejected diagnostic PUT (BadDigest) is absence-checked and leaves nothing', async () => {
+      const sim = makeInMemoryS3(CFG); // default: a wrong checksum is rejected with BadDigest 400
+      const bf = makeBudgetedFetch(sim.fetch, LIMITS);
+      const store = new S3ObjectStore(CFG, bf.fetch);
+      const keys = makeAcceptanceKeys();
+      const created: string[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: (k) => created.push(k) };
+
+      const a = await runDiagAOriginalWrongChecksum(ctx);
+      expect(a.status).toBe(400);
+      expect(a.code).toBe('BadDigest');
+      expect(a.absentAfterReject).toBe(true); // the absence check ran and confirmed nothing landed
+      expect(sim.objectCount()).toBe(0);
+    });
+
+    it('diagnostic C (correct checksum) is accepted and reads back byte-exact', async () => {
+      const sim = makeInMemoryS3(CFG);
+      const bf = makeBudgetedFetch(sim.fetch, LIMITS);
+      const store = new S3ObjectStore(CFG, bf.fetch);
+      const keys = makeAcceptanceKeys();
+      const created: string[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: (k) => created.push(k) };
+
+      await expect(runDiagCCorrectControl(ctx)).resolves.toBeUndefined(); // accepted + byte-exact read-back asserted inside
+      expect(sim.objectCount()).toBe(1);
+      await cleanupAndVerify({ store, prefix: keys.prefix, created, enterCleanupPhase: bf.enterCleanupPhase });
+      expect(sim.objectCount()).toBe(0);
+    });
+
+    it('EMITS sanitized evidence for A, B and C (label/status/code/outcome), not merely returns it', async () => {
+      const sim = makeInMemoryS3(CFG);
+      const bf = makeBudgetedFetch(sim.fetch, LIMITS);
+      const store = new S3ObjectStore(CFG, bf.fetch);
+      const keys = makeAcceptanceKeys();
+      const created: string[] = [];
+      const events: DiagEvidence[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: (k) => created.push(k), emit: (e) => events.push(e) };
+
+      await runDiagAOriginalWrongChecksum(ctx);
+      await runDiagBAddedSdkAlgo(ctx);
+      await runDiagCCorrectControl(ctx);
+
+      expect(events.map((e) => e.label)).toEqual(['DIAG-A', 'DIAG-B', 'DIAG-C']);
+      expect(events[0]).toMatchObject({ status: 400, code: 'BadDigest', outcome: 'rejected-absent', absentAfterReject: true });
+      expect(events[1]).toMatchObject({ status: 400, code: 'BadDigest', outcome: 'rejected-absent', absentAfterReject: true });
+      expect(events[2]).toMatchObject({ status: 200, outcome: 'accepted-readback-ok', readBackOk: true });
+      await cleanupAndVerify({ store, prefix: keys.prefix, created, enterCleanupPhase: bf.enterCleanupPhase });
+    });
+
+    it('preserves + EMITS the received status/code when the absence assertion fails (rejected but present)', async () => {
+      // PUT rejected (400 BadDigest) but the object is PRESENT, so the absence assertion fails. The received
+      // status/code must still be emitted (in the finally) before the assertion error propagates.
+      const inner = (async (_url: string, init: RequestInit = {}) => {
+        const method = String(init.method ?? 'GET');
+        if (method === 'PUT') return new Response('<Error><Code>BadDigest</Code></Error>', { status: 400, headers: { 'content-length': '38' } });
+        if (method === 'HEAD') return new Response(null, { status: 200, headers: { 'content-length': '15' } }); // present despite the 400
+        return new Response(null, { status: 404 });
+      }) as unknown as typeof fetch;
+      const store = new S3ObjectStore(CFG, inner);
+      const keys = makeAcceptanceKeys();
+      const events: DiagEvidence[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: inner, key: keys.key, track: () => {}, emit: (e) => events.push(e) };
+
+      await expect(runDiagAOriginalWrongChecksum(ctx)).rejects.toThrow(/must leave nothing/);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ label: 'DIAG-A', status: 400, code: 'BadDigest', outcome: 'rejected-present', absentAfterReject: false });
+    });
+
+    it("preserves + EMITS the received status when C's read-back GET mismatches", async () => {
+      // PUT accepted (200) but the read-back returns DIFFERENT bytes, so the byte-exact assertion fails. The
+      // received status must still be emitted before the assertion error propagates.
+      const inner = (async (_url: string, init: RequestInit = {}) => {
+        const method = String(init.method ?? 'GET');
+        if (method === 'PUT') return new Response('', { status: 200, headers: { 'content-length': '0' } });
+        if (method === 'GET') return new Response(new Uint8Array(Buffer.from('DIFFERENT')), { status: 200, headers: { 'content-length': '9' } });
+        if (method === 'HEAD') return new Response(null, { status: 200, headers: { 'content-length': '9' } });
+        return new Response(null, { status: 404 });
+      }) as unknown as typeof fetch;
+      const store = new S3ObjectStore(CFG, inner);
+      const keys = makeAcceptanceKeys();
+      const events: DiagEvidence[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: inner, key: keys.key, track: () => {}, emit: (e) => events.push(e) };
+
+      await expect(runDiagCCorrectControl(ctx)).rejects.toThrow(/byte-exact read-back/);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ label: 'DIAG-C', status: 200, outcome: 'accepted-readback-mismatch', readBackOk: false });
+    });
+
+    it('a PG3 assertion failure does not prevent diagnostic C or PG5 (independent execution)', async () => {
+      const sim = makeInMemoryS3(CFG, { acceptWrongChecksum: true }); // PG3 fails (provider returns 200)
+      const bf = makeBudgetedFetch(sim.fetch, LIMITS);
+      const store = new S3ObjectStore(CFG, bf.fetch);
+      const keys = makeAcceptanceKeys();
+      const created: string[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: (k) => created.push(k) };
+
+      await expect(runPG3(ctx)).rejects.toThrow(/PG3: expected a checksum 4xx \(got 200\)/); // PG3 fails
+      await expect(runDiagCCorrectControl(ctx)).resolves.toBeUndefined(); // C still runs
+      await expect(runPG5(ctx)).resolves.toBeUndefined(); // PG5 still runs
+      expect(bf.stats().tripped).toBe(false); // an assertion failure never trips the fuse
+
+      await cleanupAndVerify({ store, prefix: keys.prefix, created, enterCleanupPhase: bf.enterCleanupPhase });
+      expect(sim.objectCount()).toBe(0);
+    });
+
+    it('final cleanup accounting covers the diagnostic PUTs, absence HEADs, C read-back, and cleanup', async () => {
+      const sim = makeInMemoryS3(CFG);
+      const bf = makeBudgetedFetch(sim.fetch, LIMITS);
+      const store = new S3ObjectStore(CFG, bf.fetch);
+      const keys = makeAcceptanceKeys();
+      const created: string[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: (k) => created.push(k) };
+
+      await runDiagAOriginalWrongChecksum(ctx); // rejected → PUT + HEAD (absence)
+      await runDiagBAddedSdkAlgo(ctx); //           rejected → PUT + HEAD (absence)
+      await runDiagCCorrectControl(ctx); //          accepted → PUT + GET (read-back)
+
+      const reports: RunTotals[] = [];
+      const totals = await cleanupAndReport({ store, prefix: keys.prefix, created, budgeted: bf, report: (t) => reports.push(t) });
+
+      expect(reports).toHaveLength(1);
+      expect(totals.cleanupSucceeded).toBe(true);
+      expect(totals.preCleanup.requests).toBeGreaterThanOrEqual(6); // A(put+head) + B(put+head) + C(put+get)
+      expect(totals.final.requests).toBeGreaterThan(totals.preCleanup.requests); // cleanup added deletes + a LIST
     });
   });
 

@@ -182,6 +182,9 @@ export interface AcceptanceCtx {
   readonly fetchImpl: typeof fetch;
   readonly key: (attempt: string) => string;
   readonly track: (key: string) => void;
+  /** Optional sink for sanitized diagnostic evidence (label/status/code/outcome). The live harness wires a
+   *  console reporter; offline reporter regressions capture it. See {@link DiagEvidence}. */
+  readonly emit?: (evidence: DiagEvidence) => void;
 }
 
 /** PG1 — create-only / no-overwrite: create when absent; a second create-only is rejected as exists. */
@@ -277,6 +280,113 @@ export async function runPG5(ctx: AcceptanceCtx): Promise<void> {
   expect(await store.putIfAbsent(k5, Buffer.from('{"pg5":"tampered"}', 'utf8'), 'application/json')).toBe('exists'); // (b)
   expect((await store.get(k5)).equals(b5)).toBe(true); // original bytes intact
 }
+
+// ─────────────────────────── PG3 checksum diagnostics (A / B / C) ───────────────────────────
+// Three DIAGNOSTIC PUTs from the follow-up brief, probing how the provider treats an additional
+// `x-amz-checksum-sha256` on a create-only PUT. Each is evaluated INDEPENDENTLY in the live harness and
+// tracks its key BEFORE sending. A and B are OBSERVATIONAL for accept-vs-reject (PG3 owns the BadDigest-only
+// pass/fail); they assert ONLY the invariant that a REJECTED write leaves nothing. C is a positive control
+// identical to B (including the SDK algorithm header) but with a correct checksum + fresh key.
+
+const DIAG_WRONG_SRC = Buffer.from('completely different bytes', 'utf8');
+// A, B and C ALL use the ORIGINAL PG3 payload bytes, so A reproduces the exact PG3 request shape and the
+// diagnostics differ only where intended — A↔B by the SDK-algorithm header, B↔C by the checksum value — plus
+// the fresh key and the signing fields necessarily derived from those.
+const DIAG_PAYLOAD = Buffer.from('{"pg3":"bytes"}', 'utf8');
+
+/** Sanitized diagnostic evidence: the label, HTTP status, parsed provider error code, and absence/read-back
+ *  outcome. It NEVER contains credentials, request bodies, or signed headers. */
+export interface DiagEvidence {
+  readonly label: string;
+  readonly status: number;
+  readonly code: string | null;
+  readonly outcome: string; // e.g. 'rejected-absent' | 'rejected-present' | 'rejected' | 'accepted' | 'accepted-readback-ok' | 'accepted-readback-mismatch'
+  readonly absentAfterReject: boolean | null;
+  readonly readBackOk: boolean | null;
+}
+
+/** Send a signed checksum PUT for the A/B/C diagnostics (does NOT track — the step tracks first). All three
+ *  send the SAME body (the PG3 payload). `sdkAlgo` adds `x-amz-sdk-checksum-algorithm: SHA256`; `correct`
+ *  sends the true digest of the payload instead of a wrong one. Returns the raw response. */
+async function putWithChecksum(ctx: AcceptanceCtx, key: string, opts: { sdkAlgo: boolean; correct: boolean }): Promise<Response> {
+  const checksum = opts.correct ? rawChecksumB64(DIAG_PAYLOAD) : rawChecksumB64(DIAG_WRONG_SRC);
+  const extraHeaders: Record<string, string> = { 'content-type': 'application/json', 'if-none-match': '*', 'x-amz-checksum-sha256': checksum };
+  if (opts.sdkAlgo) extraHeaders['x-amz-sdk-checksum-algorithm'] = 'SHA256';
+  const signed = signS3Request(ctx.cfg, { method: 'PUT', key, payloadHash: sha256Hex(DIAG_PAYLOAD), amzDate: amzDateNow(), extraHeaders });
+  return ctx.fetchImpl(signed.url, { method: 'PUT', headers: signed.headers, body: new Uint8Array(DIAG_PAYLOAD) });
+}
+
+export interface DiagOutcome {
+  readonly status: number;
+  readonly code: string | null;
+  readonly absentAfterReject: boolean | null; // null when accepted (no rejection to check)
+}
+
+/** Shared body for A and B — the two OBSERVATIONAL diagnostics (accept-vs-reject is PG3's pass/fail; these
+ *  assert only that a REJECTED write leaves nothing). The received status/code are captured BEFORE the HEAD
+ *  and emitted in a `finally`, so they survive even if the HEAD or the absence assertion fails. */
+async function runObservationalDiag(ctx: AcceptanceCtx, label: string, attempt: string, sdkAlgo: boolean): Promise<DiagOutcome> {
+  const { store, key, track, emit } = ctx;
+  const k = key(attempt);
+  track(k);
+  const res = await putWithChecksum(ctx, k, { sdkAlgo, correct: false });
+  const status = res.status;
+  const code = parseS3ErrorCode(await res.text().catch(() => ''));
+  let absentAfterReject: boolean | null = null;
+  let outcome = status < 300 ? 'accepted' : 'rejected';
+  try {
+    if (status >= 400) {
+      absentAfterReject = (await store.head(k)) === null;
+      outcome = absentAfterReject ? 'rejected-absent' : 'rejected-present';
+      expect(absentAfterReject, `${label}: a rejected wrong-checksum write must leave nothing`).toBe(true);
+    }
+  } finally {
+    emit?.({ label, status, code, outcome, absentAfterReject, readBackOk: null });
+  }
+  return { status, code, absentAfterReject };
+}
+
+/** Diagnostic A — the ORIGINAL wrong-checksum PUT (PG3 payload; NO SDK algorithm header). */
+export async function runDiagAOriginalWrongChecksum(ctx: AcceptanceCtx): Promise<DiagOutcome> {
+  return runObservationalDiag(ctx, 'DIAG-A', 'diag-a', false);
+}
+
+/** Diagnostic B — wrong checksum PLUS a signed `x-amz-sdk-checksum-algorithm: SHA256` (PG3 payload). Differs
+ *  from A only by that header and the fresh key. */
+export async function runDiagBAddedSdkAlgo(ctx: AcceptanceCtx): Promise<DiagOutcome> {
+  return runObservationalDiag(ctx, 'DIAG-B', 'diag-b', true);
+}
+
+/** Diagnostic C — POSITIVE CONTROL identical to B (PG3 payload + SDK algorithm header) but a CORRECT checksum
+ *  on a fresh key. Differs from B only by the checksum value (+ derived signing) and the key. Asserts the
+ *  format is ACCEPTED and reads back byte-exact. This proves B's request FORMAT works when the checksum
+ *  matches; it does NOT make an A/B rejection attributable to the checksum — auth/request-format/other errors
+ *  remain distinct failure modes. Status/code are emitted in a `finally` so they survive a read-back failure. */
+export async function runDiagCCorrectControl(ctx: AcceptanceCtx): Promise<void> {
+  const { store, key, track, emit } = ctx;
+  const k = key('diag-c');
+  track(k);
+  const res = await putWithChecksum(ctx, k, { sdkAlgo: true, correct: true });
+  const status = res.status;
+  const code = parseS3ErrorCode(await res.text().catch(() => ''));
+  let readBackOk: boolean | null = null;
+  let outcome = status < 300 ? 'accepted' : 'rejected';
+  try {
+    expect(status, `diag-C: B's request format with a CORRECT checksum must be accepted (got ${status})`).toBeLessThan(300);
+    readBackOk = (await store.get(k)).equals(DIAG_PAYLOAD);
+    outcome = readBackOk ? 'accepted-readback-ok' : 'accepted-readback-mismatch';
+    expect(readBackOk, 'diag-C: byte-exact read-back of the positive control').toBe(true);
+  } finally {
+    emit?.({ label: 'DIAG-C', status, code, outcome, absentAfterReject: null, readBackOk });
+  }
+}
+
+/** The three diagnostic PUTs, in order. Each is evaluated independently in the live harness. */
+export const DIAGNOSTIC_STEPS: ReadonlyArray<{ name: string; run: (ctx: AcceptanceCtx) => Promise<unknown> }> = [
+  { name: 'DIAG-A — original wrong-checksum PUT (no SDK algorithm header)', run: runDiagAOriginalWrongChecksum },
+  { name: 'DIAG-B — wrong-checksum PUT + x-amz-sdk-checksum-algorithm', run: runDiagBAddedSdkAlgo },
+  { name: 'DIAG-C — positive control: B format + correct checksum', run: runDiagCCorrectControl },
+];
 
 /** The ordered acceptance steps. The live harness runs EACH in its OWN test so one step's assertion failure
  *  does not prevent the others (notably PG5) from being evaluated. */
