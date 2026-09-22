@@ -177,9 +177,10 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
       // The declared payload hash is the wrong value...
       expect(n2.headers['x-amz-content-sha256']).toBe(wrongHex);
       // ...and an INDEPENDENT SigV4 recomputation (using the header value as BOTH the signed x-amz-content-sha256
-      // and the canonical payload-hash field) MATCHES the captured signature — proving the request is validly
-      // signed for the wrong hash as sent, with that hash consistent in the header and the canonical payload
-      // field. (A live N2 rejection is therefore payload validation, on a correctly-signed request.)
+      // and the canonical payload-hash field) MATCHES the captured signature — proving ONLY that the request is
+      // validly signed for the wrong hash as sent, with that hash consistent in the header and the canonical
+      // payload field. It does NOT establish what any LIVE rejection means; N2's live pass criterion is the
+      // exact status + code (HTTP 400 XAmzContentSHA256Mismatch), asserted separately by runN2.
       const v = verifySigV4(n2);
       expect(v.payloadHash).toBe(wrongHex);
       expect(v.captured).toMatch(/^[0-9a-f]{64}$/);
@@ -230,6 +231,61 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
       await expect(runN2WrongPayloadHash(ctx)).rejects.toThrow(/N2: expected HTTP 400/);
       expect(events).toHaveLength(1);
       expect(events[0]).toMatchObject({ label: 'N2', status: 200, outcome: 'accepted' });
+    });
+
+    it('EMITS N1 evidence when the absence-check HEAD itself fails — received 400/BadDigest preserved', async () => {
+      // The PUT is correctly rejected (400 BadDigest), but the follow-up absence-check HEAD throws. The
+      // received status/code must still be emitted (in finally) before the HEAD error propagates.
+      const inner = (async (_url: string, init: RequestInit = {}) => {
+        const method = String(init.method ?? 'GET');
+        if (method === 'PUT') return new Response('<Error><Code>BadDigest</Code></Error>', { status: 400, headers: { 'content-length': '38' } });
+        if (method === 'HEAD') throw new TypeError('simulated HEAD failure');
+        return new Response(null, { status: 404 });
+      }) as unknown as typeof fetch;
+      const store = new S3ObjectStore(CFG, inner);
+      const keys = makeAcceptanceKeys();
+      const events: DiagEvidence[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: inner, key: keys.key, track: () => {}, emit: (e) => events.push(e) };
+      await expect(runN1WrongContentMd5(ctx)).rejects.toThrow(/simulated HEAD failure/);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ label: 'N1', status: 400, code: 'BadDigest' });
+    });
+
+    it('EMITS P1 evidence when the positive-control read-back GET BYTE-MISMATCHES — received 200 preserved', async () => {
+      // The PUT is accepted (200), but the read-back GET returns DIFFERENT bytes, so the byte-exact assertion
+      // fails. The received status must still be emitted, with the mismatch outcome.
+      const inner = (async (_url: string, init: RequestInit = {}) => {
+        const method = String(init.method ?? 'GET');
+        if (method === 'PUT') return new Response('', { status: 200, headers: { 'content-length': '0' } });
+        if (method === 'GET') return new Response(new Uint8Array(Buffer.from('DIFFERENT')), { status: 200, headers: { 'content-length': '9' } });
+        if (method === 'HEAD') return new Response(null, { status: 200, headers: { 'content-length': '9' } });
+        return new Response(null, { status: 404 });
+      }) as unknown as typeof fetch;
+      const store = new S3ObjectStore(CFG, inner);
+      const keys = makeAcceptanceKeys();
+      const events: DiagEvidence[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: inner, key: keys.key, track: () => {}, emit: (e) => events.push(e) };
+      await expect(runP1ContentMd5Control(ctx)).rejects.toThrow(/P1: byte-exact read-back/);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ label: 'P1', status: 200, outcome: 'accepted-readback-mismatch', readBackOk: false });
+    });
+
+    it('EMITS P2 evidence when the positive-control read-back GET FAILS — received 200 preserved', async () => {
+      // The PUT is accepted (200), but the read-back GET fails (500), so store.get throws. The received status
+      // must still be emitted before the error propagates.
+      const inner = (async (_url: string, init: RequestInit = {}) => {
+        const method = String(init.method ?? 'GET');
+        if (method === 'PUT') return new Response('', { status: 200, headers: { 'content-length': '0' } });
+        if (method === 'GET') return new Response('<Error/>', { status: 500 });
+        return new Response(null, { status: 404 });
+      }) as unknown as typeof fetch;
+      const store = new S3ObjectStore(CFG, inner);
+      const keys = makeAcceptanceKeys();
+      const events: DiagEvidence[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: inner, key: keys.key, track: () => {}, emit: (e) => events.push(e) };
+      await expect(runP2PayloadHashControl(ctx)).rejects.toThrow(/S3 GET .* failed: 500/);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ label: 'P2', status: 200, outcome: 'accepted' });
     });
   });
 
