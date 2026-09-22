@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { S3ObjectStore } from '@/domain/documents/s3-object-store';
 import { isVerificationArtifactKey } from '@/domain/documents/object-store';
-import { createHash } from 'node:crypto';
-import { buildN2SignedRequest, cleanupAndReport, cleanupAndVerify, makeAcceptanceKeys, makeBudgetedFetch, makeInMemoryS3, runAcceptanceScenarios, runDiagAOriginalWrongChecksum, runDiagBAddedSdkAlgo, runDiagCCorrectControl, runN1WrongContentMd5, runN2WrongPayloadHash, runP1ContentMd5Control, runP2PayloadHashControl, runPG1Concurrent, runPG3, runPG5, type AcceptanceCtx, type BudgetLimits, type DiagEvidence, type RunTotals } from '../support/s3-acceptance';
+import { createHash, createHmac } from 'node:crypto';
+import { cleanupAndReport, cleanupAndVerify, makeAcceptanceKeys, makeBudgetedFetch, makeInMemoryS3, runAcceptanceScenarios, runDiagAOriginalWrongChecksum, runDiagBAddedSdkAlgo, runDiagCCorrectControl, runN1WrongContentMd5, runN2WrongPayloadHash, runP1ContentMd5Control, runP2PayloadHashControl, runPG1Concurrent, runPG3, runPG5, type AcceptanceCtx, type BudgetLimits, type DiagEvidence, type RunTotals } from '../support/s3-acceptance';
 
 /**
  * OFFLINE exercise of the LIVE acceptance harness's own logic (key selection, scenarios, budgets,
@@ -61,6 +61,50 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
       return { sim, bf, store, keys, created, ctx };
     };
 
+    // ── request capture + an INDEPENDENT SigV4 verifier (re-implements signing; does NOT call signS3Request) ──
+    const lowerHeaders = (h: HeadersInit | undefined): Record<string, string> => {
+      const out: Record<string, string> = {};
+      if (!h) return out;
+      if (h instanceof Headers) h.forEach((v, k) => (out[k.toLowerCase()] = v));
+      else if (Array.isArray(h)) for (const [k, v] of h) out[String(k).toLowerCase()] = String(v);
+      else for (const [k, v] of Object.entries(h)) out[k.toLowerCase()] = String(v);
+      return out;
+    };
+    type CapturedPut = { url: string; headers: Record<string, string>; body: Buffer };
+    const recordingCtx = (faults?: Parameters<typeof makeInMemoryS3>[1]) => {
+      const sim = makeInMemoryS3(CFG, faults);
+      const puts: CapturedPut[] = [];
+      const recording = (async (url: string, init: RequestInit = {}) => {
+        if (String(init.method) === 'PUT') puts.push({ url: String(url), headers: lowerHeaders(init.headers as HeadersInit), body: Buffer.from((init.body as Uint8Array) ?? new Uint8Array()) });
+        return sim.fetch(url, init);
+      }) as unknown as typeof fetch;
+      const store = new S3ObjectStore(CFG, recording);
+      const keys = makeAcceptanceKeys();
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: recording, key: keys.key, track: () => {} };
+      return { sim, puts, store, keys, ctx };
+    };
+    const hmac = (k: Buffer | string, d: string): Buffer => createHmac('sha256', k).update(d, 'utf8').digest();
+    /** Independently recompute the SigV4 signature from a captured request and return it with the captured one. */
+    const verifySigV4 = (put: CapturedPut): { computed: string; captured: string; payloadHash: string } => {
+      const h = put.headers; // lowercased
+      const auth = h['authorization'] ?? '';
+      const signedHeaders = auth.match(/SignedHeaders=([^,]+)/)?.[1] ?? '';
+      const captured = auth.match(/Signature=([0-9a-f]+)/)?.[1] ?? '';
+      const amzDate = h['x-amz-date'] ?? '';
+      const dateStamp = amzDate.slice(0, 8);
+      const scope = `${dateStamp}/${CFG.region}/s3/aws4_request`;
+      const uri = new URL(put.url);
+      const payloadHash = h['x-amz-content-sha256'] ?? '';
+      const canonicalHeaders = signedHeaders.split(';').map((n) => `${n}:${String(h[n]).trim()}\n`).join('');
+      const canonicalRequest = ['PUT', uri.pathname, uri.search.replace(/^\?/, ''), canonicalHeaders, signedHeaders, payloadHash].join('\n');
+      const stringToSign = ['AWS4-HMAC-SHA256', amzDate, scope, createHash('sha256').update(canonicalRequest).digest('hex')].join('\n');
+      const kSigning = hmac(hmac(hmac(hmac(`AWS4${CFG.secretAccessKey}`, dateStamp), CFG.region), 's3'), 'aws4_request');
+      const computed = createHmac('sha256', kSigning).update(stringToSign, 'utf8').digest('hex');
+      return { computed, captured, payloadHash };
+    };
+    const BODY = Buffer.from('{"integrity":"probe"}', 'utf8');
+    const WRONG = Buffer.from('completely different bytes', 'utf8');
+
     it('N1 rejects a wrong Content-MD5 (400 BadDigest, absent); P1 correct is stored + read back', async () => {
       const { sim, bf, store, keys, created, ctx } = freshCtx();
       await expect(runN1WrongContentMd5(ctx)).resolves.toBeUndefined();
@@ -89,19 +133,103 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
       await expect(runN2WrongPayloadHash(ctx)).rejects.toThrow(/N2: expected HTTP 400/);
     });
 
-    it('offline signing verification: N2 is signed OVER the wrong hash (self-consistent), not a broken signature', () => {
+    it('request capture: N1/P1 and N2/P2 use identical bodies + fresh keys; only the intended digest differs (+ derived signing)', async () => {
+      const { puts, ctx } = recordingCtx();
+      await runN1WrongContentMd5(ctx);
+      await runP1ContentMd5Control(ctx);
+      await runN2WrongPayloadHash(ctx);
+      await runP2PayloadHashControl(ctx);
+      const [n1, p1, n2, p2] = puts;
+      const md5 = (b: Buffer) => createHash('md5').update(b).digest('base64');
+      const shaHex = (b: Buffer) => createHash('sha256').update(b).digest('hex');
+      const checkB64 = (b: Buffer) => createHash('sha256').update(b).digest('base64');
+      const sig = (p: CapturedPut) => p.headers['authorization']!.match(/Signature=([0-9a-f]+)/)?.[1] ?? '';
+
+      // All four: identical bodies, distinct (fresh) keys, correct signed x-amz-checksum-sha256, and if-none-match:*.
+      for (const p of [n1!, p1!, n2!, p2!]) {
+        expect(p.body.equals(BODY)).toBe(true);
+        expect(p.headers['x-amz-checksum-sha256']).toBe(checkB64(BODY));
+        expect(p.headers['if-none-match']).toBe('*');
+      }
+      expect(new Set([n1!, p1!, n2!, p2!].map((p) => new URL(p.url).pathname)).size).toBe(4);
+
+      // N1 ↔ P1 differ ONLY by content-md5 (+ derived signature); content-sha256/content-type identical.
+      expect(n1!.headers['content-md5']).toBe(md5(WRONG));
+      expect(p1!.headers['content-md5']).toBe(md5(BODY));
+      expect(n1!.headers['x-amz-content-sha256']).toBe(shaHex(BODY));
+      expect(p1!.headers['x-amz-content-sha256']).toBe(shaHex(BODY));
+      expect(n1!.headers['content-type']).toBe(p1!.headers['content-type']);
+      expect(sig(n1!)).not.toBe(sig(p1!));
+
+      // N2 ↔ P2 differ ONLY by x-amz-content-sha256 (+ derived signature); content-md5 identical.
+      expect(n2!.headers['x-amz-content-sha256']).toBe(shaHex(WRONG));
+      expect(p2!.headers['x-amz-content-sha256']).toBe(shaHex(BODY));
+      expect(n2!.headers['content-md5']).toBe(md5(BODY));
+      expect(p2!.headers['content-md5']).toBe(md5(BODY));
+      expect(sig(n2!)).not.toBe(sig(p2!));
+    });
+
+    it('N2 outgoing request is CORRECTLY SigV4-signed (independent verifier); the wrong hash is consistent in the header + canonical payload field', async () => {
+      const { puts, ctx } = recordingCtx();
+      await runN2WrongPayloadHash(ctx); // captures the actual N2 PUT
+      const n2 = puts[0]!;
+      const wrongHex = createHash('sha256').update(WRONG).digest('hex');
+      // The declared payload hash is the wrong value...
+      expect(n2.headers['x-amz-content-sha256']).toBe(wrongHex);
+      // ...and an INDEPENDENT SigV4 recomputation (using the header value as BOTH the signed x-amz-content-sha256
+      // and the canonical payload-hash field) MATCHES the captured signature — proving the request is validly
+      // signed for the wrong hash as sent, with that hash consistent in the header and the canonical payload
+      // field. (A live N2 rejection is therefore payload validation, on a correctly-signed request.)
+      const v = verifySigV4(n2);
+      expect(v.payloadHash).toBe(wrongHex);
+      expect(v.captured).toMatch(/^[0-9a-f]{64}$/);
+      expect(v.computed).toBe(v.captured);
+    });
+
+    it('EMITS sanitized N1/P1/N2/P2 evidence (label/status/code/outcome/absence/read-back)', async () => {
+      const sim = makeInMemoryS3(CFG);
+      const bf = makeBudgetedFetch(sim.fetch, LIMITS);
+      const store = new S3ObjectStore(CFG, bf.fetch);
       const keys = makeAcceptanceKeys();
-      const b = buildN2SignedRequest(CFG, keys.key('n2-sign'));
-      const auth = b.headers['authorization'] ?? b.headers['Authorization'] ?? '';
-      const signedHeaders = (auth.match(/SignedHeaders=([^,]+)/)?.[1] ?? '').split(';');
-      // The declared payload hash is the WRONG value, it is part of SignedHeaders, and the signature is a
-      // real SigV4 signature that is BOUND to the payload hash (signing the identical request with the
-      // correct hash yields a different signature) — so a live N2 rejection is payload validation, not a
-      // broken/absent signature.
-      expect(b.headers['x-amz-content-sha256']).toBe(b.wrongHash);
-      expect(signedHeaders).toContain('x-amz-content-sha256');
-      expect(b.wrongSignature).toMatch(/^[0-9a-f]{64}$/);
-      expect(b.wrongSignature).not.toBe(b.correctSignature);
+      const created: string[] = [];
+      const events: DiagEvidence[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: (k) => created.push(k), emit: (e) => events.push(e) };
+      await runN1WrongContentMd5(ctx);
+      await runP1ContentMd5Control(ctx);
+      await runN2WrongPayloadHash(ctx);
+      await runP2PayloadHashControl(ctx);
+      expect(events.map((e) => e.label)).toEqual(['N1', 'P1', 'N2', 'P2']);
+      expect(events[0]).toMatchObject({ status: 400, code: 'BadDigest', outcome: 'rejected-absent', absentAfterReject: true });
+      expect(events[1]).toMatchObject({ status: 200, outcome: 'accepted-readback-ok', readBackOk: true });
+      expect(events[2]).toMatchObject({ status: 400, code: 'XAmzContentSHA256Mismatch', outcome: 'rejected-absent', absentAfterReject: true });
+      expect(events[3]).toMatchObject({ status: 200, outcome: 'accepted-readback-ok', readBackOk: true });
+      await cleanupAndVerify({ store, prefix: keys.prefix, created, enterCleanupPhase: bf.enterCleanupPhase });
+    });
+
+    it('EMITS N1 evidence even when a later check fails — received status/code preserved', async () => {
+      // Provider ACCEPTS a wrong Content-MD5 (200) → N1's 400 assertion fails; the emit in `finally` must
+      // still fire with the received status.
+      const sim = makeInMemoryS3(CFG, { acceptWrongContentMd5: true });
+      const bf = makeBudgetedFetch(sim.fetch, LIMITS);
+      const store = new S3ObjectStore(CFG, bf.fetch);
+      const keys = makeAcceptanceKeys();
+      const events: DiagEvidence[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: () => {}, emit: (e) => events.push(e) };
+      await expect(runN1WrongContentMd5(ctx)).rejects.toThrow(/N1: expected HTTP 400/);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ label: 'N1', status: 200, outcome: 'accepted' });
+    });
+
+    it('EMITS N2 evidence even when a later check fails — received status/code preserved', async () => {
+      const sim = makeInMemoryS3(CFG, { acceptWrongPayloadHash: true });
+      const bf = makeBudgetedFetch(sim.fetch, LIMITS);
+      const store = new S3ObjectStore(CFG, bf.fetch);
+      const keys = makeAcceptanceKeys();
+      const events: DiagEvidence[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: () => {}, emit: (e) => events.push(e) };
+      await expect(runN2WrongPayloadHash(ctx)).rejects.toThrow(/N2: expected HTTP 400/);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ label: 'N2', status: 200, outcome: 'accepted' });
     });
   });
 

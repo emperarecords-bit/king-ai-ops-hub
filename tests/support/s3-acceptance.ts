@@ -399,97 +399,116 @@ export const DIAGNOSTIC_STEPS: ReadonlyArray<{ name: string; run: (ctx: Acceptan
 // The expected codes are PROVIDER-STATED (Tigris), verified here only against the offline simulator.
 const INTEGRITY_BODY = Buffer.from('{"integrity":"probe"}', 'utf8');
 
-/** Raw create-only PUT with an explicit `Content-MD5` and payload hash (for N1/N2 + P1/P2). Every other
- *  integrity header is correct; the one under test is set by the caller. Does NOT track — the step tracks. */
+/** Raw create-only PUT for N1/N2 + P1/P2. It mirrors the adapter's create-only shape: it ALWAYS sends the
+ *  correct, signed `x-amz-checksum-sha256` and `content-type`/`if-none-match`, so the ONLY difference between
+ *  a negative and its positive control is the single digest under test (`content-md5` or the payload hash)
+ *  plus the SigV4 signature derived from it. Does NOT track — the step tracks. */
 async function integrityPut(ctx: AcceptanceCtx, key: string, opts: { contentMd5: string; payloadHash: string }): Promise<Response> {
   const signed = signS3Request(ctx.cfg, {
     method: 'PUT',
     key,
     payloadHash: opts.payloadHash, // SigV4 folds this into BOTH the x-amz-content-sha256 header AND the signature
     amzDate: amzDateNow(),
-    extraHeaders: { 'content-type': 'application/json', 'if-none-match': '*', 'content-md5': opts.contentMd5 },
+    extraHeaders: {
+      'content-type': 'application/json',
+      'if-none-match': '*',
+      'content-md5': opts.contentMd5,
+      'x-amz-checksum-sha256': rawChecksumB64(INTEGRITY_BODY), // always CORRECT + signed (mirrors the adapter)
+    },
   });
   return ctx.fetchImpl(signed.url, { method: 'PUT', headers: signed.headers, body: new Uint8Array(INTEGRITY_BODY) });
 }
 
 /** N1 — a WRONG Content-MD5 (well-formed but not matching the body; every other integrity header correct)
  *  must be rejected with HTTP 400 BadDigest, and the object must be absent afterward. The pass is decided by
- *  N1's OWN status + code — a generic 4xx, auth/signature, 5xx, or network failure does NOT satisfy it. */
+ *  N1's OWN status + code — a generic 4xx, auth/signature, 5xx, or network failure does NOT satisfy it. The
+ *  received status/code + outcome are EMITTED in a `finally` (sanitized), so they survive a failing check. */
 export async function runN1WrongContentMd5(ctx: AcceptanceCtx): Promise<void> {
-  const { store, key, track } = ctx;
+  const { store, key, track, emit } = ctx;
   const k = key('n1');
   track(k);
   const res = await integrityPut(ctx, k, { contentMd5: md5B64(INTEGRITY_WRONG_SRC), payloadHash: sha256Hex(INTEGRITY_BODY) });
   const status = res.status;
   const code = parseS3ErrorCode(await res.text().catch(() => ''));
-  expect(status, `N1: expected HTTP 400 (got ${status})`).toBe(400);
-  expect(code, `N1: expected error code BadDigest (got ${code})`).toBe('BadDigest');
-  expect(await store.head(k), 'N1: a wrong-Content-MD5 write must leave nothing').toBeNull();
+  let absentAfterReject: boolean | null = null;
+  let outcome = status < 300 ? 'accepted' : 'rejected';
+  try {
+    expect(status, `N1: expected HTTP 400 (got ${status})`).toBe(400);
+    expect(code, `N1: expected error code BadDigest (got ${code})`).toBe('BadDigest');
+    absentAfterReject = (await store.head(k)) === null;
+    outcome = absentAfterReject ? 'rejected-absent' : 'rejected-present';
+    expect(absentAfterReject, 'N1: a wrong-Content-MD5 write must leave nothing').toBe(true);
+  } finally {
+    emit?.({ label: 'N1', status, code, outcome, absentAfterReject, readBackOk: null });
+  }
 }
 
-/** P1 — positive control for N1: identical request with the CORRECT Content-MD5 → accepted + byte-exact
- *  read-back. Establishes only that a matching-Content-MD5 request works. */
+/** P1 — positive control for N1: identical request (fresh key) with the CORRECT Content-MD5 → accepted +
+ *  byte-exact read-back. Establishes only that a matching-Content-MD5 request works. Evidence emitted in
+ *  `finally`. */
 export async function runP1ContentMd5Control(ctx: AcceptanceCtx): Promise<void> {
-  const { store, key, track } = ctx;
+  const { store, key, track, emit } = ctx;
   const k = key('p1');
   track(k);
   const res = await integrityPut(ctx, k, { contentMd5: md5B64(INTEGRITY_BODY), payloadHash: sha256Hex(INTEGRITY_BODY) });
-  await res.text().catch(() => '');
-  expect(res.status, `P1: a correct Content-MD5 must be accepted (got ${res.status})`).toBeLessThan(300);
-  expect((await store.get(k)).equals(INTEGRITY_BODY), 'P1: byte-exact read-back').toBe(true);
+  const status = res.status;
+  const code = parseS3ErrorCode(await res.text().catch(() => ''));
+  let readBackOk: boolean | null = null;
+  let outcome = status < 300 ? 'accepted' : 'rejected';
+  try {
+    expect(status, `P1: a correct Content-MD5 must be accepted (got ${status})`).toBeLessThan(300);
+    readBackOk = (await store.get(k)).equals(INTEGRITY_BODY);
+    outcome = readBackOk ? 'accepted-readback-ok' : 'accepted-readback-mismatch';
+    expect(readBackOk, 'P1: byte-exact read-back').toBe(true);
+  } finally {
+    emit?.({ label: 'P1', status, code, outcome, absentAfterReject: null, readBackOk });
+  }
 }
 
 /** N2 — a WRONG x-amz-content-sha256 must be rejected with HTTP 400 XAmzContentSHA256Mismatch, object absent.
  *  The SAME well-formed-but-wrong hash is placed in BOTH the header and the canonical request's payload-hash
- *  field BEFORE signing (via `payloadHash`), so the SigV4 signature is valid/self-consistent and a rejection
- *  is a PAYLOAD-validation result, not a broken signature. Pass decided by N2's OWN status + code only. */
+ *  field BEFORE signing (via `payloadHash`), so the SigV4 signature is computed over that value. Pass decided
+ *  by N2's OWN status + code only. Evidence emitted in `finally`. */
 export async function runN2WrongPayloadHash(ctx: AcceptanceCtx): Promise<void> {
-  const { store, key, track } = ctx;
+  const { store, key, track, emit } = ctx;
   const k = key('n2');
   track(k);
   const res = await integrityPut(ctx, k, { contentMd5: md5B64(INTEGRITY_BODY), payloadHash: sha256Hex(INTEGRITY_WRONG_SRC) });
   const status = res.status;
   const code = parseS3ErrorCode(await res.text().catch(() => ''));
-  expect(status, `N2: expected HTTP 400 (got ${status})`).toBe(400);
-  expect(code, `N2: expected error code XAmzContentSHA256Mismatch (got ${code})`).toBe('XAmzContentSHA256Mismatch');
-  expect(await store.head(k), 'N2: a wrong-payload-hash write must leave nothing').toBeNull();
+  let absentAfterReject: boolean | null = null;
+  let outcome = status < 300 ? 'accepted' : 'rejected';
+  try {
+    expect(status, `N2: expected HTTP 400 (got ${status})`).toBe(400);
+    expect(code, `N2: expected error code XAmzContentSHA256Mismatch (got ${code})`).toBe('XAmzContentSHA256Mismatch');
+    absentAfterReject = (await store.head(k)) === null;
+    outcome = absentAfterReject ? 'rejected-absent' : 'rejected-present';
+    expect(absentAfterReject, 'N2: a wrong-payload-hash write must leave nothing').toBe(true);
+  } finally {
+    emit?.({ label: 'N2', status, code, outcome, absentAfterReject, readBackOk: null });
+  }
 }
 
-/** P2 — positive control for N2: identical request with the CORRECT x-amz-content-sha256 → accepted +
- *  byte-exact read-back. Establishes only that a matching-payload-hash request works. */
+/** P2 — positive control for N2: identical request (fresh key) with the CORRECT x-amz-content-sha256 →
+ *  accepted + byte-exact read-back. Establishes only that a matching-payload-hash request works. Evidence
+ *  emitted in `finally`. */
 export async function runP2PayloadHashControl(ctx: AcceptanceCtx): Promise<void> {
-  const { store, key, track } = ctx;
+  const { store, key, track, emit } = ctx;
   const k = key('p2');
   track(k);
   const res = await integrityPut(ctx, k, { contentMd5: md5B64(INTEGRITY_BODY), payloadHash: sha256Hex(INTEGRITY_BODY) });
-  await res.text().catch(() => '');
-  expect(res.status, `P2: a correct x-amz-content-sha256 must be accepted (got ${res.status})`).toBeLessThan(300);
-  expect((await store.get(k)).equals(INTEGRITY_BODY), 'P2: byte-exact read-back').toBe(true);
-}
-
-/** Build (but do NOT send) the N2 signed request, for OFFLINE signing verification. Signs the SAME request
- *  (same key + amzDate) with the WRONG and the CORRECT payload hash so a caller can prove the payload hash is
- *  bound into the signature — i.e. the request is signed OVER the wrong hash, so a live rejection would be
- *  payload validation, not a broken signature. */
-export function buildN2SignedRequest(cfg: S3Config, key: string): {
-  headers: Record<string, string>;
-  wrongHash: string;
-  wrongSignature: string;
-  correctSignature: string;
-} {
-  const amzDate = amzDateNow();
-  const wrongHash = sha256Hex(INTEGRITY_WRONG_SRC);
-  const correctHash = sha256Hex(INTEGRITY_BODY);
-  const extra = { 'content-type': 'application/json', 'if-none-match': '*', 'content-md5': md5B64(INTEGRITY_BODY) };
-  const wrong = signS3Request(cfg, { method: 'PUT', key, payloadHash: wrongHash, amzDate, extraHeaders: extra });
-  const correct = signS3Request(cfg, { method: 'PUT', key, payloadHash: correctHash, amzDate, extraHeaders: extra });
-  const sigOf = (h: Record<string, string>): string => ((h['authorization'] ?? h['Authorization'] ?? '').match(/Signature=([0-9a-f]+)/)?.[1] ?? '');
-  return {
-    headers: wrong.headers as Record<string, string>,
-    wrongHash,
-    wrongSignature: sigOf(wrong.headers as Record<string, string>),
-    correctSignature: sigOf(correct.headers as Record<string, string>),
-  };
+  const status = res.status;
+  const code = parseS3ErrorCode(await res.text().catch(() => ''));
+  let readBackOk: boolean | null = null;
+  let outcome = status < 300 ? 'accepted' : 'rejected';
+  try {
+    expect(status, `P2: a correct x-amz-content-sha256 must be accepted (got ${status})`).toBeLessThan(300);
+    readBackOk = (await store.get(k)).equals(INTEGRITY_BODY);
+    outcome = readBackOk ? 'accepted-readback-ok' : 'accepted-readback-mismatch';
+    expect(readBackOk, 'P2: byte-exact read-back').toBe(true);
+  } finally {
+    emit?.({ label: 'P2', status, code, outcome, absentAfterReject: null, readBackOk });
+  }
 }
 
 /** The ordered acceptance steps. The live harness runs EACH in its OWN test so one step's assertion failure

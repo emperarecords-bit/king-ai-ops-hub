@@ -201,9 +201,11 @@ export class S3ObjectStore implements ObjectStore {
 
   /**
    * Create-only publish for a verification artifact (VER-002 PR-5). Issues a CONDITIONAL PUT
-   * (`If-None-Match: *`) with the EXACT body and a provider-verified `x-amz-checksum-sha256` (policy P-A:
-   * the adapter ALWAYS sends the checksum, so a missing checksum cannot occur on the write path). Returns
-   * `'created'` (2xx) or `'exists'` (412/409 precondition failed). It NEVER issues an unconditional PUT.
+   * (`If-None-Match: *`) with the EXACT body and integrity headers the adapter ALWAYS sends: `Content-MD5`
+   * and the SigV4 `x-amz-content-sha256` (both provider-verified — a mismatch is rejected at write), plus
+   * `x-amz-checksum-sha256`, which is sent for forward-compatibility but is NOT necessarily provider-verified
+   * (e.g. Tigris stores it as-is; enforcement is on their roadmap). Returns `'created'` (2xx) or `'exists'`
+   * (412/409 precondition failed). It NEVER issues an unconditional PUT.
    *
    * Ambiguous outcomes (network error / timeout / 5xx) are RECONCILED by HEAD before any retry: a PRESENT
    * object ⇒ `'exists'` (the caller re-validates it against the grant's size+digest); an ABSENT object ⇒ a
@@ -212,8 +214,9 @@ export class S3ObjectStore implements ObjectStore {
    * so it is never reported as a silent success, and the object is never overwritten.
    *
    * ADAPTER guarantee (offline-testable, here): the request shape and the no-unconditional-PUT + reconcile
-   * logic. Whether the PROVIDER actually ENFORCES `If-None-Match`/the checksum (credential-enforced
-   * immutability) is NOT VERIFIED here — that is the authorized live acceptance run.
+   * logic. Whether the PROVIDER actually ENFORCES `If-None-Match` / a given integrity header
+   * (credential-enforced immutability + rejection) is NOT VERIFIED here — that is the authorized live
+   * acceptance run.
    */
   async putIfAbsent(
     key: string,
