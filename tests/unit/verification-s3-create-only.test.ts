@@ -15,6 +15,7 @@ const KEY = `org/${randomUUID()}/project/${randomUUID()}/request/${randomUUID()}
 const BODY = Buffer.from('{"passed":true,"pr5":"hermetic"}', 'utf8');
 const RAW_B64 = createHash('sha256').update(BODY).digest('base64'); // base64 of the RAW 32-byte digest
 const RAW_HEX = createHash('sha256').update(BODY).digest('hex');
+const MD5_B64 = createHash('md5').update(BODY).digest('base64'); // base64 of the RAW MD5 digest (Content-MD5)
 
 type Call = { method: string; headers: Record<string, string>; body: Uint8Array | null };
 type Step = { status: number; headers?: Record<string, string> } | { throw: true };
@@ -41,7 +42,7 @@ const heads = (calls: Call[]): Call[] => calls.filter((c) => c.method === 'HEAD'
 const allPutsAreConditional = (calls: Call[]): boolean => puts(calls).every((c) => c.headers['if-none-match'] === '*');
 
 describe('VER-002 PR-5 — S3 create-only publish (adapter, hermetic)', () => {
-  it('AG1: the PUT is conditional create-only with exact bytes + base64-of-RAW-digest checksum', async () => {
+  it('AG1: the PUT is conditional create-only with exact bytes + base64-of-RAW-digest checksum + Content-MD5', async () => {
     const { fetch, calls } = simFetch([{ status: 200 }]);
     const store = new S3ObjectStore(CFG, fetch);
     expect(await store.putIfAbsent(KEY, BODY, 'application/json')).toBe('created');
@@ -49,6 +50,7 @@ describe('VER-002 PR-5 — S3 create-only publish (adapter, hermetic)', () => {
     expect(put.headers['if-none-match']).toBe('*');
     expect(put.headers['x-amz-checksum-sha256']).toBe(RAW_B64);
     expect(put.headers['x-amz-checksum-sha256']).not.toBe(RAW_HEX); // must be base64, not hex
+    expect(put.headers['content-md5']).toBe(MD5_B64); // additional integrity-at-write (base64 of raw MD5)
     expect(put.headers['content-type']).toBe('application/json');
     expect(Buffer.from(put.body!).equals(BODY)).toBe(true); // exact bytes ⇒ exact Content-Length
     expect(heads(calls).length).toBe(0); // a clean create needs no reconcile

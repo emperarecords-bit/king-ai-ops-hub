@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { S3ObjectStore } from '@/domain/documents/s3-object-store';
 import { isVerificationArtifactKey } from '@/domain/documents/object-store';
 import { createHash } from 'node:crypto';
-import { cleanupAndReport, cleanupAndVerify, makeAcceptanceKeys, makeBudgetedFetch, makeInMemoryS3, runAcceptanceScenarios, runDiagAOriginalWrongChecksum, runDiagBAddedSdkAlgo, runDiagCCorrectControl, runPG1Concurrent, runPG3, runPG5, type AcceptanceCtx, type BudgetLimits, type DiagEvidence, type RunTotals } from '../support/s3-acceptance';
+import { buildN2SignedRequest, cleanupAndReport, cleanupAndVerify, makeAcceptanceKeys, makeBudgetedFetch, makeInMemoryS3, runAcceptanceScenarios, runDiagAOriginalWrongChecksum, runDiagBAddedSdkAlgo, runDiagCCorrectControl, runN1WrongContentMd5, runN2WrongPayloadHash, runP1ContentMd5Control, runP2PayloadHashControl, runPG1Concurrent, runPG3, runPG5, type AcceptanceCtx, type BudgetLimits, type DiagEvidence, type RunTotals } from '../support/s3-acceptance';
 
 /**
  * OFFLINE exercise of the LIVE acceptance harness's own logic (key selection, scenarios, budgets,
@@ -24,18 +24,19 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
     await runAcceptanceScenarios({ store, cfg: CFG, fetchImpl: budgeted.fetch, key: keys.key, track: (k) => created.push(k) });
 
     // Every tracked key is a production-shaped verification artifact key (would trip the `put` guard).
-    expect(created.length).toBeGreaterThanOrEqual(5); // PG1, PG1-concurrent, PG2, PG3 (rejected but tracked), PG5
+    expect(created.length).toBeGreaterThanOrEqual(8); // PG1, PG1-concurrent, PG2, PG5, N1, P1, N2, P2
     for (const k of created) {
       expect(k, k).toMatch(VERIFICATION_KEY);
       expect(isVerificationArtifactKey(k), k).toBe(true);
       expect(k.startsWith(keys.prefix)).toBe(true);
     }
-    // The rejected wrong-checksum probe (PG3) is tracked but was NOT stored, so ≤ created.length landed.
+    // The rejected N1 (wrong Content-MD5) and N2 (wrong payload hash) are tracked but NOT stored, so the
+    // number of landed objects is ≤ created.length.
     expect(sim.objectCount()).toBeLessThanOrEqual(created.length);
     expect(sim.objectCount()).toBeGreaterThan(0);
 
     await cleanupAndVerify({ store, prefix: keys.prefix, created, enterCleanupPhase: budgeted.enterCleanupPhase });
-    expect(sim.objectCount()).toBe(0); // cleanup removed everything created (deletes of the never-stored probe are no-ops)
+    expect(sim.objectCount()).toBe(0); // cleanup removed everything created (deletes of the never-stored negatives are no-ops)
     expect(budgeted.stats().requests).toBeLessThanOrEqual(LIMITS.maxRequests);
   });
 
@@ -49,32 +50,58 @@ describe('VER-002 PR-5 — acceptance harness offline (simulated provider)', () 
     expect(sim.objectCount()).toBe(1); // proof the leak was real
   });
 
-  describe('negative: the acceptance assertions CATCH a mishandled wrong-checksum (PG3)', () => {
-    it.each([
-      ['an auth failure (401)', { checksumMismatchStatus: 401 }],
-      ['an auth failure (403)', { checksumMismatchStatus: 403 }],
-      ['a 5xx (503)', { checksumMismatchStatus: 503 }],
-      ['an unsupported op (405)', { checksumMismatchStatus: 405 }],
-      // The decisive regression for finding 1: a 400 whose <Code> is NOT a checksum-mismatch code
-      // ('NotAChecksumError' — note it CONTAINS the substring "Checksum"). The status alone would pass, so
-      // the allow-list parse must FAIL CLOSED. A substring test would have wrongly passed this.
-      ['a 400 with a NON-checksum <Code> (NotAChecksumError)', { checksumMismatchStatus: 400 }],
-      // The narrowed allow-list must FAIL CLOSED on the PAYLOAD-SIGNING code: XAmzContentSHA256Mismatch is
-      // about the SigV4 x-amz-content-sha256 request hash, NOT a rejection of the x-amz-checksum-sha256
-      // VALUE, so a 400 carrying it must not count as a PG3 pass.
-      ['a 400 payload-signing code (XAmzContentSHA256Mismatch)', { mismatchCode: 'XAmzContentSHA256Mismatch' }],
-      // InvalidDigest documents a MALFORMED digest, not a well-formed-but-wrong value, so it does not prove
-      // MISMATCH rejection and must fail closed even at a 400 (only BadDigest is accepted).
-      ['a 400 malformed-digest code (InvalidDigest)', { mismatchCode: 'InvalidDigest' }],
-      ['a WRONGLY-ACCEPTED body (200)', { acceptWrongChecksum: true }],
-    ])('fails PG3 when a wrong checksum yields %s', async (_label, faults) => {
+  describe('provider-verified integrity-at-write — Content-MD5 (N1/P1) + payload-hash (N2/P2)', () => {
+    const freshCtx = (faults?: Parameters<typeof makeInMemoryS3>[1]) => {
       const sim = makeInMemoryS3(CFG, faults);
       const bf = makeBudgetedFetch(sim.fetch, LIMITS);
       const store = new S3ObjectStore(CFG, bf.fetch);
       const keys = makeAcceptanceKeys();
-      await expect(
-        runAcceptanceScenarios({ store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: () => {} }),
-      ).rejects.toThrow();
+      const created: string[] = [];
+      const ctx: AcceptanceCtx = { store, cfg: CFG, fetchImpl: bf.fetch, key: keys.key, track: (k) => created.push(k) };
+      return { sim, bf, store, keys, created, ctx };
+    };
+
+    it('N1 rejects a wrong Content-MD5 (400 BadDigest, absent); P1 correct is stored + read back', async () => {
+      const { sim, bf, store, keys, created, ctx } = freshCtx();
+      await expect(runN1WrongContentMd5(ctx)).resolves.toBeUndefined();
+      await expect(runP1ContentMd5Control(ctx)).resolves.toBeUndefined();
+      expect(sim.objectCount()).toBe(1); // only P1 landed; N1 rejected
+      await cleanupAndVerify({ store, prefix: keys.prefix, created, enterCleanupPhase: bf.enterCleanupPhase });
+      expect(sim.objectCount()).toBe(0);
+    });
+
+    it('N2 rejects a wrong x-amz-content-sha256 (400 XAmzContentSHA256Mismatch, absent); P2 correct is stored + read back', async () => {
+      const { sim, bf, store, keys, created, ctx } = freshCtx();
+      await expect(runN2WrongPayloadHash(ctx)).resolves.toBeUndefined();
+      await expect(runP2PayloadHashControl(ctx)).resolves.toBeUndefined();
+      expect(sim.objectCount()).toBe(1); // only P2 landed; N2 rejected
+      await cleanupAndVerify({ store, prefix: keys.prefix, created, enterCleanupPhase: bf.enterCleanupPhase });
+      expect(sim.objectCount()).toBe(0);
+    });
+
+    it('N1 passes ONLY on its own 400 BadDigest — a provider that accepts a wrong Content-MD5 (200) fails N1', async () => {
+      const { ctx } = freshCtx({ acceptWrongContentMd5: true });
+      await expect(runN1WrongContentMd5(ctx)).rejects.toThrow(/N1: expected HTTP 400/);
+    });
+
+    it('N2 passes ONLY on its own 400 XAmzContentSHA256Mismatch — a provider that accepts a wrong hash (200) fails N2', async () => {
+      const { ctx } = freshCtx({ acceptWrongPayloadHash: true });
+      await expect(runN2WrongPayloadHash(ctx)).rejects.toThrow(/N2: expected HTTP 400/);
+    });
+
+    it('offline signing verification: N2 is signed OVER the wrong hash (self-consistent), not a broken signature', () => {
+      const keys = makeAcceptanceKeys();
+      const b = buildN2SignedRequest(CFG, keys.key('n2-sign'));
+      const auth = b.headers['authorization'] ?? b.headers['Authorization'] ?? '';
+      const signedHeaders = (auth.match(/SignedHeaders=([^,]+)/)?.[1] ?? '').split(';');
+      // The declared payload hash is the WRONG value, it is part of SignedHeaders, and the signature is a
+      // real SigV4 signature that is BOUND to the payload hash (signing the identical request with the
+      // correct hash yields a different signature) — so a live N2 rejection is payload validation, not a
+      // broken/absent signature.
+      expect(b.headers['x-amz-content-sha256']).toBe(b.wrongHash);
+      expect(signedHeaders).toContain('x-amz-content-sha256');
+      expect(b.wrongSignature).toMatch(/^[0-9a-f]{64}$/);
+      expect(b.wrongSignature).not.toBe(b.correctSignature);
     });
   });
 

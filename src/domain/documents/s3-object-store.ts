@@ -223,7 +223,8 @@ export class S3ObjectStore implements ObjectStore {
   ): Promise<CreateOnlyResult> {
     if (!isCanonicalObjectKey(key)) throw new Error('non-canonical object key');
     const now = opts.now ?? (() => new Date());
-    const checksum = createHash('sha256').update(body).digest('base64'); // base64 of the RAW digest (NOT hex)
+    const checksum = createHash('sha256').update(body).digest('base64'); // base64 of the RAW SHA-256 digest (NOT hex)
+    const contentMd5 = createHash('md5').update(body).digest('base64'); // base64 of the RAW MD5 digest
     const attemptOnce = async (): Promise<CreateOnlyResult | 'ambiguous'> => {
       let res: Response;
       try {
@@ -232,9 +233,12 @@ export class S3ObjectStore implements ObjectStore {
           key,
           payloadHash: sha256Hex(body),
           amzDate: amzDateNow(),
-          // Both headers are SIGNED (signS3Request folds extraHeaders into SignedHeaders), so the provider
-          // is asked to enforce create-only AND the checksum.
-          extraHeaders: { 'content-type': contentType, 'if-none-match': '*', 'x-amz-checksum-sha256': checksum },
+          // All of these headers are SIGNED (signS3Request folds extraHeaders into SignedHeaders). `Content-MD5`
+          // is an ADDITIONAL integrity-at-write check the provider verifies today (mismatch ⇒ 400 BadDigest);
+          // it does NOT replace the declared-SHA-256 requirement or the ingest re-hash. `x-amz-checksum-sha256`
+          // is still sent (stored as-is on providers that don't yet enforce it). The SigV4 `x-amz-content-sha256`
+          // is verified against the bytes. `If-None-Match: *` keeps the write create-only.
+          extraHeaders: { 'content-type': contentType, 'if-none-match': '*', 'x-amz-checksum-sha256': checksum, 'content-md5': contentMd5 },
         });
         res = await this.fetchImpl(signed.url, { method: 'PUT', headers: signed.headers, body: new Uint8Array(body) });
       } catch {
