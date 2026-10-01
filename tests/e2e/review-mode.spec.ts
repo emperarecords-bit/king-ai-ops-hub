@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 /**
  * Answer-routing Phase 1 — the review-mode badge, end to end. Submits a task with the Answer mode toggle set
@@ -18,7 +18,7 @@ const password = process.env.E2E_PASSWORD;
 test.describe('answer-routing — review-mode badge', () => {
   test.skip(!email || !password, 'E2E_EMAIL / E2E_PASSWORD not configured');
 
-  async function signInAndOpenNewTask(page: import('@playwright/test').Page) {
+  async function signInAndOpenNewTask(page: Page) {
     await page.goto('/login');
     await page.getByLabel('Email').fill(email!);
     await page.getByLabel('Password').fill(password!);
