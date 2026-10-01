@@ -32,8 +32,23 @@ test.describe('answer-routing — browser run-to-result (in-app fakes)', () => {
     await expect(page).toHaveURL(/\/projects/);
   }
 
+  // FAIL CLOSED: verify the EXACT server we are about to drive has the fenced in-app fakes selected, before any
+  // run is dispatched. If the probe does not confirm fake mode (reused/unknown server, incompatible runtime, or
+  // the fence threw), we throw instead of dispatching — a fake-only test must never hit a real-provider server.
+  async function assertServerIsFakeBacked(page: Page) {
+    const res = await page.request.get('/api/test/provider-mode');
+    if (!res.ok()) {
+      throw new Error(`Refusing to run: provider-mode probe returned HTTP ${res.status()} — server fake mode unverified.`);
+    }
+    const body = (await res.json()) as { fake?: boolean };
+    if (body.fake !== true) {
+      throw new Error('Refusing to run: the serving environment is NOT fake-backed (would make real provider calls).');
+    }
+  }
+
   async function runTask(page: Page, taskId: string) {
     await signIn(page);
+    await assertServerIsFakeBacked(page);
     // ?autorun=1 auto-fires the run for a pending task; the run streams then the page refreshes to the truth.
     await page.goto(`/p/${ids!.projectKey}/tasks/${taskId}?autorun=1`);
   }

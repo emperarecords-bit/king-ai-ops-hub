@@ -13,9 +13,11 @@ import {
   projectMembers,
   projects,
   runs,
+  runExecutionCheckpoints,
   runSteps,
   spendLimits,
   tasks,
+  usageEvents,
 } from '@/db/schema';
 import { withTenant } from '@/db/tenant';
 import { setProviderOverrideForTests } from '@/providers/registry';
@@ -339,6 +341,71 @@ describe('answer-routing Phase 1 — review enforcement (API/history level)', ()
     const run = await runRow(taskId);
     expect(run.reviewRequired).toBe(true);
     expect(run.reviewOutcome).toBe('reviewed');
+  });
+
+  // Correction 1 — a CONCLUSIVE failed review, interrupted immediately after it persists, must REPLAY on resume
+  // (no hidden same-step re-dispatch). One provider pair spans the crash+resume so the reviewer call count is
+  // authoritative. First attempt + recovery both run through the worker (runClaimedJob → startRun/resumeRun).
+  async function failedReviewCrashResume(required: boolean) {
+    const ws = await makeWorkspace();
+    const openai = new FakeProvider('openai');
+    openai.reply(PRIMARY_TEXT);
+    const anthropic = new FakeProvider('anthropic');
+    anthropic.fail('auth'); // ONE conclusive not-executed failure; any SECOND call would default to a success
+    setProviderOverrideForTests((id) => (id === 'openai' ? openai : id === 'anthropic' ? anthropic : undefined));
+
+    const taskId = await makeTask({
+      ctx: ws.ctx, primaryId: ws.primaryId, reviewerId: ws.reviewerId,
+      reviewEnabled: true, quickExempt: required ? null : true, // required: policy required; optional: exempt
+    });
+
+    // First attempt through the worker, crashed right after the failed review step persists (after-checkpoint #2).
+    const { __setRunTestHookForTests } = await import('@/domain/tasks/runner');
+    __setRunTestHookForTests(async (label, step) => {
+      if (label === 'after-checkpoint' && step === 2) throw new Error('injected crash after failed-review persist');
+    });
+    await withTenant(ws.ctx, (tx) => enqueueRun(tx, ws.ctx, taskId));
+    const job1 = await claimJobForTask(ws.ctx, taskId);
+    await runClaimedJob(job1!); // crashes internally; the worker fails the job and leaves the run 'running'
+    __setRunTestHookForTests(null);
+
+    // Recovery through the worker: the task is 'running' → runClaimedJob → resumeRun → replay.
+    await withTenant(ws.ctx, (tx) => enqueueRun(tx, ws.ctx, taskId));
+    const job2 = await claimJobForTask(ws.ctx, taskId);
+    const outcome = await runClaimedJob(job2!);
+
+    const run = await runRow(taskId);
+    const steps = await db.select().from(runSteps).where(eq(runSteps.runId, run.id));
+    const reviewSteps = steps.filter((s) => s.kind === 'review');
+    const ckpts = await db.select().from(runExecutionCheckpoints).where(eq(runExecutionCheckpoints.runId, run.id));
+    const usage = await db.select().from(usageEvents).where(eq(usageEvents.runId, run.id));
+
+    // The reviewer was called EXACTLY ONCE across crash + resume — no hidden same-step re-dispatch.
+    expect(anthropic.requests).toHaveLength(1);
+    // Exactly one review step row, recorded as the conclusive failure.
+    expect(reviewSteps).toHaveLength(1);
+    expect(reviewSteps[0]!.succeeded).toBe(false);
+    // No checkpoint and no usage for the failed review step (step 2) — and no duplicate from a second attempt.
+    expect(ckpts.filter((c) => c.stepNumber === 2)).toHaveLength(0);
+    expect(usage.filter((u) => u.runStepId === reviewSteps[0]!.id)).toHaveLength(0);
+    // Run finalized conclusively with the correct outcome and reliability state.
+    expect(run.reliabilityState).toBe('completed');
+    expect(outcome?.status).toBe('completed');
+    return run;
+  }
+
+  it.runIf(available)('failed REQUIRED review, crash after persist, resume → replay (no re-dispatch) → required_unmet', async () => {
+    const run = await failedReviewCrashResume(true);
+    expect(run.reviewRequired).toBe(true);
+    expect(run.reviewOutcome).toBe('required_unmet');
+    expect(run.consolidatedResult).toContain('UNREVIEWED DRAFT');
+  });
+
+  it.runIf(available)('failed OPTIONAL review, crash after persist, resume → replay (no re-dispatch) → optional_degraded', async () => {
+    const run = await failedReviewCrashResume(false);
+    expect(run.reviewRequired).toBe(false);
+    expect(run.reviewOutcome).toBe('optional_degraded');
+    expect(run.consolidatedResult).not.toContain('UNREVIEWED DRAFT');
   });
 
   it.runIf(available)('insufficient budget — run refuses to start (no bypass)', async () => {

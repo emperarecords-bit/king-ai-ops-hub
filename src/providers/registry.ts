@@ -33,10 +33,29 @@ export function setProviderOverrideForTests(
  * the real providers are used. This exists so the LOCAL running app can execute runs billing-free for the
  * browser run-to-result checks; it can never activate in a deployed environment.
  */
+export class FakeProviderEnvError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'FakeProviderEnvError';
+  }
+}
+
+/**
+ * Hard fence for the TEST-ONLY in-app fake provider. When the flag is UNSET, the normal provider path is used
+ * and nothing changes (ordinary production behavior). When the flag IS set, it must resolve to fakes or FAIL
+ * CLOSED — it must NEVER silently fall through to the real adapters on an incompatible runtime (which would
+ * turn a "fake-only" request into a real, billable call). So: flag set + incompatible runtime (production or a
+ * Fly runtime) ⇒ THROW; flag set + local ⇒ true (use fakes); flag unset ⇒ false (real providers, unchanged).
+ */
 export function testFakeProvidersEnabled(): boolean {
   if (process.env.HUB_TEST_FAKE_PROVIDERS !== '1') return false;
-  if (process.env.NODE_ENV === 'production') return false;
-  if (process.env.FLY_APP_NAME || process.env.FLY_MACHINE_ID || process.env.FLY_ALLOC_ID) return false;
+  const flyRuntime = Boolean(process.env.FLY_APP_NAME || process.env.FLY_MACHINE_ID || process.env.FLY_ALLOC_ID);
+  if (process.env.NODE_ENV === 'production' || flyRuntime) {
+    throw new FakeProviderEnvError(
+      'HUB_TEST_FAKE_PROVIDERS=1 on an incompatible serving environment (production or Fly runtime). Refusing to ' +
+        'serve — fake-only test mode must never fall through to real providers. Unset the flag for normal operation.',
+    );
+  }
   return true;
 }
 

@@ -120,6 +120,14 @@ export interface CheckpointedStepResult {
  */
 export interface ResumeHooks {
   loadCheckpoint(stepNumber: number): Promise<CheckpointedStepResult | null>;
+  /**
+   * Answer-routing Phase 1 — a prior attempt CONCLUSIVELY FAILED this step (a provably not-executed provider
+   * rejection, durably recorded as a failed run_steps row with NO result checkpoint). On resume the step is
+   * REPLAYED as that same failure — no second provider call, no re-bill — instead of being silently
+   * re-dispatched (whose success would then collide with the existing failed row and be dropped). Returns null
+   * when no such conclusive failure is recorded for the step.
+   */
+  loadConclusiveFailure(stepNumber: number): Promise<{ errorMessage: string } | null>;
   guardDispatch(stepNumber: number, kind: StepKind): Promise<void>;
 }
 
@@ -510,9 +518,27 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
     const reviewStepHash = stepEffectivePromptHash(reviewSystem, reviewTurns);
     const reviewStepNo = stepNumber + 1; // the number record() will assign to this step
     const reviewCheckpoint = input.resume ? await input.resume.loadCheckpoint(reviewStepNo) : null;
+    const reviewPriorFailure =
+      !reviewCheckpoint && input.resume ? await input.resume.loadConclusiveFailure(reviewStepNo) : null;
     if (reviewCheckpoint) {
       // Resume: the reviewer already ran and was checkpointed — replay it (no provider call, no re-bill).
       reviewResponse = responseFromCheckpoint(reviewCheckpoint);
+    } else if (reviewPriorFailure) {
+      // Resume: the reviewer CONCLUSIVELY failed on a prior attempt (durably recorded). Replay that failure —
+      // re-record the failed step (persist is a no-op on the existing (run,step) row, but step numbering stays
+      // consistent) with NO provider call and NO re-bill, then degrade exactly as the original attempt did.
+      await record({
+        kind: 'review',
+        agentId: input.reviewer.agentId,
+        response: null,
+        verdict: null,
+        verdictDetail: null,
+        succeeded: false,
+        errorMessage: reviewPriorFailure.errorMessage,
+        effectivePromptHash: reviewStepHash,
+      });
+      reviewResponse = null;
+      verdict = null;
     } else {
       try {
         if (input.resume) await input.resume.guardDispatch(reviewStepNo, 'review');
@@ -590,6 +616,8 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
       const revisionStepHash = stepEffectivePromptHash(primarySystem, revisionTurns);
       const revisionStepNo = stepNumber + 1;
       const revisionCheckpoint = input.resume ? await input.resume.loadCheckpoint(revisionStepNo) : null;
+      const revisionPriorFailure =
+        !revisionCheckpoint && input.resume ? await input.resume.loadConclusiveFailure(revisionStepNo) : null;
       if (revisionCheckpoint) {
         revisionResponse = responseFromCheckpoint(revisionCheckpoint);
         await record({
@@ -602,6 +630,20 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
           errorMessage: null,
           effectivePromptHash: revisionStepHash,
         });
+      } else if (revisionPriorFailure) {
+        // Resume: the revision CONCLUSIVELY failed before — replay the failure (no provider call, no re-bill),
+        // re-record the failed step for consistent numbering, and fall back to the primary as the original did.
+        await record({
+          kind: 'revision',
+          agentId: input.primary.agentId,
+          response: null,
+          verdict: null,
+          verdictDetail: null,
+          succeeded: false,
+          errorMessage: revisionPriorFailure.errorMessage,
+          effectivePromptHash: revisionStepHash,
+        });
+        revisionResponse = null;
       } else {
         try {
           if (input.resume) await input.resume.guardDispatch(revisionStepNo, 'revision');

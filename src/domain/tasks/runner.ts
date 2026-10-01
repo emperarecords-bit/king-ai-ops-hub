@@ -1000,6 +1000,22 @@ async function executeAndFinalize(
         outputTokens: r.outputTokens ?? 0,
       };
     },
+    loadConclusiveFailure: async (stepNumber): Promise<{ errorMessage: string } | null> => {
+      // A durable CONCLUSIVE failure = a persisted run_steps row for this step with succeeded=false. The engine
+      // records such a row ONLY for a provably not-executed provider rejection (ambiguous outcomes never reach
+      // persistStep). Replaying it on resume prevents a hidden same-step re-dispatch whose success would collide
+      // with this row (onConflictDoNothing) and be dropped from checkpoints + usage.
+      const rows = await withTenant(ctx, (tx) =>
+        tx
+          .select({ succeeded: runSteps.succeeded, errorMessage: runSteps.errorMessage })
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepNumber, stepNumber)))
+          .limit(1),
+      );
+      const r = rows[0];
+      if (!r || r.succeeded !== false) return null;
+      return { errorMessage: r.errorMessage ?? 'prior conclusive provider failure' };
+    },
     guardDispatch: async (stepNumber, kind): Promise<void> => {
       await testPoint('before-dispatch', stepNumber);
       await guardProviderDispatch(stepNumber, kind);
