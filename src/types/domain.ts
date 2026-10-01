@@ -27,6 +27,29 @@ export type MessageRole = (typeof MESSAGE_ROLES)[number];
 export const REVIEW_VERDICTS = ['approve', 'revise', 'reject'] as const;
 export type ReviewVerdict = (typeof REVIEW_VERDICTS)[number];
 
+/**
+ * Answer-routing Phase 1 — the owner-selected answer mode (a task field, never model-chosen).
+ * `reviewed` runs the cross-provider review path; `quick` runs primary-only. The REQUESTED mode is
+ * derived from a task's `reviewEnabled` toggle; the EFFECTIVE mode is decided server-side at execution
+ * and may be forced to `reviewed` when review is required (Quick can never waive a required review).
+ */
+export const REVIEW_MODES = ['quick', 'reviewed'] as const;
+export type ReviewMode = (typeof REVIEW_MODES)[number];
+
+/**
+ * Answer-routing Phase 1 — the ACTUAL review outcome of a run, persisted on `runs.review_outcome`.
+ *   - `reviewed`          — a reviewer ran and returned a well-formed verdict (approve/revise/reject).
+ *   - `omitted`           — review was not required and not performed (permitted Quick mode).
+ *   - `required_unmet`    — review was REQUIRED but the reviewer was unavailable, failed, timed out, or
+ *                           returned an invalid result. The primary stands as an UNREVIEWED DRAFT; it must
+ *                           NOT be treated as reviewed or routed into a review-required workflow.
+ *   - `optional_degraded` — an OPTIONAL review was requested but did not complete; the primary stands,
+ *                           clearly distinguished from a required-but-unmet review.
+ * Legacy runs predating this field carry NULL (unknown) — never backfilled, so no review history is fabricated.
+ */
+export const REVIEW_OUTCOMES = ['reviewed', 'omitted', 'required_unmet', 'optional_degraded'] as const;
+export type ReviewOutcome = (typeof REVIEW_OUTCOMES)[number];
+
 export const REVIEW_SEVERITIES = ['critical', 'major', 'minor'] as const;
 export type ReviewSeverity = (typeof REVIEW_SEVERITIES)[number];
 

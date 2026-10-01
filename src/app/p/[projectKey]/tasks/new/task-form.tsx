@@ -139,9 +139,12 @@ export function TaskForm({
         />
       </div>
 
-      {/* P1a agent pinning — cross-check is now an EXACT reviewer pick, not an automatic opposing-provider
-          reviewer. When on, an explicit reviewer employee is required. */}
+      {/* Answer-routing Phase 1 — this toggle picks the answer MODE: Reviewed (cross-check with an exact
+          reviewer) or Quick (primary only). P1a agent pinning still applies: when Reviewed, an explicit
+          reviewer employee is required. Review may be REQUIRED for a task by policy — in that case a Quick
+          request is enforced as Reviewed server-side, and the result says so. */}
       <div className="rounded-md border border-[var(--border)] p-3">
+        <span className="mb-1 block text-sm font-medium">Answer mode</span>
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
@@ -150,8 +153,14 @@ export function TaskForm({
             onChange={(e) => setReviewEnabled(e.target.checked)}
             className="accent-[var(--accent)]"
           />
-          {reviewEnabled ? 'Cross-check with an exact reviewer' : 'No automated review'}
+          {reviewEnabled ? 'Reviewed — cross-check with an exact reviewer' : 'Quick — primary only, no review'}
         </label>
+        {!reviewEnabled ? (
+          <p className="mt-1 text-xs text-[var(--muted)]">
+            Quick mode skips review only when review is not required for this task. If review is required, it is
+            enforced and the result is marked accordingly.
+          </p>
+        ) : null}
         {reviewEnabled ? (
           <div className="mt-3">
             <label htmlFor="reviewerAgentId" className="mb-1 block text-sm text-[var(--muted)]">

@@ -71,6 +71,8 @@ import {
   providerIdEnum,
   providerSelectionEnum,
   reviewVerdictEnum,
+  reviewModeEnum,
+  reviewOutcomeEnum,
   runJobStatusEnum,
   runStatusEnum,
   stepKindEnum,
@@ -1288,6 +1290,11 @@ export const tasks = pgTable(
     input: text('input').notNull(),
     providerSelection: providerSelectionEnum('provider_selection').notNull(),
     reviewEnabled: boolean('review_enabled').notNull().default(true),
+    /** Answer-routing Phase 1 — a SERVER-SET exemption from the default "review is required" policy. It is
+     *  NEVER accepted from the browser or model output; only a trusted server path (seed/test/admin) may set
+     *  it, so a Quick request can be honored only on a task explicitly marked exempt. Nullable with NO default:
+     *  existing tasks and ordinary submissions are null ⇒ review required (conservative). */
+    quickExempt: boolean('quick_exempt'),
     /** D-014: human-selected routing tier; flagship requires a stated category. */
     modelTier: modelTierEnum('model_tier').notNull().default('standard'),
     flagshipCategory: flagshipCategoryEnum('flagship_category'),
@@ -1606,6 +1613,23 @@ export const runs = pgTable(
      *  untouched. Composite FKs (below) keep a non-null requested id in this workspace. */
     requestedPrimaryAgentId: uuid('requested_primary_agent_id'),
     requestedReviewerAgentId: uuid('requested_reviewer_agent_id'),
+    /** Answer-routing Phase 1 — the review-mode decision trail, recorded immutably at run start (and the
+     *  outcome at finalize). ALL nullable with NO default: runs predating the feature stay NULL (unknown) and
+     *  are NEVER backfilled, so no review history is fabricated.
+     *    requestedMode    — what the task asked for (derived from reviewEnabled: reviewed|quick).
+     *    effectiveMode    — what the server actually ran after policy (reviewed|quick).
+     *    reviewRequired   — the server-side policy decision for this run.
+     *    reviewPolicyReason — machine reason for that decision (e.g. default_required, task_explicitly_exempt,
+     *                       policy_eval_error).
+     *    reviewForced     — true when a Quick request was forced to Reviewed because review was required.
+     *    reviewOutcome    — the ACTUAL outcome (reviewed|omitted|required_unmet|optional_degraded), set at
+     *                       finalize. `required_unmet` ⇒ the consolidated result is an UNREVIEWED DRAFT. */
+    requestedMode: reviewModeEnum('requested_mode'),
+    effectiveMode: reviewModeEnum('effective_mode'),
+    reviewRequired: boolean('review_required'),
+    reviewPolicyReason: text('review_policy_reason'),
+    reviewForced: boolean('review_forced'),
+    reviewOutcome: reviewOutcomeEnum('review_outcome'),
     /** Deterministic consolidation output. Null until the run finishes. */
     consolidatedResult: text('consolidated_result'),
     /** Project-folder chunks retrieved for this run (D-020 transparency). */
