@@ -17,9 +17,11 @@ import {
   spendLimits,
   tasks,
 } from '@/db/schema';
+import { withTenant } from '@/db/tenant';
 import { setProviderOverrideForTests } from '@/providers/registry';
 import { anchorReviewClaims } from '@/orchestration/prompts';
-import { startRun } from '@/domain/tasks/runner';
+import { startRun, resumeRun } from '@/domain/tasks/runner';
+import { enqueueRun, claimJobForTask, runClaimedJob } from '@/domain/jobs/jobs';
 import { BudgetExceededError } from '@/lib/errors';
 
 /**
@@ -36,6 +38,9 @@ process.env.DATABASE_URL =
 process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? 'test-openai-key';
 process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? 'test-anthropic-key';
 process.env.APP_ENCRYPTION_KEY = process.env.APP_ENCRYPTION_KEY ?? Buffer.alloc(32).toString('base64');
+// This suite starts many runs in quick succession; lift the per-minute run rate limit so the cases under test
+// (budget, enforcement) are what gate, not the rate limiter. Does not affect production config.
+process.env.RATE_LIMIT_RUNS_PER_MINUTE = '1000';
 
 let available = false;
 try {
@@ -59,14 +64,21 @@ function reviewReject() {
   return `\`\`\`review-result\n${JSON.stringify({ verdict: 'reject', findings: [{ claimAnchor: anchor, severity: 'critical', rationale: 'A blocking problem.' }] })}\n\`\`\``;
 }
 
-/** Injects a fresh pair of fake providers for one run. `reviewer` scripts the single reviewer call. */
-function injectProviders(reviewer: 'approve' | 'reject' | 'fail' | 'none') {
+/**
+ * Injects a fresh pair of fake providers for one run. `reviewer` scripts the single reviewer call:
+ *   fail             → 'auth' (CONCLUSIVE not-executed → a clean failed review step → required_unmet)
+ *   ambiguous        → 'overloaded' (UNCERTAIN; may have executed+charged → reconciliation, NOT a draft)
+ *   ambiguous_timeout→ 'timeout'    (UNCERTAIN → reconciliation)
+ */
+function injectProviders(reviewer: 'approve' | 'reject' | 'fail' | 'ambiguous' | 'ambiguous_timeout' | 'none') {
   const openai = new FakeProvider('openai');
   openai.reply(PRIMARY_TEXT); // primary step; later extraction calls fall back to defaultReply 'ok'
   const anthropic = new FakeProvider('anthropic');
   if (reviewer === 'approve') anthropic.reply(reviewApprove());
   else if (reviewer === 'reject') anthropic.reply(reviewReject());
-  else if (reviewer === 'fail') anthropic.fail('auth'); // provably not-executed → a clean failed review step
+  else if (reviewer === 'fail') anthropic.fail('auth');
+  else if (reviewer === 'ambiguous') anthropic.fail('overloaded');
+  else if (reviewer === 'ambiguous_timeout') anthropic.fail('timeout');
   setProviderOverrideForTests((id) => (id === 'openai' ? openai : id === 'anthropic' ? anthropic : undefined));
 }
 
@@ -226,6 +238,107 @@ describe('answer-routing Phase 1 — review enforcement (API/history level)', ()
     expect(run.reviewOutcome).toBe('reviewed');
     expect((await reviewStep(run.id))?.verdict).toBe('reject');
     expect(run.consolidatedResult).not.toContain('UNREVIEWED DRAFT');
+  });
+
+  it.runIf(available)('UNCERTAIN reviewer outcome (ambiguous overload) is PRESERVED as reconciliation, not a draft', async () => {
+    const ws = await makeWorkspace();
+    injectProviders('ambiguous');
+    const taskId = await makeTask({ ctx: ws.ctx, primaryId: ws.primaryId, reviewerId: ws.reviewerId, reviewEnabled: true, quickExempt: null });
+    const outcome = await startRun(ws.ctx, taskId);
+    expect(outcome.status).toBe('reconciliation_required');
+    const run = await runRow(taskId);
+    expect(run.status).toBe('failed');
+    expect(run.reliabilityState).toBe('reconciliation_required');
+    // Provider uncertainty is NOT erased into an unreviewed draft: no outcome, no consolidated banner.
+    expect(run.reviewOutcome).toBeNull();
+    expect(run.consolidatedResult).toBeNull();
+  });
+
+  it.runIf(available)('UNCERTAIN reviewer outcome (ambiguous timeout) is PRESERVED as reconciliation', async () => {
+    const ws = await makeWorkspace();
+    injectProviders('ambiguous_timeout');
+    const taskId = await makeTask({ ctx: ws.ctx, primaryId: ws.primaryId, reviewerId: ws.reviewerId, reviewEnabled: true, quickExempt: null });
+    const outcome = await startRun(ws.ctx, taskId);
+    expect(outcome.status).toBe('reconciliation_required');
+    const run = await runRow(taskId);
+    expect(run.reliabilityState).toBe('reconciliation_required');
+    expect(run.reviewOutcome).toBeNull();
+  });
+
+  it.runIf(available)('exact pinned reviewer — forced run uses the assigned reviewer, withholds (null) when unresolved; no substitution', async () => {
+    // Forced + reviewer assigned → the run executes EXACTLY that reviewer.
+    const a = await makeWorkspace();
+    injectProviders('approve');
+    const t1 = await makeTask({ ctx: a.ctx, primaryId: a.primaryId, reviewerId: a.reviewerId, reviewEnabled: false, quickExempt: false });
+    await startRun(a.ctx, t1);
+    const r1 = await runRow(t1);
+    expect(r1.reviewerAgentId).toBe(a.reviewerId);
+    expect(r1.primaryAgentId).toBe(a.primaryId);
+    // Forced + no reviewer → reviewer WITHHELD (null), recorded required_unmet — not substituted with another agent.
+    const b = await makeWorkspace();
+    injectProviders('none');
+    const t2 = await makeTask({ ctx: b.ctx, primaryId: b.primaryId, reviewerId: null, reviewEnabled: false, quickExempt: false });
+    await startRun(b.ctx, t2);
+    const r2 = await runRow(t2);
+    expect(r2.reviewerAgentId).toBeNull();
+    expect(r2.reviewOutcome).toBe('required_unmet');
+  });
+
+  it.runIf(available)('cross-workspace reviewer assignment is rejected at the data boundary', async () => {
+    const a = await makeWorkspace();
+    const b = await makeWorkspace();
+    // Assigning project A's task a reviewer that lives in project B must fail (composite same-workspace FK).
+    await expect(
+      makeTask({ ctx: a.ctx, primaryId: a.primaryId, reviewerId: b.reviewerId, reviewEnabled: true, quickExempt: null }),
+    ).rejects.toThrow();
+  });
+
+  it.runIf(available)('negative verdict stays VISIBLE — reviewed ≠ approved (reject caution in the result)', async () => {
+    const ws = await makeWorkspace();
+    injectProviders('reject');
+    const taskId = await makeTask({ ctx: ws.ctx, primaryId: ws.primaryId, reviewerId: ws.reviewerId, reviewEnabled: true, quickExempt: null });
+    await startRun(ws.ctx, taskId);
+    const run = await runRow(taskId);
+    expect(run.reviewOutcome).toBe('reviewed');
+    expect((await reviewStep(run.id))?.verdict).toBe('reject');
+    // The consolidated answer surfaces the rejection + caution (reviewed is not the same as approved).
+    expect(run.consolidatedResult).toContain('reject');
+    expect(run.consolidatedResult!.toLowerCase()).toContain('caution');
+  });
+
+  it.runIf(available)('QUEUE/WORKER path enforces identically — a Quick request forced to Reviewed via the dispatcher', async () => {
+    const ws = await makeWorkspace();
+    injectProviders('approve');
+    const taskId = await makeTask({ ctx: ws.ctx, primaryId: ws.primaryId, reviewerId: ws.reviewerId, reviewEnabled: false, quickExempt: false });
+    await withTenant(ws.ctx, (tx) => enqueueRun(tx, ws.ctx, taskId));
+    const job = await claimJobForTask(ws.ctx, taskId);
+    expect(job).not.toBeNull();
+    await runClaimedJob(job!); // real worker entry: runClaimedJob → startRun (with a job lease)
+    const run = await runRow(taskId);
+    expect(run.requestedMode).toBe('quick');
+    expect(run.effectiveMode).toBe('reviewed');
+    expect(run.reviewForced).toBe(true);
+    expect(run.reviewOutcome).toBe('reviewed');
+  });
+
+  it.runIf(available)('RESUME path carries the review decision — an interrupted required run resumes to the SAME outcome', async () => {
+    const ws = await makeWorkspace();
+    // Crash the fresh run AFTER the finalizing marker is written but BEFORE terminal apply, leaving the run
+    // mid-finalize; then resumeRun re-enters executeAndFinalize and finalizes idempotently.
+    injectProviders('approve');
+    const taskId = await makeTask({ ctx: ws.ctx, primaryId: ws.primaryId, reviewerId: ws.reviewerId, reviewEnabled: true, quickExempt: null });
+    const { __setRunTestHookForTests } = await import('@/domain/tasks/runner');
+    __setRunTestHookForTests(async (label) => {
+      if (label === 'after-finalizing-marker') throw new Error('injected crash (mid-finalize)');
+    });
+    await expect(startRun(ws.ctx, taskId)).rejects.toThrow(/injected crash/);
+    __setRunTestHookForTests(null);
+    injectProviders('approve'); // re-arm providers for the resumed attempt (checkpoints replay; no re-bill)
+    const outcome = await resumeRun(ws.ctx, taskId);
+    expect(outcome.status).toBe('completed');
+    const run = await runRow(taskId);
+    expect(run.reviewRequired).toBe(true);
+    expect(run.reviewOutcome).toBe('reviewed');
   });
 
   it.runIf(available)('insufficient budget — run refuses to start (no bypass)', async () => {

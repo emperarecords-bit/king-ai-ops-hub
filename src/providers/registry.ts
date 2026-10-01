@@ -4,6 +4,7 @@ import { serverEnv } from '@/lib/env.server';
 import { AnthropicProvider } from './anthropic';
 import { OpenAIProvider } from './openai';
 import { OpenAICompatibleProvider } from './openai-compatible';
+import { getInAppFakeProvider } from './test-fake-provider';
 
 /**
  * Server-side provider registry. Keys are read here, once, from server env —
@@ -26,10 +27,27 @@ export function setProviderOverrideForTests(
   providerOverride = fn;
 }
 
+/**
+ * Hard-fenced flag for the TEST-ONLY in-app fake provider. ALL of these must hold: explicit opt-in
+ * (`HUB_TEST_FAKE_PROVIDERS=1`), NOT a production NODE_ENV, and no Fly runtime present. Any one failing ⇒
+ * the real providers are used. This exists so the LOCAL running app can execute runs billing-free for the
+ * browser run-to-result checks; it can never activate in a deployed environment.
+ */
+export function testFakeProvidersEnabled(): boolean {
+  if (process.env.HUB_TEST_FAKE_PROVIDERS !== '1') return false;
+  if (process.env.NODE_ENV === 'production') return false;
+  if (process.env.FLY_APP_NAME || process.env.FLY_MACHINE_ID || process.env.FLY_ALLOC_ID) return false;
+  return true;
+}
+
 export function getProvider(id: ProviderId): AIProvider {
   if (providerOverride) {
     const injected = providerOverride(id);
     if (injected) return injected;
+  }
+  if (testFakeProvidersEnabled()) {
+    // Fenced to non-production + explicit opt-in + no Fly runtime (see testFakeProvidersEnabled).
+    return getInAppFakeProvider(id);
   }
   if (!registry) {
     const env = serverEnv();
