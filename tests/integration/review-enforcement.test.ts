@@ -120,7 +120,7 @@ beforeAll(async () => {
   await db.insert(profiles).values({ id: userId, email: `rev-${randomUUID().slice(0, 8)}@t.local`, displayName: 'A' });
   orgId = (await db.insert(organizations).values({ name: 'O', slug: `rev-${randomUUID().slice(0, 8)}` }).returning({ id: organizations.id }))[0]!.id;
   await db.insert(memberships).values({ orgId, userId, role: 'owner' });
-  baseCtx = { userId, orgId, projectId: '' };
+  baseCtx = { userId, orgId, projectId: '', orgRole: 'owner', projectRole: 'admin' };
 });
 
 afterEach(() => setProviderOverrideForTests(null));
