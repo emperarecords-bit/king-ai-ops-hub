@@ -32,6 +32,8 @@ import {
   MESSAGE_ROLES,
   MILESTONE_STATUSES,
   MODEL_TIERS,
+  REVIEW_MODES,
+  REVIEW_OUTCOMES,
   OBJECTIVE_STATUSES,
   WORK_ITEM_CONDITIONS,
   ORG_ROLES,
@@ -58,6 +60,8 @@ export const runStatusEnum = pgEnum('run_status', RUN_STATUSES);
 export const stepKindEnum = pgEnum('step_kind', STEP_KINDS);
 export const messageRoleEnum = pgEnum('message_role', MESSAGE_ROLES);
 export const reviewVerdictEnum = pgEnum('review_verdict', REVIEW_VERDICTS);
+export const reviewModeEnum = pgEnum('review_mode', REVIEW_MODES);
+export const reviewOutcomeEnum = pgEnum('review_outcome', REVIEW_OUTCOMES);
 export const actionTypeEnum = pgEnum('action_type', ACTION_TYPES);
 export const approvalStatusEnum = pgEnum('approval_status', APPROVAL_STATUSES);
 export const orgRoleEnum = pgEnum('org_role', ORG_ROLES);

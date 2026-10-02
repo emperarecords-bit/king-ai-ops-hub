@@ -23,6 +23,7 @@ import { ObjectiveLinkControls } from './objective-controls';
 import { noEligibleExecutor } from '@/domain/execution/executors';
 import { classifyTaskObjectiveLink, listOpenObjectives } from '@/domain/objectives/task-link';
 import { ReviewComparison } from './review-comparison';
+import { ReviewStateBadge } from './review-state-badge';
 
 const ROLE_LABEL: Record<string, string> = {
   user: 'You',
@@ -269,6 +270,8 @@ export default async function TaskDetailPage({
           />
         </Card>
       ) : null}
+
+      {latestRun ? <ReviewStateBadge run={latestRun} /> : null}
 
       {latestRun?.consolidatedResult ? (
         <Card title="Consolidated result" className="mb-6 border-[var(--accent)]">

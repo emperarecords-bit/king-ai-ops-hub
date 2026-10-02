@@ -1,6 +1,7 @@
 import {
   type FreshnessComparison,
   type ReviewDetail,
+  type ReviewOutcome,
   type ReviewVerdict,
   type StepKind,
 } from '@/types/domain';
@@ -119,6 +120,14 @@ export interface CheckpointedStepResult {
  */
 export interface ResumeHooks {
   loadCheckpoint(stepNumber: number): Promise<CheckpointedStepResult | null>;
+  /**
+   * Answer-routing Phase 1 — a prior attempt CONCLUSIVELY FAILED this step (a provably not-executed provider
+   * rejection, durably recorded as a failed run_steps row with NO result checkpoint). On resume the step is
+   * REPLAYED as that same failure — no second provider call, no re-bill — instead of being silently
+   * re-dispatched (whose success would then collide with the existing failed row and be dropped). Returns null
+   * when no such conclusive failure is recorded for the step.
+   */
+  loadConclusiveFailure(stepNumber: number): Promise<{ errorMessage: string } | null>;
   guardDispatch(stepNumber: number, kind: StepKind): Promise<void>;
 }
 
@@ -157,6 +166,13 @@ export interface EngineInput {
   readonly primary: EngineAgent;
   /** Absent → review disabled for this run. */
   readonly reviewer: EngineAgent | null;
+  /**
+   * Answer-routing Phase 1 — whether review is REQUIRED for this run (decided server-side by the runner's
+   * review policy; see review-policy.ts). When true and the reviewer is absent, fails, or returns an invalid
+   * result, the run's `reviewOutcome` is `required_unmet` and the consolidated result is an UNREVIEWED DRAFT.
+   * Absent/false ⇒ legacy behavior (review is optional; a reviewer failure degrades gracefully).
+   */
+  readonly reviewRequired?: boolean;
   readonly perCallTimeoutMs: number;
   readonly runDeadline: number; // epoch ms; the whole run must finish by this
   /** Stable run timestamp used for immutable reviewer provenance, including checkpoint replay. */
@@ -215,6 +231,11 @@ export interface EngineResult {
   readonly ownerQuestions: readonly string[];
   readonly steps: readonly StepRecord[];
   readonly failureReason: string | null;
+  /**
+   * Answer-routing Phase 1 — the ACTUAL review outcome for this run. The runner persists it on
+   * `runs.review_outcome` and the UI badges it. `required_unmet` means `consolidated` is an UNREVIEWED DRAFT.
+   */
+  readonly reviewOutcome: ReviewOutcome;
 }
 
 function remainingBudget(deadline: number): number {
@@ -319,18 +340,42 @@ async function callWithRetry(
  * outputs. No model call: the consolidated result is reproducible from the
  * message history alone.
  */
+/**
+ * Answer-routing Phase 1 — the banner that MUST travel with the answer itself (not just a UI badge) when a
+ * required review did not complete. Its presence is the in-text, portable marker of an unreviewed draft.
+ */
+export const UNREVIEWED_DRAFT_BANNER =
+  '> ⚠️ **UNREVIEWED DRAFT — a required review did not complete.**\n' +
+  '> A review is required for this task, but the reviewer was unavailable, failed, timed out, or returned an ' +
+  'invalid result. The answer below has **not** been reviewed. Do not treat it as reviewed or route it into a ' +
+  'review-required workflow.';
+
 export function consolidate(args: {
   primaryText: string;
   reviewText: string | null;
   verdict: ReviewVerdict | null;
   revisionText: string | null;
+  /**
+   * Answer-routing Phase 1 — when `required_unmet`, the primary stands as an UNREVIEWED DRAFT: the banner is
+   * prepended and the normal review summary is suppressed (any invalid review text is not presented as a
+   * review). For every other value (and when omitted) the output is byte-identical to the prior behavior.
+   */
+  reviewOutcome?: ReviewOutcome;
 }): string {
+  const isUnmet = args.reviewOutcome === 'required_unmet';
+
+  // A required-unmet run never presents a revision as the result — the primary is the unreviewed draft.
   const finalBody =
-    args.revisionText != null && args.revisionText.length > 0
+    !isUnmet && args.revisionText != null && args.revisionText.length > 0
       ? args.revisionText
       : args.primaryText;
 
   const sections: string[] = [stripActionBlock(finalBody)];
+
+  if (isUnmet) {
+    sections.unshift(UNREVIEWED_DRAFT_BANNER);
+    return sections.join('\n\n');
+  }
 
   if (args.verdict != null && args.reviewText != null) {
     sections.push(
@@ -429,6 +474,9 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
         ownerQuestions: [],
         steps,
         failureReason: `Primary model call failed: ${message}`,
+        // The primary failed — there is no draft to review. Reported for completeness; the runner finalizes
+        // this as a FAILED run (not via finalizeCompleted), so this value is not persisted as an outcome.
+        reviewOutcome: input.reviewRequired ? 'required_unmet' : 'omitted',
       };
     }
   }
@@ -446,6 +494,9 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
   let reviewResponse: AgentResponse | null = null;
   let verdict: ReviewVerdict | null = null;
   let revisionResponse: AgentResponse | null = null;
+  // Answer-routing Phase 1 — true when the reviewer ran but its output was not a well-formed verdict (a
+  // malformed review falls back to verdict='reject'; for a REQUIRED review that counts as "not met").
+  let reviewMalformed = false;
 
   // --- Step 2: REVIEW (optional) -------------------------------------------
   if (input.reviewer) {
@@ -467,9 +518,27 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
     const reviewStepHash = stepEffectivePromptHash(reviewSystem, reviewTurns);
     const reviewStepNo = stepNumber + 1; // the number record() will assign to this step
     const reviewCheckpoint = input.resume ? await input.resume.loadCheckpoint(reviewStepNo) : null;
+    const reviewPriorFailure =
+      !reviewCheckpoint && input.resume ? await input.resume.loadConclusiveFailure(reviewStepNo) : null;
     if (reviewCheckpoint) {
       // Resume: the reviewer already ran and was checkpointed — replay it (no provider call, no re-bill).
       reviewResponse = responseFromCheckpoint(reviewCheckpoint);
+    } else if (reviewPriorFailure) {
+      // Resume: the reviewer CONCLUSIVELY failed on a prior attempt (durably recorded). Replay that failure —
+      // re-record the failed step (persist is a no-op on the existing (run,step) row, but step numbering stays
+      // consistent) with NO provider call and NO re-bill, then degrade exactly as the original attempt did.
+      await record({
+        kind: 'review',
+        agentId: input.reviewer.agentId,
+        response: null,
+        verdict: null,
+        verdictDetail: null,
+        succeeded: false,
+        errorMessage: reviewPriorFailure.errorMessage,
+        effectivePromptHash: reviewStepHash,
+      });
+      reviewResponse = null;
+      verdict = null;
     } else {
       try {
         if (input.resume) await input.resume.guardDispatch(reviewStepNo, 'review');
@@ -517,6 +586,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
         executedAt: input.provenanceExecutedAt ?? new Date().toISOString(),
       });
       verdict = parsedReview.detail.verdict;
+      reviewMalformed = parsedReview.malformedReasons.length > 0;
       // Only report malformed output on a FRESH review — a replayed checkpoint must not re-audit it.
       if (!reviewCheckpoint && parsedReview.malformedReasons.length > 0) {
         // stepNumber not yet advanced for this step; report against the next.
@@ -546,6 +616,8 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
       const revisionStepHash = stepEffectivePromptHash(primarySystem, revisionTurns);
       const revisionStepNo = stepNumber + 1;
       const revisionCheckpoint = input.resume ? await input.resume.loadCheckpoint(revisionStepNo) : null;
+      const revisionPriorFailure =
+        !revisionCheckpoint && input.resume ? await input.resume.loadConclusiveFailure(revisionStepNo) : null;
       if (revisionCheckpoint) {
         revisionResponse = responseFromCheckpoint(revisionCheckpoint);
         await record({
@@ -558,6 +630,20 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
           errorMessage: null,
           effectivePromptHash: revisionStepHash,
         });
+      } else if (revisionPriorFailure) {
+        // Resume: the revision CONCLUSIVELY failed before — replay the failure (no provider call, no re-bill),
+        // re-record the failed step for consistent numbering, and fall back to the primary as the original did.
+        await record({
+          kind: 'revision',
+          agentId: input.primary.agentId,
+          response: null,
+          verdict: null,
+          verdictDetail: null,
+          succeeded: false,
+          errorMessage: revisionPriorFailure.errorMessage,
+          effectivePromptHash: revisionStepHash,
+        });
+        revisionResponse = null;
       } else {
         try {
           if (input.resume) await input.resume.guardDispatch(revisionStepNo, 'revision');
@@ -604,12 +690,28 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
     }
   }
 
+  // --- Review outcome (answer-routing Phase 1) ------------------------------
+  // Decided from what actually happened + whether review was REQUIRED. A reviewer that ran and returned a
+  // well-formed verdict (approve/revise/reject) is `reviewed`. Absence or any failure/invalid result is
+  // `omitted`/`optional_degraded` when review was optional, or `required_unmet` when it was required — in which
+  // case the primary stands as an UNREVIEWED DRAFT (banner added by consolidate).
+  const reviewRequired = input.reviewRequired === true;
+  let reviewOutcome: ReviewOutcome;
+  if (input.reviewer == null) {
+    reviewOutcome = reviewRequired ? 'required_unmet' : 'omitted';
+  } else if (reviewResponse != null && !reviewMalformed) {
+    reviewOutcome = 'reviewed';
+  } else {
+    reviewOutcome = reviewRequired ? 'required_unmet' : 'optional_degraded';
+  }
+
   // --- Step 4: CONSOLIDATE (deterministic, no model call) -------------------
   const consolidated = consolidate({
     primaryText: primaryResponse.text,
     reviewText: reviewResponse?.text ?? null,
     verdict,
     revisionText: revisionResponse?.text ?? null,
+    reviewOutcome,
   });
   await record({
     kind: 'consolidate',
@@ -656,5 +758,6 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
     ownerQuestions: questionExtraction.questions,
     steps,
     failureReason: null,
+    reviewOutcome,
   };
 }

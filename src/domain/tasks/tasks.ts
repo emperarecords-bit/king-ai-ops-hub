@@ -9,6 +9,8 @@ import {
   type ObjectiveStatus,
   type RetrievedDocRef,
   type ReviewDetail,
+  type ReviewMode,
+  type ReviewOutcome,
   type ReviewVerdict,
   type StepKind,
   type TaskStatus,
@@ -565,6 +567,12 @@ export interface RunRow {
   reviewerEffectivePromptHash: string | null;
   assemblerVersion: string | null;
   sourceManifest: { kind: string; id?: string | null; scope?: string | null; hash: string }[] | null;
+  // Answer-routing Phase 1 — review-mode decision trail (null for runs predating the feature).
+  requestedMode: ReviewMode | null;
+  effectiveMode: ReviewMode | null;
+  reviewRequired: boolean | null;
+  reviewForced: boolean | null;
+  reviewOutcome: ReviewOutcome | null;
 }
 
 export async function listRuns(tx: DbTx, ctx: TenantContext, taskId: string): Promise<RunRow[]> {
@@ -586,6 +594,11 @@ export async function listRuns(tx: DbTx, ctx: TenantContext, taskId: string): Pr
       reviewerEffectivePromptHash: runs.reviewerEffectivePromptHash,
       assemblerVersion: runs.assemblerVersion,
       sourceManifest: runs.sourceManifest,
+      requestedMode: runs.requestedMode,
+      effectiveMode: runs.effectiveMode,
+      reviewRequired: runs.reviewRequired,
+      reviewForced: runs.reviewForced,
+      reviewOutcome: runs.reviewOutcome,
     })
     .from(runs)
     .where(

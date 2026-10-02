@@ -24,6 +24,7 @@ import {
 import { AUTHORITY } from '@/orchestration/prompts';
 import { buildDelegationRules, MAX_DELEGATIONS_PER_RUN } from '@/orchestration/delegations';
 import { createTask } from '@/domain/tasks/tasks';
+import { deriveReviewPlan } from '@/domain/tasks/review-policy';
 import { loadApprovedContextForRun } from '@/domain/github/content';
 import { createTextArtifact } from '@/domain/artifacts/artifacts';
 import { assembleOrgBriefing, listDelegationTargets, resolveHqProjectKey } from '@/domain/org/briefing';
@@ -476,6 +477,10 @@ interface RunExecParams {
   reviewerRow: AgentRow | null;
   assembled: AssembledRunContext;
   provenanceExecutedAt: string;
+  /** Answer-routing Phase 1 — server-side review-required decision for this run (fail-safe true on resume if
+   *  a legacy run row has no recorded value). Threaded into the engine so a required-but-unmet review yields an
+   *  UNREVIEWED DRAFT rather than a silent pass. */
+  reviewRequired: boolean;
 }
 
 export async function startRun(
@@ -527,35 +532,49 @@ export async function startRun(
       });
       throw new AssignmentRequiredError('primary_not_assignable');
     }
+    // Answer-routing Phase 1 — the review-mode decision is made HERE, server-side, from persisted task state
+    // only (task.review_enabled + task.quick_exempt). A browser- or model-supplied value can never reach this
+    // point, so Quick can never waive a required review: a Quick request against a not-exempt task is FORCED to
+    // Reviewed. The decision + any forced override is persisted on the run below.
+    const reviewPlan = deriveReviewPlan({ reviewRequested: task.reviewEnabled, quickExempt: task.quickExempt });
+    const effectiveReviewEnabled = reviewPlan.effectiveMode === 'reviewed';
+
     let reviewerRow: AgentRow | null = null;
-    if (task.reviewEnabled) {
+    if (effectiveReviewEnabled) {
+      // An EXPLICIT reviewed request keeps the strict fail-closed misconfiguration behavior (unchanged). A
+      // FORCED review (a Quick request overridden because review is required) must NOT hard-fail the task the
+      // owner asked to run Quick: when a reviewer cannot be resolved, the run proceeds primary-only and the
+      // engine records review_outcome='required_unmet' — an UNREVIEWED DRAFT, never a silent pass. No silent
+      // reviewer substitution occurs in either case: the reviewer is only ever the task's pinned reviewer.
+      const strict = task.reviewEnabled;
       if (task.assignedReviewerAgentId == null) {
         await auditAssignmentFailure(ctx, {
           action: 'run.assignment_validation_failed',
           entityType: 'task',
           entityId: taskId,
-          detail: { reason: 'review_enabled_without_reviewer' },
+          detail: { reason: 'review_enabled_without_reviewer', forced: reviewPlan.forced },
         });
-        throw new AssignmentRequiredError('review_enabled_without_reviewer');
-      }
-      reviewerRow = await getAssignableAgentById(tx, ctx, task.assignedReviewerAgentId, 'reviewer');
-      if (!reviewerRow) {
-        await auditAssignmentFailure(ctx, {
-          action: 'run.assignment_validation_failed',
-          entityType: 'task',
-          entityId: taskId,
-          detail: { requestedReviewerAgentId: task.assignedReviewerAgentId, reason: 'reviewer_not_assignable' },
-        });
-        throw new AssignmentRequiredError('reviewer_not_assignable');
-      }
-      if (reviewerRow.id === primaryRow.id) {
-        await auditAssignmentFailure(ctx, {
-          action: 'run.assignment_validation_failed',
-          entityType: 'task',
-          entityId: taskId,
-          detail: { requestedReviewerAgentId: task.assignedReviewerAgentId, reason: 'reviewer_equals_primary' },
-        });
-        throw new AssignmentRequiredError('reviewer_equals_primary');
+        if (strict) throw new AssignmentRequiredError('review_enabled_without_reviewer');
+      } else {
+        reviewerRow = await getAssignableAgentById(tx, ctx, task.assignedReviewerAgentId, 'reviewer');
+        if (!reviewerRow) {
+          await auditAssignmentFailure(ctx, {
+            action: 'run.assignment_validation_failed',
+            entityType: 'task',
+            entityId: taskId,
+            detail: { requestedReviewerAgentId: task.assignedReviewerAgentId, reason: 'reviewer_not_assignable', forced: reviewPlan.forced },
+          });
+          if (strict) throw new AssignmentRequiredError('reviewer_not_assignable');
+        } else if (reviewerRow.id === primaryRow.id) {
+          await auditAssignmentFailure(ctx, {
+            action: 'run.assignment_validation_failed',
+            entityType: 'task',
+            entityId: taskId,
+            detail: { requestedReviewerAgentId: task.assignedReviewerAgentId, reason: 'reviewer_equals_primary', forced: reviewPlan.forced },
+          });
+          if (strict) throw new AssignmentRequiredError('reviewer_equals_primary');
+          reviewerRow = null; // cannot review independently → required review will be recorded as unmet
+        }
       }
     }
 
@@ -572,6 +591,12 @@ export async function startRun(
         reviewerAgentId: reviewerRow?.id ?? null,
         requestedPrimaryAgentId: task.assignedPrimaryAgentId,
         requestedReviewerAgentId: task.assignedReviewerAgentId ?? null,
+        // Answer-routing Phase 1 — the review-mode decision trail (outcome set at finalize).
+        requestedMode: reviewPlan.requestedMode,
+        effectiveMode: reviewPlan.effectiveMode,
+        reviewRequired: reviewPlan.required,
+        reviewPolicyReason: reviewPlan.reason,
+        reviewForced: reviewPlan.forced,
         retrievedDocuments: assembled.retrievedRefs.length > 0 ? assembled.retrievedRefs : null,
         contextManifest: assembled.contextManifest.length > 0 ? assembled.contextManifest : null,
         retrievedSources: assembled.retrievedSources.length > 0 ? assembled.retrievedSources : null,
@@ -591,9 +616,14 @@ export async function startRun(
       .returning({ id: runs.id });
     const runId = runInserted[0]!.id;
 
+    // Executing agents must equal the pinned agents — no silent substitution. The ONE allowed exception is a
+    // FORCED review that could not resolve its pinned reviewer: the run intentionally proceeds without a
+    // reviewer (recorded review_outcome='required_unmet'), which is a withheld review, not a substituted one.
+    const reviewerMismatch = (reviewerRow?.id ?? null) !== (task.assignedReviewerAgentId ?? null);
+    const reviewerWithheldByForcedPolicy = reviewPlan.forced && reviewerRow == null;
     if (
       primaryRow.id !== task.assignedPrimaryAgentId ||
-      (reviewerRow?.id ?? null) !== (task.assignedReviewerAgentId ?? null)
+      (reviewerMismatch && !reviewerWithheldByForcedPolicy)
     ) {
       throw new AppError('run_invalid_state', 'Assignment integrity check failed: executing agents differ from the assigned employees.');
     }
@@ -635,6 +665,11 @@ export async function startRun(
         reviewerProvider: reviewerRow?.provider ?? null,
         modelTier: task.modelTier,
         flagshipCategory: task.flagshipCategory,
+        requestedMode: reviewPlan.requestedMode,
+        effectiveMode: reviewPlan.effectiveMode,
+        reviewRequired: reviewPlan.required,
+        reviewPolicyReason: reviewPlan.reason,
+        reviewForced: reviewPlan.forced,
       },
     });
     await writeAudit(tx, ctx, {
@@ -662,7 +697,7 @@ export async function startRun(
       });
     }
 
-    return { task, runId, primaryRow, reviewerRow, assembled };
+    return { task, runId, primaryRow, reviewerRow, assembled, reviewRequired: reviewPlan.required };
   });
 
   return executeAndFinalize(
@@ -675,6 +710,7 @@ export async function startRun(
       reviewerRow: preflight.reviewerRow,
       assembled: preflight.assembled,
       provenanceExecutedAt: nowIso,
+      reviewRequired: preflight.reviewRequired,
     },
     live,
     jobCtx,
@@ -746,6 +782,8 @@ export async function resumeRun(
       reviewerRow: prep.reviewerRow,
       assembled: prep.assembled,
       provenanceExecutedAt: prep.run.createdAt.toISOString(),
+      // Fail-safe: a run row predating this field (null) resumes as review-REQUIRED, never as waived.
+      reviewRequired: prep.run.reviewRequired ?? true,
     },
     live,
     jobCtx,
@@ -763,7 +801,7 @@ async function executeAndFinalize(
   jobCtx: RunJobContext | undefined,
 ): Promise<RunOutcome> {
   const env = serverEnv();
-  const { task, runId, executionAttemptId, primaryRow, reviewerRow, assembled, provenanceExecutedAt } = params;
+  const { task, runId, executionAttemptId, primaryRow, reviewerRow, assembled, provenanceExecutedAt, reviewRequired } = params;
   const taskId = task.id;
 
   // Per-step persistence, IDEMPOTENT + checkpoint-writing. The run_steps insert is guarded by the
@@ -856,6 +894,17 @@ async function executeAndFinalize(
           entityId: runId,
           detail: { stepNumber: record.stepNumber, kind: record.kind, provider: record.response.provider, model: record.response.model },
         });
+      } else if (!record.succeeded) {
+        // Answer-routing Phase 1 — a cleanly-FAILED provider step must RESOLVE its dispatch intent so the next
+        // dispatch guard does not falsely see state='dispatching' and raise ReconciliationRequiredSignal. The
+        // engine records a failed step ONLY for a PROVABLY not-executed ProviderError (ambiguous outcomes
+        // propagate as a signal and never reach persistStep), so clearing the intent here is safe and mirrors
+        // the extraction not-executed path. Without this, a failed REQUIRED review is mis-routed to
+        // reconciliation instead of completing as an UNREVIEWED DRAFT (review_outcome='required_unmet').
+        await tx
+          .update(runs)
+          .set({ reliabilityState: 'result_checkpointed', updatedAt: new Date() })
+          .where(and(eq(runs.id, runId), nonterminalReliability()));
       }
     });
     await testPoint('after-checkpoint', record.stepNumber);
@@ -950,6 +999,22 @@ async function executeAndFinalize(
         inputTokens: r.inputTokens ?? 0,
         outputTokens: r.outputTokens ?? 0,
       };
+    },
+    loadConclusiveFailure: async (stepNumber): Promise<{ errorMessage: string } | null> => {
+      // A durable CONCLUSIVE failure = a persisted run_steps row for this step with succeeded=false. The engine
+      // records such a row ONLY for a provably not-executed provider rejection (ambiguous outcomes never reach
+      // persistStep). Replaying it on resume prevents a hidden same-step re-dispatch whose success would collide
+      // with this row (onConflictDoNothing) and be dropped from checkpoints + usage.
+      const rows = await withTenant(ctx, (tx) =>
+        tx
+          .select({ succeeded: runSteps.succeeded, errorMessage: runSteps.errorMessage })
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepNumber, stepNumber)))
+          .limit(1),
+      );
+      const r = rows[0];
+      if (!r || r.succeeded !== false) return null;
+      return { errorMessage: r.errorMessage ?? 'prior conclusive provider failure' };
     },
     guardDispatch: async (stepNumber, kind): Promise<void> => {
       await testPoint('before-dispatch', stepNumber);
@@ -1254,6 +1319,7 @@ async function executeAndFinalize(
         freshnessComparison: assembled.freshnessComparison,
         primary: primaryForRun,
         reviewer: reviewerRow ? toEngineAgent(reviewerRow, task.modelTier) : null,
+        reviewRequired,
         perCallTimeoutMs: env.PROVIDER_TIMEOUT_MS,
         runDeadline: Date.now() + env.RUN_TIMEOUT_MS,
         provenanceExecutedAt,
@@ -1644,6 +1710,9 @@ async function finalizeCompleted(
       .set({
         status: 'completed',
         consolidatedResult: result.consolidated,
+        // Answer-routing Phase 1 — the ACTUAL review outcome (reviewed|omitted|required_unmet|optional_degraded).
+        // `required_unmet` ⇒ consolidatedResult above is an UNREVIEWED DRAFT (banner embedded by the engine).
+        reviewOutcome: result.reviewOutcome,
         reliabilityState: 'completed',
         finishedAt: new Date(),
         updatedAt: new Date(),
@@ -1655,7 +1724,7 @@ async function finalizeCompleted(
       action: 'run.completed',
       entityType: 'run',
       entityId: runId,
-      detail: { steps: result.steps.length, proposedActions: result.proposedActions.length, delegationsCreated, artifactsCreated, questionsAsked, finalStatus },
+      detail: { steps: result.steps.length, proposedActions: result.proposedActions.length, delegationsCreated, artifactsCreated, questionsAsked, finalStatus, reviewOutcome: result.reviewOutcome },
     });
     await writeAudit(tx, ctx, {
       action: 'run.finalization_completed',
