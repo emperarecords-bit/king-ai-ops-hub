@@ -52,6 +52,22 @@ function optInt(v: string | undefined): number | undefined {
   return Number.isFinite(n) ? n : NaN;
 }
 
+/**
+ * Resolve the applied-migration count. When the pins require an explicit value (staging), a missing APPLIED_COUNT
+ * fails closed rather than defaulting — the applied state must be a deliberate runtime input, never a baked
+ * assumption that staging is already migrated to some prefix.
+ */
+function resolveAppliedCount(applied: number | undefined, pins: ReleasePins): number {
+  if (applied !== undefined) return applied;
+  if (pins.requireExplicitAppliedCount) {
+    throw new StagingReceiptInputError('APPLIED_COUNT: an explicit applied-migration count is required (never defaulted for this environment)');
+  }
+  if (pins.defaultAppliedCount === undefined) {
+    throw new StagingReceiptInputError('APPLIED_COUNT: required (no default applied-migration count is configured)');
+  }
+  return pins.defaultAppliedCount;
+}
+
 export function inputsFromEnv(env: NodeJS.ProcessEnv, pins: ReleasePins = STAGING_PINS): StagingReceiptInputs {
   const method = requireEnv('SNAPSHOT_DISCOVERY_METHOD', env.SNAPSHOT_DISCOVERY_METHOD);
   let discovery: SnapshotDiscoveryInput;
@@ -72,6 +88,7 @@ export function inputsFromEnv(env: NodeJS.ProcessEnv, pins: ReleasePins = STAGIN
   const stored = optInt(env.STORED_SIZE_BYTES);
   const applied = optInt(env.APPLIED_COUNT);
   return {
+    // appliedCount resolved below so the staging path can REQUIRE an explicit value (never a baked prefix).
     sourceCommit: env.SOURCE_COMMIT ?? '',
     targetImageRef: env.TARGET_IMAGE_REF ?? '',
     targetImageDigest: env.TARGET_IMAGE_DIGEST ?? '',
@@ -87,7 +104,7 @@ export function inputsFromEnv(env: NodeJS.ProcessEnv, pins: ReleasePins = STAGIN
     expiresAt: env.EXPIRES_AT ?? '',
     keyId: env.KEY_ID ?? '',
     discovery,
-    appliedCount: applied === undefined ? pins.defaultAppliedCount : applied,
+    appliedCount: resolveAppliedCount(applied, pins),
     assertPortableMigrationSetHash: env.ASSERT_PORTABLE_MIGRATION_SET_HASH || undefined,
     assertRuntimeMigrationSetHash: env.ASSERT_RUNTIME_MIGRATION_SET_HASH || undefined,
   };

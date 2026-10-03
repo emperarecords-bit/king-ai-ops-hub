@@ -57,7 +57,13 @@ export interface ReleasePins {
   readonly providerAdapterVersion: typeof FLY_VOLUMES_ADAPTER_VERSION;
   readonly expectedMigrationEndpoint: string;
   readonly expectedCommittedMigrationCount: number;
-  readonly defaultAppliedCount: number;
+  /** Fallback applied-migration count when the operator omits APPLIED_COUNT. OPTIONAL: an environment that must
+   *  never presume a migrated prefix (see `requireExplicitAppliedCount`) omits it, so a missing APPLIED_COUNT
+   *  fails closed instead of silently defaulting. */
+  readonly defaultAppliedCount?: number;
+  /** When true, the CLI REQUIRES an explicit APPLIED_COUNT and never falls back to `defaultAppliedCount` — the
+   *  applied state must be a deliberate runtime input, not a baked assumption. */
+  readonly requireExplicitAppliedCount?: boolean;
 }
 
 export const STAGING_PINS: ReleasePins = {
@@ -68,13 +74,14 @@ export const STAGING_PINS: ReleasePins = {
   databaseIdentity: 'king_ai_ops_hub_staging',
   snapshotProvider: FLY_VOLUMES_PROVIDER,
   providerAdapterVersion: FLY_VOLUMES_ADAPTER_VERSION,
-  // Bumped 2026-08-22 for 0068 (knowledge_pinned — pinned knowledge reaches every run). STAGING_PINS binds to
-  // the PINNED 0068 staging-release source (a moving HEAD must not redefine it), so it is NOT bumped for a new
-  // migration the way PRODUCTION_PINS is — see tests/unit/gbackup-sign-staging-receipt.test.ts.
-  expectedMigrationEndpoint: '0068_knowledge_pinned',
-  expectedCommittedMigrationCount: 69,
-  /** Staging deployed through 0067; 0068 is the one pending. */
-  defaultAppliedCount: 68,
+  // Bumped 2026-10-03 to the current reviewed staging target 0077_chunky_owl / 78 committed migrations (the same
+  // migration set PRODUCTION_PINS already binds). The endpoint/count are a fail-closed tripwire: a source tree
+  // whose endpoint/count differs is rejected in deriveMigrationFacts. The actual staging APPLIED_COUNT is NOT
+  // baked here — staging must pass it as an explicit runtime input (requireExplicitAppliedCount), so the signer
+  // never presumes staging is already migrated to some prefix. See tests/unit/gbackup-sign-staging-receipt.test.ts.
+  expectedMigrationEndpoint: '0077_chunky_owl',
+  expectedCommittedMigrationCount: 78,
+  requireExplicitAppliedCount: true,
 } as const;
 
 /** Gate defaults (mirror scripts/migrate.ts buildGateConfigFromEnv): used for the producer's self-verification. */
