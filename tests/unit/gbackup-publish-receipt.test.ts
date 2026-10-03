@@ -92,7 +92,7 @@ function expectation(over: Partial<ReceiptV2Expectation> = {}): ReceiptV2Expecta
   return {
     environment: 'staging', targetApplication: 'king-ai-ops-hub-staging', databaseApp: 'king-ai-hub-db-staging',
     sourceVolumeId: 'vol_4m3kmknl059qpd6v', databaseSystemIdentifier: DBID, snapshotProvider: 'fly-volumes', providerAdapterVersion: 'fly-volumes.v1',
-    minRetentionDays: 7, maxSnapshotAgeMs: 30 * 60 * 1000, sourceCommit: SRC, targetImageRef: REF, deploymentNonce: NONCE,
+    minRetentionDays: 7, maxSnapshotAgeMs: 30 * 60 * 1000, sourceCommit: SRC, expectedRegistryNamespace: 'registry.fly.io/king-ai-ops-hub-staging', deploymentNonce: NONCE,
     portableMigrationSetHash: PORTABLE, runtimeMigrationSetHash: RUNTIME, pendingMigrations: PENDING,
     migrationStartedAt: NOW(), supportedSchemaVersions: new Set(['2']), supportedAlgorithms: new Set(['ed25519']), keyStore: keyStore(), ...over,
   };

@@ -13,7 +13,9 @@ const PEM = kp.publicKey.export({ type: 'spki', format: 'pem' }).toString();
 const NONCE = 'deadbeefdeadbeefdeadbeefdeadbeef';
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 const DBID = '7300338420798239475';
-const REF = 'registry.fly.io/king-ai-ops-hub-staging:deployment-01ABC';
+const NS = 'registry.fly.io/king-ai-ops-hub-staging';
+// Model A: the SIGNED receipt ref must itself be immutable (digest-bound), consistent with targetImageDigest, in NS.
+const REF = `registry.fly.io/king-ai-ops-hub-staging:deployment-01ABC@${DIGEST}`;
 
 const store = () => { const l = loadReceiptKeyBundle([{ keyId: 'test-dbr-001', algorithm: 'ed25519', publicKeyPem: PEM, purpose: 'deployment_backup_receipt', status: 'active' }]); if (!l.ok) throw new Error(l.code); return l.store; };
 
@@ -51,7 +53,7 @@ function exp(over: Partial<ReceiptV2Expectation> = {}): ReceiptV2Expectation {
   return {
     environment: 'staging', targetApplication: 'king-ai-ops-hub-staging', databaseApp: 'king-ai-hub-db-staging',
     sourceVolumeId: 'vol_4m3kmknl059qpd6v', databaseSystemIdentifier: DBID, snapshotProvider: 'fly-volumes', providerAdapterVersion: 'fly-volumes.v1',
-    minRetentionDays: 7, maxSnapshotAgeMs: 30 * 60 * 1000, sourceCommit: 'd2805ffab69bb83926a50d0422d65823b521138f', targetImageRef: REF,
+    minRetentionDays: 7, maxSnapshotAgeMs: 30 * 60 * 1000, sourceCommit: 'd2805ffab69bb83926a50d0422d65823b521138f', expectedRegistryNamespace: NS,
     deploymentNonce: NONCE, portableMigrationSetHash: 'b'.repeat(64), runtimeMigrationSetHash: 'c'.repeat(64),
     pendingMigrations: [{ migrationIndex: 54, migrationTag: '0054_example', migrationPath: 'drizzle/0054_example.sql', byteLength: 100, sha256: 'e'.repeat(64) }],
     migrationStartedAt: new Date('2026-08-01T11:50:20.000Z'),
@@ -65,8 +67,12 @@ describe('B1 receipt-v2 verifier — happy path, signature, key policy', () => {
     const r = verifyReceiptV2Parsed(sign(buildSigned()), exp());
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect(r.imageTrust.image_ref_verified_runtime).toBe(true);
-      expect(r.imageTrust.image_digest_verified_controller).toBe(false);
+      // Model A honest diagnostics: the full ref is NOT runtime-verified; namespace IS; the signed ref is
+      // digest-bound; the ref→digest binding was proven controller-side; the digest is not runtime-observable.
+      expect(r.imageTrust.image_ref_verified_runtime).toBe(false);
+      expect(r.imageTrust.image_namespace_verified_runtime).toBe(true);
+      expect(r.imageTrust.image_ref_digest_bound_in_signed_receipt).toBe(true);
+      expect(r.imageTrust.image_digest_verified_controller).toBe(true);
       expect(r.imageTrust.image_digest_signed_but_not_runtime_observable).toBe(true);
     }
   });
@@ -142,12 +148,21 @@ describe('B1 receipt-v2 verifier — provider evidence + identity', () => {
     expect(codeOf(verifyReceiptV2Parsed(sign(buildSigned({ pendingMigrations: [] })), exp()))).toBe('pending_migration_mismatch');
     expect(codeOf(verifyReceiptV2Parsed(sign(buildSigned()), exp({ pendingMigrations: [] })))).toBe('pending_migration_mismatch');
   });
-  it('nonce / image-ref / source-commit / migration-hash / pending mismatches rejected', () => {
+  it('nonce / source-commit / migration-hash / pending mismatches rejected', () => {
     expect(codeOf(verifyReceiptV2Parsed(sign(buildSigned()), exp({ deploymentNonce: 'cafebabecafebabecafebabecafebabe' })))).toBe('nonce_mismatch');
-    expect(codeOf(verifyReceiptV2Parsed(sign(buildSigned()), exp({ targetImageRef: `${REF}-x` })))).toBe('image_ref_mismatch');
     expect(codeOf(verifyReceiptV2Parsed(sign(buildSigned()), exp({ sourceCommit: 'f'.repeat(40) })))).toBe('source_commit_mismatch');
     expect(codeOf(verifyReceiptV2Parsed(sign(buildSigned()), exp({ runtimeMigrationSetHash: 'd'.repeat(64) })))).toBe('migration_set_mismatch');
     expect(codeOf(verifyReceiptV2Parsed(sign(buildSigned()), exp({ pendingMigrations: [{ migrationIndex: 54, migrationTag: '0054_example', migrationPath: 'drizzle/0054_example.sql', byteLength: 100, sha256: '1'.repeat(64) }] })))).toBe('pending_migration_mismatch');
+  });
+  it('Model A step-10: the SIGNED ref must be digest-bound, consistent with targetImageDigest, and in the app namespace', () => {
+    // tag-only (not digest-bound) signed ref → rejected
+    expect(codeOf(verifyReceiptV2Parsed(sign(buildSigned({ targetImageRef: 'registry.fly.io/king-ai-ops-hub-staging:deployment-01ABC' })), exp()))).toBe('image_ref_mismatch');
+    // signed ref digest != signed targetImageDigest → rejected
+    expect(codeOf(verifyReceiptV2Parsed(sign(buildSigned({ targetImageRef: `registry.fly.io/king-ai-ops-hub-staging:deployment-01ABC@sha256:${'b'.repeat(64)}` })), exp()))).toBe('image_ref_mismatch');
+    // signed ref in the WRONG application registry namespace → rejected (digest still matches)
+    expect(codeOf(verifyReceiptV2Parsed(sign(buildSigned({ targetImageRef: `registry.fly.io/king-ai-ops-hub-prod:deployment-01ABC@${DIGEST}` })), exp()))).toBe('image_ref_mismatch');
+    // a digest-bound ref WITHOUT any tag, in the right namespace, is accepted
+    expect(verifyReceiptV2Parsed(sign(buildSigned({ targetImageRef: `registry.fly.io/king-ai-ops-hub-staging@${DIGEST}` })), exp()).ok).toBe(true);
   });
 });
 
