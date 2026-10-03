@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import {
   type ReleasePins,
   STAGING_PINS,
@@ -137,6 +137,27 @@ export async function runPublishCli(
   log(`Published ${pins.environment} receipt ${result.receiptId} — ${result.status}`);
   log(`  url=${result.url}`);
   log(`  sha256=${result.receiptSha256} pending=${result.pendingMigrationCount} nonce=${result.deploymentNonce}`);
+
+  // Optional sanitized publication evidence (NON-SECRET only — safe to upload as a CI artifact).
+  const evidencePath = env.PUBLISH_EVIDENCE_FILE?.trim();
+  if (evidencePath) {
+    const evidence = {
+      status: result.status,
+      publicUrl: result.url,
+      objectKey: result.objectKey,
+      receiptId: result.receiptId,
+      receiptSha256: result.receiptSha256,
+      receiptCanonicalHash: result.receiptCanonicalHash,
+      byteLength: result.byteLength,
+      sourceCommit: inputs.sourceCommit,
+      targetImageDigest: inputs.targetImageDigest,
+      deploymentNonce: result.deploymentNonce,
+      pendingMigrationCount: result.pendingMigrationCount,
+      publishedAtUtc: result.publishedAt,
+    };
+    writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, 'utf8');
+    log(`  evidence=${evidencePath}`);
+  }
   return result;
 }
 

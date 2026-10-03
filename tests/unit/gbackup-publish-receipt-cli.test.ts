@@ -152,6 +152,24 @@ describe('publish-receipt CLI — happy path (fake store/fetcher)', () => {
     const r2 = await runPublishCli(env, process.cwd(), () => {}, { store, fetcher: fetcherFor(store.map), now: PUBLISH_NOW });
     expect(r2.status).toBe('already_present_identical');
   }, HEAVY);
+
+  it('writes sanitized publication evidence (non-secret only) when PUBLISH_EVIDENCE_FILE is set', async () => {
+    const store = new FakeStore();
+    const evidenceFile = join(OUT_DIR, 'evidence.json');
+    const env = { ...baseEnv(SIGNED.receiptFile, SIGNED.trustBundleJson), PUBLISH_EVIDENCE_FILE: evidenceFile };
+    await runPublishCli(env, process.cwd(), () => {}, { store, fetcher: fetcherFor(store.map), now: PUBLISH_NOW });
+    const raw = readFileSync(evidenceFile, 'utf8');
+    const ev = JSON.parse(raw);
+    expect(ev.status).toBe('created');
+    expect(ev.publicUrl).toBe(EXPECTED_URL);
+    expect(ev.deploymentNonce).toBe(NONCE);
+    expect(ev.sourceCommit).toBe(STAGING_SOURCE_COMMIT);
+    expect(ev.targetImageDigest).toBe(DIGEST);
+    expect(typeof ev.receiptSha256).toBe('string');
+    expect(ev.publishedAtUtc).toMatch(/Z$/);
+    // No credential / secret material may appear in the evidence.
+    expect(/SECRET|ACCESS_KEY|PRIVATE KEY/i.test(raw)).toBe(false);
+  }, HEAVY);
 });
 
 describe('publish-receipt CLI — fail-closed', () => {
