@@ -24,6 +24,9 @@ import { readRuntimeMigrationSet } from '../../scripts/backup/runtime-migration-
  */
 
 const HEAVY_TIMEOUT = 60_000; // portable git-blob manifest + runtime hashing over 61 migrations is disk/git-bound
+// `defaultAppliedCount` is optional on ReleasePins (staging omits it to force an explicit APPLIED_COUNT); production
+// defines it, so narrow it once here. The `?? 0` fallback is unreachable for PRODUCTION_PINS.
+const PROD_APPLIED_COUNT = PRODUCTION_PINS.defaultAppliedCount ?? 0;
 
 function makeInputs(sourceCommit: string, nonceByte: string, snapshotId: string): StagingReceiptInputs {
   const now = Date.now();
@@ -45,7 +48,7 @@ function makeInputs(sourceCommit: string, nonceByte: string, snapshotId: string)
     expiresAt: iso(now + 3_600_000),
     keyId: 'prod-dbr-2026-08',
     discovery: { method: 'create-response-id', createResponseSnapshotId: snapshotId, listedSnapshotId: snapshotId },
-    appliedCount: PRODUCTION_PINS.defaultAppliedCount,
+    appliedCount: PROD_APPLIED_COUNT,
   };
 }
 
@@ -67,7 +70,7 @@ describe('production pins — consistency with the repository', () => {
     // Production deployed through 0067 on 2026-08-18 (68 applied); the default applied
     // count must never exceed the committed set (that would mean a pin typo).
     expect(PRODUCTION_PINS.defaultAppliedCount).toBe(68);
-    expect(PRODUCTION_PINS.defaultAppliedCount).toBeLessThanOrEqual(PRODUCTION_PINS.expectedCommittedMigrationCount);
+    expect(PROD_APPLIED_COUNT).toBeLessThanOrEqual(PRODUCTION_PINS.expectedCommittedMigrationCount);
   });
 });
 
@@ -84,7 +87,7 @@ describe('production pins — the shared producer signs + self-verifies a produc
     expect(out.receipt.keyId).toBe('prod-dbr-2026-08');
     // Pending set = committed set minus what production has already applied.
     expect(out.derived.pendingMigrations.length).toBe(
-      PRODUCTION_PINS.expectedCommittedMigrationCount - PRODUCTION_PINS.defaultAppliedCount,
+      PRODUCTION_PINS.expectedCommittedMigrationCount - PROD_APPLIED_COUNT,
     );
     expect(out.derived.endpointTag).toBe(PRODUCTION_PINS.expectedMigrationEndpoint);
     // Self-verification already ran inside produceStagingReceipt (it throws on failure) — reaching here IS the proof.
@@ -98,7 +101,7 @@ describe('production pins — the shared producer signs + self-verifies a produc
     const keyLoad = loadReceiptKeyBundle([out.publicTrustEntry]);
     if (!keyLoad.ok) throw new Error('trust load failed');
     const exp = {
-      ...buildSelfVerifyExpectation(inputs, deriveMigrationFacts({ runtimeDir: process.cwd(), gitCommitish: head }, PRODUCTION_PINS.defaultAppliedCount, PRODUCTION_PINS), keyLoad.store, PRODUCTION_PINS),
+      ...buildSelfVerifyExpectation(inputs, deriveMigrationFacts({ runtimeDir: process.cwd(), gitCommitish: head }, PROD_APPLIED_COUNT, PRODUCTION_PINS), keyLoad.store, PRODUCTION_PINS),
       allowProductionEnvironment: false,
     };
     const result = verifyReceiptV2Parsed(out.receipt, exp);
