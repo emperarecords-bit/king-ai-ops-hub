@@ -17,13 +17,25 @@ import {
   computeNormalizedProviderEvidenceDigest,
 } from './provider-fly-volumes';
 import { type ReceiptKeyStore } from './receipt-key-bundle';
+import { imageRepositoryNamespace } from './receipt-v2-controller';
 import { parseStrictJsonBuffer } from './strict-json';
 
 /**
  * G-Backup-B1 — RUNTIME receipt-v2 verifier. Verify-only. Time is derived from ONE authoritative input,
  * `migrationStartedAt`, plus the signed receipt timestamps — no independent host clock. The signed
  * `targetImageDigest` is CONTROLLER-established evidence covered by the signature and is NOT re-resolved at runtime.
+ *
+ * Image identity (Model A, 2026-10-03): on Fly the only runtime-observable image identity is the MUTABLE
+ * `FLY_IMAGE_REF` deployment tag (`registry.fly.io/<app>:deployment-<id>`), which can never be digest-bound nor
+ * equal to the controller-signed build reference. So the verifier does NOT compare a runtime ref to the receipt.
+ * Instead the SIGNED receipt reference must itself be immutable (digest-bound), internally consistent with the
+ * signed `targetImageDigest`, and sit in the expected application registry namespace. The ref→digest relationship
+ * was proven CONTROLLER-side before publish/deploy (receipt-v2-controller.validateControllerImageBinding); the
+ * mutable runtime `FLY_IMAGE_REF` is namespace-checked by the gate and otherwise diagnostic only.
  */
+
+/** A digest-bound image reference suffix: `@sha256:<64 hex>`. */
+const SIGNED_REF_DIGEST_SUFFIX = /^@sha256:[0-9a-f]{64}$/;
 
 export type ReceiptV2FailCode =
   | 'json_invalid'
@@ -54,8 +66,15 @@ export type ReceiptV2FailCode =
   | 'production_rejected';
 
 export interface ImageTrustDiagnostics {
+  /** The full image REFERENCE is NOT verified at runtime — Fly exposes only a mutable deployment-tag FLY_IMAGE_REF. */
   readonly image_ref_verified_runtime: boolean;
+  /** The runtime namespace (FLY_IMAGE_REF repository) IS checked against the expected app registry (by the gate). */
+  readonly image_namespace_verified_runtime: boolean;
+  /** The SIGNED receipt reference is itself immutable (digest-bound), verified here. */
+  readonly image_ref_digest_bound_in_signed_receipt: boolean;
+  /** The ref→digest relationship was proven CONTROLLER-side before publish/deploy (and is covered by the signature). */
   readonly image_digest_verified_controller: boolean;
+  /** The digest is signed evidence but not independently re-resolvable on the Machine. */
   readonly image_digest_signed_but_not_runtime_observable: boolean;
 }
 
@@ -81,8 +100,13 @@ export interface ReceiptV2Expectation {
   readonly minRetentionDays: number;
   readonly maxSnapshotAgeMs: number;
   readonly sourceCommit: string;
-  /** Runtime-observed image reference (FLY_IMAGE_REF). Digest is NOT re-resolved at runtime. */
-  readonly targetImageRef: string;
+  /**
+   * The application's registry namespace (`registry.fly.io/<app>`). The SIGNED receipt's `targetImageRef` must be
+   * digest-bound, internally consistent with its signed `targetImageDigest`, and sit in THIS namespace. The mutable
+   * runtime `FLY_IMAGE_REF` is NOT compared to the receipt (the gate namespace-checks it separately); the image
+   * digest is controller-established evidence covered by the signature and is not re-resolved on the Machine.
+   */
+  readonly expectedRegistryNamespace: string;
   readonly deploymentNonce: string;
   readonly portableMigrationSetHash: string;
   readonly runtimeMigrationSetHash: string;
@@ -108,7 +132,13 @@ function equalPending(a: readonly PendingMigrationEntry[], b: readonly PendingMi
   return true;
 }
 
-const IMAGE_TRUST: ImageTrustDiagnostics = { image_ref_verified_runtime: true, image_digest_verified_controller: false, image_digest_signed_but_not_runtime_observable: true };
+const IMAGE_TRUST: ImageTrustDiagnostics = {
+  image_ref_verified_runtime: false,
+  image_namespace_verified_runtime: true,
+  image_ref_digest_bound_in_signed_receipt: true,
+  image_digest_verified_controller: true,
+  image_digest_signed_but_not_runtime_observable: true,
+};
 
 export function verifyReceiptV2Parsed(input: unknown, exp: ReceiptV2Expectation): ReceiptV2VerifyResult {
   // 3. schema (canonical encodings + pending canonical order + discovery-evidence shape enforced here)
@@ -161,8 +191,20 @@ export function verifyReceiptV2Parsed(input: unknown, exp: ReceiptV2Expectation)
   // 9. deployment nonce
   if (r.deploymentNonce !== exp.deploymentNonce) return fail(9, 'nonce_mismatch', 'deploymentNonce');
 
-  // 10. image REFERENCE only (runtime-observable). Digest is controller evidence, covered by the signature.
-  if (r.targetImageRef !== exp.targetImageRef) return fail(10, 'image_ref_mismatch', 'targetImageRef');
+  // 10. Image identity (Model A). The mutable runtime FLY_IMAGE_REF is NOT compared here (the gate namespace-checks
+  //     it). The SIGNED reference must itself be immutable (digest-bound), carry a digest equal to the signed
+  //     targetImageDigest, and sit in the expected application registry namespace. The ref→digest binding is
+  //     controller-established evidence covered by the signature; the digest is not re-resolved on the Machine.
+  const atIdx = r.targetImageRef.lastIndexOf('@');
+  if (atIdx < 0 || !SIGNED_REF_DIGEST_SUFFIX.test(r.targetImageRef.slice(atIdx))) {
+    return fail(10, 'image_ref_mismatch', 'signed targetImageRef is not digest-bound');
+  }
+  if (r.targetImageRef.slice(atIdx + 1) !== r.targetImageDigest) {
+    return fail(10, 'image_ref_mismatch', 'signed targetImageRef digest does not equal targetImageDigest');
+  }
+  if (imageRepositoryNamespace(r.targetImageRef) !== exp.expectedRegistryNamespace) {
+    return fail(10, 'image_ref_mismatch', 'signed targetImageRef is not in the expected application registry namespace');
+  }
 
   // 11. source commit
   if (r.sourceCommit !== exp.sourceCommit) return fail(11, 'source_commit_mismatch', 'sourceCommit');

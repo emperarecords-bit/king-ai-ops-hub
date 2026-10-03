@@ -340,7 +340,9 @@ export function buildSelfVerifyExpectation(
     minRetentionDays: SELF_VERIFY_MIN_RETENTION_DAYS,
     maxSnapshotAgeMs: SELF_VERIFY_MAX_SNAPSHOT_AGE_MS,
     sourceCommit: inputs.sourceCommit,
-    targetImageRef: inputs.targetImageRef,
+    // Model A: the runtime no longer compares a mutable FLY_IMAGE_REF to the receipt; the SIGNED ref must itself be
+    // digest-bound, consistent with targetImageDigest, and in this namespace. Self-verify mirrors the release gate.
+    expectedRegistryNamespace: `registry.fly.io/${pins.targetApplication}`,
     deploymentNonce: inputs.deploymentNonce,
     portableMigrationSetHash: derived.portableMigrationSetHash,
     runtimeMigrationSetHash: derived.runtimeMigrationSetHash,

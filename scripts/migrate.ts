@@ -75,6 +75,9 @@ function buildGateConfigFromEnv(): GateConfig {
     targetApplication: env.GBACKUP_TARGET_APPLICATION ?? env.FLY_APP_NAME,
     databaseApp: env.GBACKUP_DATABASE_APP,
     sourceVolumeId: env.GBACKUP_SOURCE_VOLUME_ID,
+    // RUNTIME-OBSERVED image identity. On Fly this is the MUTABLE deployment tag; the gate uses it for a namespace
+    // check + diagnostics only (Model A) — it is never compared to the signed receipt. The immutable digest-bound
+    // identity lives in the signed receipt, verified by the B1 verifier.
     expectedImageRef: env.FLY_IMAGE_REF,
     minRetentionDays: intEnv(env.GBACKUP_MIN_RETENTION_DAYS, 7),
     maxSnapshotAgeMs: intEnv(env.GBACKUP_MAX_SNAPSHOT_AGE_MS, 30 * 60 * 1000),

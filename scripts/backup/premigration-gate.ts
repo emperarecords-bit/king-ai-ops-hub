@@ -14,6 +14,7 @@ import {
   readRuntimeMigrationSet,
 } from './runtime-migration-set';
 import { isCanonicalDeploymentNonce, isNonZeroCanonicalUint64Decimal } from './receipt-v2-encoding';
+import { imageRepositoryNamespace } from './receipt-v2-controller';
 
 /**
  * G-Backup-B2a — RELEASE-MACHINE pre-migration verification gate (consumer only).
@@ -195,6 +196,13 @@ export interface GateConfig {
   readonly targetApplication?: string;
   readonly databaseApp?: string;
   readonly sourceVolumeId?: string;
+  /**
+   * The RUNTIME-OBSERVED image reference (`FLY_IMAGE_REF`). On Fly this is a MUTABLE deployment tag
+   * (`registry.fly.io/<app>:deployment-<id>`) that is neither digest-bound nor equal to the controller-signed build
+   * ref, so it is NOT compared to the receipt. On enforced environments the gate only requires its repository
+   * namespace to equal `registry.fly.io/<targetApplication>`; it is otherwise diagnostic. The immutable,
+   * digest-bound identity lives in the SIGNED receipt and is verified by the B1 verifier.
+   */
   readonly expectedImageRef?: string;
   readonly minRetentionDays: number;
   readonly maxSnapshotAgeMs: number;
@@ -263,10 +271,21 @@ function buildReceiptExpectation(deps: GateDeps, source: ReleaseSourceInputs, sy
   const targetApplication = requireConfig(c.targetApplication, 'targetApplication');
   const databaseApp = requireConfig(c.databaseApp, 'databaseApp');
   const sourceVolumeId = requireConfig(c.sourceVolumeId, 'sourceVolumeId');
-  const targetImageRef = requireConfig(c.expectedImageRef, 'expectedImageRef');
-  // On staging/production the accepted runtime identity MUST be immutable (digest-bound) and will be compared
-  // exactly against the signed receipt by the B1 verifier (image_ref_mismatch). Tag-only refs are mutable → rejected.
-  if (isEnforced(deps.config.environment)) assertDigestBoundImageRef(targetImageRef);
+  const observedImageRef = requireConfig(c.expectedImageRef, 'expectedImageRef');
+  // The application's immutable registry namespace. On Fly the only runtime-observable image identity is the MUTABLE
+  // deployment-tag FLY_IMAGE_REF (`registry.fly.io/<app>:deployment-<id>`), which can never be digest-bound nor equal
+  // to the controller-signed build ref. So the runtime no longer requires FLY_IMAGE_REF to be digest-bound or to
+  // equal the receipt; on enforced environments it is namespace-checked (fail-closed) and otherwise diagnostic. The
+  // immutable, digest-bound identity lives in the SIGNED receipt and is verified by the B1 verifier.
+  const expectedRegistryNamespace = `registry.fly.io/${targetApplication}`;
+  if (isEnforced(deps.config.environment)) {
+    if (PLACEHOLDERS.has(observedImageRef)) {
+      throw new PreMigrationGateError('image_identity_invalid', 'runtime image identity (FLY_IMAGE_REF) is missing/placeholder');
+    }
+    if (imageRepositoryNamespace(observedImageRef) !== expectedRegistryNamespace) {
+      throw new PreMigrationGateError('image_identity_invalid', 'runtime image identity (FLY_IMAGE_REF) is not in the expected application registry namespace');
+    }
+  }
   if (!HEX_COMMIT.test(source.sourceCommit) || PLACEHOLDERS.has(source.sourceCommit)) {
     throw new PreMigrationGateError('source_identity_invalid', 'baked sourceCommit is missing/placeholder/malformed');
   }
@@ -287,7 +306,7 @@ function buildReceiptExpectation(deps: GateDeps, source: ReleaseSourceInputs, sy
     minRetentionDays: c.minRetentionDays,
     maxSnapshotAgeMs: c.maxSnapshotAgeMs,
     sourceCommit: source.sourceCommit,
-    targetImageRef,
+    expectedRegistryNamespace,
     deploymentNonce: nonce,
     portableMigrationSetHash: source.portableMigrationSetHash,
     runtimeMigrationSetHash: source.runtimeSet.runtimeMigrationSetHash,

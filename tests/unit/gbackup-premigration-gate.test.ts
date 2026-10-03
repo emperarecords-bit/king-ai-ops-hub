@@ -268,25 +268,55 @@ describe('B2a gate — baked source identity is fatal on staging when missing/pl
   });
 });
 
-// -- immutable digest-bound image identity -----------------------------------
+// -- Fly runtime image identity (Model A: namespace-checked, not digest-bound) -----------------------
 
-describe('B2a gate — staging requires an immutable digest-bound image identity', () => {
-  it('rejects tag-only / placeholder / malformed-digest identity with image_identity_invalid', async () => {
-    expect(await code(() => runPreMigrationGate(deps({ config: { expectedImageRef: TAG_ONLY } })))).toBe('image_identity_invalid'); // tag-only (mutable)
-    expect(await code(() => runPreMigrationGate(deps({ config: { expectedImageRef: 'UNKNOWN' } })))).toBe('image_identity_invalid'); // placeholder
-    expect(await code(() => runPreMigrationGate(deps({ config: { expectedImageRef: 'registry.fly.io/app@sha256:deadbeef' } })))).toBe('image_identity_invalid'); // malformed digest
+describe('B2a gate — Fly runtime image identity (Model A)', () => {
+  it('REGRESSION (F incident): a mutable deployment-tag FLY_IMAGE_REF passes when the SIGNED receipt ref is digest-bound in the right namespace', async () => {
+    // FLY_IMAGE_REF = registry.fly.io/<app>:deployment-<id> (tag-only, Fly-assigned); signed receipt ref is digest-bound.
+    const v = await runPreMigrationGate(deps({ config: { expectedImageRef: TAG_ONLY } }));
+    expect(v.mode).toBe('verified');
   });
-  it('missing image identity is rejected', async () => {
+  it('a digest-bound FLY_IMAGE_REF in the right namespace is also accepted (the runtime ref is NOT compared to the receipt)', async () => {
+    const v = await runPreMigrationGate(deps({ config: { expectedImageRef: REF2 } }));
+    expect(v.mode).toBe('verified');
+  });
+  it('missing runtime image identity → config_incomplete', async () => {
     expect(await code(() => runPreMigrationGate(deps({ config: { expectedImageRef: undefined } })))).toBe('config_incomplete');
   });
-  it('a digest-bound identity that does not exactly match the receipt is rejected by the verifier', async () => {
-    expect(await verifyCode(deps({ config: { expectedImageRef: REF2 } }))).toBe('image_ref_mismatch');
+  it('placeholder / malformed / wrong-namespace runtime identity → image_identity_invalid (fail-closed)', async () => {
+    expect(await code(() => runPreMigrationGate(deps({ config: { expectedImageRef: 'UNKNOWN' } })))).toBe('image_identity_invalid'); // placeholder
+    expect(await code(() => runPreMigrationGate(deps({ config: { expectedImageRef: 'not-a-valid-ref' } })))).toBe('image_identity_invalid'); // malformed (namespace != expected)
+    expect(await code(() => runPreMigrationGate(deps({ config: { expectedImageRef: 'registry.fly.io/king-ai-ops-hub-prod:deployment-01ABC' } })))).toBe('image_identity_invalid'); // wrong app namespace
   });
-  it('local/dev tolerates a tag-only identity (enforcement is staging/production only)', async () => {
-    // local bypass path never builds the expectation; a non-bypass local run would still verify, but the digest
-    // requirement is not enforced outside staging/production — proven via assertDigestBoundImageRef directly.
+  it('the digest-bound assertion utility remains available + correct for callers that need it', () => {
     expect(() => assertDigestBoundImageRef(REF)).not.toThrow();
     expect(() => assertDigestBoundImageRef(TAG_ONLY)).toThrow(PreMigrationGateError);
+  });
+  it('the SIGNED receipt ref must itself be digest-bound, consistent with its digest, and in the app namespace', async () => {
+    expect(await verifyCode(deps({ f: fetcher(signedReceiptBytes({ targetImageRef: TAG_ONLY, targetImageDigest: DIGEST })).f }))).toBe('image_ref_mismatch'); // tag-only signed ref
+    expect(await verifyCode(deps({ f: fetcher(signedReceiptBytes({ targetImageRef: `registry.fly.io/king-ai-ops-hub-staging:deployment-01ABC@sha256:${'b'.repeat(64)}`, targetImageDigest: DIGEST })).f }))).toBe('image_ref_mismatch'); // ref digest != targetImageDigest
+    expect(await verifyCode(deps({ f: fetcher(signedReceiptBytes({ targetImageRef: `registry.fly.io/king-ai-ops-hub-prod:deployment-01ABC@${DIGEST}`, targetImageDigest: DIGEST })).f }))).toBe('image_ref_mismatch'); // signed ref wrong namespace
+  });
+  it('production parity: a prod-namespace deployment-tag FLY_IMAGE_REF passes a production-configured gate', async () => {
+    const PROD_TAG = 'registry.fly.io/king-ai-ops-hub-prod:deployment-01XYZ';
+    const PROD_REF = `registry.fly.io/king-ai-ops-hub-prod:deployment-01XYZ@${DIGEST}`;
+    const c = await verifyCode(deps({
+      config: { environment: 'production', targetApplication: 'king-ai-ops-hub-prod', expectedImageRef: PROD_TAG },
+      f: fetcher(signedReceiptBytes({ environment: 'production', targetApplication: 'king-ai-ops-hub-prod', targetImageRef: PROD_REF, targetImageDigest: DIGEST })).f,
+    }));
+    expect(c).toBeUndefined(); // full verification succeeded under production config
+  });
+  it('a stale/expired published receipt still fails freshness even with a valid image identity (Model A never resurrects spent receipts)', async () => {
+    expect(await verifyCode(deps({ config: { expectedImageRef: TAG_ONLY }, now: new Date('2026-08-01T12:40:00.000Z') }))).toBe('snapshot_time_invalid');
+  });
+  it('an old image (stale baked migration set) consuming a new receipt still fails migration-set binding', async () => {
+    const staleSource = { ...SRC, runtimeSet: { ...SRC.runtimeSet, runtimeMigrationSetHash: 'd'.repeat(64) } };
+    expect(await verifyCode(deps({ source: staleSource, config: { expectedImageRef: TAG_ONLY } }))).toBe('migration_set_mismatch');
+  });
+  it('a tampered signature still fails', async () => {
+    const obj = JSON.parse(signedReceiptBytes().toString('utf8')) as { signature: string };
+    obj.signature = (obj.signature[0] === 'A' ? 'B' : 'A') + obj.signature.slice(1); // perturb first char (stays canonical)
+    expect(await verifyCode(deps({ f: fetcher(Buffer.from(JSON.stringify(obj), 'utf8')).f }))).toBe('invalid_signature');
   });
 });
 
@@ -339,12 +369,13 @@ describe('B2a gate — receipt + key + mismatch failures carry the verifier code
     expect(await verifyCode(deps({ config: { trustBundleEntries: [trustEntry({ notAfter: '2026-07-01T00:00:00.000Z' })] } }))).toBe('expired_at_receipt');
     expect(await verifyCode(deps({ config: { trustBundleEntries: [trustEntry({ notBefore: '2026-09-01T00:00:00.000Z' })] } }))).toBe('not_yet_valid_at_receipt');
   });
-  it('source-commit / image / db-id / volume / application / nonce mismatches', async () => {
+  it('source-commit / db-id / volume / application / nonce mismatches', async () => {
     expect(await verifyCode(deps({ f: fetcher(signedReceiptBytes({ sourceCommit: 'f'.repeat(40) })).f }))).toBe('source_commit_mismatch');
-    expect(await verifyCode(deps({ config: { expectedImageRef: REF2 } }))).toBe('image_ref_mismatch'); // valid digest-bound, different image
     expect(await verifyCode(deps({ probe: probe({ sysid: '999' }) }))).toBe('db_identity_mismatch');
     expect(await verifyCode(deps({ config: { sourceVolumeId: 'vol_other' } }))).toBe('db_identity_mismatch');
-    expect(await verifyCode(deps({ config: { targetApplication: 'king-ai-ops-hub-prod' } }))).toBe('application_mismatch');
+    // A gate configured for a different app: the runtime ref must be in THAT app's namespace (so the gate reaches the
+    // verifier), where the staging receipt's targetApplication then mismatches at step 8.
+    expect(await verifyCode(deps({ config: { targetApplication: 'king-ai-ops-hub-prod', expectedImageRef: 'registry.fly.io/king-ai-ops-hub-prod:deployment-01ABC' } }))).toBe('application_mismatch');
     expect(await verifyCode(deps({ config: { deploymentNonce: 'cafebabecafebabecafebabecafebabe' } }))).toBe('nonce_mismatch');
   });
   it('migration-set and freshness mismatches', async () => {
