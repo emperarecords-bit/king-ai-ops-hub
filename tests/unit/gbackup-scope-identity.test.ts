@@ -1,7 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it , vi } from 'vitest';
+import { HEAVY_HOOK_TIMEOUT_MS, HEAVY_TEST_TIMEOUT_MS } from '../support/heavy-timeout';
+// #117: git-blob/DB-heavy test file — bounded timeout headroom under full-suite parallel contention (assertions unchanged).
+vi.setConfig({ testTimeout: HEAVY_TEST_TIMEOUT_MS, hookTimeout: HEAVY_HOOK_TIMEOUT_MS });
 import { canonicalizeV1 } from '@/lib/canonical';
 import {
   CANONICAL_REPOSITORY_ID,
