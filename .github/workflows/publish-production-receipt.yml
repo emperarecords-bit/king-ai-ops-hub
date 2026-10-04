@@ -1,0 +1,207 @@
+# Publish PRODUCTION backup receipt — MANUAL, gated publication of an ALREADY-SIGNED G-Backup receipt-v2 to the
+# production gate's WORM receipt origin (AWS S3, create-only). Gate 3 (owner-approved 2026-08-14).
+#
+# A parameter-for-parameter mirror of the proven staging publish workflow, differing ONLY in: the protected
+# `production` Environment (required reviewer + branch policy), the production target application, the production
+# signer-workflow provenance, the production receipt artifact, and the per-environment publisher CLI entry.
+#
+# This workflow is a CONSUMER: it downloads the signed receipt artifact produced by the approved PRODUCTION signing
+# workflow, verifies it locally against the explicitly-supplied release facts, and publishes it create-only to the
+# deterministic HTTPS locator, then re-fetches + re-verifies it anonymously. It NEVER holds the Ed25519 signing
+# private key, never performs a Fly / snapshot / migration / deploy action, and uses ONLY the dedicated
+# least-privilege PRODUCTION receipt-publish S3 credentials (GBACKUP_RECEIPT_S3_*) — never the application AWS_* /
+# VER-002 storage credentials, and never the staging credentials.
+#
+# Trigger: workflow_dispatch ONLY (never push / pull_request / schedule / repository_dispatch / pull_request_target).
+
+name: Publish production backup receipt
+
+on:
+  workflow_dispatch:
+    inputs:
+      signer_run_id:
+        description: 'GitHub Actions run id of the approved "Sign production backup receipt" run that produced the receipt artifact.'
+        required: true
+        type: string
+      source_commit:
+        description: 'Exact source commit the receipt binds (full 40-hex; must be an ancestor of protected main).'
+        required: true
+        type: string
+      target_image_ref:
+        description: 'Digest-bound image reference (…@sha256:<64hex>) the release will run.'
+        required: true
+        type: string
+      target_image_digest:
+        description: 'The sha256:<64hex> image digest (must match the digest bound into target_image_ref).'
+        required: true
+        type: string
+      deployment_nonce:
+        description: 'Canonical 128-bit deployment nonce (hex32 or unpadded base64url22).'
+        required: true
+        type: string
+      applied_count:
+        description: 'Migrations already applied to production (explicit; never defaulted — e.g. 69).'
+        required: true
+        type: string
+      target_application:
+        description: 'Target application — MUST be king-ai-ops-hub-prod. Staging is refused.'
+        required: true
+        default: king-ai-ops-hub-prod
+        type: string
+      database_system_identifier:
+        description: 'PostgreSQL system identifier (pg_control_system) of the production DB — nonzero uint64 decimal.'
+        required: true
+        type: string
+      snapshot_id:
+        description: 'Fly volume snapshot id (vs_…) the receipt binds (cross-check).'
+        required: true
+        type: string
+
+# Least privilege: read-only repository token + read access to Actions (to retrieve the signer artifact). No write
+# scope of any kind, no deployments, no packages, no id-token.
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: publish-production-receipt-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish-production-receipt
+    runs-on: ubuntu-latest
+    # Only ever run in the canonical repository (never a fork), and bind the production Environment so its
+    # required-reviewer + branch-policy protections (configured in repo settings) gate every run.
+    if: github.repository == 'emperarecords-bit/king-ai-ops-hub'
+    environment: production
+    timeout-minutes: 15
+    steps:
+      # 0. PRODUCTION-ONLY guard: refuse any target application other than production (staging is never reachable here).
+      - name: Guard — production target only (staging refused)
+        env:
+          TARGET_APP: ${{ inputs.target_application }}
+        run: |
+          if [ "$TARGET_APP" != "king-ai-ops-hub-prod" ]; then
+            echo "::error::target_application must be king-ai-ops-hub-prod (got '$TARGET_APP')"; exit 1
+          fi
+          echo "target_application=$TARGET_APP (production)"
+
+      # 1. TRUSTED checkout: the reviewed publisher CLI from the WORKFLOW's own revision. Full history so the
+      #    selected source commit (an ancestor of main) is present for the portable migration-set hash.
+      - name: Checkout trusted workflow code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate source_commit + verify it is an ancestor of protected main
+        env:
+          SRC: ${{ inputs.source_commit }}
+        run: |
+          if ! printf '%s' "$SRC" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::source_commit must be a full 40-hex commit SHA"; exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$SRC" origin/main; then
+            echo "::error::source_commit is not an ancestor of protected main"; exit 1
+          fi
+          echo "source_commit $SRC is an ancestor of protected main"
+
+      # 2. DATA-ONLY checkout of the SELECTED source into a separate directory. The publisher reads ONLY its
+      #    migration files to independently re-derive the migration set; no npm, scripts, or binaries run from it.
+      - name: Materialize selected source (data only — no code executed from it)
+        env:
+          SRC: ${{ inputs.source_commit }}
+        run: |
+          git worktree add --detach selected-source "$SRC"
+          echo "selected-source checked out at $SRC (drizzle files only will be read)"
+
+      - name: Setup Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies (from trusted lockfile)
+        run: npm ci
+
+      # 3. PROVENANCE: the receipt artifact MUST come from the approved PRODUCTION signing workflow run, in THIS
+      #    repo, that succeeded. Any other source (including the staging signer) is refused before download.
+      - name: Verify signer run provenance
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SIGNER_RUN_ID: ${{ inputs.signer_run_id }}
+        run: |
+          run_json=$(gh api "/repos/${{ github.repository }}/actions/runs/${SIGNER_RUN_ID}")
+          path=$(printf '%s' "$run_json" | jq -r '.path')
+          concl=$(printf '%s' "$run_json" | jq -r '.conclusion')
+          repo=$(printf '%s' "$run_json" | jq -r '.repository.full_name')
+          echo "signer run: path=$path conclusion=$concl repo=$repo"
+          if [ "$path" != ".github/workflows/sign-production-receipt.yml" ]; then
+            echo "::error::artifact run is not the approved PRODUCTION signing workflow"; exit 1
+          fi
+          if [ "$concl" != "success" ]; then
+            echo "::error::signer run did not conclude success"; exit 1
+          fi
+          if [ "$repo" != "${{ github.repository }}" ]; then
+            echo "::error::signer run is not from the canonical repository"; exit 1
+          fi
+
+      # 4. Download the signed receipt artifact from that verified run (read-only, via the built-in token).
+      - name: Download signed receipt artifact from the signer run
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: production-receipt-v2
+          run-id: ${{ inputs.signer_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: receipt-in
+
+      # 5. PUBLISH: verify-before-publish + create-only write + anonymous read-back + remote re-verify, via the
+      #    PRODUCTION CLI entry over the merged publisher. The publisher never holds the signing key. The dedicated
+      #    production receipt-publish S3 credential is the only credential here; the base URL / host / trust bundle
+      #    are the existing PUBLIC production verification config.
+      - name: Publish receipt (create-only) + anonymous read-back verification
+        env:
+          RECEIPT_FILE: receipt-in/production-receipt.v2.json
+          SOURCE_DIR: ${{ github.workspace }}/selected-source
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          TARGET_IMAGE_REF: ${{ inputs.target_image_ref }}
+          TARGET_IMAGE_DIGEST: ${{ inputs.target_image_digest }}
+          DEPLOYMENT_NONCE: ${{ inputs.deployment_nonce }}
+          APPLIED_COUNT: ${{ inputs.applied_count }}
+          DATABASE_SYSTEM_IDENTIFIER: ${{ inputs.database_system_identifier }}
+          SNAPSHOT_DISCOVERY_METHOD: create-response-id
+          CREATE_RESPONSE_SNAPSHOT_ID: ${{ inputs.snapshot_id }}
+          SNAPSHOT_ID: ${{ inputs.snapshot_id }}
+          # Existing PUBLIC verification config (non-secret) — the gate's locator base + host allowlist + trust bundle.
+          GBACKUP_RECEIPT_BASE_URL: ${{ vars.GBACKUP_RECEIPT_BASE_URL }}
+          GBACKUP_RECEIPT_HOSTS: ${{ vars.GBACKUP_RECEIPT_HOSTS }}
+          GBACKUP_RECEIPT_TRUST_BUNDLE: ${{ vars.GBACKUP_RECEIPT_TRUST_BUNDLE }}
+          # DEDICATED least-privilege PRODUCTION receipt-publish credential — NEVER the app AWS_* / VER-002 storage
+          # credential, and NEVER the staging credential.
+          GBACKUP_RECEIPT_S3_ACCESS_KEY_ID: ${{ secrets.GBACKUP_RECEIPT_S3_ACCESS_KEY_ID }}
+          GBACKUP_RECEIPT_S3_SECRET_ACCESS_KEY: ${{ secrets.GBACKUP_RECEIPT_S3_SECRET_ACCESS_KEY }}
+          GBACKUP_RECEIPT_S3_ENDPOINT: ${{ secrets.GBACKUP_RECEIPT_S3_ENDPOINT }}
+          GBACKUP_RECEIPT_S3_REGION: ${{ secrets.GBACKUP_RECEIPT_S3_REGION }}
+          GBACKUP_RECEIPT_S3_BUCKET: ${{ secrets.GBACKUP_RECEIPT_S3_BUCKET }}
+          PUBLISH_EVIDENCE_FILE: ${{ github.workspace }}/publish-out/evidence.json
+        run: |
+          mkdir -p publish-out
+          npx tsx scripts/ci/publish-production-receipt.ts
+
+      # 6. Hygiene: the sanitized evidence must carry NO credential/secret material before it is uploaded.
+      - name: Assert no credential material in the evidence
+        run: |
+          if grep -rliE "SECRET|ACCESS_KEY|PRIVATE KEY|AWS_SECRET" publish-out 2>/dev/null | grep -qz .; then
+            echo "::error::credential material found in publication evidence"; exit 1
+          fi
+          echo "evidence is free of credential material"
+
+      - name: Upload sanitized publication evidence (public material only)
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: production-publish-evidence
+          path: publish-out/evidence.json
+          if-no-files-found: error
+          retention-days: 7
