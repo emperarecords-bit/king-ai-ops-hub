@@ -4,8 +4,13 @@ import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { HEAVY_HOOK_TIMEOUT_MS, HEAVY_TEST_TIMEOUT_MS } from '../support/heavy-timeout';
 import { EXPECTED_DRIZZLE_VERSION, computeExpectedMigrations, installedDrizzleVersion } from '../../scripts/backup/migration-hash';
+// #117: git-blob/DB-heavy integration file (buildSourceManifestFromGit + migrate) — bounded timeout headroom under
+// full-suite parallel contention (assertions unchanged). This completes PR #126, which patched the fast
+// tests/unit/gbackup-detector.test.ts but missed this heavy tests/integration/ sibling.
+vi.setConfig({ testTimeout: HEAVY_TEST_TIMEOUT_MS, hookTimeout: HEAVY_HOOK_TIMEOUT_MS });
 import { classifyMigrationState, detectMigrationState } from '../../scripts/backup/migration-detector';
 import { buildSourceManifestFromGit } from '../../scripts/backup/source-manifest';
 import { finalizeAttestationId } from '../../scripts/backup/legacy-attestation-canonical';
