@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 
@@ -29,9 +29,15 @@ const checker = readFileSync(join(repositoryRoot, 'scripts/firecracker/check-hos
 const ownerGate = readFileSync(join(repositoryRoot, 'docs/architecture/file-write-owner-gate-package.md'), 'utf8');
 const runbook = readFileSync(join(repositoryRoot, 'docs/runbooks/firecracker-disposable-rehearsal.md'), 'utf8');
 const acquisitionManifest = JSON.parse(readFileSync(join(repositoryRoot, 'config/firecracker/artifact-acquisition.manifest.json'), 'utf8')) as Record<string, unknown>;
-const kernelFragment = readFileSync(join(repositoryRoot, 'config/firecracker/kernel-x86_64-6.18.fragment'));
-const rootfsBuild = readFileSync(join(repositoryRoot, 'config/firecracker/rootfs-build.json'));
-const guestSource = readFileSync(join(repositoryRoot, 'guest/king-file-write-v1/king-file-write-v1.c'));
+// Repository provenance binds the COMMITTED Git bytes — exactly what the acquisition manifest pins — NOT the
+// working-tree checkout. Git converts LF→CRLF on checkout on Windows (core.autocrlf=true; these paths are not
+// pinned `eol=lf` in .gitattributes), which changes the raw bytes and therefore their SHA-256, so hashing the
+// working tree makes this provenance assertion checkout/OS-sensitive. Reading committed bytes via `git show HEAD:`
+// yields the identical hash on Windows and Linux/CI and binds the canonical committed content. See issue #127.
+const committedBytes = (path: string): Buffer => execFileSync('git', ['show', `HEAD:${path}`], { maxBuffer: 64 * 1024 * 1024 });
+const kernelFragment = committedBytes('config/firecracker/kernel-x86_64-6.18.fragment');
+const rootfsBuild = committedBytes('config/firecracker/rootfs-build.json');
+const guestSource = committedBytes('guest/king-file-write-v1/king-file-write-v1.c');
 const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 
 describe('Firecracker rehearsal package', () => {
@@ -136,6 +142,19 @@ describe('Firecracker rehearsal package', () => {
       'rootfs.imageSha256',
       'entrypoint.binarySha256',
     ]);
+  });
+
+  it('provenance binding is non-vacuous: drifted committed content (no manifest pin update) would FAIL', () => {
+    // Prove the pin binds the EXACT committed bytes, not just "some hash is present": the current committed content
+    // is pinned, but ANY change to it without a corresponding manifest update yields a hash absent from the manifest
+    // — i.e. the provenance assertion is fail-closed against stale pins, not a snapshot of whatever is on disk.
+    const rendered = JSON.stringify(acquisitionManifest);
+    for (const bytes of [kernelFragment, rootfsBuild, guestSource]) {
+      expect(rendered).toContain(digest(bytes)); // committed content is pinned
+      const drifted = Buffer.concat([bytes, Buffer.from([0x0a])]); // one-byte change = a different source blob
+      expect(digest(drifted)).not.toBe(digest(bytes));
+      expect(rendered).not.toContain(digest(drifted)); // a drifted blob is NOT pinned → provenance would fail
+    }
   });
 
   it('contains placeholders rather than credentials or host paths', () => {
