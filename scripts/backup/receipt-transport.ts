@@ -43,6 +43,20 @@ export interface TransportControls {
   readonly hostAllowlist: ReadonlySet<string>;
 }
 
+/**
+ * SHARED receipt-transport defaults — the single source of truth for every consumer (the release gate in
+ * scripts/migrate.ts and the publisher in scripts/ci/publish-receipt.ts) so their transport policy cannot silently
+ * diverge. An explicit `GBACKUP_TRANSPORT_TIMEOUT_MS` / `GBACKUP_TRANSPORT_MAX_BYTES` env override still wins.
+ *
+ * The timeout was raised 2000 → 5000 ms after the 2026-10-04 production v50 incident: the gate's receipt fetch
+ * timed out on the FIRST (cold) HTTPS request from the Fly release-command machine to the AWS S3 receipt origin
+ * (DNS + TLS + GET exceeded 2 s), failing closed before any DDL; a warm retry fetched the same valid receipt in
+ * ~128 ms. 5000 ms gives generous cold-start headroom while keeping the fail-closed abort well inside the 30-minute
+ * snapshot-freshness budget. See issue #123.
+ */
+export const DEFAULT_RECEIPT_TRANSPORT_TIMEOUT_MS = 5000;
+export const DEFAULT_RECEIPT_TRANSPORT_MAX_BYTES = 64 * 1024;
+
 /** Producer-side (external controller) write interface. Optional; the gate's integrity does NOT depend on it. */
 export interface ReceiptStoreWriter {
   /** Write a receipt object only if the key is absent, where the store supports it. */
@@ -71,12 +85,23 @@ export async function fetchAndVerifyReceiptV2(
     return { ok: false, stage: 'transport', code: 'locator_invalid', detail: e instanceof Error ? e.message : 'bad locator' };
   }
 
+  // Enforce the transport timeout around the (single) fetch itself, so the bound holds for ANY fetcher — not only
+  // the production HTTPS fetcher (which keeps its own socket-level timeout as the inner enforcement). This is a
+  // backstop that makes the timeout deterministically testable with an injected fetcher and can only make the
+  // transport STRICTER, never weaker. Exactly one request is issued; a timeout fails closed as code `timeout`.
   let res: ReceiptFetchResult;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    res = await fetcher.fetchOnce(url);
+    res = await new Promise<ReceiptFetchResult>((resolve, reject) => {
+      timer = setTimeout(() => reject(new ReceiptTransportError('timeout', 'request timed out')), controls.timeoutMs);
+      if (typeof timer.unref === 'function') timer.unref();
+      fetcher.fetchOnce(url).then(resolve, reject);
+    });
   } catch (e) {
     const code = e instanceof ReceiptTransportError ? e.code : 'fetch_error';
     return { ok: false, stage: 'transport', code, detail: e instanceof Error ? e.message : 'fetch failed' };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
   if (res.redirected) return { ok: false, stage: 'transport', code: 'redirect', detail: 'redirects are not allowed' };
   if (res.status !== 200) return { ok: false, stage: 'transport', code: 'bad_status', detail: `status ${res.status}` };
