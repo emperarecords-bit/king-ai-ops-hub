@@ -1,5 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { HEAVY_HOOK_TIMEOUT_MS, HEAVY_TEST_TIMEOUT_MS } from '../support/heavy-timeout';
+
+// #117: this suite spawns one `git show` per committed migration SQL file; under full-suite parallel
+// process-spawn contention that exceeds the 5000ms default. Bounded headroom; assertions unchanged.
+vi.setConfig({ testTimeout: HEAVY_TEST_TIMEOUT_MS, hookTimeout: HEAVY_HOOK_TIMEOUT_MS });
 
 /**
  * Migration SQL must be LF-only.

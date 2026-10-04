@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { HEAVY_HOOK_TIMEOUT_MS, HEAVY_TEST_TIMEOUT_MS } from '../support/heavy-timeout';
 import { ensureAppSchema } from '../../scripts/bootstrap-prerequisite';
 import { ProbeInjectedFailure, tenantIsolationProbe, verifyBootstrap } from '../../scripts/bootstrap-verify';
 import { assertDisposableDbForVerification } from '../support/require-disposable-db';
@@ -23,6 +24,9 @@ import {
  * databases (`king_ai_hub_p1c_*`), never the shared `king_ai_hub`. Refuses the shared DB when the run opts in
  * via REQUIRE_DISPOSABLE_DB=1 (no-op otherwise); skips cleanly when the local Postgres is unreachable.
  */
+
+// #117: fresh-DB + full-migration tests exceed the 5000ms default under full-suite parallel contention.
+vi.setConfig({ testTimeout: HEAVY_TEST_TIMEOUT_MS, hookTimeout: HEAVY_HOOK_TIMEOUT_MS });
 
 assertDisposableDbForVerification('bootstrap.test');
 
