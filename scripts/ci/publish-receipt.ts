@@ -9,6 +9,8 @@ import {
 import { inputsFromEnv } from './sign-staging-receipt';
 import { loadReceiptKeyBundle } from '../backup/receipt-key-bundle';
 import {
+  DEFAULT_RECEIPT_TRANSPORT_MAX_BYTES,
+  DEFAULT_RECEIPT_TRANSPORT_TIMEOUT_MS,
   type ReceiptFetcher,
   type TransportControls,
   createHttpsReceiptFetcher,
@@ -56,10 +58,10 @@ function parseHostAllowlist(v: string): ReadonlySet<string> {
   return new Set(hosts);
 }
 
-function buildControls(env: NodeJS.ProcessEnv): TransportControls {
+export function buildControls(env: NodeJS.ProcessEnv): TransportControls {
   return {
-    maxBytes: intEnv(env.GBACKUP_TRANSPORT_MAX_BYTES, 64 * 1024),
-    timeoutMs: intEnv(env.GBACKUP_TRANSPORT_TIMEOUT_MS, 2000),
+    maxBytes: intEnv(env.GBACKUP_TRANSPORT_MAX_BYTES, DEFAULT_RECEIPT_TRANSPORT_MAX_BYTES),
+    timeoutMs: intEnv(env.GBACKUP_TRANSPORT_TIMEOUT_MS, DEFAULT_RECEIPT_TRANSPORT_TIMEOUT_MS),
     hostAllowlist: parseHostAllowlist(requireEnv('GBACKUP_RECEIPT_HOSTS', env.GBACKUP_RECEIPT_HOSTS)),
   };
 }
