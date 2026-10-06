@@ -30,11 +30,46 @@ interface ProposalItem {
   error?: string;
 }
 
+type Confidence = 'low' | 'medium' | 'high';
+
+interface CouncilReviewer {
+  role: string;
+  label: string;
+  provider: string;
+  ok: boolean;
+  conclusion: string;
+}
+
+interface CouncilSynthesis {
+  agreement: string[];
+  disagreements: string[];
+  recommendation: string;
+  risks: string[];
+  confidence: Confidence;
+  ownerDecisionNeeded: string[];
+}
+
+interface CouncilResult {
+  synthesis: CouncilSynthesis;
+  reviewers: CouncilReviewer[];
+  degraded: boolean;
+}
+
+interface CouncilState {
+  status: 'running' | 'done' | 'error';
+  result?: CouncilResult;
+  error?: string;
+  showReviewers?: boolean;
+}
+
 interface Msg {
   id: string;
   role: 'owner' | 'assistant';
   content: string;
+  /** The owner question that produced this assistant answer (enables "Ask Council"). */
+  question?: string;
   proposals?: ProposalItem[];
+  council?: CouncilState;
 }
 
 const SUGGESTIONS = [
@@ -132,11 +167,153 @@ function confirmBody(p: Proposal): Record<string, unknown> {
   }
 }
 
+const CONFIDENCE_STYLE: Record<Confidence, string> = {
+  high: 'text-[var(--success,#6bbf73)] border-[var(--success,#6bbf73)]',
+  medium: 'text-[var(--accent)] border-[var(--accent)]',
+  low: 'text-[var(--danger,#c37474)] border-[var(--danger,#c37474)]',
+};
+
+function CouncilList({ title, items }: { title: string; items: string[] }) {
+  if (!items || items.length === 0) return null;
+  return (
+    <div className="mt-2">
+      <p className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">{title}</p>
+      <ul className="mt-1 list-disc space-y-0.5 pl-4 text-sm">
+        {items.map((it, i) => (
+          <li key={i} className="whitespace-pre-wrap">{it}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /**
- * Ops Chat surface (v2.2). Streams replies over SSE, shows what it's looking up,
- * and renders a confirm card per proposed action — answering a question,
- * approving/rejecting, or dispatching/re-running work. The write (or run) happens
- * only on Confirm.
+ * The owner-triggered Council review surface for one assistant answer. It shows
+ * an "Ask Council" button (Council never runs on its own), a running state while
+ * the independent reviewers work, and one compact synthesis card with optional
+ * drill-down into each reviewer's concise conclusion. Stacks vertically for
+ * mobile — no fixed widths.
+ */
+function CouncilBlock({
+  state,
+  disabled,
+  onAsk,
+  onToggleReviewers,
+}: {
+  state: CouncilState | undefined;
+  disabled: boolean;
+  onAsk: () => void;
+  onToggleReviewers: () => void;
+}) {
+  if (!state) {
+    return (
+      <div className="mt-3">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={onAsk}
+          className="rounded-full border border-[var(--border)] px-3 py-1.5 text-xs text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-40"
+        >
+          ⚖️ Ask Council
+        </button>
+        <p className="mt-1 text-[11px] text-[var(--muted)]">
+          Gets several independent model reviews (accuracy · risk · alternative) — uses extra model calls.
+        </p>
+      </div>
+    );
+  }
+
+  if (state.status === 'running') {
+    return (
+      <div className="mt-3 rounded-md border border-[var(--border)] bg-[var(--surface-raised,rgba(120,160,255,0.06))] p-3">
+        <p className="text-sm">⚖️ Council is reviewing…</p>
+        <p className="mt-1 text-xs text-[var(--muted)]">
+          Accuracy · Risk · Alternative reviewers running independently. This uses several model calls.
+        </p>
+      </div>
+    );
+  }
+
+  if (state.status === 'error') {
+    return (
+      <div className="mt-3 rounded-md border border-[var(--border)] p-3">
+        <p className="text-sm text-[var(--danger,#c37474)]">⚖️ {state.error ?? 'Council is unavailable right now.'}</p>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={onAsk}
+          className="mt-2 rounded-full border border-[var(--border)] px-3 py-1 text-xs text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-40"
+        >
+          Try again
+        </button>
+      </div>
+    );
+  }
+
+  const r = state.result;
+  if (!r) return null;
+  const s = r.synthesis;
+  return (
+    <div className="mt-3 flex flex-col gap-1 rounded-md border border-[var(--accent)] bg-[var(--surface-raised,rgba(120,160,255,0.06))] p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">⚖️ Council review</p>
+        <span className={'rounded-full border px-2 py-0.5 text-[11px] font-semibold ' + CONFIDENCE_STYLE[s.confidence]}>
+          {s.confidence} confidence
+        </span>
+        {r.degraded ? (
+          <span className="text-[11px] text-[var(--muted)]">· some reviewers unavailable</span>
+        ) : null}
+      </div>
+
+      {s.recommendation ? (
+        <div className="mt-1">
+          <p className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Strongest recommendation</p>
+          <p className="mt-0.5 whitespace-pre-wrap text-sm">{s.recommendation}</p>
+        </div>
+      ) : null}
+
+      <CouncilList title="Agreement" items={s.agreement} />
+      <CouncilList title="Disagreements" items={s.disagreements} />
+      <CouncilList title="Risks & caveats" items={s.risks} />
+      <CouncilList title="Still needs your judgement" items={s.ownerDecisionNeeded} />
+
+      <div className="mt-2">
+        <button
+          type="button"
+          onClick={onToggleReviewers}
+          className="text-xs text-[var(--muted)] underline underline-offset-2 hover:text-[var(--foreground)]"
+        >
+          {state.showReviewers ? 'Hide reviewer notes' : `Show reviewer notes (${r.reviewers.length})`}
+        </button>
+        {state.showReviewers ? (
+          <div className="mt-2 flex flex-col gap-2">
+            {r.reviewers.map((rev, i) => (
+              <div key={i} className="rounded border border-[var(--border)] p-2">
+                <p className="text-xs font-semibold">{rev.label}</p>
+                {rev.ok ? (
+                  <p className="mt-1 whitespace-pre-wrap text-sm">{rev.conclusion}</p>
+                ) : (
+                  <p className="mt-1 text-xs text-[var(--muted)]">Unavailable for this review.</p>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+
+      <p className="mt-2 text-[11px] text-[var(--muted)]">
+        Council is review-only and changes nothing. To act on this, ask Ops Chat to prepare it — actions still go through confirm.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Ops Chat surface (v2.2 + Council). Streams replies over SSE, shows what it's
+ * looking up, and renders a confirm card per proposed action — answering a
+ * question, approving/rejecting, or dispatching/re-running work. The write (or
+ * run) happens only on Confirm. Each completed answer also offers an optional,
+ * owner-triggered Council review (multiple independent model reviews → synthesis).
  */
 export function OpsChatClient({ opening }: { opening: string }) {
   const [messages, setMessages] = useState<Msg[]>([{ id: 'opening', role: 'assistant', content: opening }]);
@@ -194,6 +371,42 @@ export function OpsChatClient({ opening }: { opening: string }) {
     }
   }
 
+  function setCouncil(msgId: string, fields: Partial<CouncilState>) {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === msgId ? { ...m, council: { ...(m.council ?? { status: 'running' }), ...fields } } : m,
+      ),
+    );
+  }
+
+  function toggleReviewers(msgId: string) {
+    setMessages((prev) =>
+      prev.map((m) => (m.id === msgId && m.council ? { ...m, council: { ...m.council, showReviewers: !m.council.showReviewers } } : m)),
+    );
+  }
+
+  async function askCouncil(msgId: string) {
+    const m = messages.find((x) => x.id === msgId);
+    if (!m || m.role !== 'assistant' || !m.question || m.content.trim().length === 0) return;
+    if (m.council?.status === 'running') return;
+    setCouncil(msgId, { status: 'running', result: undefined, error: undefined, showReviewers: false });
+    try {
+      const res = await fetch('/api/ops-chat/council', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: m.question, answer: m.content }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || 'Council is unavailable right now.');
+      }
+      const result = (await res.json()) as CouncilResult;
+      setCouncil(msgId, { status: 'done', result });
+    } catch (e) {
+      setCouncil(msgId, { status: 'error', error: e instanceof Error ? e.message : 'Council is unavailable right now.' });
+    }
+  }
+
   async function send(text: string) {
     const trimmed = text.trim();
     if (!trimmed || streaming) return;
@@ -208,7 +421,7 @@ export function OpsChatClient({ opening }: { opening: string }) {
 
     const ownerMsg: Msg = { id: nextId(), role: 'owner', content: trimmed };
     const replyId = nextId();
-    setMessages((prev) => [...prev, ownerMsg, { id: replyId, role: 'assistant', content: '' }]);
+    setMessages((prev) => [...prev, ownerMsg, { id: replyId, role: 'assistant', content: '', question: trimmed }]);
     setStreaming(true);
 
     const controller = new AbortController();
@@ -391,6 +604,15 @@ export function OpsChatClient({ opening }: { opening: string }) {
                   </div>
                 );
               })}
+
+              {m.role === 'assistant' && m.id !== 'opening' && m.question && m.content.trim().length > 0 ? (
+                <CouncilBlock
+                  state={m.council}
+                  disabled={streaming}
+                  onAsk={() => void askCouncil(m.id)}
+                  onToggleReviewers={() => toggleReviewers(m.id)}
+                />
+              ) : null}
             </div>
           </div>
         ))}
