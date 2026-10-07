@@ -8,6 +8,8 @@ import { consumeRateLimit } from '@/domain/usage/rate-limit';
 import { serverEnv } from '@/lib/env.server';
 import { buildPulse, pulseContext } from '@/domain/opschat/pulse';
 import { createOpsChatToolset } from '@/domain/opschat/tools';
+import { type ToolLoopEvent } from '@/types/provider';
+import { OPS_CHAT_SERVER_DEADLINE_MS, OPS_CHAT_TIMEOUT_MESSAGE } from '@/domain/opschat/limits';
 
 /**
  * POST — Ops Chat (chat-first front door). v2: the model can call READ tools to
@@ -132,30 +134,86 @@ export async function POST(req: Request): Promise<Response> {
         }
       };
 
+      // Overall end-to-end deadline for the WHOLE request — every provider
+      // iteration AND every tool call — independent of the per-call provider
+      // timeout and of how many tool-loop iterations run. Racing each iterator
+      // step against this deadline means a stalled tool (runTool is not itself
+      // cancellable) still yields a clean, retryable timeout rather than an
+      // open-forever stream. Aborting also cancels any in-flight Anthropic call.
+      // The browser watchdog is the backstop.
+      const ac = new AbortController();
+      const onReqAbort = (): void => ac.abort();
+      if (req.signal) {
+        if (req.signal.aborted) ac.abort();
+        else req.signal.addEventListener('abort', onReqAbort, { once: true });
+      }
+      let timedOut = false;
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      const TIMEOUT = Symbol('ops-chat-deadline');
+      const deadline = new Promise<typeof TIMEOUT>((resolve) => {
+        deadlineTimer = setTimeout(() => {
+          timedOut = true;
+          ac.abort();
+          resolve(TIMEOUT);
+        }, OPS_CHAT_SERVER_DEADLINE_MS);
+      });
+
+      const finalize = (): void => {
+        for (const proposal of toolset.getProposals()) send('proposal', proposal);
+        send('done', {});
+      };
+
+      let iterator: AsyncIterator<ToolLoopEvent> | undefined;
       try {
         const provider = getProvider('anthropic');
         if (!provider.streamWithTools) throw new Error('Tool-use is not available on this provider.');
-        for await (const ev of provider.streamWithTools(
-          { model: OPS_CHAT_MODEL, system, turns, temperature: 0.3, maxOutputTokens: 1500, timeoutMs: 90_000, signal: req.signal },
+        iterator = provider.streamWithTools(
+          { model: OPS_CHAT_MODEL, system, turns, temperature: 0.3, maxOutputTokens: 1500, timeoutMs: 90_000, signal: ac.signal },
           toolset.tools,
           toolset.runTool,
-        )) {
+        )[Symbol.asyncIterator]();
+
+        for (;;) {
+          const step = await Promise.race([iterator.next(), deadline]);
+          if (step === TIMEOUT) {
+            send('error', { message: OPS_CHAT_TIMEOUT_MESSAGE });
+            break;
+          }
+          if (step.done) {
+            finalize();
+            break;
+          }
+          const ev = step.value;
           if (ev.kind === 'delta') send('delta', { text: ev.text });
           else if (ev.kind === 'tool_start') send('tool', { name: ev.name, phase: 'start' });
           else if (ev.kind === 'tool_end') send('tool', { name: ev.name, phase: 'end', ok: ev.ok });
+          else if (ev.kind === 'done') {
+            finalize();
+            break;
+          }
         }
-        for (const proposal of toolset.getProposals()) send('proposal', proposal);
-        send('done', {});
       } catch (err) {
-        if (!(err instanceof AppError)) log.error('ops-chat stream failed', { err });
-        send('error', { message: toPublicMessage(err) });
+        if (timedOut) {
+          send('error', { message: OPS_CHAT_TIMEOUT_MESSAGE });
+        } else if (ac.signal.aborted) {
+          // Client disconnected before the deadline — nothing to deliver.
+        } else {
+          if (!(err instanceof AppError)) log.error('ops-chat stream failed', { err });
+          send('error', { message: toPublicMessage(err) });
+        }
       } finally {
+        if (deadlineTimer) clearTimeout(deadlineTimer);
+        req.signal?.removeEventListener('abort', onReqAbort);
         closed = true;
         try {
           controller.close();
         } catch {
           /* already closed */
         }
+        // Best-effort unwind of the provider generator (fire-and-forget; a
+        // generator stalled inside a tool call is orphaned — it holds no write
+        // and is GC'd). Never awaited, so a stuck tool cannot block closing.
+        void iterator?.return?.(undefined)?.catch(() => {});
       }
     },
   });
