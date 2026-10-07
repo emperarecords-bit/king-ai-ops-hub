@@ -1,6 +1,8 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { consumeOpsChatStream } from './ops-chat-stream';
+import { OPS_CHAT_CLIENT_TIMEOUT_MS, OPS_CHAT_TIMEOUT_MESSAGE } from '@/domain/opschat/limits';
 
 type Proposal =
   | { kind: 'answer_question'; questionId: string; projectKey: string; workspaceName: string; question: string; answer: string }
@@ -426,8 +428,21 @@ export function OpsChatClient({ opening }: { opening: string }) {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    // Browser watchdog: no Send may leave the UI stuck on "Thinking…". At the
+    // deadline we abort the fetch; the server enforces its own (slightly shorter)
+    // deadline, so normally a clean timeout error arrives first and this is the
+    // backstop. A timed-out request wrote nothing — the only write path is an
+    // explicit Confirm through /api/ops-chat/confirm.
+    let timedOut = false;
+    const watchdog = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, OPS_CHAT_CLIENT_TIMEOUT_MS);
+
     const append = (delta: string) =>
       setMessages((prev) => prev.map((m) => (m.id === replyId ? { ...m, content: m.content + delta } : m)));
+    const dropEmptyReply = () =>
+      setMessages((prev) => prev.filter((m) => !(m.id === replyId && m.content.trim().length === 0 && !m.proposals)));
 
     try {
       const res = await fetch('/api/ops-chat', {
@@ -447,65 +462,46 @@ export function OpsChatClient({ opening }: { opening: string }) {
         throw new Error(msg);
       }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      let streamError: string | null = null;
+      // Resolves the instant the server sends `done` (or `error`) — never waits
+      // for the connection to close.
+      const result = await consumeOpsChatStream(res.body, {
+        onDelta: (text) => {
+          append(text);
+          setToolActivity(null);
+        },
+        onToolStart: (name) => setToolActivity(TOOL_LABEL[name] ?? 'looking that up'),
+        onToolEnd: () => setToolActivity(null),
+        onProposal: (payload) => {
+          const proposal = payload as unknown as Proposal;
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === replyId
+                ? { ...m, proposals: [...(m.proposals ?? []), { proposal, state: 'pending' as const }] }
+                : m,
+            ),
+          );
+        },
+      });
 
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let idx: number;
-        while ((idx = buf.indexOf('\n\n')) >= 0) {
-          const chunk = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          let event = 'message';
-          let data = '';
-          for (const line of chunk.split('\n')) {
-            if (line.startsWith('event:')) event = line.slice(6).trim();
-            else if (line.startsWith('data:')) data += line.slice(5).trim();
-          }
-          if (!data) continue;
-          let payload: Record<string, unknown>;
-          try {
-            payload = JSON.parse(data);
-          } catch {
-            continue;
-          }
-          if (event === 'delta' && typeof payload.text === 'string') {
-            append(payload.text);
-            setToolActivity(null);
-          } else if (event === 'tool') {
-            if (payload.phase === 'start' && typeof payload.name === 'string') {
-              setToolActivity(TOOL_LABEL[payload.name] ?? 'looking that up');
-            } else if (payload.phase === 'end') {
-              setToolActivity(null);
-            }
-          } else if (event === 'proposal') {
-            const proposal = payload as unknown as Proposal;
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === replyId
-                  ? { ...m, proposals: [...(m.proposals ?? []), { proposal, state: 'pending' as const }] }
-                  : m,
-              ),
-            );
-          } else if (event === 'error') {
-            streamError = typeof payload.message === 'string' ? payload.message : 'The assistant hit an error.';
-          }
-        }
-      }
-
-      if (streamError) {
-        setError(streamError);
-        setMessages((prev) => prev.filter((m) => !(m.id === replyId && m.content.trim().length === 0 && !m.proposals)));
+      if (result.status === 'error') {
+        setError(result.message);
+        dropEmptyReply();
       }
     } catch (err) {
-      if ((err as Error)?.name === 'AbortError') return;
+      if ((err as Error)?.name === 'AbortError') {
+        // Watchdog fired → bounded timeout with a clear, retryable message.
+        // Any other abort (component unmount / navigation) stays silent.
+        if (timedOut) {
+          setError(OPS_CHAT_TIMEOUT_MESSAGE);
+          dropEmptyReply();
+        }
+        return;
+      }
       setError(err instanceof Error ? err.message : 'Something went wrong.');
-      setMessages((prev) => prev.filter((m) => !(m.id === replyId && m.content.trim().length === 0 && !m.proposals)));
+      dropEmptyReply();
     } finally {
+      // Always clear the pending state and the watchdog, on every exit path.
+      clearTimeout(watchdog);
       setStreaming(false);
       setToolActivity(null);
       abortRef.current = null;
