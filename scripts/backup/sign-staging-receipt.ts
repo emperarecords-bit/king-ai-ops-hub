@@ -74,13 +74,13 @@ export const STAGING_PINS: ReleasePins = {
   databaseIdentity: 'king_ai_ops_hub_staging',
   snapshotProvider: FLY_VOLUMES_PROVIDER,
   providerAdapterVersion: FLY_VOLUMES_ADAPTER_VERSION,
-  // Bumped 2026-10-03 to the current reviewed staging target 0077_chunky_owl / 78 committed migrations (the same
-  // migration set PRODUCTION_PINS already binds). The endpoint/count are a fail-closed tripwire: a source tree
-  // whose endpoint/count differs is rejected in deriveMigrationFacts. The actual staging APPLIED_COUNT is NOT
-  // baked here — staging must pass it as an explicit runtime input (requireExplicitAppliedCount), so the signer
-  // never presumes staging is already migrated to some prefix. See tests/unit/gbackup-sign-staging-receipt.test.ts.
-  expectedMigrationEndpoint: '0077_chunky_owl',
-  expectedCommittedMigrationCount: 78,
+  // Bumped 2026-10-08 to the current reviewed target 0078_silent_ultron / 79 committed migrations (Owner
+  // Notifications v1; the same migration set PRODUCTION_PINS already binds). The endpoint/count are a fail-closed
+  // tripwire: a source tree whose endpoint/count differs is rejected in deriveMigrationFacts. The actual staging
+  // APPLIED_COUNT is NOT baked here — staging must pass it as an explicit runtime input (requireExplicitAppliedCount),
+  // so the signer never presumes staging is already migrated to some prefix. See tests/unit/gbackup-sign-staging-receipt.test.ts.
+  expectedMigrationEndpoint: '0078_silent_ultron',
+  expectedCommittedMigrationCount: 79,
   requireExplicitAppliedCount: true,
 } as const;
 

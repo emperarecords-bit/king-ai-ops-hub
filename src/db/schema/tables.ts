@@ -63,6 +63,12 @@ import {
   messageRoleEnum,
   milestoneStatusEnum,
   modelTierEnum,
+  notificationEventTypeEnum,
+  notificationSeverityEnum,
+  notificationRoutingEnum,
+  notificationChannelEnum,
+  notificationMessageKindEnum,
+  notificationMessageStatusEnum,
   objectiveStatusEnum,
   workItemConditionEnum,
   orgRoleEnum,
@@ -2200,6 +2206,132 @@ export const ownerQuestions = pgTable(
     index('owner_questions_project_status_idx').on(t.projectId, t.status),
     index('owner_questions_org_idx').on(t.orgId),
     check('owner_questions_status_chk', sql`${t.status} in ('open','answered','dismissed')`),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Owner Notifications (v1) — introduced by migration 0078. Four tables:
+//   notification_events          — the canonical "something happened" record + the in-app notification.
+//                                   Tenant-scoped AND recipient-scoped (recipient_user_id); reads/mark-read
+//                                   are recipient-gated in RLS, inserts are tenant-gated (the run-author/system
+//                                   stamps the recipient, who is not the inserter).
+//   notification_messages        — one OUTBOUND message (e.g. one email). USER-scoped, because a digest batches
+//                                   events across workspaces. Inert until PR2 (no sender ships in PR1).
+//   notification_message_events  — the batch membership join (which events went into which message). Explicit
+//                                   relation, never opaque JSON, so a digest's contents are always recoverable.
+//   notification_preferences     — per-user global prefs (quiet hours + digest schedule in LOCAL wall-clock +
+//                                   IANA timezone so DST never shifts the owner's digest; nullable email override).
+// ---------------------------------------------------------------------------
+
+/** The fact + the in-app notification. One row per (recipient, incident); UNIQUE(dedupe) makes capture idempotent. */
+export const notificationEvents = pgTable(
+  'notification_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    /** Whose notification this is. Resolved at capture (the workspace owner); reads/mark-read are gated on it. */
+    recipientUserId: uuid('recipient_user_id').notNull().references(() => profiles.id, { onDelete: 'cascade' }),
+    eventType: notificationEventTypeEnum('event_type').notNull(),
+    severity: notificationSeverityEnum('severity').notNull(),
+    routing: notificationRoutingEnum('routing').notNull(),
+    title: text('title').notNull(),
+    body: text('body').notNull(),
+    /** The subject the event is about (approval|owner_question|run) + its id — provenance, not an FK (polymorphic). */
+    entityType: text('entity_type').notNull(),
+    entityId: text('entity_id').notNull(),
+    /** "<eventType>:<entityType>:<entityId>" — collapses a repeated incident to one event. */
+    dedupeKey: text('dedupe_key').notNull(),
+    readAt: timestamp('read_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    // Idempotency: one incident → one event per recipient. Capture inserts onConflictDoNothing on this.
+    uniqueIndex('notification_events_dedupe_uq').on(t.orgId, t.projectId, t.recipientUserId, t.dedupeKey),
+    // Composite tenant identity so the batch-membership join can FK (org, project, event) — mirrors executor_executions.
+    unique('notification_events_tenant_id_uq').on(t.orgId, t.projectId, t.id),
+    index('notification_events_recipient_unread_idx').on(t.recipientUserId, t.readAt, t.createdAt),
+    index('notification_events_project_created_idx').on(t.orgId, t.projectId, t.createdAt),
+    index('notification_events_routing_idx').on(t.routing, t.createdAt),
+  ],
+);
+
+/** One outbound message (one email). USER-scoped — a digest batches events from many workspaces for one owner. */
+export const notificationMessages = pgTable(
+  'notification_messages',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    recipientUserId: uuid('recipient_user_id').notNull().references(() => profiles.id, { onDelete: 'cascade' }),
+    channel: notificationChannelEnum('channel').notNull(),
+    kind: notificationMessageKindEnum('kind').notNull(),
+    status: notificationMessageStatusEnum('status').notNull().default('queued'),
+    /** Stable, mandatory idempotency key — passed to the provider so a safe retry never double-sends. */
+    idempotencyKey: text('idempotency_key').notNull(),
+    /** Rendered at send time (PR2); nullable while queued. */
+    subject: text('subject'),
+    body: text('body'),
+    /** When the router should next attempt this message (quiet-hours end, digest time, or backoff). */
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }),
+    lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
+    attemptCount: integer('attempt_count').notNull().default(0),
+    maxAttempts: integer('max_attempts').notNull().default(5),
+    resultCode: text('result_code'),
+    resultDetail: jsonb('result_detail').$type<Record<string, unknown>>().notNull().default({}),
+    sentAt: timestamp('sent_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('notification_messages_idempotency_uq').on(t.recipientUserId, t.idempotencyKey),
+    index('notification_messages_due_idx').on(t.status, t.nextAttemptAt),
+    index('notification_messages_recipient_created_idx').on(t.recipientUserId, t.createdAt),
+    check('notification_messages_attempt_ck', sql`${t.attemptCount} >= 0 and ${t.maxAttempts} > 0`),
+  ],
+);
+
+/** Batch membership: which events belong to which outbound message (explicit relation, never JSON). */
+export const notificationMessageEvents = pgTable(
+  'notification_message_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    recipientUserId: uuid('recipient_user_id').notNull().references(() => profiles.id, { onDelete: 'cascade' }),
+    messageId: uuid('message_id').notNull().references(() => notificationMessages.id, { onDelete: 'cascade' }),
+    orgId: uuid('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+    eventId: uuid('event_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('notification_message_events_uq').on(t.messageId, t.eventId),
+    index('notification_message_events_event_idx').on(t.eventId),
+    index('notification_message_events_recipient_idx').on(t.recipientUserId),
+    foreignKey({ columns: [t.orgId, t.projectId, t.eventId], foreignColumns: [notificationEvents.orgId, notificationEvents.projectId, notificationEvents.id], name: 'notification_message_events_event_tenant_fk' }).onDelete('cascade'),
+  ],
+);
+
+/** Per-user (global) notification preferences. Quiet hours + digest times are LOCAL wall-clock in `timezone`. */
+export const notificationPreferences = pgTable(
+  'notification_preferences',
+  {
+    userId: uuid('user_id').primaryKey().references(() => profiles.id, { onDelete: 'cascade' }),
+    emailEnabled: boolean('email_enabled').notNull().default(true),
+    /** null ⇒ resolve the live profiles.email at send time (never duplicated here). */
+    emailOverride: text('email_override'),
+    /** IANA zone (e.g. "America/New_York"); drives quiet-hours + digest wall-clock → UTC conversion. */
+    timezone: text('timezone').notNull().default('UTC'),
+    /** "HH:MM" local; both null ⇒ quiet hours off. Non-critical sends defer out of this window. */
+    quietHoursStartLocal: text('quiet_hours_start_local'),
+    quietHoursEndLocal: text('quiet_hours_end_local'),
+    /** Local wall-clock times ("HH:MM") at which a digest is sent; a small set, not one email per event. */
+    digestTimesLocal: text('digest_times_local').array().notNull().default(sql`'{}'::text[]`),
+    /** Per-event/severity channel overrides; the hook for a future per-org override without a new table. */
+    routingOverrides: jsonb('routing_overrides').$type<Record<string, unknown>>().notNull().default({}),
+    lastDigestAt: timestamp('last_digest_at', { withTimezone: true }),
+    nextDigestAt: timestamp('next_digest_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    check('notification_preferences_quiet_pairing_ck', sql`(${t.quietHoursStartLocal} is null) = (${t.quietHoursEndLocal} is null)`),
+    check('notification_preferences_quiet_format_ck', sql`(${t.quietHoursStartLocal} is null or ${t.quietHoursStartLocal} ~ '^[0-2][0-9]:[0-5][0-9]$') and (${t.quietHoursEndLocal} is null or ${t.quietHoursEndLocal} ~ '^[0-2][0-9]:[0-5][0-9]$')`),
   ],
 );
 

@@ -16,9 +16,9 @@ export const PRODUCTION_PINS: ReleasePins = {
   databaseIdentity: 'king_ai_ops_hub_production',
   snapshotProvider: FLY_VOLUMES_PROVIDER,
   providerAdapterVersion: FLY_VOLUMES_ADAPTER_VERSION,
-  // Bumped 2026-10-01 (0077 chunky_owl — answer-routing Phase 1 review-mode columns).
-  expectedMigrationEndpoint: '0077_chunky_owl',
-  expectedCommittedMigrationCount: 78,
+  // Bumped 2026-10-08 (0078 silent_ultron — Owner Notifications v1 tables: events/messages/message_events/preferences).
+  expectedMigrationEndpoint: '0078_silent_ultron',
+  expectedCommittedMigrationCount: 79,
   /** Production deployed through 0067 on 2026-08-18; 0068–0072 are pending. */
   defaultAppliedCount: 68,
 } as const;

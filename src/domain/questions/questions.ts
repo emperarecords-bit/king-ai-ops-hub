@@ -4,6 +4,7 @@ import { agents, ownerQuestions } from '@/db/schema';
 import { type DbTx } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { writeAudit } from '@/domain/audit/audit';
+import { enqueueNotificationSafe } from '@/domain/notifications/enqueue';
 import { createKnowledge } from '@/domain/knowledge/knowledge';
 import { AppError, NotFoundError, ValidationError } from '@/lib/errors';
 import { type TenantContext } from '@/types/domain';
@@ -50,6 +51,13 @@ export async function createOwnerQuestions(
       entityType: 'owner_question',
       entityId: row.id,
       detail: { byAgentId: input.agentId, taskId: input.taskId },
+    });
+    await enqueueNotificationSafe(tx, ctx, {
+      eventType: 'owner_question_raised',
+      entityType: 'owner_question',
+      entityId: row.id,
+      title: 'A question needs your answer',
+      body: q,
     });
     budget -= 1;
     created += 1;

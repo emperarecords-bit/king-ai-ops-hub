@@ -541,6 +541,59 @@ export const ARTIFACT_KINDS = ['text', 'markdown', 'json', 'file'] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 
 /**
+ * Owner Notifications (v1). The event is the canonical "something happened that the owner may care
+ * about" record and doubles as the in-app notification. Severity drives routing; delivery (email) is a
+ * separate, pluggable concern that materializes `notification_messages` out-of-band. These unions are the
+ * source of truth projected into the pg enums (src/db/schema/enums.ts).
+ */
+export const NOTIFICATION_EVENT_TYPES = [
+  'approval_pending',
+  'owner_question_raised',
+  'run_failed',
+  'run_reconciliation_required',
+  'run_completed',
+] as const;
+export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
+
+export const NOTIFICATION_SEVERITIES = [
+  'critical',
+  'action_required',
+  'warning',
+  'informational',
+  'success',
+] as const;
+export type NotificationSeverity = (typeof NOTIFICATION_SEVERITIES)[number];
+
+/** How an event is meant to reach the owner. `immediate` = send now (critical/action_required);
+ *  `digest` = coalesce into a scheduled summary; `in_app_only` = never emailed, visible in-app. */
+export const NOTIFICATION_ROUTINGS = ['immediate', 'digest', 'in_app_only'] as const;
+export type NotificationRouting = (typeof NOTIFICATION_ROUTINGS)[number];
+
+/** Channels an outbound message can use. `sms` is reserved for a later increment (no adapter in v1). */
+export const NOTIFICATION_CHANNELS = ['email', 'in_app', 'sms'] as const;
+export type NotificationChannelId = (typeof NOTIFICATION_CHANNELS)[number];
+
+/** An outbound message is either one immediate event or a batch (digest) of many. */
+export const NOTIFICATION_MESSAGE_KINDS = ['immediate', 'digest'] as const;
+export type NotificationMessageKind = (typeof NOTIFICATION_MESSAGE_KINDS)[number];
+
+/**
+ * Outbound-message lifecycle. `ambiguous` = the provider call timed out / returned an unknown outcome;
+ * the message MAY have been delivered, so it is NEVER blindly retried — it is surfaced for manual review.
+ * `suppressed` = preferences or quiet-hours withheld it (recorded, not sent).
+ */
+export const NOTIFICATION_MESSAGE_STATUSES = [
+  'queued',
+  'sending',
+  'sent',
+  'failed',
+  'ambiguous',
+  'suppressed',
+  'canceled',
+] as const;
+export type NotificationMessageStatus = (typeof NOTIFICATION_MESSAGE_STATUSES)[number];
+
+/**
  * The tenant scope every repository call must carry. Constructed exclusively by
  * `requireTenant()` after verifying session and membership; nothing else may
  * build one outside of tests.

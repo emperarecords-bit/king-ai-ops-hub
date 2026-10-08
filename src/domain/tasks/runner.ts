@@ -32,6 +32,7 @@ import { assembleTeamBriefing } from '@/domain/tasks/team-briefing';
 import { assemblePortfolioBriefing } from '@/domain/portfolio/portfolio';
 import { assembleAccurateBidsSight, sightEnabledKeys } from '@/domain/integrations/accuratebids-sight';
 import { createOwnerQuestions } from '@/domain/questions/questions';
+import { enqueueNotificationSafe } from '@/domain/notifications/enqueue';
 import { createHqQuestions, deliverHqAnswer } from '@/domain/questions/hq-questions';
 import { HQ_QUESTION_RULES, extractHqQuestions } from '@/orchestration/questions-block';
 import { resolveModelForTier } from '@/orchestration/routing';
@@ -1518,6 +1519,13 @@ async function finalizeCompleted(
         entityId: inserted[0]!.id,
         detail: { actionType: action.type, summary: action.summary },
       });
+      await enqueueNotificationSafe(tx, ctx, {
+        eventType: 'approval_pending',
+        entityType: 'approval',
+        entityId: inserted[0]!.id,
+        title: `Approval needed: ${action.summary}`,
+        body: `An action is waiting for your decision — ${action.summary} (${action.type}).`,
+      });
     }
 
     // GM delegation — authority decided HERE, at the trust boundary: only the workspace's General
@@ -1732,6 +1740,17 @@ async function finalizeCompleted(
       entityId: runId,
       detail: { finalStatus },
     });
+    // A clean completion is an in-app notification (success → in_app_only). When finalStatus is
+    // 'awaiting_approval' the approval_pending notifications above already carry the attention signal.
+    if (finalStatus === 'completed') {
+      await enqueueNotificationSafe(tx, ctx, {
+        eventType: 'run_completed',
+        entityType: 'run',
+        entityId: runId,
+        title: 'A run completed',
+        body: `A run completed with ${result.steps.length} step(s).`,
+      });
+    }
 
     return { runId, status: finalStatus, failureReason: null as string | null };
   });
@@ -1759,6 +1778,13 @@ async function finalizeFailed(
       .where(eq(runs.id, runId));
     await tx.update(tasks).set({ status: 'failed', updatedAt: new Date() }).where(eq(tasks.id, taskId));
     await writeAudit(tx, ctx, { action: 'run.failed', entityType: 'run', entityId: runId, detail: { reason } });
+    await enqueueNotificationSafe(tx, ctx, {
+      eventType: 'run_failed',
+      entityType: 'run',
+      entityId: runId,
+      title: 'A run failed',
+      body: `A run failed and may need your attention. Reason: ${reason}`,
+    });
     log.warn('Run failed', { runId, failureClass: reason.split(/[\s(:]/, 1)[0] || 'unknown', recoverable: true });
     return { runId, status: 'failed', failureReason: reason };
   });
@@ -1799,6 +1825,13 @@ async function finalizeReconciliation(
       entityType: 'run',
       entityId: runId,
       detail: { stepNumber, reason, remoteOutcome: 'unknown', externalChargeKnown: false },
+    });
+    await enqueueNotificationSafe(tx, ctx, {
+      eventType: 'run_reconciliation_required',
+      entityType: 'run',
+      entityId: runId,
+      title: 'A run needs manual reconciliation',
+      body: 'A run had an uncertain provider outcome — a step was dispatched but its remote result and any external charge are unknown. It will not retry automatically; manual reconciliation is required.',
     });
     return { runId, status: 'reconciliation_required', failureReason: 'reconciliation_required' };
   });

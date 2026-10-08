@@ -8,6 +8,7 @@ import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { decideApproval } from '@/domain/approvals/approvals';
 import { answerOwnerQuestion, dismissOwnerQuestion } from '@/domain/questions/questions';
+import { markNotificationRead } from '@/domain/notifications/history';
 import { executeApprovedIfEligible, type ApprovalExecutionOutcome } from '@/domain/execution/execute-on-approval';
 
 export interface InboxDecisionState {
@@ -105,4 +106,39 @@ export async function resolveQuestionFromInbox(
   revalidatePath('/inbox');
   revalidatePath(`/p/${parsed.data.projectKey}/knowledge`);
   return { error: null, resolved: true };
+}
+
+export interface NotificationReadState {
+  error: string | null;
+  read: boolean;
+}
+
+const notificationSchema = z.object({
+  projectKey: z.string().min(1),
+  notificationId: z.string().uuid(),
+});
+
+/**
+ * Mark one in-app notification read FROM the inbox. Same viewport-not-privilege stance: requireTenant
+ * re-derives membership for the target workspace, and markNotificationRead is RLS-gated to the recipient
+ * (recipient_user_id = app.current_user_id()), so a user can only ever clear their OWN notifications.
+ */
+export async function markNotificationReadFromInbox(
+  _prev: NotificationReadState,
+  formData: FormData,
+): Promise<NotificationReadState> {
+  const parsed = notificationSchema.safeParse({
+    projectKey: formData.get('projectKey'),
+    notificationId: formData.get('notificationId'),
+  });
+  if (!parsed.success) return { error: 'Invalid request.', read: false };
+  try {
+    const ctx = await requireTenant(parsed.data.projectKey);
+    await withTenant(ctx, (tx) => markNotificationRead(tx, ctx, parsed.data.notificationId));
+  } catch (err) {
+    if (!(err instanceof AppError)) log.error('markNotificationReadFromInbox failed', { err });
+    return { error: toPublicMessage(err), read: false };
+  }
+  revalidatePath('/inbox');
+  return { error: null, read: true };
 }
