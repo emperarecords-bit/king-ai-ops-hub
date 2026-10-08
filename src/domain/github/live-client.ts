@@ -2,6 +2,8 @@ import { ForbiddenError } from '@/lib/errors';
 import { InstallationTokenSource, type FetchLike } from './app-auth';
 import {
   type GitHubRepoClient,
+  type PullRequestSummary,
+  type RefCheckStatus,
   type RepoRef,
   type RepoTreeEntry,
 } from './client';
@@ -27,6 +29,36 @@ export class GitHubApiError extends Error {
     this.name = 'GitHubApiError';
     this.status = status;
   }
+}
+
+/** Shape the untrusted PR payload into the safe summary. Title/body are repo content; no secrets. */
+function toPrSummary(repoFullName: string, pr: Record<string, unknown>): PullRequestSummary {
+  const head = (pr.head ?? {}) as { ref?: unknown; sha?: unknown };
+  const base = (pr.base ?? {}) as { ref?: unknown };
+  const number = typeof pr.number === 'number' ? pr.number : 0;
+  return {
+    number,
+    title: typeof pr.title === 'string' ? pr.title : '',
+    state: pr.state === 'closed' ? 'closed' : 'open',
+    draft: pr.draft === true,
+    merged: pr.merged === true || typeof pr.merged_at === 'string',
+    headRef: typeof head.ref === 'string' ? head.ref : '',
+    headSha: typeof head.sha === 'string' ? head.sha : '',
+    baseRef: typeof base.ref === 'string' ? base.ref : '',
+    url: typeof pr.html_url === 'string' ? pr.html_url : `https://github.com/${repoFullName}/pull/${number}`,
+  };
+}
+
+/** Roll up GitHub Actions check-runs into one CI state. */
+function rollUpCheckState(
+  checks: ReadonlyArray<{ status: string; conclusion: string | null }>,
+): RefCheckStatus['state'] {
+  if (checks.length === 0) return 'unknown';
+  if (checks.some((c) => c.status !== 'completed')) return 'pending';
+  const bad = new Set(['failure', 'cancelled', 'timed_out', 'action_required', 'stale', 'startup_failure']);
+  if (checks.some((c) => c.conclusion && bad.has(c.conclusion))) return 'failure';
+  if (checks.every((c) => c.conclusion === 'success' || c.conclusion === 'neutral' || c.conclusion === 'skipped')) return 'success';
+  return 'neutral';
 }
 
 interface LiveClientArgs {
@@ -136,6 +168,42 @@ export class LiveGitHubClient implements GitHubRepoClient {
       throw new GitHubApiError('read blob (unexpected shape)', 500);
     }
     return Buffer.from(out.content, 'base64').toString('utf8');
+  }
+
+  async listPullRequests(repo: RepoRef, opts?: { state?: 'open' | 'closed' | 'all' }): Promise<PullRequestSummary[]> {
+    const state = opts?.state ?? 'open';
+    const out = (await this.request(
+      repo,
+      'list pull requests',
+      'GET',
+      `/repos/${repo.repoFullName}/pulls?state=${state}&per_page=30&sort=updated&direction=desc`,
+    )) as Array<Record<string, unknown>>;
+    return (Array.isArray(out) ? out : []).map((pr) => toPrSummary(repo.repoFullName, pr));
+  }
+
+  async getPullRequest(repo: RepoRef, prNumber: number): Promise<PullRequestSummary> {
+    const out = (await this.request(
+      repo,
+      'get pull request',
+      'GET',
+      `/repos/${repo.repoFullName}/pulls/${prNumber}`,
+    )) as Record<string, unknown>;
+    return toPrSummary(repo.repoFullName, out);
+  }
+
+  async getRefChecks(repo: RepoRef, ref: string): Promise<RefCheckStatus> {
+    const out = (await this.request(
+      repo,
+      'get ref check-runs',
+      'GET',
+      `/repos/${repo.repoFullName}/commits/${encodeURIComponent(ref)}/check-runs?per_page=100`,
+    )) as { check_runs?: Array<{ name?: unknown; status?: unknown; conclusion?: unknown }> };
+    const checks = (out.check_runs ?? []).map((c) => ({
+      name: typeof c.name === 'string' ? c.name : '(unnamed)',
+      status: typeof c.status === 'string' ? c.status : 'unknown',
+      conclusion: typeof c.conclusion === 'string' ? c.conclusion : null,
+    }));
+    return { ref, state: rollUpCheckState(checks), checks };
   }
 
   // --- writes (each one policy-gated BEFORE any mutating request) ----------

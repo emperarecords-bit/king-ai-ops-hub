@@ -12,6 +12,7 @@ import { executeApprovedIfEligible } from '@/domain/execution/execute-on-approva
 import { createTask, getTask } from '@/domain/tasks/tasks';
 import { enqueueRun } from '@/domain/jobs/jobs';
 import { listAgents } from '@/domain/agents/agents';
+import { executeGitHubPrFromOpsChat } from '@/domain/opschat/github-action';
 
 /**
  * POST — execute a confirmed Ops Chat action. The ONLY place Ops Chat writes.
@@ -61,6 +62,19 @@ const Body = z.discriminatedUnion('action', [
     action: z.literal('rerun_task'),
     projectKey: z.string().min(1),
     taskId: z.string().uuid(),
+  }),
+  z.object({
+    action: z.literal('execute_github_pr'),
+    projectKey: z.string().min(1),
+    repo: z.string().trim().min(1).max(200),
+    branch: z.string().trim().min(1).max(200),
+    baseBranch: z.string().trim().min(1).max(200).optional(),
+    title: z.string().trim().min(1).max(300),
+    body: z.string().max(20_000).optional(),
+    files: z
+      .array(z.object({ path: z.string().min(1).max(500), content: z.string().max(100_000) }).strict())
+      .min(1)
+      .max(20),
   }),
 ]);
 
@@ -159,6 +173,20 @@ export async function POST(req: Request): Promise<Response> {
           await enqueueRun(tx, ctx, body.taskId);
         });
         return Response.json({ ok: true });
+      }
+      case 'execute_github_pr': {
+        // Admin-gated here (defense-in-depth); the governed path re-verifies admin, payload integrity,
+        // executor enablement, a fresh payload-bound confirmation, and idempotency before any GitHub write.
+        requireAdmin(ctx.projectRole);
+        const executed = await executeGitHubPrFromOpsChat(ctx, {
+          repo: body.repo,
+          branch: body.branch,
+          baseBranch: body.baseBranch,
+          title: body.title,
+          body: body.body ?? '',
+          files: body.files,
+        });
+        return Response.json({ ok: true, executed });
       }
     }
   } catch (err) {

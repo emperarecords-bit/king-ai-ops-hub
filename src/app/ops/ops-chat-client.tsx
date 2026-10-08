@@ -24,12 +24,25 @@ type Proposal =
       agentId: string;
       agentName: string;
     }
-  | { kind: 'rerun_task'; projectKey: string; workspaceName: string; taskId: string; taskTitle: string };
+  | { kind: 'rerun_task'; projectKey: string; workspaceName: string; taskId: string; taskTitle: string }
+  | {
+      kind: 'github_pr';
+      projectKey: string;
+      workspaceName: string;
+      repo: string;
+      branch: string;
+      baseBranch: string;
+      title: string;
+      body: string;
+      riskClass: string;
+      files: Array<{ path: string; content: string }>;
+    };
 
 interface ProposalItem {
   proposal: Proposal;
   state: 'pending' | 'confirming' | 'done' | 'error' | 'cancelled';
   error?: string;
+  result?: { outcome?: string | null; message?: string | null; prUrl?: string | null };
 }
 
 type Confidence = 'low' | 'medium' | 'high';
@@ -94,6 +107,11 @@ const TOOL_LABEL: Record<string, string> = {
   propose_decide_approval: 'preparing the decision',
   propose_dispatch_task: 'preparing the task',
   propose_rerun_task: 'preparing the re-run',
+  github_capabilities: 'checking GitHub capabilities',
+  list_github_repos: 'listing linked repositories',
+  list_pull_requests: 'reading pull requests',
+  get_pull_request: 'reading the pull request & CI',
+  propose_github_pr: 'preparing the pull request',
 };
 
 let seq = 0;
@@ -118,6 +136,8 @@ function doneLabel(p: Proposal): string {
       return `✓ Started — task queued in ${p.workspaceName}.`;
     case 'rerun_task':
       return `✓ Re-run queued for "${p.taskTitle}".`;
+    case 'github_pr':
+      return `✓ Pull request requested in ${p.repo}.`;
   }
 }
 function headerLabel(p: Proposal): string {
@@ -130,6 +150,8 @@ function headerLabel(p: Proposal): string {
       return `Confirm — start a task in ${p.workspaceName} (uses tokens)`;
     case 'rerun_task':
       return `Confirm — re-run in ${p.workspaceName} (uses tokens)`;
+    case 'github_pr':
+      return `Confirm — open a pull request in ${p.repo}`;
   }
 }
 function confirmLabel(p: Proposal): string {
@@ -142,6 +164,8 @@ function confirmLabel(p: Proposal): string {
       return 'Confirm & start';
     case 'rerun_task':
       return 'Confirm & re-run';
+    case 'github_pr':
+      return 'Confirm & open PR';
   }
 }
 function confirmBody(p: Proposal): Record<string, unknown> {
@@ -166,6 +190,17 @@ function confirmBody(p: Proposal): Record<string, unknown> {
       };
     case 'rerun_task':
       return { action: 'rerun_task', projectKey: p.projectKey, taskId: p.taskId };
+    case 'github_pr':
+      return {
+        action: 'execute_github_pr',
+        projectKey: p.projectKey,
+        repo: p.repo,
+        branch: p.branch,
+        baseBranch: p.baseBranch,
+        title: p.title,
+        body: p.body || undefined,
+        files: p.files,
+      };
   }
 }
 
@@ -363,11 +398,16 @@ export function OpsChatClient({ opening }: { opening: string }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(confirmBody(item.proposal)),
       });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error(j.error || 'That did not go through.');
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j.error || 'That did not go through.');
+      const executed = j?.executed as { outcome?: string | null; message?: string | null; prUrl?: string | null } | undefined;
+      // A governed action can reach the confirm path but still be blocked/failed by dispatch (e.g. the
+      // executor is disabled). Surface that honestly rather than a false "done".
+      if (item.proposal.kind === 'github_pr' && executed && executed.outcome !== 'succeeded') {
+        setItem(msgId, index, { state: 'error', error: executed.message || `The GitHub action ${executed.outcome ?? 'did not run'}.` });
+        return;
       }
-      setItem(msgId, index, { state: 'done' });
+      setItem(msgId, index, { state: 'done', result: executed });
     } catch (e) {
       setItem(msgId, index, { state: 'error', error: e instanceof Error ? e.message : 'That did not go through.' });
     }
@@ -538,7 +578,19 @@ export function OpsChatClient({ opening }: { opening: string }) {
                     className="mt-3 rounded-md border border-[var(--accent)] bg-[var(--surface-raised,rgba(120,160,255,0.06))] p-3"
                   >
                     {item.state === 'done' ? (
-                      <p className="text-sm text-[var(--success,#6bbf73)]">{doneLabel(p)}</p>
+                      <div className="flex flex-col gap-1">
+                        <p className="text-sm text-[var(--success,#6bbf73)]">{doneLabel(p)}</p>
+                        {p.kind === 'github_pr' && item.result?.prUrl ? (
+                          <a
+                            href={item.result.prUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-[var(--accent)] underline underline-offset-2 break-all"
+                          >
+                            {item.result.prUrl}
+                          </a>
+                        ) : null}
+                      </div>
                     ) : item.state === 'cancelled' ? (
                       <p className="text-sm text-[var(--muted)]">Cancelled — nothing was changed.</p>
                     ) : (
@@ -568,10 +620,23 @@ export function OpsChatClient({ opening }: { opening: string }) {
                               Run by {p.agentName}. Starts an AI run and uses tokens.
                             </p>
                           </>
-                        ) : (
+                        ) : p.kind === 'rerun_task' ? (
                           <p className="mt-1 text-sm">
                             Re-run <span className="font-semibold">{p.taskTitle}</span>. Starts an AI run and uses tokens.
                           </p>
+                        ) : (
+                          <div className="mt-1 flex flex-col gap-0.5 text-sm">
+                            <p className="font-semibold">{p.title}</p>
+                            <p className="text-xs text-[var(--muted)]">
+                              {p.repo} · <span className="font-mono">{p.branch}</span> → <span className="font-mono">{p.baseBranch}</span>
+                            </p>
+                            <p className="text-xs text-[var(--muted)]">
+                              {p.files.length} file{p.files.length === 1 ? '' : 's'}: <span className="font-mono">{p.files.map((f) => f.path).join(', ')}</span>
+                            </p>
+                            <p className="mt-1 text-xs text-[var(--muted)]">
+                              Risk: {p.riskClass.replace(/_/g, ' ')} · Side effect: opens a pull request (no merge). Rollback: close the PR / delete the branch — the default branch is never written.
+                            </p>
+                          </div>
                         )}
 
                         {item.state === 'error' ? (

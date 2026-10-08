@@ -9,6 +9,17 @@ import { listTasks, getTask, listRuns, listRunSteps } from '@/domain/tasks/tasks
 import { openQuestionsForOwner, type OpenOwnerQuestion } from '@/domain/questions/questions';
 import { listApprovalsForQueue, getApprovalDetail, type QueueApprovalRow } from '@/domain/approvals/approvals';
 import { listAgents } from '@/domain/agents/agents';
+import { listRepoLinks } from '@/domain/github/links';
+import { getGitHubClient } from '@/domain/github/client';
+import {
+  githubWorkspaceCapabilities,
+  listWorkspaceRepos,
+  listWorkspacePullRequests,
+  getWorkspacePullRequest,
+  RepoNotLinkedError,
+} from '@/domain/github/inspection';
+import { gitPrPayloadSchema, findGitPrPlaceholder } from '@/domain/execution/git-pr-executor';
+import { EXECUTOR_RISK_BY_ACTION } from '@/domain/execution/executor-policy';
 
 /**
  * Ops Chat tool layer (v2 + v2.1). The model may call these to fetch deeper
@@ -55,6 +66,20 @@ export type OpsChatProposal =
       readonly workspaceName: string;
       readonly taskId: string;
       readonly taskTitle: string;
+    }
+  | {
+      readonly kind: 'github_pr';
+      readonly projectKey: string;
+      readonly workspaceName: string;
+      readonly repo: string;
+      readonly branch: string;
+      /** The PR target, resolved for the card (the linked repo's default branch when unspecified). */
+      readonly baseBranch: string;
+      readonly title: string;
+      readonly body: string;
+      readonly riskClass: string;
+      /** Carried to the confirm boundary (the proposed code); the card shows paths only, never content. */
+      readonly files: ReadonlyArray<{ readonly path: string; readonly content: string }>;
     };
 
 function proposalKey(p: OpsChatProposal): string {
@@ -67,6 +92,8 @@ function proposalKey(p: OpsChatProposal): string {
       return `r:${p.taskId}`;
     case 'dispatch_task':
       return `d:${p.projectKey}:${p.title.toLowerCase()}`;
+    case 'github_pr':
+      return `gh:${p.projectKey}:${p.repo}:${p.branch.toLowerCase()}`;
   }
 }
 
@@ -94,6 +121,26 @@ function argStr(input: unknown, key: string): string {
 }
 function argBool(input: unknown, key: string): boolean {
   return Boolean(input && typeof input === 'object' && (input as Record<string, unknown>)[key] === true);
+}
+function argNum(input: unknown, key: string): number | null {
+  if (input && typeof input === 'object' && key in input) {
+    const v = (input as Record<string, unknown>)[key];
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+  return null;
+}
+function argFiles(input: unknown): Array<{ path: string; content: string }> {
+  const v = input && typeof input === 'object' ? (input as Record<string, unknown>).files : undefined;
+  if (!Array.isArray(v)) return [];
+  const out: Array<{ path: string; content: string }> = [];
+  for (const f of v) {
+    if (f && typeof f === 'object') {
+      const path = (f as Record<string, unknown>).path;
+      const content = (f as Record<string, unknown>).content;
+      if (typeof path === 'string' && typeof content === 'string') out.push({ path, content });
+    }
+  }
+  return out;
 }
 
 function resolveProject(projects: readonly ProjectAccessRecord[], ref: string): ProjectAccessRecord | null {
@@ -264,6 +311,79 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
         task: { type: 'string', description: 'Task title or id.' },
       },
       required: ['project', 'task'],
+    },
+  },
+  {
+    name: 'github_capabilities',
+    description:
+      "Read which governed GitHub actions this workspace can do right now — whether GitHub is configured, the git_pr executor is registered and enabled, which repositories are linked, and whether a pull-request can be proposed. Read-only.",
+    inputSchema: {
+      type: 'object',
+      properties: { project: { type: 'string', description: 'Workspace name or key.' } },
+      required: ['project'],
+    },
+  },
+  {
+    name: 'list_github_repos',
+    description: "List the GitHub repositories linked to a workspace, with each repo's default branch. Read-only.",
+    inputSchema: {
+      type: 'object',
+      properties: { project: { type: 'string', description: 'Workspace name or key.' } },
+      required: ['project'],
+    },
+  },
+  {
+    name: 'list_pull_requests',
+    description:
+      "List pull requests on a linked repository (default: open). Returns number, title, state, head/base branch, head SHA, and URL. Read-only.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        repo: { type: 'string', description: 'Canonical owner/repo; must be linked to this workspace.' },
+        state: { type: 'string', enum: ['open', 'closed', 'all'], description: "Default 'open'." },
+      },
+      required: ['project', 'repo'],
+    },
+  },
+  {
+    name: 'get_pull_request',
+    description:
+      'Get one pull request on a linked repository plus its rolled-up CI/check state (success/failure/pending). Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        repo: { type: 'string', description: 'Canonical owner/repo; must be linked to this workspace.' },
+        number: { type: 'number', description: 'Pull request number.' },
+      },
+      required: ['project', 'repo', 'number'],
+    },
+  },
+  {
+    name: 'propose_github_pr',
+    description:
+      'Prepare an EXACT GitHub pull request (new branch + commit + PR on a linked repo) FOR THE OWNER TO CONFIRM. Does NOT create anything — it surfaces a confirmation card. The branch is a NEW work branch (never the default branch); each file must carry its COMPLETE intended content (never a placeholder or summary). On confirm it runs through the governed git_pr executor.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        repo: { type: 'string', description: 'Canonical owner/repo; must be linked to this workspace.' },
+        branch: { type: 'string', description: 'The NEW work branch the changes land on (never a default branch).' },
+        base_branch: { type: 'string', description: "PR target; defaults to the repo's default branch." },
+        title: { type: 'string', description: 'Pull request title.' },
+        body: { type: 'string', description: 'Pull request body (optional).' },
+        files: {
+          type: 'array',
+          description: 'Files to create/replace; each with its complete intended content.',
+          items: {
+            type: 'object',
+            properties: { path: { type: 'string' }, content: { type: 'string' } },
+            required: ['path', 'content'],
+          },
+        },
+      },
+      required: ['project', 'repo', 'branch', 'title', 'files'],
     },
   },
 ];
@@ -547,6 +667,97 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
         return JSON.stringify({
           prepared: true,
           note: `Prepared for the owner to confirm: re-run "${t.title}" in ${p.name}. This will START an AI run (uses tokens) only after the owner confirms. Do NOT claim it is running yet.`,
+        });
+      }
+      case 'github_capabilities': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const ctx = ctxFor(auth, p);
+        const caps = await withTenant(ctx, (tx) => githubWorkspaceCapabilities(tx, ctx));
+        return JSON.stringify({ workspace: p.name, ...caps });
+      }
+      case 'list_github_repos': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const ctx = ctxFor(auth, p);
+        const repos = await withTenant(ctx, (tx) => listWorkspaceRepos(tx, ctx));
+        return JSON.stringify({ workspace: p.name, repos });
+      }
+      case 'list_pull_requests': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const repo = argStr(input, 'repo');
+        const stateArg = argStr(input, 'state');
+        const state = stateArg === 'closed' || stateArg === 'all' ? stateArg : 'open';
+        const ctx = ctxFor(auth, p);
+        try {
+          const prs = await withTenant(ctx, (tx) => listWorkspacePullRequests(tx, ctx, getGitHubClient(), repo, { state }));
+          return JSON.stringify({ workspace: p.name, repo, state, count: prs.length, pullRequests: prs });
+        } catch (err) {
+          if (err instanceof RepoNotLinkedError) return JSON.stringify({ error: err.message });
+          return JSON.stringify({ error: 'Could not read pull requests from GitHub.' });
+        }
+      }
+      case 'get_pull_request': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const repo = argStr(input, 'repo');
+        const number = argNum(input, 'number');
+        if (number === null) return JSON.stringify({ error: 'A pull request number is required.' });
+        const ctx = ctxFor(auth, p);
+        try {
+          const { pr, checks } = await withTenant(ctx, (tx) => getWorkspacePullRequest(tx, ctx, getGitHubClient(), repo, number));
+          return JSON.stringify({ workspace: p.name, repo, pullRequest: pr, ci: { state: checks.state, checks: checks.checks } });
+        } catch (err) {
+          if (err instanceof RepoNotLinkedError) return JSON.stringify({ error: err.message });
+          return JSON.stringify({ error: 'Could not read that pull request from GitHub.' });
+        }
+      }
+      case 'propose_github_pr': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        if (p.projectRole !== 'admin') {
+          return JSON.stringify({ error: 'You must be an admin of that workspace to propose a GitHub action.' });
+        }
+        const repo = argStr(input, 'repo');
+        const branch = argStr(input, 'branch');
+        const baseBranchArg = argStr(input, 'base_branch');
+        const title = argStr(input, 'title');
+        const body = argStr(input, 'body');
+        const files = argFiles(input);
+        const ctx = ctxFor(auth, p);
+        // The repo must be linked (and we read its default branch for the card's PR target).
+        const link = await withTenant(ctx, (tx) => listRepoLinks(tx, ctx)).then((ls) => ls.find((l) => l.repoFullName === repo) ?? null);
+        if (!link) return JSON.stringify({ error: `Repository "${repo}" is not linked to this workspace. Use list_github_repos.` });
+        // Validate into the exact executable payload — bad shapes are refusals, not best-effort repairs.
+        const parsed = gitPrPayloadSchema.safeParse({ repo, branch, title, body, ...(baseBranchArg ? { baseBranch: baseBranchArg } : {}), files });
+        if (!parsed.success) {
+          const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+          return JSON.stringify({ error: `That pull request is not valid: ${issues}` });
+        }
+        for (const f of parsed.data.files) {
+          const marker = findGitPrPlaceholder(f.content);
+          if (marker) return JSON.stringify({ error: `File "${f.path}" contains placeholder text ("${marker}") instead of real content.` });
+        }
+        const baseBranch = parsed.data.baseBranch ?? link.defaultBranch;
+        if (branch === link.defaultBranch || branch === 'main' || branch === 'master') {
+          return JSON.stringify({ error: `"${branch}" is a default/protected branch — propose a NEW work branch; the PR targets "${baseBranch}".` });
+        }
+        addProposal({
+          kind: 'github_pr',
+          projectKey: p.key,
+          workspaceName: p.name,
+          repo: parsed.data.repo,
+          branch: parsed.data.branch,
+          baseBranch,
+          title: parsed.data.title,
+          body: parsed.data.body,
+          riskClass: EXECUTOR_RISK_BY_ACTION.git_pr,
+          files: parsed.data.files.map((f) => ({ path: f.path, content: f.content })),
+        });
+        return JSON.stringify({
+          prepared: true,
+          note: `Prepared for the owner to confirm: a pull request in ${parsed.data.repo} from ${parsed.data.branch} into ${baseBranch}. Tell the owner it is ready to confirm below. Do NOT claim it is created yet.`,
         });
       }
       default:
