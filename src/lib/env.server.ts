@@ -26,6 +26,16 @@ const serverEnvSchema = z.object({
     .string()
     .optional()
     .transform((v) => (v && v.trim() !== '' ? v : undefined)),
+  // Owner Notifications email channel (optional vendor — Resend). The channel sends ONLY when BOTH are set AND
+  // the channel is enabled (NOTIFICATIONS_ENABLED) and not kill-switched. Either unset ⇒ email blocks, never sends.
+  EMAIL_API_KEY: z
+    .string()
+    .optional()
+    .transform((v) => (v && v.trim() !== '' ? v : undefined)),
+  EMAIL_FROM: z
+    .string()
+    .optional()
+    .transform((v) => (v && v.trim() !== '' ? v : undefined)),
   APP_ENCRYPTION_KEY: z
     .string()
     .refine((v) => Buffer.from(v, 'base64').length === 32, {
@@ -97,6 +107,8 @@ function assertProductionSafe(env: ServerEnv): void {
   check('ANTHROPIC_API_KEY', env.ANTHROPIC_API_KEY);
   if (env.GEMINI_API_KEY) check('GEMINI_API_KEY', env.GEMINI_API_KEY);
   if (env.DEEPSEEK_API_KEY) check('DEEPSEEK_API_KEY', env.DEEPSEEK_API_KEY);
+  if (env.EMAIL_API_KEY) check('EMAIL_API_KEY', env.EMAIL_API_KEY);
+  if (env.EMAIL_FROM) check('EMAIL_FROM', env.EMAIL_FROM);
   check('APP_ENCRYPTION_KEY', env.APP_ENCRYPTION_KEY);
   check('DATABASE_URL', env.DATABASE_URL);
   // A superuser / dev password in the DB URL means RLS is not the enforced net.

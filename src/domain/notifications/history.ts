@@ -1,6 +1,6 @@
 import 'server-only';
 import { and, desc, eq } from 'drizzle-orm';
-import { notificationEvents } from '@/db/schema';
+import { notificationEvents, notificationMessageEvents, notificationMessages } from '@/db/schema';
 import { type DbTx } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { writeAudit } from '@/domain/audit/audit';
@@ -25,6 +25,9 @@ export interface OwnerNotification {
   readonly body: string;
   readonly read: boolean;
   readonly createdAt: Date;
+  /** Latest outbound delivery status for this event (null when nothing has been attempted / in_app_only). */
+  readonly deliveryStatus: string | null;
+  readonly deliveryResultCode: string | null;
 }
 
 const HISTORY_LIMIT_PER_WORKSPACE = 50;
@@ -44,6 +47,8 @@ export async function notificationsForOwner(
       orgRole: orgRoleByOrg.get(project.orgId) ?? 'member',
       projectRole: project.projectRole,
     };
+    // LEFT JOIN the delivery ledger (messages are recipient-scoped; readable here because withTenant stamps the
+    // owner's user id). An event may map to >1 message (e.g. an immediate + a later digest); keep the latest.
     const rows = await withTenant(ctx, (tx) =>
       tx
         .select({
@@ -55,13 +60,23 @@ export async function notificationsForOwner(
           body: notificationEvents.body,
           readAt: notificationEvents.readAt,
           createdAt: notificationEvents.createdAt,
+          msgStatus: notificationMessages.status,
+          msgResultCode: notificationMessages.resultCode,
+          msgCreatedAt: notificationMessages.createdAt,
         })
         .from(notificationEvents)
+        .leftJoin(notificationMessageEvents, eq(notificationMessageEvents.eventId, notificationEvents.id))
+        .leftJoin(notificationMessages, eq(notificationMessages.id, notificationMessageEvents.messageId))
         .where(and(eq(notificationEvents.projectId, ctx.projectId), eq(notificationEvents.recipientUserId, userId)))
         .orderBy(desc(notificationEvents.createdAt))
-        .limit(HISTORY_LIMIT_PER_WORKSPACE),
+        .limit(HISTORY_LIMIT_PER_WORKSPACE * 3),
     );
+    const latestByEvent = new Map<string, (typeof rows)[number]>();
     for (const r of rows) {
+      const prev = latestByEvent.get(r.id);
+      if (!prev || (r.msgCreatedAt && (!prev.msgCreatedAt || r.msgCreatedAt > prev.msgCreatedAt))) latestByEvent.set(r.id, r);
+    }
+    for (const r of latestByEvent.values()) {
       items.push({
         notificationId: r.id,
         projectKey: project.key,
@@ -73,6 +88,8 @@ export async function notificationsForOwner(
         body: r.body,
         read: r.readAt !== null,
         createdAt: r.createdAt,
+        deliveryStatus: r.msgStatus ?? null,
+        deliveryResultCode: r.msgResultCode ?? null,
       });
     }
   }

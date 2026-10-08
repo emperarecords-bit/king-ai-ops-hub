@@ -558,6 +558,61 @@ language sql security definer set search_path = public, pg_temp as $$
    limit 1
 $$;
 
+-- Owner Notifications delivery (v1 PR2): the worker scans pending notifications ACROSS workspaces, the same
+-- cross-tenant step the run/standing dispatchers make. app_server has no cross-tenant read, so these definer
+-- functions return only the identity + render fields; the worker then does all writes UNDER withUser(recipient),
+-- RLS enforced. They are language plpgsql (late-binding) so the incremental-bootstrap test — which applies the
+-- CURRENT rls.sql to the PENULTIMATE schema, before the notification tables exist — tolerates their absence; a
+-- call against a missing table would error, but they are simply never called there.
+
+-- Immediate events not yet placed into any outbound message. The router sends (or quiet-hours-defers by leaving
+-- them pending, or suppresses) each. An event with a message_events row is already handled and never reappears.
+create or replace function app.list_pending_immediate_notifications(p_now timestamptz, p_limit int)
+returns table (event_id uuid, org_id uuid, project_id uuid, recipient_user_id uuid, severity text, title text, body text)
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  return query
+    select e.id, e.org_id, e.project_id, e.recipient_user_id, e.severity::text, e.title, e.body
+    from notification_events e
+    where e.routing = 'immediate'
+      and not exists (select 1 from notification_message_events me where me.event_id = e.id)
+    order by e.created_at asc
+    limit p_limit;
+end
+$$;
+
+-- Users whose digest is due: a preferences row with at least one digest time and next_digest_at in the past.
+create or replace function app.list_due_digest_users(p_now timestamptz, p_limit int)
+returns table (user_id uuid)
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  return query
+    select p.user_id
+    from notification_preferences p
+    where array_length(p.digest_times_local, 1) >= 1
+      and p.next_digest_at is not null
+      and p.next_digest_at <= p_now
+    order by p.next_digest_at asc
+    limit p_limit;
+end
+$$;
+
+-- A recipient's digest-routed events not yet placed into any message (the batch contents for their next digest).
+create or replace function app.list_pending_digest_events(p_recipient uuid, p_limit int)
+returns table (event_id uuid, org_id uuid, project_id uuid, severity text, title text, body text, created_at timestamptz)
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  return query
+    select e.id, e.org_id, e.project_id, e.severity::text, e.title, e.body, e.created_at
+    from notification_events e
+    where e.recipient_user_id = p_recipient
+      and e.routing = 'digest'
+      and not exists (select 1 from notification_message_events me where me.event_id = e.id)
+    order by e.created_at asc
+    limit p_limit;
+end
+$$;
+
 -- Worker/queue health (O-22): the /api/health worker-liveness signal counts
 -- run_jobs across tenants. app_server has no cross-tenant read, so this fixed
 -- aggregate (no row data) is exposed as a definer function instead.
@@ -633,6 +688,9 @@ begin
     'app.list_stale_document_jobs()',
     'app.list_due_schedules(timestamptz)',
     'app.org_owner_user_id(uuid)',
+    'app.list_pending_immediate_notifications(timestamptz, int)',
+    'app.list_due_digest_users(timestamptz, int)',
+    'app.list_pending_digest_events(uuid, int)',
     'app.run_jobs_health()',
     'app.adopt_placeholder_profile(uuid, text, text)',
     'app.is_org_member(uuid)',
@@ -875,6 +933,7 @@ do $$
 begin
   if to_regclass('public.notification_events') is not null then
     grant select, insert, update on notification_events to app_server;
+    grant select on notification_events to app_system;  -- the delivery dispatchers (definer, app_system-owned)
     alter table notification_events enable row level security;
     alter table notification_events force row level security;
     -- Command-split policies: recipient-gated reads/updates, tenant-gated inserts.
@@ -910,6 +969,7 @@ begin
 
   if to_regclass('public.notification_message_events') is not null then
     grant select, insert on notification_message_events to app_server;
+    grant select on notification_message_events to app_system;  -- dispatcher 'not exists' checks
     alter table notification_message_events enable row level security;
     alter table notification_message_events force row level security;
     drop policy if exists notification_message_events_self on notification_message_events;
@@ -921,6 +981,7 @@ begin
 
   if to_regclass('public.notification_preferences') is not null then
     grant select, insert, update on notification_preferences to app_server;
+    grant select on notification_preferences to app_system;  -- list_due_digest_users (definer)
     alter table notification_preferences enable row level security;
     alter table notification_preferences force row level security;
     drop policy if exists notification_preferences_self on notification_preferences;
