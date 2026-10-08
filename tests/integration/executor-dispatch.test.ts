@@ -95,6 +95,9 @@ describe.skipIf(!available)('trusted executor dispatch', { timeout: 15_000 }, ()
     setGitHubClientOverrideForTests({
       listTree: async () => [],
       readBlob: async () => '',
+      listPullRequests: async () => [],
+      getPullRequest: async () => ({ number: 0, title: '', state: 'open', draft: false, merged: false, headRef: '', headSha: '', baseRef: '', url: '' }),
+      getRefChecks: async () => ({ ref: '', state: 'unknown', checks: [] }),
       createBranch: async () => { calls.push('createBranch'); },
       commitToBranch: async () => { calls.push('commitToBranch'); },
       openPullRequest: async () => { calls.push('openPullRequest'); return { prNumber: 7 }; },

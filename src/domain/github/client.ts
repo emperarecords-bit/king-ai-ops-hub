@@ -25,11 +25,37 @@ export interface RepoTreeEntry {
   readonly size: number | null;
 }
 
+/** A pull request's safe, UNTRUSTED summary — carries no secrets (title/body are repo content). */
+export interface PullRequestSummary {
+  readonly number: number;
+  readonly title: string;
+  readonly state: 'open' | 'closed';
+  readonly draft: boolean;
+  readonly merged: boolean;
+  readonly headRef: string;
+  readonly headSha: string;
+  readonly baseRef: string;
+  readonly url: string;
+}
+
+/** Rolled-up CI/check state for a ref (GitHub Actions check-runs). */
+export interface RefCheckStatus {
+  readonly ref: string;
+  readonly state: 'success' | 'failure' | 'pending' | 'neutral' | 'unknown';
+  readonly checks: ReadonlyArray<{ name: string; status: string; conclusion: string | null }>;
+}
+
 export interface GitHubRepoClient {
   /** List the file tree at a ref. Read-only. */
   listTree(repo: RepoRef, ref: string): Promise<RepoTreeEntry[]>;
   /** Fetch one blob's UTF-8 content at a ref. Read-only. The caller treats the result as UNTRUSTED data. */
   readBlob(repo: RepoRef, ref: string, path: string): Promise<string>;
+  /** List pull requests (read-only). Default state 'open'. */
+  listPullRequests(repo: RepoRef, opts?: { state?: 'open' | 'closed' | 'all' }): Promise<PullRequestSummary[]>;
+  /** One pull request's detail (read-only). */
+  getPullRequest(repo: RepoRef, prNumber: number): Promise<PullRequestSummary>;
+  /** Rolled-up CI/check state for a ref — a commit SHA or branch (read-only). */
+  getRefChecks(repo: RepoRef, ref: string): Promise<RefCheckStatus>;
   /** Create a work branch from a base ref. Never the default branch (enforced by write-policy before any call). */
   createBranch(repo: RepoRef, baseRef: string, newBranch: string): Promise<void>;
   /** Commit file changes to an existing NON-default work branch. */
@@ -62,6 +88,15 @@ class UnconfiguredGitHubClient implements GitHubRepoClient {
     return Promise.reject(new GitHubUnconfiguredError());
   }
   readBlob(): Promise<string> {
+    return Promise.reject(new GitHubUnconfiguredError());
+  }
+  listPullRequests(): Promise<PullRequestSummary[]> {
+    return Promise.reject(new GitHubUnconfiguredError());
+  }
+  getPullRequest(): Promise<PullRequestSummary> {
+    return Promise.reject(new GitHubUnconfiguredError());
+  }
+  getRefChecks(): Promise<RefCheckStatus> {
     return Promise.reject(new GitHubUnconfiguredError());
   }
   createBranch(): Promise<void> {
