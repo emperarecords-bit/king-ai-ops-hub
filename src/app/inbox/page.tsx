@@ -2,9 +2,19 @@ import Link from 'next/link';
 import { listMyProjectsWithOrgRoles } from '@/domain/auth/guard';
 import { ownerInbox } from '@/domain/inbox/inbox';
 import { openQuestionsForOwner } from '@/domain/questions/questions';
+import { notificationsForOwner } from '@/domain/notifications/history';
 import { Card, EmptyState, PageHeader } from '@/components/ui';
 import { InboxDecisionForm } from './inbox-decision-form';
 import { QuestionAnswerForm } from './question-answer-form';
+import { NotificationReadForm } from './notification-read-form';
+
+const SEVERITY_LABEL: Record<string, string> = {
+  critical: 'Critical',
+  action_required: 'Needs you',
+  warning: 'Warning',
+  informational: 'Info',
+  success: 'Done',
+};
 
 /**
  * The Owner Inbox (EV-011 follow-up): every pending approval, every business,
@@ -16,6 +26,8 @@ export default async function InboxPage() {
   const { user, projects, orgRoles } = await listMyProjectsWithOrgRoles();
   const inbox = await ownerInbox(user.id, projects, orgRoles);
   const questions = await openQuestionsForOwner(user.id, projects, orgRoles);
+  const notifications = await notificationsForOwner(user.id, projects, orgRoles);
+  const unreadCount = notifications.filter((n) => !n.read).length;
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-6">
@@ -89,6 +101,39 @@ export default async function InboxPage() {
           </Card>
         ))
       )}
+
+      {notifications.length > 0 ? (
+        <section className="space-y-3 pt-2">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-[var(--muted)]">
+            Recent notifications{unreadCount > 0 ? ` — ${unreadCount} unread` : ''}
+          </h2>
+          {notifications.map((n) => (
+            <Card key={n.notificationId}>
+              <div className="flex flex-col gap-1.5">
+                <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
+                  <span className="rounded bg-[var(--surface-raised)] px-2 py-0.5 text-[var(--foreground)]">
+                    {n.workspaceName}
+                  </span>
+                  <span className="rounded border border-[var(--border)] px-2 py-0.5">
+                    {SEVERITY_LABEL[n.severity] ?? n.severity}
+                  </span>
+                  {!n.read ? <span className="text-[var(--accent)]">● new</span> : null}
+                  <span>· {n.createdAt.toISOString().slice(0, 16).replace('T', ' ')} UTC</span>
+                </div>
+                <p className={`text-sm ${n.read ? 'opacity-70' : 'font-semibold'}`}>{n.title}</p>
+                {n.body && n.body !== n.title ? (
+                  <p className="text-xs text-[var(--muted)]">{n.body}</p>
+                ) : null}
+                {!n.read ? (
+                  <div className="pt-0.5">
+                    <NotificationReadForm projectKey={n.projectKey} notificationId={n.notificationId} />
+                  </div>
+                ) : null}
+              </div>
+            </Card>
+          ))}
+        </section>
+      ) : null}
     </div>
   );
 }

@@ -21,13 +21,13 @@ import { runPublishCli } from '../../scripts/ci/publish-receipt';
 
 /**
  * G-Backup publish CLI — OFFLINE. Builds the real staging source fixture (migration files from git at the pinned
- * 0077 commit), signs a receipt with an EPHEMERAL key, writes it to a temp file, then drives `runPublishCli` with a
+ * 0078 commit), signs a receipt with an EPHEMERAL key, writes it to a temp file, then drives `runPublishCli` with a
  * FAKE in-memory store + fake anonymous fetcher. No network, no real S3/AWS, no credentials, no deploy. Proves the
  * CLI wires env → expectation → publisher correctly and fails closed on missing config / a tampered receipt.
  */
 
 const kp = genKey('ed25519');
-const STAGING_SOURCE_COMMIT = execFileSync('git', ['rev-parse', '11544963ce7a0367bf95c3e5687301e7c5b1a021^{commit}'], { encoding: 'utf8' }).trim();
+const STAGING_SOURCE_COMMIT = execFileSync('git', ['rev-parse', '1be10f77ab5400b435d36ef05014fffca9f9ab92^{commit}'], { encoding: 'utf8' }).trim();
 const RUNTIME_DIR = mkdtempSync(join(tmpdir(), 'publish-cli-src-'));
 const journalText = execFileSync('git', ['show', `${STAGING_SOURCE_COMMIT}:drizzle/meta/_journal.json`], { encoding: 'utf8' });
 mkdirSync(join(RUNTIME_DIR, 'drizzle', 'meta'), { recursive: true });

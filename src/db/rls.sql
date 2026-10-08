@@ -540,6 +540,24 @@ language sql security definer set search_path = public, pg_temp as $$
   where s.enabled = true and s.next_run_at <= p_now
 $$;
 
+-- Owner Notifications (0078): capture runs in the RUN AUTHOR's (or system runner's) tenant tx, but a
+-- notification's recipient is the workspace OWNER — a different user the author's RLS context cannot read.
+-- This definer resolves the org owner's user id so enqueue can stamp recipient_user_id without a cross-user
+-- read. Returns NULL when an org has no owner membership (enqueue then skips — a notification never fails a run).
+--
+-- Recipient-selection invariant: an org is provisioned with exactly ONE owner membership (projects/provision.ts),
+-- but the schema does not FORBID a second owner being added later, so this selection is made TOTALLY DETERMINISTIC
+-- rather than relying on unordered selection: the EARLIEST-created owner, ties broken by the lowest user_id. The
+-- same (org_id, owner-set) therefore always yields the same recipient across calls, snapshots, and worker restarts.
+create or replace function app.org_owner_user_id(p_org_id uuid)
+returns uuid
+language sql security definer set search_path = public, pg_temp as $$
+  select m.user_id from memberships m
+   where m.org_id = p_org_id and m.role = 'owner'
+   order by m.created_at asc, m.user_id asc
+   limit 1
+$$;
+
 -- Worker/queue health (O-22): the /api/health worker-liveness signal counts
 -- run_jobs across tenants. app_server has no cross-tenant read, so this fixed
 -- aggregate (no row data) is exposed as a definer function instead.
@@ -614,6 +632,7 @@ begin
     'app.requeue_document_job(uuid)',
     'app.list_stale_document_jobs()',
     'app.list_due_schedules(timestamptz)',
+    'app.org_owner_user_id(uuid)',
     'app.run_jobs_health()',
     'app.adopt_placeholder_profile(uuid, text, text)',
     'app.is_org_member(uuid)',
@@ -842,6 +861,73 @@ begin
       'create policy owner_questions_tenant on owner_questions
          using (org_id = app.current_org_id() and project_id = app.current_project_id())
          with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+  end if;
+end
+$$;
+
+-- Owner Notifications (migration 0078). to_regclass-guarded like owner_questions so the penultimate-schema
+-- incremental bootstrap tolerates absence. notification_events is BOTH tenant- and recipient-scoped: reads
+-- and mark-read require recipient_user_id = app.current_user_id() (an admin never sees/clears another user's
+-- notifications), while INSERT is tenant-scoped only because capture runs in the run-author/system context and
+-- stamps the recipient (who is not the inserter). Messages/join/preferences are USER-scoped (a digest spans
+-- workspaces). Nothing is deleted by the app — no delete grants. No sender exists in this increment.
+do $$
+begin
+  if to_regclass('public.notification_events') is not null then
+    grant select, insert, update on notification_events to app_server;
+    alter table notification_events enable row level security;
+    alter table notification_events force row level security;
+    -- Command-split policies: recipient-gated reads/updates, tenant-gated inserts.
+    drop policy if exists notification_events_select on notification_events;
+    execute
+      'create policy notification_events_select on notification_events for select
+         using (org_id = app.current_org_id() and project_id = app.current_project_id()
+                and recipient_user_id = app.current_user_id())';
+    drop policy if exists notification_events_insert on notification_events;
+    execute
+      'create policy notification_events_insert on notification_events for insert
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+    drop policy if exists notification_events_update on notification_events;
+    execute
+      'create policy notification_events_update on notification_events for update
+         using (org_id = app.current_org_id() and project_id = app.current_project_id()
+                and recipient_user_id = app.current_user_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id()
+                and recipient_user_id = app.current_user_id())';
+  end if;
+
+  if to_regclass('public.notification_messages') is not null then
+    -- Outbound messages are user-scoped. app_server (the worker role) reads/creates/updates its own-recipient rows.
+    grant select, insert, update on notification_messages to app_server;
+    alter table notification_messages enable row level security;
+    alter table notification_messages force row level security;
+    drop policy if exists notification_messages_self on notification_messages;
+    execute
+      'create policy notification_messages_self on notification_messages
+         using (recipient_user_id = app.current_user_id())
+         with check (recipient_user_id = app.current_user_id())';
+  end if;
+
+  if to_regclass('public.notification_message_events') is not null then
+    grant select, insert on notification_message_events to app_server;
+    alter table notification_message_events enable row level security;
+    alter table notification_message_events force row level security;
+    drop policy if exists notification_message_events_self on notification_message_events;
+    execute
+      'create policy notification_message_events_self on notification_message_events
+         using (recipient_user_id = app.current_user_id())
+         with check (recipient_user_id = app.current_user_id())';
+  end if;
+
+  if to_regclass('public.notification_preferences') is not null then
+    grant select, insert, update on notification_preferences to app_server;
+    alter table notification_preferences enable row level security;
+    alter table notification_preferences force row level security;
+    drop policy if exists notification_preferences_self on notification_preferences;
+    execute
+      'create policy notification_preferences_self on notification_preferences
+         using (user_id = app.current_user_id())
+         with check (user_id = app.current_user_id())';
   end if;
 end
 $$;

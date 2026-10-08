@@ -32,6 +32,12 @@ import {
   MESSAGE_ROLES,
   MILESTONE_STATUSES,
   MODEL_TIERS,
+  NOTIFICATION_EVENT_TYPES,
+  NOTIFICATION_SEVERITIES,
+  NOTIFICATION_ROUTINGS,
+  NOTIFICATION_CHANNELS,
+  NOTIFICATION_MESSAGE_KINDS,
+  NOTIFICATION_MESSAGE_STATUSES,
   REVIEW_MODES,
   REVIEW_OUTCOMES,
   OBJECTIVE_STATUSES,
@@ -99,3 +105,9 @@ export const decisionConfidenceEnum = pgEnum('decision_confidence', DECISION_CON
 export const extractionStatusEnum = pgEnum('extraction_status', EXTRACTION_STATUSES);
 export const runJobStatusEnum = pgEnum('run_job_status', RUN_JOB_STATUSES);
 export const dataClassificationEnum = pgEnum('data_classification', DATA_CLASSIFICATIONS);
+export const notificationEventTypeEnum = pgEnum('notification_event_type', NOTIFICATION_EVENT_TYPES);
+export const notificationSeverityEnum = pgEnum('notification_severity', NOTIFICATION_SEVERITIES);
+export const notificationRoutingEnum = pgEnum('notification_routing', NOTIFICATION_ROUTINGS);
+export const notificationChannelEnum = pgEnum('notification_channel', NOTIFICATION_CHANNELS);
+export const notificationMessageKindEnum = pgEnum('notification_message_kind', NOTIFICATION_MESSAGE_KINDS);
+export const notificationMessageStatusEnum = pgEnum('notification_message_status', NOTIFICATION_MESSAGE_STATUSES);
