@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
 import { type TenantContext } from '@/types/domain';
@@ -146,6 +146,58 @@ describe('recipient-safe reads', () => {
     await withTenant(ownerCtx, (tx) => enqueueNotification(tx, ownerCtx, input(runId)));
     const otherSees = await notificationsForOwner(otherCtx.userId, [otherProjectRec], new Map([[otherCtx.orgId, 'owner' as const]]));
     expect(otherSees.length).toBe(0);
+  });
+});
+
+describe('app.org_owner_user_id — deterministic recipient (multi-owner safe)', () => {
+  const uid = (suffix: string) => `00000000-0000-4000-8000-0000000000${suffix}`;
+  async function ownerOf(oid: string): Promise<string | null> {
+    const res = await getSetupDb().execute(sql`select app.org_owner_user_id(${oid}::uuid) as uid`);
+    const rows = (res as { rows?: Array<{ uid: string | null }> }).rows ?? (res as unknown as Array<{ uid: string | null }>);
+    return (Array.isArray(rows) ? rows[0]?.uid : null) ?? null;
+  }
+
+  it.runIf(available)('breaks a created_at tie by the lowest user_id', async () => {
+    const db = getSetupDb();
+    const a = uid('0a');
+    const b = uid('0b');
+    await db.insert(profiles).values([
+      { id: a, email: `a-${randomUUID().slice(0, 8)}@test.local`, displayName: 'A' },
+      { id: b, email: `b-${randomUUID().slice(0, 8)}@test.local`, displayName: 'B' },
+    ]);
+    const org = await db.insert(organizations).values({ name: 'Multi', slug: `mo-${randomUUID().slice(0, 8)}` }).returning({ id: organizations.id });
+    const oid = org[0]!.id;
+    const ts = new Date('2026-01-01T00:00:00.000Z');
+    // Two owners, SAME created_at → the user_id tiebreaker must decide (and decide the same way every call).
+    await db.insert(memberships).values([
+      { orgId: oid, userId: b, role: 'owner', createdAt: ts, updatedAt: ts },
+      { orgId: oid, userId: a, role: 'owner', createdAt: ts, updatedAt: ts },
+    ]);
+    expect(await ownerOf(oid)).toBe(a); // lower user_id wins the tie
+    expect(await ownerOf(oid)).toBe(a); // stable across calls
+  });
+
+  it.runIf(available)('prefers the earliest created_at over a lower user_id', async () => {
+    const db = getSetupDb();
+    const earlyHigh = uid('ff'); // higher user_id, but created first
+    const lateLow = uid('01'); // lower user_id, but created later
+    await db.insert(profiles).values([
+      { id: earlyHigh, email: `eh-${randomUUID().slice(0, 8)}@test.local`, displayName: 'EH' },
+      { id: lateLow, email: `ll-${randomUUID().slice(0, 8)}@test.local`, displayName: 'LL' },
+    ]);
+    const org = await db.insert(organizations).values({ name: 'Multi2', slug: `mo2-${randomUUID().slice(0, 8)}` }).returning({ id: organizations.id });
+    const oid = org[0]!.id;
+    await db.insert(memberships).values([
+      { orgId: oid, userId: earlyHigh, role: 'owner', createdAt: new Date('2026-01-01T00:00:00.000Z'), updatedAt: new Date('2026-01-01T00:00:00.000Z') },
+      { orgId: oid, userId: lateLow, role: 'owner', createdAt: new Date('2026-02-01T00:00:00.000Z'), updatedAt: new Date('2026-02-01T00:00:00.000Z') },
+    ]);
+    expect(await ownerOf(oid)).toBe(earlyHigh); // created_at is the primary key of the ordering
+  });
+
+  it.runIf(available)('returns null for an org with no owner (enqueue then skips, never fails a run)', async () => {
+    const db = getSetupDb();
+    const org = await db.insert(organizations).values({ name: 'NoOwner', slug: `no-${randomUUID().slice(0, 8)}` }).returning({ id: organizations.id });
+    expect(await ownerOf(org[0]!.id)).toBeNull();
   });
 });
 

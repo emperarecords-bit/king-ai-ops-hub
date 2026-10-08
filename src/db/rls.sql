@@ -544,12 +544,17 @@ $$;
 -- notification's recipient is the workspace OWNER — a different user the author's RLS context cannot read.
 -- This definer resolves the org owner's user id so enqueue can stamp recipient_user_id without a cross-user
 -- read. Returns NULL when an org has no owner membership (enqueue then skips — a notification never fails a run).
+--
+-- Recipient-selection invariant: an org is provisioned with exactly ONE owner membership (projects/provision.ts),
+-- but the schema does not FORBID a second owner being added later, so this selection is made TOTALLY DETERMINISTIC
+-- rather than relying on unordered selection: the EARLIEST-created owner, ties broken by the lowest user_id. The
+-- same (org_id, owner-set) therefore always yields the same recipient across calls, snapshots, and worker restarts.
 create or replace function app.org_owner_user_id(p_org_id uuid)
 returns uuid
 language sql security definer set search_path = public, pg_temp as $$
   select m.user_id from memberships m
    where m.org_id = p_org_id and m.role = 'owner'
-   order by m.created_at asc
+   order by m.created_at asc, m.user_id asc
    limit 1
 $$;
 
