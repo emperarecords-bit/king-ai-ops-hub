@@ -30,7 +30,9 @@ export async function enqueueNotification(
   // The recipient is the workspace OWNER, not the run author whose context we're in. Resolve via a SECURITY
   // DEFINER helper so it works even from a system-runner context that cannot read memberships cross-user.
   const res = await tx.execute(sql`select app.org_owner_user_id(${ctx.orgId}::uuid) as uid`);
-  const recipientUserId = ((res as { rows?: Array<{ uid: string | null }> }).rows?.[0]?.uid) ?? null;
+  // postgres-js returns a bare array; some drivers wrap it as { rows }. Normalize both (mirrors jobs.ts firstRow).
+  const rows = (res as { rows?: Array<{ uid: string | null }> }).rows ?? (res as unknown as Array<{ uid: string | null }>);
+  const recipientUserId = (Array.isArray(rows) ? rows[0]?.uid : null) ?? null;
   if (!recipientUserId) return null;
 
   const inserted = await tx
