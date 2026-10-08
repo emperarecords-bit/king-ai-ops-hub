@@ -16,6 +16,16 @@ const SEVERITY_LABEL: Record<string, string> = {
   success: 'Done',
 };
 
+const DELIVERY_LABEL: Record<string, string> = {
+  sent: 'Emailed',
+  sending: 'Sending…',
+  queued: 'Queued',
+  failed: 'Email failed',
+  ambiguous: 'Email unconfirmed',
+  suppressed: 'In-app only',
+  canceled: 'Canceled',
+};
+
 /**
  * The Owner Inbox (EV-011 follow-up): every pending approval, every business,
  * one stack, oldest first. The owner's day as "things to okay". Each card is
@@ -104,9 +114,14 @@ export default async function InboxPage() {
 
       {notifications.length > 0 ? (
         <section className="space-y-3 pt-2">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-[var(--muted)]">
-            Recent notifications{unreadCount > 0 ? ` — ${unreadCount} unread` : ''}
-          </h2>
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-[var(--muted)]">
+              Recent notifications{unreadCount > 0 ? ` — ${unreadCount} unread` : ''}
+            </h2>
+            <Link href="/settings/notifications" className="text-xs underline opacity-70 hover:opacity-100">
+              Notification settings
+            </Link>
+          </div>
           {notifications.map((n) => (
             <Card key={n.notificationId}>
               <div className="flex flex-col gap-1.5">
@@ -117,6 +132,11 @@ export default async function InboxPage() {
                   <span className="rounded border border-[var(--border)] px-2 py-0.5">
                     {SEVERITY_LABEL[n.severity] ?? n.severity}
                   </span>
+                  {n.deliveryStatus ? (
+                    <span className="rounded border border-[var(--border)] px-2 py-0.5" title={n.deliveryResultCode ?? undefined}>
+                      {DELIVERY_LABEL[n.deliveryStatus] ?? n.deliveryStatus}
+                    </span>
+                  ) : null}
                   {!n.read ? <span className="text-[var(--accent)]">● new</span> : null}
                   <span>· {n.createdAt.toISOString().slice(0, 16).replace('T', ' ')} UTC</span>
                 </div>

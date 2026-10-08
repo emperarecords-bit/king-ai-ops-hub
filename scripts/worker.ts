@@ -11,6 +11,8 @@ import {
   runClaimedDocumentJob,
 } from '../src/domain/documents/document-jobs';
 import { runDueSchedules } from '../src/domain/standing/standing';
+import { routeDueNotifications } from '../src/domain/notifications/router';
+import { flushDueDigests } from '../src/domain/notifications/digest';
 import { log } from '../src/lib/log';
 
 /**
@@ -38,6 +40,10 @@ const RECONCILE_INTERVAL_MS = 60_000;
 // deterministic identity (schedule_id + due next_run_at, onConflictDoNothing) and the whole
 // occurrence is one fail-closed transaction.
 const STANDING_TICK_INTERVAL_MS = 60_000;
+// Owner Notifications delivery: IMMEDIATE sends ride the fast idle pass so a run_failed email isn't delayed by up
+// to a minute; the DIGEST flush (a few scheduled summaries) runs on the slower tick. Both fail closed when the
+// email channel isn't live (unset NOTIFICATIONS_ENABLED, kill switch, missing EMAIL_API_KEY / EMAIL_FROM).
+const NOTIFICATION_DIGEST_INTERVAL_MS = 60_000;
 let stopping = false;
 
 /** Reclaim jobs whose lease has expired (run + document queues). Idempotent and
@@ -63,11 +69,33 @@ async function standingTickOnce(reason: 'boot' | 'periodic'): Promise<void> {
   }
 }
 
+/** Deliver due IMMEDIATE notifications (fast path). Fail-closed + errors never fatal to the loop. */
+async function notificationImmediateTickOnce(): Promise<void> {
+  try {
+    const r = await routeDueNotifications();
+    if (r.processed > 0) log.info('worker.notification_immediate', { ...r });
+  } catch (err) {
+    log.error('worker.notification_immediate_failed', { errorClass: err instanceof Error ? err.name : 'unknown' });
+  }
+}
+
+/** Flush due digests (scheduled summaries). Fail-closed + errors never fatal to the loop. */
+async function notificationDigestTickOnce(reason: 'boot' | 'periodic'): Promise<void> {
+  try {
+    const r = await flushDueDigests();
+    if (r.users > 0) log.info('worker.notification_digest', { reason, ...r });
+  } catch (err) {
+    log.error('worker.notification_digest_failed', { reason, errorClass: err instanceof Error ? err.name : 'unknown' });
+  }
+}
+
 async function loop(): Promise<void> {
   await reconcileOnce('boot');
   await standingTickOnce('boot');
+  await notificationDigestTickOnce('boot');
   let lastReconcile = Date.now();
   let lastStandingTick = Date.now();
+  let lastDigestTick = Date.now();
   log.info('worker.ready', { idlePollMs: IDLE_MS, reconcileIntervalMs: RECONCILE_INTERVAL_MS, standingTickMs: STANDING_TICK_INTERVAL_MS });
 
   while (!stopping) {
@@ -83,6 +111,12 @@ async function loop(): Promise<void> {
         await standingTickOnce('periodic');
         lastStandingTick = Date.now();
       }
+      if (Date.now() - lastDigestTick >= NOTIFICATION_DIGEST_INTERVAL_MS) {
+        await notificationDigestTickOnce('periodic');
+        lastDigestTick = Date.now();
+      }
+      // Immediate notifications ride the fast idle pass so a critical email is not delayed by the 60s tick.
+      await notificationImmediateTickOnce();
 
       const job = await claimNextJob();
       if (job) {
