@@ -116,9 +116,9 @@ describe('pricing foundation (P1a)', () => {
     expect(cost.usdMicros).toBe(750_000n);
   });
 
-  it('executor eligibility is true ONLY for git_pr and org_delegation (pricing gains no executor)', () => {
+  it('executor eligibility is true ONLY for git_pr, org_delegation, external_http, and supabase_deploy (pricing gains no executor)', () => {
     for (const a of ACTION_TYPES) {
-      expect(hasEligibleExecutor(a)).toBe(a === 'git_pr' || a === 'org_delegation' || a === 'external_http');
+      expect(hasEligibleExecutor(a)).toBe(a === 'git_pr' || a === 'org_delegation' || a === 'external_http' || a === 'supabase_deploy');
     }
   });
 
