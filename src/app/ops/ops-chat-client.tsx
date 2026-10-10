@@ -57,6 +57,20 @@ type Proposal =
       expectedHeadSha: string;
       expectedRunAttempt: number;
       riskClass: string;
+    }
+  | {
+      kind: 'supabase_deploy';
+      projectKey: string;
+      workspaceName: string;
+      projectRef: string;
+      functionSlug: string;
+      sourceRepo: string;
+      sourceSha: string;
+      sourcePath: string;
+      entrypointPath: string;
+      importMapPath: string | null;
+      verifyJwt: boolean;
+      riskClass: string;
     };
 
 interface ProposalItem {
@@ -72,6 +86,8 @@ interface ProposalItem {
     attempt?: number | null;
     runState?: string | null;
     runUrl?: string | null;
+    version?: number | null;
+    contentDigest?: string | null;
   };
 }
 
@@ -145,6 +161,12 @@ const TOOL_LABEL: Record<string, string> = {
   propose_github_pr: 'preparing the pull request',
   propose_github_merge: 'preparing the merge',
   propose_github_rerun: 'preparing the re-run',
+  supabase_capabilities: 'checking Supabase capabilities',
+  list_supabase_projects: 'listing linked Supabase projects',
+  inspect_supabase_project: 'reading the Supabase project',
+  inspect_edge_functions: 'reading edge functions',
+  inspect_migrations: 'reading Supabase migrations',
+  propose_supabase_deploy: 'preparing the deploy',
 };
 
 let seq = 0;
@@ -175,6 +197,8 @@ function doneLabel(p: Proposal): string {
       return `✓ Merge requested for PR #${p.prNumber} in ${p.repo}.`;
     case 'github_rerun':
       return `✓ Re-run requested for run ${p.runId} in ${p.repo}.`;
+    case 'supabase_deploy':
+      return `✓ Deploy requested for "${p.functionSlug}" in project ${p.projectRef}.`;
   }
 }
 function headerLabel(p: Proposal): string {
@@ -193,6 +217,8 @@ function headerLabel(p: Proposal): string {
       return `Confirm — merge PR #${p.prNumber} in ${p.repo}`;
     case 'github_rerun':
       return `Confirm — re-run failed jobs of run ${p.runId} in ${p.repo}`;
+    case 'supabase_deploy':
+      return `Confirm — deploy "${p.functionSlug}" to project ${p.projectRef}`;
   }
 }
 function confirmLabel(p: Proposal): string {
@@ -211,6 +237,8 @@ function confirmLabel(p: Proposal): string {
       return 'Confirm & merge';
     case 'github_rerun':
       return 'Confirm & re-run';
+    case 'supabase_deploy':
+      return 'Confirm & deploy';
   }
 }
 function confirmBody(p: Proposal): Record<string, unknown> {
@@ -264,6 +292,19 @@ function confirmBody(p: Proposal): Record<string, unknown> {
         runId: p.runId,
         expectedHeadSha: p.expectedHeadSha,
         expectedRunAttempt: p.expectedRunAttempt,
+      };
+    case 'supabase_deploy':
+      return {
+        action: 'execute_supabase_deploy',
+        projectKey: p.projectKey,
+        projectRef: p.projectRef,
+        functionSlug: p.functionSlug,
+        sourceRepo: p.sourceRepo,
+        sourceSha: p.sourceSha,
+        sourcePath: p.sourcePath,
+        entrypointPath: p.entrypointPath,
+        importMapPath: p.importMapPath ?? undefined,
+        verifyJwt: p.verifyJwt,
       };
   }
 }
@@ -474,14 +515,19 @@ export function OpsChatClient({ opening }: { opening: string }) {
             attempt?: number | null;
             state?: string | null;
             runUrl?: string | null;
+            version?: number | null;
+            contentDigest?: string | null;
           }
         | undefined;
       // A governed action can reach the confirm path but still be blocked/failed by dispatch (e.g. the
       // executor is disabled, or a merge precondition failed). Surface that honestly rather than a false "done".
-      const isGithubMutation =
-        item.proposal.kind === 'github_pr' || item.proposal.kind === 'github_merge' || item.proposal.kind === 'github_rerun';
-      if (isGithubMutation && executed && executed.outcome !== 'succeeded') {
-        setItem(msgId, index, { state: 'error', error: executed.message || `The GitHub action ${executed.outcome ?? 'did not run'}.` });
+      const isGovernedMutation =
+        item.proposal.kind === 'github_pr' ||
+        item.proposal.kind === 'github_merge' ||
+        item.proposal.kind === 'github_rerun' ||
+        item.proposal.kind === 'supabase_deploy';
+      if (isGovernedMutation && executed && executed.outcome !== 'succeeded') {
+        setItem(msgId, index, { state: 'error', error: executed.message || `The action ${executed.outcome ?? 'did not run'}.` });
         return;
       }
       setItem(msgId, index, {
@@ -496,6 +542,8 @@ export function OpsChatClient({ opening }: { opening: string }) {
               attempt: executed.attempt ?? null,
               runState: executed.state ?? null,
               runUrl: executed.runUrl ?? null,
+              version: executed.version ?? null,
+              contentDigest: executed.contentDigest ?? null,
             }
           : undefined,
       });
@@ -704,6 +752,19 @@ export function OpsChatClient({ opening }: { opening: string }) {
                               {item.result?.runState ? ` · ${item.result.runState}` : ''}
                             </span>
                           </div>
+                        ) : p.kind === 'supabase_deploy' ? (
+                          <div className="flex flex-col gap-0.5 text-xs text-[var(--muted)]">
+                            <span>
+                              {p.functionSlug} → project {p.projectRef}
+                              {item.result?.version != null ? ` · version ${item.result.version}` : ''}
+                            </span>
+                            <span>
+                              from <span className="font-mono">{p.sourceRepo}@{p.sourceSha.slice(0, 7)}</span>
+                            </span>
+                            {item.result?.contentDigest ? (
+                              <span>Source digest: <span className="font-mono">{item.result.contentDigest.slice(0, 12)}</span></span>
+                            ) : null}
+                          </div>
                         ) : null}
                       </div>
                     ) : item.state === 'cancelled' ? (
@@ -762,7 +823,7 @@ export function OpsChatClient({ opening }: { opening: string }) {
                               Risk: {p.riskClass.replace(/_/g, ' ')} · Side effect: lands PR #{p.prNumber} into {p.expectedBaseBranch} (refused unless open, non-draft, exact head, green CI). Rollback: revert the merge commit. Recovery: a server error mid-merge is marked ambiguous for reconciliation — never auto-retried.
                             </p>
                           </div>
-                        ) : (
+                        ) : p.kind === 'github_rerun' ? (
                           <div className="mt-1 flex flex-col gap-0.5 text-sm">
                             <p className="font-semibold">Re-run failed jobs — run {p.runId}</p>
                             <p className="text-xs text-[var(--muted)]">
@@ -770,6 +831,20 @@ export function OpsChatClient({ opening }: { opening: string }) {
                             </p>
                             <p className="mt-1 text-xs text-[var(--muted)]">
                               Risk: {p.riskClass.replace(/_/g, ' ')} · Side effect: starts a fresh CI attempt of the run&apos;s failed jobs (no repo-content change; refused unless the run is completed + failed). Rollback: re-running is idempotent — nothing to undo. Recovery: a server error mid-request is marked ambiguous for reconciliation, never auto-retried.
+                            </p>
+                          </div>
+                        ) : (
+                          <div className="mt-1 flex flex-col gap-0.5 text-sm">
+                            <p className="font-semibold">Deploy edge function “{p.functionSlug}”</p>
+                            <p className="text-xs text-[var(--muted)]">
+                              project {p.projectRef} · from <span className="font-mono">{p.sourceRepo}@{p.sourceSha.slice(0, 7)}</span> · <span className="font-mono">{p.sourcePath}</span>
+                            </p>
+                            <p className="text-xs text-[var(--muted)]">
+                              entrypoint <span className="font-mono">{p.entrypointPath}</span>
+                              {p.importMapPath ? <> · import map <span className="font-mono">{p.importMapPath}</span></> : null} · verify_jwt {p.verifyJwt ? 'on' : 'off'}
+                            </p>
+                            <p className="mt-1 text-xs text-[var(--muted)]">
+                              Risk: {p.riskClass.replace(/_/g, ' ')} · Side effect: deploys the function&apos;s exact bytes at that commit SHA to the live project (refused unless the project + repo are linked, the source path has files, and the entrypoint is present). Rollback: redeploy the prior source SHA. Recovery: a server error mid-deploy is marked ambiguous for reconciliation, never auto-retried.
                             </p>
                           </div>
                         )}

@@ -26,6 +26,7 @@ import {
   findGitPrPlaceholder,
 } from '@/domain/execution/git-pr-executor';
 import { EXECUTOR_RISK_BY_ACTION } from '@/domain/execution/executor-policy';
+import { deployEdgeFunctionPayloadSchema } from '@/domain/supabase/deploy-executor';
 import { getSupabaseClient } from '@/domain/supabase/client';
 import {
   supabaseWorkspaceCapabilities,
@@ -116,6 +117,20 @@ export type OpsChatProposal =
       readonly expectedHeadSha: string;
       readonly expectedRunAttempt: number;
       readonly riskClass: string;
+    }
+  | {
+      readonly kind: 'supabase_deploy';
+      readonly projectKey: string;
+      readonly workspaceName: string;
+      readonly projectRef: string;
+      readonly functionSlug: string;
+      readonly sourceRepo: string;
+      readonly sourceSha: string;
+      readonly sourcePath: string;
+      readonly entrypointPath: string;
+      readonly importMapPath: string | null;
+      readonly verifyJwt: boolean;
+      readonly riskClass: string;
     };
 
 function proposalKey(p: OpsChatProposal): string {
@@ -134,6 +149,8 @@ function proposalKey(p: OpsChatProposal): string {
       return `ghm:${p.projectKey}:${p.repo}:${p.prNumber}`;
     case 'github_rerun':
       return `ghr:${p.projectKey}:${p.repo}:${p.runId}`;
+    case 'supabase_deploy':
+      return `sbd:${p.projectKey}:${p.projectRef}:${p.functionSlug}:${p.sourceSha}`;
   }
 }
 
@@ -528,6 +545,26 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
         project_ref: { type: 'string', description: 'The Supabase project ref; must be linked to this workspace.' },
       },
       required: ['project', 'project_ref'],
+    },
+  },
+  {
+    name: 'propose_supabase_deploy',
+    description:
+      'Prepare to DEPLOY one Supabase edge function FOR THE OWNER TO CONFIRM. Does NOT deploy anything — it surfaces a confirmation card. The function is deployed from the EXACT bytes of a LINKED GitHub repo at an immutable full commit SHA (40 hex chars — never a branch or short SHA); both the Supabase project (project_ref) and the source repo must be linked to this workspace. On confirm, the governed executor reads the source at that SHA, refuses an unlinked project/repo, a missing source path, a missing entrypoint, or an oversized bundle, deploys the bytes, and verifies the new version. Reversible by redeploying the prior SHA. SQL/migrations are NOT supported here.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        project_ref: { type: 'string', description: 'The target Supabase project ref; must be linked to this workspace.' },
+        function_slug: { type: 'string', description: 'The edge function slug to deploy (e.g. "approve-quote").' },
+        source_repo: { type: 'string', description: 'Canonical owner/repo holding the function source; must be linked.' },
+        source_sha: { type: 'string', description: 'The FULL 40-hex commit SHA to deploy from (immutable; not a branch).' },
+        source_path: { type: 'string', description: 'Repo-relative directory of the function bundle (e.g. "supabase/functions/approve-quote").' },
+        entrypoint_path: { type: 'string', description: 'Bundle-relative entrypoint. Default "index.ts".' },
+        import_map_path: { type: 'string', description: 'Bundle-relative import map, if the function uses one. Optional.' },
+        verify_jwt: { type: 'boolean', description: 'Whether Supabase should require a verified JWT on the function. Set it explicitly.' },
+      },
+      required: ['project', 'project_ref', 'function_slug', 'source_repo', 'source_sha', 'source_path', 'verify_jwt'],
     },
   },
 ];
@@ -1055,6 +1092,61 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           if (err instanceof SupabaseProjectNotLinkedError) return JSON.stringify({ error: err.message });
           return JSON.stringify({ error: 'Could not read migrations from Supabase.' });
         }
+      }
+      case 'propose_supabase_deploy': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        if (p.projectRole !== 'admin') {
+          return JSON.stringify({ error: 'You must be an admin of that workspace to propose a Supabase deploy.' });
+        }
+        const projectRef = argStr(input, 'project_ref');
+        const functionSlug = argStr(input, 'function_slug');
+        const sourceRepo = argStr(input, 'source_repo');
+        const sourceSha = argStr(input, 'source_sha').toLowerCase();
+        const sourcePath = argStr(input, 'source_path');
+        const entrypointArg = argStr(input, 'entrypoint_path');
+        const importMapArg = argStr(input, 'import_map_path');
+        const verifyJwt = argBool(input, 'verify_jwt');
+        const ctx = ctxFor(auth, p);
+        // Both the target project AND the source repo must be linked to this workspace.
+        const projectLinked = await withTenant(ctx, (tx) => listWorkspaceSupabaseProjects(tx, ctx)).then((ls) => ls.some((l) => l.projectRef === projectRef));
+        if (!projectLinked) return JSON.stringify({ error: `Supabase project "${projectRef}" is not linked to this workspace. Use list_supabase_projects.` });
+        const repoLinked = await withTenant(ctx, (tx) => listRepoLinks(tx, ctx)).then((ls) => ls.some((l) => l.repoFullName === sourceRepo));
+        if (!repoLinked) return JSON.stringify({ error: `Source repository "${sourceRepo}" is not linked to this workspace. Use list_github_repos.` });
+        // Validate into the exact executable payload — bad shapes are refusals, not best-effort repairs.
+        const parsed = deployEdgeFunctionPayloadSchema.safeParse({
+          operation: 'deploy_edge_function',
+          projectRef,
+          functionSlug,
+          sourceRepo,
+          sourceSha,
+          sourcePath,
+          ...(entrypointArg ? { entrypointPath: entrypointArg } : {}),
+          ...(importMapArg ? { importMapPath: importMapArg } : {}),
+          verifyJwt,
+        });
+        if (!parsed.success) {
+          const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+          return JSON.stringify({ error: `That deploy is not valid: ${issues}` });
+        }
+        addProposal({
+          kind: 'supabase_deploy',
+          projectKey: p.key,
+          workspaceName: p.name,
+          projectRef: parsed.data.projectRef,
+          functionSlug: parsed.data.functionSlug,
+          sourceRepo: parsed.data.sourceRepo,
+          sourceSha: parsed.data.sourceSha,
+          sourcePath: parsed.data.sourcePath,
+          entrypointPath: parsed.data.entrypointPath,
+          importMapPath: parsed.data.importMapPath ?? null,
+          verifyJwt: parsed.data.verifyJwt,
+          riskClass: EXECUTOR_RISK_BY_ACTION.supabase_deploy,
+        });
+        return JSON.stringify({
+          prepared: true,
+          note: `Prepared for the owner to confirm: deploy "${parsed.data.functionSlug}" to Supabase project ${parsed.data.projectRef} from ${parsed.data.sourceRepo}@${parsed.data.sourceSha.slice(0, 7)}. Tell the owner it is ready to confirm below. Do NOT claim it is deployed yet.`,
+        });
       }
       default:
         return JSON.stringify({ error: `Unknown tool: ${name}` });

@@ -171,9 +171,9 @@ describe('G-Backup-A import boundary', () => {
     expect(migrate.includes("join(process.cwd(), 'source-identity.json')")).toBe(true);
   });
 
-  it('executor eligibility is true ONLY for git_pr, org_delegation, and external_http', () => {
+  it('executor eligibility is true ONLY for git_pr, org_delegation, external_http, and supabase_deploy', () => {
     for (const a of ACTION_TYPES) {
-      expect(hasEligibleExecutor(a)).toBe(a === 'git_pr' || a === 'org_delegation' || a === 'external_http');
+      expect(hasEligibleExecutor(a)).toBe(a === 'git_pr' || a === 'org_delegation' || a === 'external_http' || a === 'supabase_deploy');
     }
   });
 

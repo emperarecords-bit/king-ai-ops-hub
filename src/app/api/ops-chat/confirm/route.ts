@@ -17,6 +17,7 @@ import {
   executeGitHubMergeFromOpsChat,
   executeGitHubRerunFromOpsChat,
 } from '@/domain/opschat/github-action';
+import { executeSupabaseDeployFromOpsChat } from '@/domain/opschat/supabase-action';
 
 /**
  * POST — execute a confirmed Ops Chat action. The ONLY place Ops Chat writes.
@@ -96,6 +97,18 @@ const Body = z.discriminatedUnion('action', [
     runId: z.number().int().positive(),
     expectedHeadSha: z.string().trim().regex(/^[0-9a-fA-F]{7,40}$/),
     expectedRunAttempt: z.number().int().positive(),
+  }),
+  z.object({
+    action: z.literal('execute_supabase_deploy'),
+    projectKey: z.string().min(1),
+    projectRef: z.string().trim().regex(/^[a-z0-9]{16,40}$/),
+    functionSlug: z.string().trim().min(1).max(60),
+    sourceRepo: z.string().trim().min(1).max(200),
+    sourceSha: z.string().trim().regex(/^[0-9a-f]{40}$/),
+    sourcePath: z.string().trim().min(1).max(300),
+    entrypointPath: z.string().trim().min(1).max(200).optional(),
+    importMapPath: z.string().trim().min(1).max(200).optional(),
+    verifyJwt: z.boolean(),
   }),
 ]);
 
@@ -229,6 +242,23 @@ export async function POST(req: Request): Promise<Response> {
           runId: body.runId,
           expectedHeadSha: body.expectedHeadSha,
           expectedRunAttempt: body.expectedRunAttempt,
+        });
+        return Response.json({ ok: true, executed });
+      }
+      case 'execute_supabase_deploy': {
+        // Same governed path as the GitHub bridge: admin here (defense-in-depth), then the dispatch choke point
+        // re-verifies admin, payload integrity, executor enablement, a fresh payload-bound confirmation, and
+        // idempotency before the one Supabase deploy. The source bytes are read from the linked repo at the SHA.
+        requireAdmin(ctx.projectRole);
+        const executed = await executeSupabaseDeployFromOpsChat(ctx, {
+          projectRef: body.projectRef,
+          functionSlug: body.functionSlug,
+          sourceRepo: body.sourceRepo,
+          sourceSha: body.sourceSha,
+          sourcePath: body.sourcePath,
+          entrypointPath: body.entrypointPath,
+          importMapPath: body.importMapPath,
+          verifyJwt: body.verifyJwt,
         });
         return Response.json({ ok: true, executed });
       }

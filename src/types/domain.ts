@@ -102,6 +102,12 @@ export const ACTION_TYPES = [
   // approved cross-workspace delegation — on Okay the hub creates a task for the target
   // workspace's General Manager.
   'org_delegation',
+  // Phase 2C write slice: deploy ONE Supabase Edge Function to a LINKED project from the exact
+  // bytes of a LINKED GitHub repo at an immutable commit SHA. external_reversible (a deploy is
+  // undone by redeploying the prior source SHA). Proposed via Ops Chat; executes only after the
+  // owner confirms through the same governed choke point as git_pr. SQL/migration execution is a
+  // SEPARATE, later action type — never folded in here.
+  'supabase_deploy',
 ] as const;
 export type ActionType = (typeof ACTION_TYPES)[number];
 
