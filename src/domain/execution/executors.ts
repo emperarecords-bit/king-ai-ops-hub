@@ -14,6 +14,9 @@ const ELIGIBLE_EXECUTOR_ACTION_TYPES: ReadonlySet<ActionType> = new Set<ActionTy
   // accuratebids_quote contract become real draft quotes; every other external_http
   // payload is refused by the executor with an explanatory block.
   'external_http',
+  // Phase 2C write slice: deploy ONE linked Supabase edge function from a linked repo at an exact
+  // source SHA (./../supabase/deploy-executor.ts). Still gated by EXECUTORS_ENABLED at dispatch.
+  'supabase_deploy',
 ]);
 
 /** True when a real executor exists for this action type. */

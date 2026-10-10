@@ -1,4 +1,6 @@
 import {
+  type SupabaseDeployClient,
+  type SupabaseEdgeFunctionDeploySpec,
   type SupabaseManagementClient,
   type SupabaseProjectRef,
   type SupabaseProjectInfo,
@@ -7,17 +9,18 @@ import {
 } from './client';
 
 /**
- * The LIVE Supabase Management API client (Phase 2C, read-only). Speaks the Management REST API
+ * The LIVE Supabase Management API client (Phase 2C). Speaks the Management REST API
  * (https://api.supabase.com/v1) with the owner-gated personal/organization access token as a bearer.
  * `fetchImpl` is injected so every test runs against a recorder with zero network. Response bodies are
- * UNTRUSTED repo/project content and carry no secret. Only READS are implemented — there is no deploy, SQL,
- * or migration method here.
+ * UNTRUSTED repo/project content and carry no secret. It implements both the read surface and — for the
+ * write slice — the single-function deploy surface (`SupabaseDeployClient`); there is still no SQL or
+ * migration method. `verify_jwt` and the exact bytes come from the governed executor, never from this layer.
  */
 
-/** Minimal fetch shape so tests inject a recorder and no test touches the network. */
+/** Minimal fetch shape so tests inject a recorder and no test touches the network. The deploy call carries a body. */
 export type SupabaseFetchLike = (
   url: string,
-  init: { method: string; headers: Record<string, string> },
+  init: { method: string; headers: Record<string, string>; body?: FormData | string },
 ) => Promise<{ status: number; json(): Promise<unknown> }>;
 
 export class SupabaseApiError extends Error {
@@ -70,7 +73,7 @@ interface LiveClientArgs {
   readonly apiBase?: string;
 }
 
-export class LiveSupabaseManagementClient implements SupabaseManagementClient {
+export class LiveSupabaseManagementClient implements SupabaseManagementClient, SupabaseDeployClient {
   private readonly token: string;
   private readonly fetchImpl: SupabaseFetchLike;
   private readonly apiBase: string;
@@ -103,5 +106,51 @@ export class LiveSupabaseManagementClient implements SupabaseManagementClient {
   async listMigrations(ref: SupabaseProjectRef): Promise<SupabaseMigrationSummary[]> {
     const out = (await this.request('list migrations', 'GET', `/v1/projects/${ref.projectRef}/database/migrations`)) as Array<Record<string, unknown>>;
     return (Array.isArray(out) ? out : []).map(toMigration);
+  }
+
+  // ── Write surface (Phase 2C write slice) ───────────────────────────────────
+
+  /**
+   * Deploy one edge function's EXACT bytes via the Management bundle-deploy endpoint
+   * (`POST /v1/projects/{ref}/functions/deploy?slug=…`, multipart: a `metadata` part + one `file` part per
+   * source file). The Content-Type/boundary is set by the platform fetch for the FormData — we send only the
+   * bearer. The caller (the governed executor) has already read, bounded, and digest-bound these bytes.
+   */
+  async deployEdgeFunction(
+    ref: SupabaseProjectRef,
+    spec: SupabaseEdgeFunctionDeploySpec,
+  ): Promise<{ slug: string; version: number | null }> {
+    const form = new FormData();
+    const metadata: Record<string, unknown> = {
+      name: spec.slug,
+      entrypoint_path: spec.entrypointPath,
+      verify_jwt: spec.verifyJwt,
+    };
+    if (spec.importMapPath) metadata.import_map_path = spec.importMapPath;
+    form.append('metadata', JSON.stringify(metadata));
+    for (const f of spec.files) {
+      form.append('file', new Blob([f.content], { type: 'application/typescript' }), f.path);
+    }
+    const res = await this.fetchImpl(
+      `${this.apiBase}/v1/projects/${ref.projectRef}/functions/deploy?slug=${encodeURIComponent(spec.slug)}`,
+      { method: 'POST', headers: { authorization: `Bearer ${this.token}`, accept: 'application/json' }, body: form },
+    );
+    if (res.status !== 200 && res.status !== 201) throw new SupabaseApiError('deploy edge function', res.status);
+    const out = (await res.json()) as Record<string, unknown>;
+    return {
+      slug: typeof out.slug === 'string' ? out.slug : spec.slug,
+      version: typeof out.version === 'number' ? out.version : null,
+    };
+  }
+
+  /** Read one edge function by slug for post-deploy verification; null on 404. */
+  async getEdgeFunction(ref: SupabaseProjectRef, slug: string): Promise<SupabaseEdgeFunctionSummary | null> {
+    const res = await this.fetchImpl(`${this.apiBase}/v1/projects/${ref.projectRef}/functions/${encodeURIComponent(slug)}`, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${this.token}`, accept: 'application/json' },
+    });
+    if (res.status === 404) return null;
+    if (res.status !== 200) throw new SupabaseApiError('get edge function', res.status);
+    return toEdgeFunction((await res.json()) as Record<string, unknown>);
   }
 }
