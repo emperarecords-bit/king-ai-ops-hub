@@ -26,6 +26,15 @@ import {
   findGitPrPlaceholder,
 } from '@/domain/execution/git-pr-executor';
 import { EXECUTOR_RISK_BY_ACTION } from '@/domain/execution/executor-policy';
+import { getSupabaseClient } from '@/domain/supabase/client';
+import {
+  supabaseWorkspaceCapabilities,
+  listWorkspaceSupabaseProjects,
+  getWorkspaceSupabaseProject,
+  listWorkspaceEdgeFunctions,
+  listWorkspaceMigrations,
+  SupabaseProjectNotLinkedError,
+} from '@/domain/supabase/inspection';
 
 /**
  * Ops Chat tool layer (v2 + v2.1). The model may call these to fetch deeper
@@ -462,6 +471,63 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
         expected_run_attempt: { type: 'number', description: 'The run attempt number you inspected; a stale attempt is refused.' },
       },
       required: ['project', 'repo', 'run_id', 'expected_head_sha', 'expected_run_attempt'],
+    },
+  },
+  {
+    name: 'supabase_capabilities',
+    description:
+      'Read which governed Supabase inspection this workspace can do right now — whether the Supabase Management connection is configured, which Supabase projects are linked, and whether inspection is available. Read-only. (Phase 2C is read-only: no deploy/SQL/migration actions exist yet.)',
+    inputSchema: {
+      type: 'object',
+      properties: { project: { type: 'string', description: 'Workspace name or key.' } },
+      required: ['project'],
+    },
+  },
+  {
+    name: 'list_supabase_projects',
+    description: 'List the Supabase projects linked to a workspace (their refs + labels). Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: { project: { type: 'string', description: 'Workspace name or key.' } },
+      required: ['project'],
+    },
+  },
+  {
+    name: 'inspect_supabase_project',
+    description:
+      'Read one linked Supabase project’s state: name, region, status, and database version. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        project_ref: { type: 'string', description: 'The Supabase project ref; must be linked to this workspace.' },
+      },
+      required: ['project', 'project_ref'],
+    },
+  },
+  {
+    name: 'inspect_edge_functions',
+    description:
+      'List a linked Supabase project’s edge functions with each function’s slug, status, version, and verify_jwt. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        project_ref: { type: 'string', description: 'The Supabase project ref; must be linked to this workspace.' },
+      },
+      required: ['project', 'project_ref'],
+    },
+  },
+  {
+    name: 'inspect_migrations',
+    description: 'List a linked Supabase project’s applied database migrations (version + name). Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        project_ref: { type: 'string', description: 'The Supabase project ref; must be linked to this workspace.' },
+      },
+      required: ['project', 'project_ref'],
     },
   },
 ];
@@ -936,6 +1002,59 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           prepared: true,
           note: `Prepared for the owner to confirm: re-run the failed jobs of run ${parsed.data.runId} in ${parsed.data.repo}. Tell the owner it is ready to confirm below. Do NOT claim it is rerun yet.`,
         });
+      }
+      case 'supabase_capabilities': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const ctx = ctxFor(auth, p);
+        const caps = await withTenant(ctx, (tx) => supabaseWorkspaceCapabilities(tx, ctx));
+        return JSON.stringify({ workspace: p.name, ...caps });
+      }
+      case 'list_supabase_projects': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const ctx = ctxFor(auth, p);
+        const projects = await withTenant(ctx, (tx) => listWorkspaceSupabaseProjects(tx, ctx));
+        return JSON.stringify({ workspace: p.name, projects });
+      }
+      case 'inspect_supabase_project': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const ref = argStr(input, 'project_ref');
+        const ctx = ctxFor(auth, p);
+        try {
+          const info = await withTenant(ctx, (tx) => getWorkspaceSupabaseProject(tx, ctx, getSupabaseClient(), ref));
+          return JSON.stringify({ workspace: p.name, project: info });
+        } catch (err) {
+          if (err instanceof SupabaseProjectNotLinkedError) return JSON.stringify({ error: err.message });
+          return JSON.stringify({ error: 'Could not read that Supabase project.' });
+        }
+      }
+      case 'inspect_edge_functions': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const ref = argStr(input, 'project_ref');
+        const ctx = ctxFor(auth, p);
+        try {
+          const functions = await withTenant(ctx, (tx) => listWorkspaceEdgeFunctions(tx, ctx, getSupabaseClient(), ref));
+          return JSON.stringify({ workspace: p.name, projectRef: ref, count: functions.length, edgeFunctions: functions });
+        } catch (err) {
+          if (err instanceof SupabaseProjectNotLinkedError) return JSON.stringify({ error: err.message });
+          return JSON.stringify({ error: 'Could not read edge functions from Supabase.' });
+        }
+      }
+      case 'inspect_migrations': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const ref = argStr(input, 'project_ref');
+        const ctx = ctxFor(auth, p);
+        try {
+          const migrations = await withTenant(ctx, (tx) => listWorkspaceMigrations(tx, ctx, getSupabaseClient(), ref));
+          return JSON.stringify({ workspace: p.name, projectRef: ref, count: migrations.length, migrations });
+        } catch (err) {
+          if (err instanceof SupabaseProjectNotLinkedError) return JSON.stringify({ error: err.message });
+          return JSON.stringify({ error: 'Could not read migrations from Supabase.' });
+        }
       }
       default:
         return JSON.stringify({ error: `Unknown tool: ${name}` });

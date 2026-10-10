@@ -17,8 +17,8 @@ export const PRODUCTION_PINS: ReleasePins = {
   snapshotProvider: FLY_VOLUMES_PROVIDER,
   providerAdapterVersion: FLY_VOLUMES_ADAPTER_VERSION,
   // Bumped 2026-10-08 (0078 silent_ultron — Owner Notifications v1 tables: events/messages/message_events/preferences).
-  expectedMigrationEndpoint: '0078_silent_ultron',
-  expectedCommittedMigrationCount: 79,
+  expectedMigrationEndpoint: '0079_careless_hiroim',
+  expectedCommittedMigrationCount: 80,
   /** Production deployed through 0067 on 2026-08-18; 0068–0072 are pending. */
   defaultAppliedCount: 68,
 } as const;

@@ -1104,6 +1104,39 @@ export const githubRepoLinks = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Supabase project links (Phase 2C). The per-project binding of a Hub workspace
+// to one external Supabase project, identified by its project REF — an opaque,
+// non-secret identifier (the analog of a GitHub App installation id). Contains
+// NO secret: the Supabase Management API token is an owner-gated platform secret
+// that never enters the database. `label` is an optional human name for cards.
+// ---------------------------------------------------------------------------
+
+export const supabaseProjectLinks = pgTable(
+  'supabase_project_links',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    /** Supabase project ref (e.g. "bblnywrcdsfdasytkzps") — an opaque identifier, not a secret. */
+    projectRef: text('project_ref').notNull(),
+    /** Optional human-friendly label for the linked project. */
+    label: text('label'),
+    linkedBy: uuid('linked_by')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'cascade' }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('supabase_project_links_project_ref_uq').on(t.projectId, t.projectRef),
+    index('supabase_project_links_org_project_idx').on(t.orgId, t.projectId),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Work hierarchy (OBJECTIVES.md, D-010/D-015) — dark in Sprint 3, UI Sprint 4.
 // Containment: Project → Objective → Milestone → Task. Department/Employee is
 // an ASSIGNMENT dimension (sponsoring_department_id, accountable_agent_id),
