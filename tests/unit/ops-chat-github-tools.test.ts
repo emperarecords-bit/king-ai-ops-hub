@@ -16,6 +16,7 @@ const h = vi.hoisted(() => {
     listWorkspaceRepos: vi.fn(),
     listWorkspacePullRequests: vi.fn(),
     getWorkspacePullRequest: vi.fn(),
+    getWorkspaceWorkflowRun: vi.fn(),
     RepoNotLinkedError,
   };
 });
@@ -34,6 +35,7 @@ vi.mock('@/domain/github/inspection', () => ({
   listWorkspaceRepos: h.listWorkspaceRepos,
   listWorkspacePullRequests: h.listWorkspacePullRequests,
   getWorkspacePullRequest: h.getWorkspacePullRequest,
+  getWorkspaceWorkflowRun: h.getWorkspaceWorkflowRun,
   RepoNotLinkedError: h.RepoNotLinkedError,
 }));
 
@@ -64,7 +66,8 @@ beforeEach(() => {
   });
   h.listWorkspaceRepos.mockResolvedValue([{ repoFullName: LINK.repoFullName, defaultBranch: 'main' }]);
   h.listWorkspacePullRequests.mockResolvedValue([{ number: 5, title: 'x', state: 'open', draft: false, merged: false, headRef: 'f', headSha: 'abc', baseRef: 'main', url: 'https://github.com/x/5' }]);
-  h.getWorkspacePullRequest.mockResolvedValue({ pr: { number: 5, title: 'x', state: 'open', draft: false, merged: false, headRef: 'f', headSha: 'abc', baseRef: 'main', url: 'u' }, checks: { ref: 'abc', state: 'success', checks: [] } });
+  h.getWorkspacePullRequest.mockResolvedValue({ pr: { number: 5, title: 'x', state: 'open', draft: false, merged: false, headRef: 'f', headSha: 'abc', baseRef: 'main', url: 'u', mergeCommitSha: null }, checks: { ref: 'abc', state: 'success', checks: [] } });
+  h.getWorkspaceWorkflowRun.mockResolvedValue({ id: 99, headSha: 'a'.repeat(40), runAttempt: 1, status: 'completed', conclusion: 'failure', url: 'https://github.com/x/actions/runs/99', name: 'CI' });
 });
 
 const validFiles = [{ path: 'docs/note.md', content: 'A real line of content.' }];
@@ -156,8 +159,11 @@ describe('CENTRAL SECURITY PROMISE — "create a PR" reaches a confirm card, mut
       listTree: async () => [],
       readBlob: async () => '',
       listPullRequests: async () => [],
-      getPullRequest: async () => ({}),
+      getPullRequest: async () => ({ mergeCommitSha: null }),
       getRefChecks: async () => ({ ref: '', state: 'unknown', checks: [] }),
+      mergePullRequest: async () => ({ merged: true, mergeCommitSha: null }),
+      getWorkflowRun: async () => ({ id: 0, headSha: "", runAttempt: 1, status: "completed", conclusion: "failure", url: "", name: "" }),
+      rerunFailedWorkflowJobs: async () => undefined,
       createBranch: async () => { writeCalled.push('createBranch'); },
       commitToBranch: async () => { writeCalled.push('commitToBranch'); },
       openPullRequest: async () => { writeCalled.push('openPullRequest'); return { prNumber: 1 }; },
@@ -177,5 +183,75 @@ describe('CENTRAL SECURITY PROMISE — "create a PR" reaches a confirm card, mut
     // during propose (the propose path only validates + records; the executor behind confirm does the write).
     expect(writeCalled).toEqual([]);
     expect(h.getGitHubClient).not.toHaveBeenCalled();
+  });
+});
+
+describe('propose_github_merge / propose_github_rerun — prepare a card, mutate NOTHING', () => {
+  it('propose_github_merge records a github_merge proposal and never touches the GitHub client', async () => {
+    const writeCalled: string[] = [];
+    h.getGitHubClient.mockReturnValue({
+      mergePullRequest: async () => { writeCalled.push('mergePullRequest'); return { merged: true, mergeCommitSha: null }; },
+      rerunFailedWorkflowJobs: async () => { writeCalled.push('rerunFailedWorkflowJobs'); },
+    });
+    const ts = toolset();
+    const out = JSON.parse(await ts.runTool({
+      name: 'propose_github_merge',
+      input: { project: 'accuratebids', repo: LINK.repoFullName, pr_number: 5, expected_head_sha: 'a'.repeat(40), expected_base_branch: 'main' },
+    }));
+    expect(out.prepared).toBe(true);
+    expect(ts.getProposals()).toHaveLength(1);
+    const p = ts.getProposals()[0]!;
+    expect(p).toMatchObject({ kind: 'github_merge', repo: LINK.repoFullName, prNumber: 5, expectedHeadSha: 'a'.repeat(40), expectedBaseBranch: 'main', mergeMethod: 'squash' });
+    expect(writeCalled).toEqual([]);
+    expect(h.getGitHubClient).not.toHaveBeenCalled();
+  });
+
+  it('propose_github_rerun records a github_rerun proposal and never touches the GitHub client', async () => {
+    const writeCalled: string[] = [];
+    h.getGitHubClient.mockReturnValue({
+      mergePullRequest: async () => { writeCalled.push('mergePullRequest'); return { merged: true, mergeCommitSha: null }; },
+      rerunFailedWorkflowJobs: async () => { writeCalled.push('rerunFailedWorkflowJobs'); },
+    });
+    const ts = toolset();
+    const out = JSON.parse(await ts.runTool({
+      name: 'propose_github_rerun',
+      input: { project: 'accuratebids', repo: LINK.repoFullName, run_id: 99, expected_head_sha: 'a'.repeat(40), expected_run_attempt: 1 },
+    }));
+    expect(out.prepared).toBe(true);
+    expect(ts.getProposals()).toHaveLength(1);
+    const p = ts.getProposals()[0]!;
+    expect(p).toMatchObject({ kind: 'github_rerun', repo: LINK.repoFullName, runId: 99, expectedHeadSha: 'a'.repeat(40), expectedRunAttempt: 1 });
+    expect(writeCalled).toEqual([]);
+    expect(h.getGitHubClient).not.toHaveBeenCalled();
+  });
+
+  it('a non-admin cannot propose a merge or a rerun', async () => {
+    for (const name of ['propose_github_merge', 'propose_github_rerun']) {
+      const ts = toolset();
+      const out = JSON.parse(await ts.runTool({
+        name,
+        input: { project: 'stressprobe', repo: LINK.repoFullName, pr_number: 5, run_id: 99, expected_head_sha: 'a'.repeat(40), expected_base_branch: 'main', expected_run_attempt: 1 },
+      }));
+      expect(out.error).toMatch(/admin/i);
+      expect(ts.getProposals()).toHaveLength(0);
+    }
+  });
+
+  it('propose_github_merge on an unlinked repo is refused and records nothing', async () => {
+    h.listRepoLinks.mockResolvedValue([]);
+    const ts = toolset();
+    const out = JSON.parse(await ts.runTool({
+      name: 'propose_github_merge',
+      input: { project: 'accuratebids', repo: 'attacker/evil', pr_number: 5, expected_head_sha: 'a'.repeat(40), expected_base_branch: 'main' },
+    }));
+    expect(out.error).toMatch(/not linked/i);
+    expect(ts.getProposals()).toHaveLength(0);
+  });
+
+  it('get_workflow_run is a read tool: returns the run and records no proposal', async () => {
+    const ts = toolset();
+    const out = JSON.parse(await ts.runTool({ name: 'get_workflow_run', input: { project: 'accuratebids', repo: LINK.repoFullName, run_id: 99 } }));
+    expect(out.workflowRun).toMatchObject({ id: 99, status: 'completed', conclusion: 'failure' });
+    expect(ts.getProposals()).toHaveLength(0);
   });
 });

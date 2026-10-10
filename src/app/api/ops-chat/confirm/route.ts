@@ -12,7 +12,11 @@ import { executeApprovedIfEligible } from '@/domain/execution/execute-on-approva
 import { createTask, getTask } from '@/domain/tasks/tasks';
 import { enqueueRun } from '@/domain/jobs/jobs';
 import { listAgents } from '@/domain/agents/agents';
-import { executeGitHubPrFromOpsChat } from '@/domain/opschat/github-action';
+import {
+  executeGitHubPrFromOpsChat,
+  executeGitHubMergeFromOpsChat,
+  executeGitHubRerunFromOpsChat,
+} from '@/domain/opschat/github-action';
 
 /**
  * POST — execute a confirmed Ops Chat action. The ONLY place Ops Chat writes.
@@ -75,6 +79,23 @@ const Body = z.discriminatedUnion('action', [
       .array(z.object({ path: z.string().min(1).max(500), content: z.string().max(100_000) }).strict())
       .min(1)
       .max(20),
+  }),
+  z.object({
+    action: z.literal('execute_github_merge'),
+    projectKey: z.string().min(1),
+    repo: z.string().trim().min(1).max(200),
+    prNumber: z.number().int().positive(),
+    expectedHeadSha: z.string().trim().regex(/^[0-9a-fA-F]{7,40}$/),
+    expectedBaseBranch: z.string().trim().min(1).max(200),
+    mergeMethod: z.enum(['squash', 'merge', 'rebase']).optional(),
+  }),
+  z.object({
+    action: z.literal('execute_github_rerun'),
+    projectKey: z.string().min(1),
+    repo: z.string().trim().min(1).max(200),
+    runId: z.number().int().positive(),
+    expectedHeadSha: z.string().trim().regex(/^[0-9a-fA-F]{7,40}$/),
+    expectedRunAttempt: z.number().int().positive(),
   }),
 ]);
 
@@ -185,6 +206,29 @@ export async function POST(req: Request): Promise<Response> {
           title: body.title,
           body: body.body ?? '',
           files: body.files,
+        });
+        return Response.json({ ok: true, executed });
+      }
+      case 'execute_github_merge': {
+        // Same governed path as create-PR: admin here (defense-in-depth), then payload integrity, executor
+        // enablement, a fresh payload-bound confirmation, and idempotency before any GitHub write.
+        requireAdmin(ctx.projectRole);
+        const executed = await executeGitHubMergeFromOpsChat(ctx, {
+          repo: body.repo,
+          prNumber: body.prNumber,
+          expectedHeadSha: body.expectedHeadSha,
+          expectedBaseBranch: body.expectedBaseBranch,
+          mergeMethod: body.mergeMethod,
+        });
+        return Response.json({ ok: true, executed });
+      }
+      case 'execute_github_rerun': {
+        requireAdmin(ctx.projectRole);
+        const executed = await executeGitHubRerunFromOpsChat(ctx, {
+          repo: body.repo,
+          runId: body.runId,
+          expectedHeadSha: body.expectedHeadSha,
+          expectedRunAttempt: body.expectedRunAttempt,
         });
         return Response.json({ ok: true, executed });
       }

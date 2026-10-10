@@ -96,8 +96,11 @@ describe.skipIf(!available)('trusted executor dispatch', { timeout: 15_000 }, ()
       listTree: async () => [],
       readBlob: async () => '',
       listPullRequests: async () => [],
-      getPullRequest: async () => ({ number: 0, title: '', state: 'open', draft: false, merged: false, headRef: '', headSha: '', baseRef: '', url: '' }),
+      getPullRequest: async () => ({ number: 0, title: '', state: 'open', draft: false, merged: false, headRef: '', headSha: '', baseRef: '', url: '', mergeCommitSha: null }),
       getRefChecks: async () => ({ ref: '', state: 'unknown', checks: [] }),
+      mergePullRequest: async () => ({ merged: true, mergeCommitSha: null }),
+      getWorkflowRun: async () => ({ id: 0, headSha: "", runAttempt: 1, status: "completed", conclusion: "failure", url: "", name: "" }),
+      rerunFailedWorkflowJobs: async () => undefined,
       createBranch: async () => { calls.push('createBranch'); },
       commitToBranch: async () => { calls.push('commitToBranch'); },
       openPullRequest: async () => { calls.push('openPullRequest'); return { prNumber: 7 }; },
@@ -121,6 +124,50 @@ describe.skipIf(!available)('trusted executor dispatch', { timeout: 15_000 }, ()
       expect(records.get(approval!.id)).toMatchObject({ outcome: 'succeeded', executorId: 'git_pr', prNumber: 7, prUrl: `https://github.com/${repoFullName}/pull/7` });
       const unexecuted = await withTenant(ctx, (tx) => tasksWithAuthorizedUnexecutedActions(tx, ctx, [task!.id]));
       expect(unexecuted.has(task!.id)).toBe(false);
+    } finally {
+      setGitHubClientOverrideForTests(null);
+    }
+  });
+
+  it('executes an approved merge_pr live end-to-end through the SAME choke point, exactly once', async () => {
+    const db = getSetupDb();
+    const repoFullName = 'emperarecords-bit/accuratebids';
+    const HEAD = 'a'.repeat(40);
+    await db.insert(githubRepoLinks).values({ orgId: ctx.orgId, projectId: ctx.projectId, installationId: 153529449n, repoFullName, defaultBranch: 'main', linkedBy: ctx.userId }).onConflictDoNothing();
+
+    // A merge_pr payload rides actionType 'git_pr' — no new action type, no migration.
+    const payload = { operation: 'merge_pr', repo: repoFullName, prNumber: 7, expectedHeadSha: HEAD, expectedBaseBranch: 'main' };
+    const [task] = await db.insert(tasks).values({ orgId: ctx.orgId, projectId: ctx.projectId, title: 'Merge live', input: 'live', providerSelection: 'openai', createdBy: ctx.userId, status: 'completed' }).returning({ id: tasks.id });
+    const [approval] = await db.insert(approvals).values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId: task!.id, actionType: 'git_pr', payload, payloadSha256: sha256Hex(canonicalJson(payload)), summary: 'Merge PR #7', status: 'approved', decidedBy: ctx.userId, decidedAt: new Date(), expiresAt: new Date(Date.now() + 60_000) }).returning({ id: approvals.id });
+
+    let merged = false;
+    const mergeCalls: string[] = [];
+    setGitHubClientOverrideForTests({
+      listTree: async () => [],
+      readBlob: async () => '',
+      listPullRequests: async () => [],
+      getPullRequest: async () => ({ number: 7, title: 't', state: 'open', draft: false, merged, headRef: 'f', headSha: HEAD, baseRef: 'main', url: `https://github.com/${repoFullName}/pull/7`, mergeCommitSha: merged ? 'c'.repeat(40) : null }),
+      getRefChecks: async () => ({ ref: HEAD, state: 'success', checks: [] }),
+      createBranch: async () => {},
+      commitToBranch: async () => {},
+      openPullRequest: async () => ({ prNumber: 7 }),
+      mergePullRequest: async () => { mergeCalls.push('merge'); merged = true; return { merged: true, mergeCommitSha: 'c'.repeat(40) }; },
+      getWorkflowRun: async () => ({ id: 0, headSha: '', runAttempt: 1, status: 'completed', conclusion: 'failure', url: '', name: '' }),
+      rerunFailedWorkflowJobs: async () => {},
+    } as GitHubRepoClient);
+    try {
+      const first = await executeApprovedIfEligible(ctx, approval!.id, { enabledExecutorIds: ['git_pr'] });
+      expect(first).toMatchObject({ attempted: true, outcome: 'succeeded' });
+      expect(first.preview).toMatchObject({ operation: 'merge_pr', merged: true, mergeCommitSha: 'c'.repeat(40) });
+      expect(mergeCalls).toHaveLength(1);
+
+      // Same deterministic per-approval idempotency key ⇒ a duplicate Okay can never re-merge.
+      const again = await executeApprovedIfEligible(ctx, approval!.id, { enabledExecutorIds: ['git_pr'] });
+      expect(again.outcome).toBe('blocked');
+      expect(mergeCalls).toHaveLength(1);
+
+      const results = await db.select({ action: auditLogs.action }).from(auditLogs).where(and(eq(auditLogs.entityId, approval!.id), eq(auditLogs.action, 'execution.result')));
+      expect(results).toHaveLength(1);
     } finally {
       setGitHubClientOverrideForTests(null);
     }

@@ -6,6 +6,7 @@ import {
   type RefCheckStatus,
   type RepoRef,
   type RepoTreeEntry,
+  type WorkflowRunSummary,
 } from './client';
 import { assessGitWrite } from './write-policy';
 
@@ -46,6 +47,21 @@ function toPrSummary(repoFullName: string, pr: Record<string, unknown>): PullReq
     headSha: typeof head.sha === 'string' ? head.sha : '',
     baseRef: typeof base.ref === 'string' ? base.ref : '',
     url: typeof pr.html_url === 'string' ? pr.html_url : `https://github.com/${repoFullName}/pull/${number}`,
+    mergeCommitSha: typeof pr.merge_commit_sha === 'string' ? pr.merge_commit_sha : null,
+  };
+}
+
+/** Shape the untrusted workflow-run payload into the safe summary. No secrets. */
+function toWorkflowRunSummary(repoFullName: string, run: Record<string, unknown>): WorkflowRunSummary {
+  const id = typeof run.id === 'number' ? run.id : 0;
+  return {
+    id,
+    headSha: typeof run.head_sha === 'string' ? run.head_sha : '',
+    runAttempt: typeof run.run_attempt === 'number' ? run.run_attempt : 1,
+    status: typeof run.status === 'string' ? run.status : 'unknown',
+    conclusion: typeof run.conclusion === 'string' ? run.conclusion : null,
+    url: typeof run.html_url === 'string' ? run.html_url : `https://github.com/${repoFullName}/actions/runs/${id}`,
+    name: typeof run.name === 'string' ? run.name : '',
   };
 }
 
@@ -206,6 +222,16 @@ export class LiveGitHubClient implements GitHubRepoClient {
     return { ref, state: rollUpCheckState(checks), checks };
   }
 
+  async getWorkflowRun(repo: RepoRef, runId: number): Promise<WorkflowRunSummary> {
+    const out = (await this.request(
+      repo,
+      'get workflow run',
+      'GET',
+      `/repos/${repo.repoFullName}/actions/runs/${runId}`,
+    )) as Record<string, unknown>;
+    return toWorkflowRunSummary(repo.repoFullName, out);
+  }
+
   // --- writes (each one policy-gated BEFORE any mutating request) ----------
 
   async createBranch(repo: RepoRef, baseRef: string, newBranch: string): Promise<void> {
@@ -276,5 +302,42 @@ export class LiveGitHubClient implements GitHubRepoClient {
     )) as { number?: unknown };
     if (typeof out.number !== 'number') throw new GitHubApiError('open pull request (unexpected shape)', 500);
     return { prNumber: out.number };
+  }
+
+  /**
+   * Merge a PR. Deliberately NOT routed through `assertWriteAllowed`: the branch+PR-only write policy forbids
+   * every default-branch write, but a merge's whole purpose is to land a reviewed PR into (usually) the default
+   * branch. Scoping instead comes from the linked RepoRef the caller resolved, and `sha` binds the merge to the
+   * exact reviewed head — GitHub returns 409 if the head moved. GitHub branch protection remains authoritative
+   * (a protected-branch refusal surfaces here as a 4xx).
+   */
+  async mergePullRequest(
+    repo: RepoRef,
+    args: { prNumber: number; mergeMethod: 'squash' | 'merge' | 'rebase'; sha: string },
+  ): Promise<{ merged: boolean; mergeCommitSha: string | null }> {
+    const out = (await this.request(
+      repo,
+      'merge pull request',
+      'PUT',
+      `/repos/${repo.repoFullName}/pulls/${args.prNumber}/merge`,
+      { merge_method: args.mergeMethod, sha: args.sha },
+      [200],
+    )) as { merged?: unknown; sha?: unknown };
+    return { merged: out.merged === true, mergeCommitSha: typeof out.sha === 'string' ? out.sha : null };
+  }
+
+  /**
+   * Re-run only the FAILED jobs of a completed run — the dedicated `rerun-failed-jobs` endpoint, never
+   * workflow_dispatch. No repo-content mutation, so no branch write policy applies; it starts a fresh CI attempt.
+   */
+  async rerunFailedWorkflowJobs(repo: RepoRef, runId: number): Promise<void> {
+    await this.request(
+      repo,
+      'rerun failed workflow jobs',
+      'POST',
+      `/repos/${repo.repoFullName}/actions/runs/${runId}/rerun-failed-jobs`,
+      undefined,
+      [201],
+    );
   }
 }

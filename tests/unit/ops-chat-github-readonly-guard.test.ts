@@ -51,7 +51,7 @@ describe('GitHub bridge — the model/tool layer cannot execute', () => {
     expect(src).not.toContain('GitPrExecutor');
     expect(src).toContain('getGitHubClient'); // read client, used only inside read-tool cases
     // And it must never call the client's MUTATING methods — those belong to the executor behind dispatch.
-    for (const writeCall of ['.createBranch(', '.commitToBranch(', '.openPullRequest(']) {
+    for (const writeCall of ['.createBranch(', '.commitToBranch(', '.openPullRequest(', '.mergePullRequest(', '.rerunFailedWorkflowJobs(']) {
       expect(src, `${TOOLS} must not call the GitHub client write method ${writeCall}`).not.toContain(writeCall);
     }
   });
@@ -59,8 +59,13 @@ describe('GitHub bridge — the model/tool layer cannot execute', () => {
 
 describe('GitHub bridge — execution lives only behind the confirm boundary', () => {
   it('the confirm route is the sole caller of the bridge', () => {
-    expect(read(CONFIRM_ROUTE)).toContain('executeGitHubPrFromOpsChat');
-    expect(read(CONFIRM_ROUTE)).toContain('execute_github_pr');
+    const src = read(CONFIRM_ROUTE);
+    expect(src).toContain('executeGitHubPrFromOpsChat');
+    expect(src).toContain('execute_github_pr');
+    expect(src).toContain('executeGitHubMergeFromOpsChat');
+    expect(src).toContain('execute_github_merge');
+    expect(src).toContain('executeGitHubRerunFromOpsChat');
+    expect(src).toContain('execute_github_rerun');
   });
 
   it('the bridge routes through the EXISTING dispatch path, not a new executor', () => {
@@ -86,7 +91,7 @@ describe('GitHub bridge — Council stays review-only and cannot execute', () =>
   const COUNCIL = ['src/domain/opschat/council.ts', 'src/app/api/ops-chat/council/route.ts'];
   it.each(COUNCIL)('%s reaches no GitHub execution/bridge/executor', (file) => {
     const src = read(file);
-    for (const marker of [...EXECUTION_MARKERS, 'GitPrExecutor', 'propose_github_pr', '@/domain/github/']) {
+    for (const marker of [...EXECUTION_MARKERS, 'GitPrExecutor', 'propose_github_pr', 'propose_github_merge', 'propose_github_rerun', '@/domain/github/']) {
       expect(src, `${file} (Council is review-only) must not reference ${marker}`).not.toContain(marker);
     }
   });

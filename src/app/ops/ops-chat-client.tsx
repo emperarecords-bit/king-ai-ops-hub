@@ -36,13 +36,43 @@ type Proposal =
       body: string;
       riskClass: string;
       files: Array<{ path: string; content: string }>;
+    }
+  | {
+      kind: 'github_merge';
+      projectKey: string;
+      workspaceName: string;
+      repo: string;
+      prNumber: number;
+      expectedHeadSha: string;
+      expectedBaseBranch: string;
+      mergeMethod: 'squash' | 'merge' | 'rebase';
+      riskClass: string;
+    }
+  | {
+      kind: 'github_rerun';
+      projectKey: string;
+      workspaceName: string;
+      repo: string;
+      runId: number;
+      expectedHeadSha: string;
+      expectedRunAttempt: number;
+      riskClass: string;
     };
 
 interface ProposalItem {
   proposal: Proposal;
   state: 'pending' | 'confirming' | 'done' | 'error' | 'cancelled';
   error?: string;
-  result?: { outcome?: string | null; message?: string | null; prUrl?: string | null };
+  result?: {
+    outcome?: string | null;
+    message?: string | null;
+    prUrl?: string | null;
+    mergeCommitSha?: string | null;
+    runId?: number | null;
+    attempt?: number | null;
+    runState?: string | null;
+    runUrl?: string | null;
+  };
 }
 
 type Confidence = 'low' | 'medium' | 'high';
@@ -111,7 +141,10 @@ const TOOL_LABEL: Record<string, string> = {
   list_github_repos: 'listing linked repositories',
   list_pull_requests: 'reading pull requests',
   get_pull_request: 'reading the pull request & CI',
+  get_workflow_run: 'reading the workflow run',
   propose_github_pr: 'preparing the pull request',
+  propose_github_merge: 'preparing the merge',
+  propose_github_rerun: 'preparing the re-run',
 };
 
 let seq = 0;
@@ -138,6 +171,10 @@ function doneLabel(p: Proposal): string {
       return `✓ Re-run queued for "${p.taskTitle}".`;
     case 'github_pr':
       return `✓ Pull request requested in ${p.repo}.`;
+    case 'github_merge':
+      return `✓ Merge requested for PR #${p.prNumber} in ${p.repo}.`;
+    case 'github_rerun':
+      return `✓ Re-run requested for run ${p.runId} in ${p.repo}.`;
   }
 }
 function headerLabel(p: Proposal): string {
@@ -152,6 +189,10 @@ function headerLabel(p: Proposal): string {
       return `Confirm — re-run in ${p.workspaceName} (uses tokens)`;
     case 'github_pr':
       return `Confirm — open a pull request in ${p.repo}`;
+    case 'github_merge':
+      return `Confirm — merge PR #${p.prNumber} in ${p.repo}`;
+    case 'github_rerun':
+      return `Confirm — re-run failed jobs of run ${p.runId} in ${p.repo}`;
   }
 }
 function confirmLabel(p: Proposal): string {
@@ -166,6 +207,10 @@ function confirmLabel(p: Proposal): string {
       return 'Confirm & re-run';
     case 'github_pr':
       return 'Confirm & open PR';
+    case 'github_merge':
+      return 'Confirm & merge';
+    case 'github_rerun':
+      return 'Confirm & re-run';
   }
 }
 function confirmBody(p: Proposal): Record<string, unknown> {
@@ -200,6 +245,25 @@ function confirmBody(p: Proposal): Record<string, unknown> {
         title: p.title,
         body: p.body || undefined,
         files: p.files,
+      };
+    case 'github_merge':
+      return {
+        action: 'execute_github_merge',
+        projectKey: p.projectKey,
+        repo: p.repo,
+        prNumber: p.prNumber,
+        expectedHeadSha: p.expectedHeadSha,
+        expectedBaseBranch: p.expectedBaseBranch,
+        mergeMethod: p.mergeMethod,
+      };
+    case 'github_rerun':
+      return {
+        action: 'execute_github_rerun',
+        projectKey: p.projectKey,
+        repo: p.repo,
+        runId: p.runId,
+        expectedHeadSha: p.expectedHeadSha,
+        expectedRunAttempt: p.expectedRunAttempt,
       };
   }
 }
@@ -400,14 +464,41 @@ export function OpsChatClient({ opening }: { opening: string }) {
       });
       const j = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(j.error || 'That did not go through.');
-      const executed = j?.executed as { outcome?: string | null; message?: string | null; prUrl?: string | null } | undefined;
+      const executed = j?.executed as
+        | {
+            outcome?: string | null;
+            message?: string | null;
+            prUrl?: string | null;
+            mergeCommitSha?: string | null;
+            runId?: number | null;
+            attempt?: number | null;
+            state?: string | null;
+            runUrl?: string | null;
+          }
+        | undefined;
       // A governed action can reach the confirm path but still be blocked/failed by dispatch (e.g. the
-      // executor is disabled). Surface that honestly rather than a false "done".
-      if (item.proposal.kind === 'github_pr' && executed && executed.outcome !== 'succeeded') {
+      // executor is disabled, or a merge precondition failed). Surface that honestly rather than a false "done".
+      const isGithubMutation =
+        item.proposal.kind === 'github_pr' || item.proposal.kind === 'github_merge' || item.proposal.kind === 'github_rerun';
+      if (isGithubMutation && executed && executed.outcome !== 'succeeded') {
         setItem(msgId, index, { state: 'error', error: executed.message || `The GitHub action ${executed.outcome ?? 'did not run'}.` });
         return;
       }
-      setItem(msgId, index, { state: 'done', result: executed });
+      setItem(msgId, index, {
+        state: 'done',
+        result: executed
+          ? {
+              outcome: executed.outcome,
+              message: executed.message,
+              prUrl: executed.prUrl ?? null,
+              mergeCommitSha: executed.mergeCommitSha ?? null,
+              runId: executed.runId ?? null,
+              attempt: executed.attempt ?? null,
+              runState: executed.state ?? null,
+              runUrl: executed.runUrl ?? null,
+            }
+          : undefined,
+      });
     } catch (e) {
       setItem(msgId, index, { state: 'error', error: e instanceof Error ? e.message : 'That did not go through.' });
     }
@@ -589,6 +680,30 @@ export function OpsChatClient({ opening }: { opening: string }) {
                           >
                             {item.result.prUrl}
                           </a>
+                        ) : p.kind === 'github_merge' ? (
+                          <div className="flex flex-col gap-0.5 text-xs text-[var(--muted)]">
+                            {item.result?.prUrl ? (
+                              <a href={item.result.prUrl} target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] underline underline-offset-2 break-all">
+                                {item.result.prUrl}
+                              </a>
+                            ) : null}
+                            {item.result?.mergeCommitSha ? (
+                              <span>Merge commit: <span className="font-mono">{item.result.mergeCommitSha.slice(0, 10)}</span></span>
+                            ) : null}
+                          </div>
+                        ) : p.kind === 'github_rerun' ? (
+                          <div className="flex flex-col gap-0.5 text-xs text-[var(--muted)]">
+                            {item.result?.runUrl ? (
+                              <a href={item.result.runUrl} target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] underline underline-offset-2 break-all">
+                                {item.result.runUrl}
+                              </a>
+                            ) : null}
+                            <span>
+                              Run {item.result?.runId ?? p.runId}
+                              {item.result?.attempt ? ` · attempt ${item.result.attempt}` : ''}
+                              {item.result?.runState ? ` · ${item.result.runState}` : ''}
+                            </span>
+                          </div>
                         ) : null}
                       </div>
                     ) : item.state === 'cancelled' ? (
@@ -624,7 +739,7 @@ export function OpsChatClient({ opening }: { opening: string }) {
                           <p className="mt-1 text-sm">
                             Re-run <span className="font-semibold">{p.taskTitle}</span>. Starts an AI run and uses tokens.
                           </p>
-                        ) : (
+                        ) : p.kind === 'github_pr' ? (
                           <div className="mt-1 flex flex-col gap-0.5 text-sm">
                             <p className="font-semibold">{p.title}</p>
                             <p className="text-xs text-[var(--muted)]">
@@ -635,6 +750,26 @@ export function OpsChatClient({ opening }: { opening: string }) {
                             </p>
                             <p className="mt-1 text-xs text-[var(--muted)]">
                               Risk: {p.riskClass.replace(/_/g, ' ')} · Side effect: opens a pull request (no merge). Rollback: close the PR / delete the branch — the default branch is never written.
+                            </p>
+                          </div>
+                        ) : p.kind === 'github_merge' ? (
+                          <div className="mt-1 flex flex-col gap-0.5 text-sm">
+                            <p className="font-semibold">Merge pull request #{p.prNumber}</p>
+                            <p className="text-xs text-[var(--muted)]">
+                              {p.repo} · PR #{p.prNumber} @ <span className="font-mono">{p.expectedHeadSha.slice(0, 7)}</span> → <span className="font-mono">{p.expectedBaseBranch}</span> · {p.mergeMethod}
+                            </p>
+                            <p className="mt-1 text-xs text-[var(--muted)]">
+                              Risk: {p.riskClass.replace(/_/g, ' ')} · Side effect: lands PR #{p.prNumber} into {p.expectedBaseBranch} (refused unless open, non-draft, exact head, green CI). Rollback: revert the merge commit. Recovery: a server error mid-merge is marked ambiguous for reconciliation — never auto-retried.
+                            </p>
+                          </div>
+                        ) : (
+                          <div className="mt-1 flex flex-col gap-0.5 text-sm">
+                            <p className="font-semibold">Re-run failed jobs — run {p.runId}</p>
+                            <p className="text-xs text-[var(--muted)]">
+                              {p.repo} · run {p.runId} · attempt {p.expectedRunAttempt} @ <span className="font-mono">{p.expectedHeadSha.slice(0, 7)}</span>
+                            </p>
+                            <p className="mt-1 text-xs text-[var(--muted)]">
+                              Risk: {p.riskClass.replace(/_/g, ' ')} · Side effect: starts a fresh CI attempt of the run&apos;s failed jobs (no repo-content change; refused unless the run is completed + failed). Rollback: re-running is idempotent — nothing to undo. Recovery: a server error mid-request is marked ambiguous for reconciliation, never auto-retried.
                             </p>
                           </div>
                         )}

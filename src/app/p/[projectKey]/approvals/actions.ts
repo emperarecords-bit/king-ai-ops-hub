@@ -43,7 +43,7 @@ export async function decide(_prev: DecisionState, formData: FormData): Promise<
         executed = outcome.attempted ? outcome : null;
       } catch (err) {
         log.error('executeApprovedIfEligible failed', { err });
-        executed = { attempted: true, outcome: 'failed', message: 'Execution failed unexpectedly; the approval itself is recorded.', prUrl: null };
+        executed = { attempted: true, outcome: 'failed', message: 'Execution failed unexpectedly; the approval itself is recorded.', prUrl: null, preview: null };
       }
     }
   } catch (err) {

@@ -16,9 +16,15 @@ export interface ApprovalExecutionOutcome {
   readonly message: string | null;
   /** Present when the execution produced a pull request. */
   readonly prUrl: string | null;
+  /**
+   * The executor's result preview (UNTRUSTED repo-derived summary, no secrets): e.g. {prUrl, mergeCommitSha}
+   * for a merge, {runUrl, attempt, state} for a rerun. Surfaced so the confirm response can report the exact
+   * external result ids/urls/shas the operation record requires. Null when nothing executed.
+   */
+  readonly preview: Readonly<Record<string, unknown>> | null;
 }
 
-const NOT_ATTEMPTED: ApprovalExecutionOutcome = { attempted: false, outcome: null, message: null, prUrl: null };
+const NOT_ATTEMPTED: ApprovalExecutionOutcome = { attempted: false, outcome: null, message: null, prUrl: null, preview: null };
 
 /**
  * Action Executors v1: after an admin approves, the hub itself executes the action when a real
@@ -67,6 +73,7 @@ export async function executeApprovedIfEligible(
       outcome: result.outcome,
       message: result.message,
       prUrl: preview && typeof preview.prUrl === 'string' ? preview.prUrl : null,
+      preview: result.preview,
     };
   });
 }

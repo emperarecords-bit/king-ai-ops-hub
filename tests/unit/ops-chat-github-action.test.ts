@@ -26,7 +26,11 @@ vi.mock('@/domain/tasks/tasks', () => ({ createTask: h.createTask, setTaskStatus
 vi.mock('@/domain/approvals/approvals', () => ({ decideApproval: h.decideApproval }));
 vi.mock('@/domain/execution/execute-on-approval', () => ({ executeApprovedIfEligible: h.executeApprovedIfEligible }));
 
-import { executeGitHubPrFromOpsChat } from '@/domain/opschat/github-action';
+import {
+  executeGitHubPrFromOpsChat,
+  executeGitHubMergeFromOpsChat,
+  executeGitHubRerunFromOpsChat,
+} from '@/domain/opschat/github-action';
 
 const CTX = { userId: 'u1', orgId: 'o1', projectId: 'p1', orgRole: 'owner' as const, projectRole: 'admin' as const };
 const LINK = { id: 'l1', installationId: 1n, repoFullName: 'emperarecords-bit/king-ai-ops-hub', defaultBranch: 'main', linkedBy: 'u1', createdAt: new Date() };
@@ -107,5 +111,66 @@ describe('executeGitHubPrFromOpsChat — governed path only', () => {
     expect(r.outcome).toBe('blocked');
     expect(r.prUrl).toBeNull();
     expect(r.message).toContain('disabled');
+  });
+});
+
+const MERGE_INPUT = { repo: LINK.repoFullName, prNumber: 7, expectedHeadSha: 'a'.repeat(40), expectedBaseBranch: 'main' };
+const RERUN_INPUT = { repo: LINK.repoFullName, runId: 99, expectedHeadSha: 'a'.repeat(40), expectedRunAttempt: 1 };
+
+describe('executeGitHubMergeFromOpsChat — governed path only', () => {
+  it('inserts a git_pr approval carrying operation=merge_pr, decides(admin), executes, returns the merge commit SHA', async () => {
+    h.executeApprovedIfEligible.mockResolvedValue({
+      attempted: true, outcome: 'succeeded', message: 'Merged PR #7.', prUrl: 'https://github.com/x/pull/7',
+      preview: { operation: 'merge_pr', merged: true, prUrl: 'https://github.com/x/pull/7', mergeCommitSha: 'c'.repeat(40) },
+    });
+    const r = await executeGitHubMergeFromOpsChat(CTX, MERGE_INPUT);
+    const approvalRow = h.insertedApproval.mock.calls[0]![0] as { actionType: string; payload: { operation: string; prNumber: number } };
+    expect(approvalRow.actionType).toBe('git_pr');
+    expect(approvalRow.payload.operation).toBe('merge_pr');
+    expect(approvalRow.payload.prNumber).toBe(7);
+    expect(h.decideApproval).toHaveBeenCalledWith(fakeTx, CTX, 'a-123', 'approved', expect.any(String));
+    expect(h.executeApprovedIfEligible).toHaveBeenCalledWith(CTX, 'a-123');
+    expect(h.decideApproval.mock.invocationCallOrder[0]!).toBeLessThan(h.executeApprovedIfEligible.mock.invocationCallOrder[0]!);
+    expect(r.outcome).toBe('succeeded');
+    expect(r.mergeCommitSha).toBe('c'.repeat(40));
+  });
+
+  it('an unlinked repo is refused — no approval, no execution', async () => {
+    h.listRepoLinks.mockResolvedValue([]);
+    await expect(executeGitHubMergeFromOpsChat(CTX, MERGE_INPUT)).rejects.toThrow(/not linked/i);
+    expect(h.insertedApproval).not.toHaveBeenCalled();
+    expect(h.executeApprovedIfEligible).not.toHaveBeenCalled();
+  });
+
+  it('a bad head SHA throws before any approval/execution', async () => {
+    await expect(executeGitHubMergeFromOpsChat(CTX, { ...MERGE_INPUT, expectedHeadSha: 'nope' })).rejects.toThrow();
+    expect(h.insertedApproval).not.toHaveBeenCalled();
+    expect(h.executeApprovedIfEligible).not.toHaveBeenCalled();
+  });
+});
+
+describe('executeGitHubRerunFromOpsChat — governed path only', () => {
+  it('inserts a git_pr approval carrying operation=rerun_failed_workflow, decides(admin), executes, returns run state', async () => {
+    h.executeApprovedIfEligible.mockResolvedValue({
+      attempted: true, outcome: 'succeeded', message: 'Re-ran run 99.', prUrl: null,
+      preview: { operation: 'rerun_failed_workflow', runId: 99, attempt: 2, state: 'in_progress', runUrl: 'https://github.com/x/actions/runs/99' },
+    });
+    const r = await executeGitHubRerunFromOpsChat(CTX, RERUN_INPUT);
+    const approvalRow = h.insertedApproval.mock.calls[0]![0] as { actionType: string; payload: { operation: string; runId: number } };
+    expect(approvalRow.actionType).toBe('git_pr');
+    expect(approvalRow.payload.operation).toBe('rerun_failed_workflow');
+    expect(approvalRow.payload.runId).toBe(99);
+    expect(h.executeApprovedIfEligible).toHaveBeenCalledWith(CTX, 'a-123');
+    expect(r.outcome).toBe('succeeded');
+    expect(r.runId).toBe(99);
+    expect(r.attempt).toBe(2);
+    expect(r.state).toBe('in_progress');
+  });
+
+  it('an unlinked repo is refused — no approval, no execution', async () => {
+    h.listRepoLinks.mockResolvedValue([]);
+    await expect(executeGitHubRerunFromOpsChat(CTX, RERUN_INPUT)).rejects.toThrow(/not linked/i);
+    expect(h.insertedApproval).not.toHaveBeenCalled();
+    expect(h.executeApprovedIfEligible).not.toHaveBeenCalled();
   });
 });

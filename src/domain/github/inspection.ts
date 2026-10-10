@@ -8,6 +8,7 @@ import {
   type PullRequestSummary,
   type RefCheckStatus,
   type RepoRef,
+  type WorkflowRunSummary,
 } from './client';
 import { hasEligibleExecutor } from '@/domain/execution/executors';
 import { EXECUTOR_RISK_BY_ACTION } from '@/domain/execution/executor-policy';
@@ -49,6 +50,9 @@ export interface WorkspaceGithubCapabilities {
   readonly linkedRepos: readonly LinkedRepoView[];
   /** Ops Chat can prepare a create-PR proposal: a registered executor AND at least one linked repo. */
   readonly canProposePr: boolean;
+  /** merge_pr / rerun_failed_workflow ride the same git_pr executor, so they share the create-PR gate. */
+  readonly canProposeMerge: boolean;
+  readonly canProposeRerun: boolean;
 }
 
 /** What governed GitHub actions this workspace can do right now. Pure read. */
@@ -72,6 +76,8 @@ export async function githubWorkspaceCapabilities(
     },
     linkedRepos,
     canProposePr: executorRegistered && linkedRepos.length > 0,
+    canProposeMerge: executorRegistered && linkedRepos.length > 0,
+    canProposeRerun: executorRegistered && linkedRepos.length > 0,
   };
 }
 
@@ -112,4 +118,16 @@ export async function getWorkspacePullRequest(
   const pr = await client.getPullRequest(ref, prNumber);
   const checks = await client.getRefChecks(ref, pr.headSha || pr.headRef);
   return { pr, checks };
+}
+
+export async function getWorkspaceWorkflowRun(
+  tx: DbTx,
+  ctx: TenantContext,
+  client: GitHubRepoClient,
+  repoFullName: string,
+  runId: number,
+): Promise<WorkflowRunSummary> {
+  const ref = await resolveLinkedRepoRef(tx, ctx, repoFullName);
+  if (!ref) throw new RepoNotLinkedError(repoFullName);
+  return client.getWorkflowRun(ref, runId);
 }
