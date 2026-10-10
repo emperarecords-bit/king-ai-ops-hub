@@ -37,7 +37,7 @@ afterAll(async () => {
   await getSetupDb().update(projects).set({ archived: true }).where(eq(projects.id, ctx.projectId));
 });
 
-async function approved(actionType: 'file_write' | 'git_pr' = 'file_write') {
+async function approved(actionType: 'file_write' | 'git_pr' | 'supabase_sql' = 'file_write') {
   const db = getSetupDb();
   const payload = { path: 'drafts/preview.md', content: 'never written' };
   const [task] = await db.insert(tasks).values({ orgId: ctx.orgId, projectId: ctx.projectId, title: 'Executor preview', input: 'dry run', providerSelection: 'openai', createdBy: ctx.userId, status: 'completed' }).returning({ id: tasks.id });
@@ -56,6 +56,17 @@ describe.skipIf(!available)('trusted executor dispatch', { timeout: 15_000 }, ()
     expect(result.outcome).toBe('blocked');
     const events = await getSetupDb().select({ action: auditLogs.action }).from(auditLogs).where(and(eq(auditLogs.entityId, a.approvalId), eq(auditLogs.action, 'execution.blocked')));
     expect(events).toHaveLength(1);
+  });
+
+  it('BLOCKS supabase_sql by its risk class — a DML mutation is destructive_irreversible and the gate prohibits it', async () => {
+    // Phase 2C approved-SQL risk model: even a valid, approved supabase_sql action with a fresh confirmation and
+    // an enabled policy can never execute live — the dispatch choke point prohibits destructive_irreversible.
+    const a = await approved('supabase_sql');
+    const result = await withTenant(ctx, (tx) =>
+      executeApprovedAction(tx, ctx, request(a.approvalId, a.hash, { mode: 'live' }), { enabledExecutorIds: ['git_pr', 'supabase_deploy', 'supabase_sql'] }),
+    );
+    expect(result.outcome).toBe('blocked');
+    expect(result.message).toMatch(/risk class is prohibited/i);
   });
 
   it('performs a dry-run only, persists intent/result, and rejects duplicate idempotency', async () => {
