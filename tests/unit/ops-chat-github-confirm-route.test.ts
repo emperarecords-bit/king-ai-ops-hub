@@ -12,6 +12,8 @@ const h = vi.hoisted(() => ({
   withTenant: vi.fn(),
   consumeRateLimit: vi.fn(),
   executeGitHubPrFromOpsChat: vi.fn(),
+  executeGitHubMergeFromOpsChat: vi.fn(),
+  executeGitHubRerunFromOpsChat: vi.fn(),
 }));
 
 vi.mock('@/domain/auth/guard', () => ({ requireTenant: h.requireTenant }));
@@ -26,7 +28,11 @@ vi.mock('@/domain/execution/execute-on-approval', () => ({ executeApprovedIfElig
 vi.mock('@/domain/tasks/tasks', () => ({ createTask: vi.fn(), getTask: vi.fn() }));
 vi.mock('@/domain/jobs/jobs', () => ({ enqueueRun: vi.fn() }));
 vi.mock('@/domain/agents/agents', () => ({ listAgents: vi.fn() }));
-vi.mock('@/domain/opschat/github-action', () => ({ executeGitHubPrFromOpsChat: h.executeGitHubPrFromOpsChat }));
+vi.mock('@/domain/opschat/github-action', () => ({
+  executeGitHubPrFromOpsChat: h.executeGitHubPrFromOpsChat,
+  executeGitHubMergeFromOpsChat: h.executeGitHubMergeFromOpsChat,
+  executeGitHubRerunFromOpsChat: h.executeGitHubRerunFromOpsChat,
+}));
 
 import { POST } from '@/app/api/ops-chat/confirm/route';
 
@@ -44,7 +50,12 @@ beforeEach(() => {
   h.withTenant.mockImplementation((_c: unknown, fn: (tx: unknown) => unknown) => fn({}));
   h.consumeRateLimit.mockResolvedValue(undefined);
   h.executeGitHubPrFromOpsChat.mockResolvedValue({ approvalId: 'a1', attempted: true, outcome: 'succeeded', message: 'ok', prUrl: 'https://github.com/o/r/pull/3' });
+  h.executeGitHubMergeFromOpsChat.mockResolvedValue({ approvalId: 'a2', attempted: true, outcome: 'succeeded', message: 'merged', prUrl: 'https://github.com/o/r/pull/7', mergeCommitSha: 'c'.repeat(40) });
+  h.executeGitHubRerunFromOpsChat.mockResolvedValue({ approvalId: 'a3', attempted: true, outcome: 'succeeded', message: 'rerun', runId: 99, attempt: 2, state: 'in_progress', runUrl: 'https://github.com/o/r/actions/runs/99' });
 });
+
+const MERGE_GOOD = { action: 'execute_github_merge', projectKey: 'ab', repo: 'o/r', prNumber: 7, expectedHeadSha: 'a'.repeat(40), expectedBaseBranch: 'main' };
+const RERUN_GOOD = { action: 'execute_github_rerun', projectKey: 'ab', repo: 'o/r', runId: 99, expectedHeadSha: 'a'.repeat(40), expectedRunAttempt: 1 };
 
 describe('POST /api/ops-chat/confirm — execute_github_pr', () => {
   it('admin + valid → runs the governed bridge and returns provenance', async () => {
@@ -82,5 +93,55 @@ describe('POST /api/ops-chat/confirm — execute_github_pr', () => {
     const res = await call(GOOD);
     expect(res.status).toBe(403);
     expect(h.executeGitHubPrFromOpsChat).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/ops-chat/confirm — execute_github_merge', () => {
+  it('admin + valid → runs the merge bridge and returns the merge commit SHA', async () => {
+    const res = await call(MERGE_GOOD);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.executed.mergeCommitSha).toBe('c'.repeat(40));
+    const [, input] = h.executeGitHubMergeFromOpsChat.mock.calls[0]!;
+    expect(input).toMatchObject({ repo: 'o/r', prNumber: 7, expectedHeadSha: 'a'.repeat(40), expectedBaseBranch: 'main' });
+  });
+
+  it('a non-admin is refused (403) and the merge bridge is never reached', async () => {
+    h.requireTenant.mockResolvedValue(ctx('member'));
+    const res = await call(MERGE_GOOD);
+    expect(res.status).toBe(403);
+    expect(h.executeGitHubMergeFromOpsChat).not.toHaveBeenCalled();
+  });
+
+  it('a malformed head SHA → 400, bridge never reached', async () => {
+    const res = await call({ ...MERGE_GOOD, expectedHeadSha: 'not-a-sha' });
+    expect(res.status).toBe(400);
+    expect(h.executeGitHubMergeFromOpsChat).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/ops-chat/confirm — execute_github_rerun', () => {
+  it('admin + valid → runs the rerun bridge and returns run state', async () => {
+    const res = await call(RERUN_GOOD);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.executed.runId).toBe(99);
+    expect(body.executed.state).toBe('in_progress');
+    const [, input] = h.executeGitHubRerunFromOpsChat.mock.calls[0]!;
+    expect(input).toMatchObject({ repo: 'o/r', runId: 99, expectedRunAttempt: 1 });
+  });
+
+  it('a non-admin is refused (403) and the rerun bridge is never reached', async () => {
+    h.requireTenant.mockResolvedValue(ctx('member'));
+    const res = await call(RERUN_GOOD);
+    expect(res.status).toBe(403);
+    expect(h.executeGitHubRerunFromOpsChat).not.toHaveBeenCalled();
+  });
+
+  it('a missing run attempt → 400, bridge never reached', async () => {
+    const { expectedRunAttempt: _omit, ...bad } = RERUN_GOOD;
+    const res = await call(bad);
+    expect(res.status).toBe(400);
+    expect(h.executeGitHubRerunFromOpsChat).not.toHaveBeenCalled();
   });
 });

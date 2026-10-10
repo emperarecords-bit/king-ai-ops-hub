@@ -16,9 +16,15 @@ import {
   listWorkspaceRepos,
   listWorkspacePullRequests,
   getWorkspacePullRequest,
+  getWorkspaceWorkflowRun,
   RepoNotLinkedError,
 } from '@/domain/github/inspection';
-import { gitPrPayloadSchema, findGitPrPlaceholder } from '@/domain/execution/git-pr-executor';
+import {
+  createPrPayloadSchema,
+  mergePrPayloadSchema,
+  rerunFailedWorkflowPayloadSchema,
+  findGitPrPlaceholder,
+} from '@/domain/execution/git-pr-executor';
 import { EXECUTOR_RISK_BY_ACTION } from '@/domain/execution/executor-policy';
 
 /**
@@ -80,6 +86,27 @@ export type OpsChatProposal =
       readonly riskClass: string;
       /** Carried to the confirm boundary (the proposed code); the card shows paths only, never content. */
       readonly files: ReadonlyArray<{ readonly path: string; readonly content: string }>;
+    }
+  | {
+      readonly kind: 'github_merge';
+      readonly projectKey: string;
+      readonly workspaceName: string;
+      readonly repo: string;
+      readonly prNumber: number;
+      readonly expectedHeadSha: string;
+      readonly expectedBaseBranch: string;
+      readonly mergeMethod: 'squash' | 'merge' | 'rebase';
+      readonly riskClass: string;
+    }
+  | {
+      readonly kind: 'github_rerun';
+      readonly projectKey: string;
+      readonly workspaceName: string;
+      readonly repo: string;
+      readonly runId: number;
+      readonly expectedHeadSha: string;
+      readonly expectedRunAttempt: number;
+      readonly riskClass: string;
     };
 
 function proposalKey(p: OpsChatProposal): string {
@@ -94,6 +121,10 @@ function proposalKey(p: OpsChatProposal): string {
       return `d:${p.projectKey}:${p.title.toLowerCase()}`;
     case 'github_pr':
       return `gh:${p.projectKey}:${p.repo}:${p.branch.toLowerCase()}`;
+    case 'github_merge':
+      return `ghm:${p.projectKey}:${p.repo}:${p.prNumber}`;
+    case 'github_rerun':
+      return `ghr:${p.projectKey}:${p.repo}:${p.runId}`;
   }
 }
 
@@ -384,6 +415,53 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
         },
       },
       required: ['project', 'repo', 'branch', 'title', 'files'],
+    },
+  },
+  {
+    name: 'get_workflow_run',
+    description:
+      'Get one GitHub Actions workflow run on a linked repository — its head SHA, run attempt, status (queued/in_progress/completed), and conclusion (success/failure/…). Read-only. Use this before proposing a rerun to read the exact run id, attempt, head SHA, and confirm it is completed+failed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        repo: { type: 'string', description: 'Canonical owner/repo; must be linked to this workspace.' },
+        run_id: { type: 'number', description: 'The workflow run id.' },
+      },
+      required: ['project', 'repo', 'run_id'],
+    },
+  },
+  {
+    name: 'propose_github_merge',
+    description:
+      'Prepare to MERGE an existing pull request on a linked repo FOR THE OWNER TO CONFIRM. Does NOT merge anything — it surfaces a confirmation card. Read the PR first with get_pull_request to get the exact head SHA and base branch. On confirm, the governed executor refuses a draft, a closed/already-merged PR, a moved head (stale SHA), a mismatched base, or non-green CI, then squash-merges (default) and verifies. Provide the exact PR number, expected head SHA, and expected base branch.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        repo: { type: 'string', description: 'Canonical owner/repo; must be linked to this workspace.' },
+        pr_number: { type: 'number', description: 'The pull request number to merge.' },
+        expected_head_sha: { type: 'string', description: 'The PR head SHA you reviewed; a moved head is refused.' },
+        expected_base_branch: { type: 'string', description: 'The branch the PR must be merging into.' },
+        merge_method: { type: 'string', enum: ['squash', 'merge', 'rebase'], description: "Default 'squash'." },
+      },
+      required: ['project', 'repo', 'pr_number', 'expected_head_sha', 'expected_base_branch'],
+    },
+  },
+  {
+    name: 'propose_github_rerun',
+    description:
+      'Prepare to RE-RUN THE FAILED JOBS of a completed, failed GitHub Actions workflow run on a linked repo FOR THE OWNER TO CONFIRM. Does NOT rerun anything — it surfaces a confirmation card. Read the run first with get_workflow_run. On confirm, the governed executor refuses a run that is not completed+failed, or whose head SHA / attempt do not match, then uses the rerun-failed-jobs endpoint (never workflow_dispatch). Provide the exact run id, expected head SHA, and expected run attempt.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        repo: { type: 'string', description: 'Canonical owner/repo; must be linked to this workspace.' },
+        run_id: { type: 'number', description: 'The workflow run id to re-run failed jobs for.' },
+        expected_head_sha: { type: 'string', description: 'The run head SHA you inspected; a mismatch is refused.' },
+        expected_run_attempt: { type: 'number', description: 'The run attempt number you inspected; a stale attempt is refused.' },
+      },
+      required: ['project', 'repo', 'run_id', 'expected_head_sha', 'expected_run_attempt'],
     },
   },
 ];
@@ -730,7 +808,7 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
         const link = await withTenant(ctx, (tx) => listRepoLinks(tx, ctx)).then((ls) => ls.find((l) => l.repoFullName === repo) ?? null);
         if (!link) return JSON.stringify({ error: `Repository "${repo}" is not linked to this workspace. Use list_github_repos.` });
         // Validate into the exact executable payload — bad shapes are refusals, not best-effort repairs.
-        const parsed = gitPrPayloadSchema.safeParse({ repo, branch, title, body, ...(baseBranchArg ? { baseBranch: baseBranchArg } : {}), files });
+        const parsed = createPrPayloadSchema.safeParse({ operation: 'create_pr', repo, branch, title, body, ...(baseBranchArg ? { baseBranch: baseBranchArg } : {}), files });
         if (!parsed.success) {
           const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
           return JSON.stringify({ error: `That pull request is not valid: ${issues}` });
@@ -758,6 +836,105 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
         return JSON.stringify({
           prepared: true,
           note: `Prepared for the owner to confirm: a pull request in ${parsed.data.repo} from ${parsed.data.branch} into ${baseBranch}. Tell the owner it is ready to confirm below. Do NOT claim it is created yet.`,
+        });
+      }
+      case 'get_workflow_run': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const repo = argStr(input, 'repo');
+        const runId = argNum(input, 'run_id');
+        if (runId === null) return JSON.stringify({ error: 'A workflow run id is required.' });
+        const ctx = ctxFor(auth, p);
+        try {
+          const run = await withTenant(ctx, (tx) => getWorkspaceWorkflowRun(tx, ctx, getGitHubClient(), repo, runId));
+          return JSON.stringify({ workspace: p.name, repo, workflowRun: run });
+        } catch (err) {
+          if (err instanceof RepoNotLinkedError) return JSON.stringify({ error: err.message });
+          return JSON.stringify({ error: 'Could not read that workflow run from GitHub.' });
+        }
+      }
+      case 'propose_github_merge': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        if (p.projectRole !== 'admin') {
+          return JSON.stringify({ error: 'You must be an admin of that workspace to propose a GitHub action.' });
+        }
+        const repo = argStr(input, 'repo');
+        const prNumber = argNum(input, 'pr_number');
+        const expectedHeadSha = argStr(input, 'expected_head_sha');
+        const expectedBaseBranch = argStr(input, 'expected_base_branch');
+        const mergeMethodArg = argStr(input, 'merge_method');
+        if (prNumber === null) return JSON.stringify({ error: 'A pull request number is required.' });
+        const ctx = ctxFor(auth, p);
+        const link = await withTenant(ctx, (tx) => listRepoLinks(tx, ctx)).then((ls) => ls.find((l) => l.repoFullName === repo) ?? null);
+        if (!link) return JSON.stringify({ error: `Repository "${repo}" is not linked to this workspace. Use list_github_repos.` });
+        const parsed = mergePrPayloadSchema.safeParse({
+          operation: 'merge_pr',
+          repo,
+          prNumber,
+          expectedHeadSha,
+          expectedBaseBranch,
+          ...(mergeMethodArg ? { mergeMethod: mergeMethodArg } : {}),
+        });
+        if (!parsed.success) {
+          const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+          return JSON.stringify({ error: `That merge is not valid: ${issues}` });
+        }
+        addProposal({
+          kind: 'github_merge',
+          projectKey: p.key,
+          workspaceName: p.name,
+          repo: parsed.data.repo,
+          prNumber: parsed.data.prNumber,
+          expectedHeadSha: parsed.data.expectedHeadSha,
+          expectedBaseBranch: parsed.data.expectedBaseBranch,
+          mergeMethod: parsed.data.mergeMethod,
+          riskClass: EXECUTOR_RISK_BY_ACTION.git_pr,
+        });
+        return JSON.stringify({
+          prepared: true,
+          note: `Prepared for the owner to confirm: merge PR #${parsed.data.prNumber} in ${parsed.data.repo} into ${parsed.data.expectedBaseBranch}. Tell the owner it is ready to confirm below. Do NOT claim it is merged yet.`,
+        });
+      }
+      case 'propose_github_rerun': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        if (p.projectRole !== 'admin') {
+          return JSON.stringify({ error: 'You must be an admin of that workspace to propose a GitHub action.' });
+        }
+        const repo = argStr(input, 'repo');
+        const runId = argNum(input, 'run_id');
+        const expectedHeadSha = argStr(input, 'expected_head_sha');
+        const expectedRunAttempt = argNum(input, 'expected_run_attempt');
+        if (runId === null) return JSON.stringify({ error: 'A workflow run id is required.' });
+        if (expectedRunAttempt === null) return JSON.stringify({ error: 'An expected run attempt is required.' });
+        const ctx = ctxFor(auth, p);
+        const link = await withTenant(ctx, (tx) => listRepoLinks(tx, ctx)).then((ls) => ls.find((l) => l.repoFullName === repo) ?? null);
+        if (!link) return JSON.stringify({ error: `Repository "${repo}" is not linked to this workspace. Use list_github_repos.` });
+        const parsed = rerunFailedWorkflowPayloadSchema.safeParse({
+          operation: 'rerun_failed_workflow',
+          repo,
+          runId,
+          expectedHeadSha,
+          expectedRunAttempt,
+        });
+        if (!parsed.success) {
+          const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+          return JSON.stringify({ error: `That rerun is not valid: ${issues}` });
+        }
+        addProposal({
+          kind: 'github_rerun',
+          projectKey: p.key,
+          workspaceName: p.name,
+          repo: parsed.data.repo,
+          runId: parsed.data.runId,
+          expectedHeadSha: parsed.data.expectedHeadSha,
+          expectedRunAttempt: parsed.data.expectedRunAttempt,
+          riskClass: EXECUTOR_RISK_BY_ACTION.git_pr,
+        });
+        return JSON.stringify({
+          prepared: true,
+          note: `Prepared for the owner to confirm: re-run the failed jobs of run ${parsed.data.runId} in ${parsed.data.repo}. Tell the owner it is ready to confirm below. Do NOT claim it is rerun yet.`,
         });
       }
       default:

@@ -36,6 +36,21 @@ export interface PullRequestSummary {
   readonly headSha: string;
   readonly baseRef: string;
   readonly url: string;
+  /** The squash/merge commit SHA once merged, else null — used to verify + report a governed merge. */
+  readonly mergeCommitSha: string | null;
+}
+
+/** A GitHub Actions workflow run's safe, UNTRUSTED summary — carries no secrets. */
+export interface WorkflowRunSummary {
+  readonly id: number;
+  readonly headSha: string;
+  readonly runAttempt: number;
+  /** queued | in_progress | completed | waiting | … */
+  readonly status: string;
+  /** success | failure | cancelled | … | null (null while not completed). */
+  readonly conclusion: string | null;
+  readonly url: string;
+  readonly name: string;
 }
 
 /** Rolled-up CI/check state for a ref (GitHub Actions check-runs). */
@@ -70,6 +85,23 @@ export interface GitHubRepoClient {
     repo: RepoRef,
     args: { fromBranch: string; intoBranch: string; title: string; body: string },
   ): Promise<{ prNumber: number }>;
+  /**
+   * Merge an existing pull request (Phase 2B). Unlike the create-PR primitives this intentionally lands into
+   * the (usually default) base branch — a merge is the sanctioned way a reviewed PR becomes the default branch,
+   * and is reversible by reverting the merge commit. Scoping is by the linked RepoRef; `sha` binds the merge to
+   * the exact reviewed head (GitHub rejects a stale head); GitHub branch protection stays authoritative.
+   */
+  mergePullRequest(
+    repo: RepoRef,
+    args: { prNumber: number; mergeMethod: 'squash' | 'merge' | 'rebase'; sha: string },
+  ): Promise<{ merged: boolean; mergeCommitSha: string | null }>;
+  /** One GitHub Actions workflow run's detail (read-only). */
+  getWorkflowRun(repo: RepoRef, runId: number): Promise<WorkflowRunSummary>;
+  /**
+   * Re-run only the FAILED jobs of a completed workflow run (Phase 2B) — the `rerun-failed-jobs` endpoint,
+   * never workflow_dispatch. No repo-content side effect; it starts a fresh CI attempt of the same run.
+   */
+  rerunFailedWorkflowJobs(repo: RepoRef, runId: number): Promise<void>;
 }
 
 /** Thrown for every operation while the owner-gated GitHub App credentials are absent. */
@@ -108,6 +140,15 @@ class UnconfiguredGitHubClient implements GitHubRepoClient {
   openPullRequest(): Promise<{ prNumber: number }> {
     return Promise.reject(new GitHubUnconfiguredError());
   }
+  mergePullRequest(): Promise<{ merged: boolean; mergeCommitSha: string | null }> {
+    return Promise.reject(new GitHubUnconfiguredError());
+  }
+  getWorkflowRun(): Promise<WorkflowRunSummary> {
+    return Promise.reject(new GitHubUnconfiguredError());
+  }
+  rerunFailedWorkflowJobs(): Promise<void> {
+    return Promise.reject(new GitHubUnconfiguredError());
+  }
 }
 
 let testOverride: GitHubRepoClient | null = null;
@@ -121,6 +162,10 @@ export function setGitHubClientOverrideForTests(client: GitHubRepoClient | null)
 export function isGitHubConfigured(): boolean {
   return Boolean(process.env.GITHUB_APP_ID && process.env.GITHUB_APP_PRIVATE_KEY);
 }
+
+/** Hard ceiling on any single GitHub REST call. A hung mutation must become a bounded failure we can
+ *  classify (timeout ⇒ ambiguous), never an indefinitely pending request. */
+const GITHUB_FETCH_TIMEOUT_MS = 25_000;
 
 let liveClient: GitHubRepoClient | null = null;
 
@@ -141,7 +186,7 @@ export function getGitHubClient(): GitHubRepoClient {
       appId,
       privateKeyPem,
       fetchImpl: async (url, init) => {
-        const res = await fetch(url, init);
+        const res = await fetch(url, { ...init, signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS) });
         return { status: res.status, json: () => res.json() };
       },
     });
