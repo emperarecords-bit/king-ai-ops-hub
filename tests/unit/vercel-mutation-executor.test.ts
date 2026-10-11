@@ -18,6 +18,7 @@ const OTHER_SHA = 'b'.repeat(40);
 const TARGET = 'dpl_target00000001';
 const CURRENT = 'dpl_current0000002';
 const SOURCE = 'dpl_source0000003';
+const NEWID = 'dpl_new00000004';
 
 function action(payload: Record<string, unknown>, mode: 'dry_run' | 'live' = 'live'): ExecutorAction {
   const payloadSha256 = sha256Hex(canonicalJson(payload));
@@ -31,27 +32,34 @@ function action(payload: Record<string, unknown>, mode: 'dry_run' | 'live' = 'li
 }
 
 interface Opts {
-  deployments?: Record<string, VercelDeploymentState | null>;
+  deployments?: Record<string, VercelDeploymentState | null | Error>;
   project?: VercelProjectState;
   promoteError?: unknown;
   rollbackError?: unknown;
   redeployError?: unknown;
   getDeploymentError?: unknown;
   projectAfter?: VercelProjectState;
+  /** When true, the SECOND getProjectState call (the post-mutation verification read) throws. */
+  verifyProjectThrows?: boolean;
   links?: readonly VercelProjectLink[];
 }
 
 function build(opts: Opts = {}) {
   const calls: string[] = [];
-  const deployments: Record<string, VercelDeploymentState | null> = opts.deployments ?? {
+  const deployments: Record<string, VercelDeploymentState | null | Error> = opts.deployments ?? {
     [TARGET]: { id: TARGET, readyState: 'READY', target: 'production', sourceSha: SHA },
     [SOURCE]: { id: SOURCE, readyState: 'READY', target: 'preview', sourceSha: SHA },
+    [NEWID]: { id: NEWID, readyState: 'READY', target: 'preview', sourceSha: SHA },
   };
   let getProjectCount = 0;
   const client: VercelMutationClient = {
-    getDeployment: async (_ref, id) => { calls.push(`getDeployment:${id}`); if (opts.getDeploymentError) throw opts.getDeploymentError; return deployments[id] ?? null; },
-    getProjectState: async () => { calls.push('getProjectState'); getProjectCount += 1; return getProjectCount >= 2 && opts.projectAfter ? opts.projectAfter : (opts.project ?? { name: 'accuratebids', productionDeploymentId: CURRENT, productionSha: OTHER_SHA }); },
-    redeploy: async () => { calls.push('redeploy'); if (opts.redeployError) throw opts.redeployError; return { deploymentId: 'dpl_new00000004', readyState: 'QUEUED' }; },
+    getDeployment: async (_ref, id) => { calls.push(`getDeployment:${id}`); if (opts.getDeploymentError) throw opts.getDeploymentError; const d = deployments[id]; if (d instanceof Error) throw d; return d ?? null; },
+    getProjectState: async () => {
+      calls.push('getProjectState'); getProjectCount += 1;
+      if (opts.verifyProjectThrows && getProjectCount >= 2) throw new Error('verification read failed');
+      return getProjectCount >= 2 && opts.projectAfter ? opts.projectAfter : (opts.project ?? { name: 'accuratebids', productionDeploymentId: CURRENT, productionSha: OTHER_SHA });
+    },
+    redeploy: async () => { calls.push('redeploy'); if (opts.redeployError) throw opts.redeployError; return { deploymentId: NEWID, readyState: 'QUEUED' }; },
     promote: async () => { calls.push('promote'); if (opts.promoteError) throw opts.promoteError; },
     rollback: async () => { calls.push('rollback'); if (opts.rollbackError) throw opts.rollbackError; },
   };
@@ -136,12 +144,14 @@ describe('VercelMutationExecutor — dry run + live', () => {
     expect(calls).toContain('promote');
   });
 
-  it('redeploy succeeds, returns the new deployment id, and leaves production unchanged', async () => {
-    const { executor } = build();
+  it('redeploy succeeds only after re-reading the new deployment and confirming its SHA (honest state captured)', async () => {
+    const { executor, calls } = build();
     const act = action(redeployP());
     const r = validateExecutorResult(act, executor.capability, await executor.execute(act));
     expect(r.outcome).toBe('succeeded');
-    expect(r.preview).toMatchObject({ newDeploymentId: 'dpl_new00000004', productionChanged: false });
+    expect(r.preview).toMatchObject({ newDeploymentId: NEWID, newDeploymentState: 'READY', newDeploymentSha: SHA, productionChanged: false });
+    // Verified by a read-back of the exact new id, not by trusting the create response.
+    expect(calls).toContain(`getDeployment:${NEWID}`);
   });
 
   it('rollback succeeds on a READY previous production target', async () => {
@@ -173,5 +183,47 @@ describe('VercelMutationExecutor — dry run + live', () => {
     const r = await executor.execute(action(promoteP()));
     expect(r.outcome).toBe('ambiguous');
     expect(r.reconciliation).toBe('required');
+  });
+});
+
+describe('VercelMutationExecutor — post-action verification failures are ambiguous, never success', () => {
+  it('promote success response + verification read throws → ambiguous (reconcile, no retry)', async () => {
+    const { executor } = build({ verifyProjectThrows: true });
+    const r = await executor.execute(action(promoteP()));
+    expect(r.outcome).toBe('ambiguous');
+    expect(r.reconciliation).toBe('required');
+    expect(r.retryAllowed).toBe(false);
+  });
+
+  it('rollback success response + verification read throws → ambiguous (reconcile, no retry)', async () => {
+    const { executor } = build({ verifyProjectThrows: true });
+    const r = await executor.execute(action(rollbackP()));
+    expect(r.outcome).toBe('ambiguous');
+    expect(r.reconciliation).toBe('required');
+    expect(r.retryAllowed).toBe(false);
+  });
+
+  it('redeploy success response + verification read throws → ambiguous (reconcile, no retry)', async () => {
+    const { executor } = build({ deployments: { [SOURCE]: { id: SOURCE, readyState: 'READY', target: 'preview', sourceSha: SHA }, [NEWID]: new Error('read-back failed') } });
+    const r = await executor.execute(action(redeployP()));
+    expect(r.outcome).toBe('ambiguous');
+    expect(r.reconciliation).toBe('required');
+    expect(r.retryAllowed).toBe(false);
+    expect((r.preview as { newDeploymentId?: string }).newDeploymentId).toBe(NEWID);
+  });
+
+  it('redeploy new deployment SHA mismatch → ambiguous (manual reconciliation, not success)', async () => {
+    const { executor } = build({ deployments: { [SOURCE]: { id: SOURCE, readyState: 'READY', target: 'preview', sourceSha: SHA }, [NEWID]: { id: NEWID, readyState: 'READY', target: 'preview', sourceSha: OTHER_SHA } } });
+    const r = await executor.execute(action(redeployP()));
+    expect(r.outcome).toBe('ambiguous');
+    expect(r.reconciliation).toBe('required');
+    expect(r.message).toMatch(/source SHA/i);
+  });
+
+  it('redeploy with a verified new deployment (exists + SHA matches) → succeeded', async () => {
+    const { executor } = build({ deployments: { [SOURCE]: { id: SOURCE, readyState: 'READY', target: 'preview', sourceSha: SHA }, [NEWID]: { id: NEWID, readyState: 'READY', target: 'preview', sourceSha: SHA } } });
+    const r = await executor.execute(action(redeployP()));
+    expect(r.outcome).toBe('succeeded');
+    expect(r.preview).toMatchObject({ newDeploymentId: NEWID, newDeploymentSha: SHA });
   });
 });

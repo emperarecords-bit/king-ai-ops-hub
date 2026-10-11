@@ -189,10 +189,27 @@ export class VercelMutationExecutor implements Executor {
       if (isDefinite(err)) return result('failed', `Vercel rejected the redeploy before creating it (no side effect): ${msg(err)}.`, target, { retryAllowed: false });
       return result('ambiguous', `Redeploy outcome is unknown after a transport/server error — a new deployment may or may not have been created: ${msg(err)}. Reconcile before any retry.`, target, { reconciliation: 'required', retryAllowed: false });
     }
-    return result('succeeded', `Created a new deployment ${created.deploymentId} (state "${created.readyState}") from ${payload.sourceDeploymentId}. Production traffic is unchanged.`, {
-      ...target,
-      newDeploymentId: created.deploymentId,
-      newDeploymentState: created.readyState,
+
+    // A new deployment HAS been created. Do not trust the create response — re-read it by exact id and verify it
+    // exists and carries the expected source SHA before claiming success. A failed read-back, a missing
+    // deployment, or a SHA that contradicts the binding is `ambiguous` + manual reconciliation, never success.
+    const created_target = { ...target, newDeploymentId: created.deploymentId };
+    let verified;
+    try {
+      verified = await this.deps.vercel.getDeployment(ref, created.deploymentId);
+    } catch (err) {
+      return result('ambiguous', `Redeploy created ${created.deploymentId} but it could not be re-read to verify: ${msg(err)}. Reconcile before any retry.`, created_target, { reconciliation: 'required', retryAllowed: false });
+    }
+    if (!verified) {
+      return result('ambiguous', `Redeploy reported ${created.deploymentId} but that deployment was not found on read-back. Reconcile before any retry.`, created_target, { reconciliation: 'required', retryAllowed: false });
+    }
+    if (verified.sourceSha !== payload.expectedSourceSha) {
+      return result('ambiguous', `Redeploy created ${created.deploymentId}, but its source SHA is ${verified.sourceSha ?? 'unknown'}, not the expected ${payload.expectedSourceSha}. Reconcile manually before any retry.`, { ...created_target, newDeploymentSha: verified.sourceSha }, { reconciliation: 'required', retryAllowed: false });
+    }
+    return result('succeeded', `Created a new deployment ${created.deploymentId} (state "${verified.readyState}") from ${payload.sourceDeploymentId}. Production traffic is unchanged.`, {
+      ...created_target,
+      newDeploymentState: verified.readyState,
+      newDeploymentSha: verified.sourceSha,
       productionChanged: false,
     });
   }
@@ -269,16 +286,21 @@ export class VercelMutationExecutor implements Executor {
     return { blocked: null };
   }
 
-  /** Shared promote/rollback post-write verification: production now points at the target. */
+  /**
+   * Shared promote/rollback post-write verification: production now points at the target. A mutation HAS been
+   * attempted, so inability to re-read — or any result that does not positively confirm the target — is
+   * `ambiguous` + reconciliation required, NEVER success. (A failed verification read must not fall through to
+   * success.)
+   */
   private async verifyPointerMoved(op: string, targetId: string, ref: VercelProjectRef, target: Record<string, unknown>, result: ResultFn): Promise<ExecutorResult> {
     let after;
     try {
       after = await this.deps.vercel.getProjectState(ref);
-    } catch {
-      after = null;
+    } catch (err) {
+      return result('ambiguous', `The ${op} call returned success but production could not be re-read to verify (the mutation may have taken effect): ${msg(err)}. Reconcile before any retry.`, target, { reconciliation: 'required', retryAllowed: false });
     }
-    if (after && after.productionDeploymentId !== targetId) {
-      return result('ambiguous', `The ${op} call returned success but production still points to ${after.productionDeploymentId ?? 'unknown'}, not ${targetId}. Reconcile before any retry.`, target, { reconciliation: 'required', retryAllowed: false });
+    if (after.productionDeploymentId !== targetId) {
+      return result('ambiguous', `The ${op} call returned success but production points to ${after.productionDeploymentId ?? 'unknown'}, not ${targetId}. Reconcile before any retry.`, target, { reconciliation: 'required', retryAllowed: false });
     }
     return result('succeeded', `Production now points to ${targetId} (${op}).`, { ...target, productionDeploymentId: targetId, productionChanged: true });
   }
