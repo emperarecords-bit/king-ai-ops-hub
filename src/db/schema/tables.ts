@@ -1136,6 +1136,36 @@ export const supabaseProjectLinks = pgTable(
   ],
 );
 
+// Phase 2D — per-workspace binding to one external Vercel project (by its opaque project id). Admin-only,
+// tenant-scoped (RLS). The row holds NO secret: the Vercel API token is an owner-gated platform secret that
+// never enters the database (same design as github_repo_links / supabase_project_links).
+export const vercelProjectLinks = pgTable(
+  'vercel_project_links',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    /** Vercel project id (e.g. "prj_xxx") — an opaque identifier, not a secret. */
+    vercelProjectId: text('vercel_project_id').notNull(),
+    /** Optional Vercel team id scoping the project (for team-owned projects); not a secret. */
+    vercelTeamId: text('vercel_team_id'),
+    /** Optional human-friendly label for the linked project. */
+    label: text('label'),
+    linkedBy: uuid('linked_by')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'cascade' }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('vercel_project_links_project_id_uq').on(t.projectId, t.vercelProjectId),
+    index('vercel_project_links_org_project_idx').on(t.orgId, t.projectId),
+  ],
+);
+
 // ---------------------------------------------------------------------------
 // Work hierarchy (OBJECTIVES.md, D-010/D-015) — dark in Sprint 3, UI Sprint 4.
 // Containment: Project → Objective → Milestone → Task. Department/Employee is

@@ -905,6 +905,24 @@ begin
 end
 $$;
 
+-- Vercel project links (Phase 2D; migration 0082). to_regclass-guarded like supabase_project_links so the
+-- penultimate-schema incremental bootstrap tolerates absence. Ordinary tenant-scoped configuration — no secret
+-- (the Vercel API token is a platform secret, never in the DB); unlink is a hard delete of the config row.
+do $$
+begin
+  if to_regclass('public.vercel_project_links') is not null then
+    grant select, insert, update, delete on vercel_project_links to app_server;
+    alter table vercel_project_links enable row level security;
+    alter table vercel_project_links force row level security;
+    drop policy if exists vercel_project_links_tenant on vercel_project_links;
+    execute
+      'create policy vercel_project_links_tenant on vercel_project_links
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+  end if;
+end
+$$;
+
 -- Employee Chat conversations (EV-004; migration 0064). to_regclass-guarded like api_tokens/github_repo_links
 -- so the penultimate-schema incremental bootstrap tolerates absence. Thread identities only — every exchange
 -- is still an ordinary task/run, so no delete grant: a conversation, once begun, is history.
