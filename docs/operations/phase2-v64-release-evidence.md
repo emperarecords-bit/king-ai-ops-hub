@@ -67,7 +67,7 @@ Migration complete.
 - Prod `drizzle.__drizzle_migrations` count: **79 → 84** (verified post-deploy via the migration role).
 - Migrations applied: **0079–0083** (exactly five).
 - New DDL tables confirmed present in prod: `supabase_project_links` (0079), `vercel_project_links` (0082).
-- 0080 / 0081 / 0083 = executor wiring + RLS/policy; no new tables.
+- 0080 / 0081 / 0083 add the `action_type` enum values for `supabase_deploy`, `supabase_sql`, and `vercel_mutation` respectively; no new tables.
 
 ## 5. Pre-DDL snapshot & rollback
 
