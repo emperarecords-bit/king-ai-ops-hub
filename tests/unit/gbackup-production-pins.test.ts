@@ -15,6 +15,7 @@ import {
 import { loadReceiptKeyBundle } from '../../scripts/backup/receipt-key-bundle';
 import { verifyReceiptV2Parsed } from '../../scripts/backup/receipt-v2-verify';
 import { readRuntimeMigrationSet } from '../../scripts/backup/runtime-migration-set';
+import { inputsFromEnv } from '../../scripts/ci/sign-staging-receipt';
 
 /**
  * Gate 3 — production release pins. Three jobs:
@@ -27,9 +28,10 @@ import { readRuntimeMigrationSet } from '../../scripts/backup/runtime-migration-
  */
 
 const HEAVY_TIMEOUT = 60_000; // portable git-blob manifest + runtime hashing over 61 migrations is disk/git-bound
-// `defaultAppliedCount` is optional on ReleasePins (staging omits it to force an explicit APPLIED_COUNT); production
-// defines it, so narrow it once here. The `?? 0` fallback is unreachable for PRODUCTION_PINS.
-const PROD_APPLIED_COUNT = PRODUCTION_PINS.defaultAppliedCount ?? 0;
+// Production REQUIRES an explicit APPLIED_COUNT (no baked default) — see PRODUCTION_PINS.requireExplicitAppliedCount.
+// The real production applied count at this release is 79 (through 0078_silent_ultron), confirmed from the live DB
+// at ceremony time; the end-to-end signing test below uses it as the explicit runtime input.
+const PROD_APPLIED_COUNT = 79;
 
 function makeInputs(sourceCommit: string, nonceByte: string, snapshotId: string): StagingReceiptInputs {
   const now = Date.now();
@@ -70,9 +72,9 @@ describe('production pins — consistency with the repository', () => {
       expect(PRODUCTION_PINS[field], field).not.toBe(STAGING_PINS[field]);
       expect(PRODUCTION_PINS[field].length).toBeGreaterThan(0);
     }
-    // Production deployed through 0067 on 2026-08-18 (68 applied); the default applied
-    // count must never exceed the committed set (that would mean a pin typo).
-    expect(PRODUCTION_PINS.defaultAppliedCount).toBe(68);
+    // Production carries NO baked applied-count fallback — it must be supplied explicitly at signing time.
+    expect(PRODUCTION_PINS.defaultAppliedCount).toBeUndefined();
+    expect(PRODUCTION_PINS.requireExplicitAppliedCount).toBe(true);
     expect(PROD_APPLIED_COUNT).toBeLessThanOrEqual(PRODUCTION_PINS.expectedCommittedMigrationCount);
   });
 });
@@ -110,5 +112,19 @@ describe('production pins — the shared producer signs + self-verifies a produc
     const result = verifyReceiptV2Parsed(out.receipt, exp);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('production_rejected');
+  });
+});
+
+describe('production pins — APPLIED_COUNT is required and never defaulted (fail-closed)', () => {
+  // A valid env that reaches the applied-count resolution (snapshot discovery satisfied) but omits APPLIED_COUNT.
+  const baseEnv = { SNAPSHOT_DISCOVERY_METHOD: 'create-response-id', CREATE_RESPONSE_SNAPSHOT_ID: 'vs_prodpins0001' };
+
+  it('production signing throws on a missing APPLIED_COUNT (no baked fallback to the stale 68)', () => {
+    expect(() => inputsFromEnv({ ...baseEnv } as unknown as NodeJS.ProcessEnv, PRODUCTION_PINS)).toThrow(/APPLIED_COUNT/);
+  });
+
+  it('production signing accepts an explicit APPLIED_COUNT verbatim', () => {
+    const inputs = inputsFromEnv({ ...baseEnv, APPLIED_COUNT: '79' } as unknown as NodeJS.ProcessEnv, PRODUCTION_PINS);
+    expect(inputs.appliedCount).toBe(79);
   });
 });
