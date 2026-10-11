@@ -1,21 +1,25 @@
 import {
   type VercelClient,
+  type VercelMutationClient,
   type VercelProjectRef,
   type VercelProjectInfo,
+  type VercelProjectState,
+  type VercelDeploymentState,
   type VercelDeploymentSummary,
 } from './client';
 
 /**
- * The LIVE Vercel REST client (Phase 2D, read-only). Speaks the Vercel REST API (https://api.vercel.com) with the
- * owner-gated access token as a bearer. `fetchImpl` is injected so every test runs against a recorder with zero
- * network. Response bodies are UNTRUSTED project/deployment content and carry no secret. Only READS are
- * implemented — there is no redeploy/promote/rollback method here.
+ * The LIVE Vercel REST client (Phase 2D). Speaks the Vercel REST API (https://api.vercel.com) with the owner-gated
+ * access token as a bearer. `fetchImpl` is injected so every test runs against a recorder with zero network.
+ * Response bodies are UNTRUSTED project/deployment content and carry no secret. It implements both the read
+ * surface and — for the mutation slice — the redeploy/promote/rollback surface (`VercelMutationClient`). Every
+ * mutation is an exact-id, idempotent-at-the-choke-point operation the governed executor has already bound.
  */
 
-/** Minimal fetch shape so tests inject a recorder and no test touches the network. */
+/** Minimal fetch shape so tests inject a recorder and no test touches the network. Mutations carry a JSON body. */
 export type VercelFetchLike = (
   url: string,
-  init: { method: string; headers: Record<string, string> },
+  init: { method: string; headers: Record<string, string>; body?: string },
 ) => Promise<{ status: number; json(): Promise<unknown> }>;
 
 export class VercelApiError extends Error {
@@ -63,7 +67,7 @@ interface LiveClientArgs {
   readonly apiBase?: string;
 }
 
-export class LiveVercelClient implements VercelClient {
+export class LiveVercelClient implements VercelClient, VercelMutationClient {
   private readonly token: string;
   private readonly fetchImpl: VercelFetchLike;
   private readonly apiBase: string;
@@ -102,5 +106,64 @@ export class LiveVercelClient implements VercelClient {
     )) as { deployments?: Array<Record<string, unknown>> };
     const list = Array.isArray(out.deployments) ? out.deployments : [];
     return list.map(toDeployment);
+  }
+
+  // ── Mutation surface (Phase 2D mutation slice) ──────────────────────────────
+
+  private async mutate(operation: string, method: string, path: string, body: unknown, okStatuses: readonly number[]): Promise<unknown> {
+    const res = await this.fetchImpl(`${this.apiBase}${path}`, {
+      method,
+      headers: { authorization: `Bearer ${this.token}`, accept: 'application/json', 'content-type': 'application/json' },
+      body: JSON.stringify(body ?? {}),
+    });
+    if (!okStatuses.includes(res.status)) throw new VercelApiError(operation, res.status);
+    return res.json();
+  }
+
+  async getDeployment(ref: VercelProjectRef, deploymentId: string): Promise<VercelDeploymentState | null> {
+    const res = await this.fetchImpl(`${this.apiBase}${this.withTeam(`/v13/deployments/${encodeURIComponent(deploymentId)}`, ref)}`, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${this.token}`, accept: 'application/json' },
+    });
+    if (res.status === 404) return null;
+    if (res.status !== 200) throw new VercelApiError('get deployment', res.status);
+    const raw = (await res.json()) as Record<string, unknown>;
+    const meta = (raw.meta ?? {}) as Record<string, unknown>;
+    return {
+      id: typeof raw.uid === 'string' ? raw.uid : typeof raw.id === 'string' ? raw.id : deploymentId,
+      readyState: typeof raw.readyState === 'string' ? raw.readyState : typeof raw.state === 'string' ? raw.state : 'UNKNOWN',
+      target: raw.target === 'production' ? 'production' : 'preview',
+      sourceSha: typeof meta.githubCommitSha === 'string' ? meta.githubCommitSha : null,
+    };
+  }
+
+  async getProjectState(ref: VercelProjectRef): Promise<VercelProjectState> {
+    const raw = (await this.request('get project', this.withTeam(`/v9/projects/${encodeURIComponent(ref.projectId)}`, ref))) as Record<string, unknown>;
+    const targets = (raw.targets ?? {}) as { production?: { id?: unknown; meta?: Record<string, unknown> } };
+    const prod = targets.production ?? {};
+    const prodMeta = (prod.meta ?? {}) as Record<string, unknown>;
+    return {
+      name: typeof raw.name === 'string' ? raw.name : '',
+      productionDeploymentId: typeof prod.id === 'string' ? prod.id : null,
+      productionSha: typeof prodMeta.githubCommitSha === 'string' ? prodMeta.githubCommitSha : null,
+    };
+  }
+
+  async redeploy(ref: VercelProjectRef, args: { name: string; sourceDeploymentId: string }): Promise<{ deploymentId: string; readyState: string }> {
+    // Create a new deployment reusing the source deployment's files. It is NOT targeted at production, so it never
+    // moves traffic — a separate promote does that.
+    const out = (await this.mutate('redeploy', 'POST', this.withTeam('/v13/deployments', ref), { name: args.name, deploymentId: args.sourceDeploymentId }, [200, 201])) as Record<string, unknown>;
+    return {
+      deploymentId: typeof out.id === 'string' ? out.id : typeof out.uid === 'string' ? out.uid : '',
+      readyState: typeof out.readyState === 'string' ? out.readyState : typeof out.status === 'string' ? out.status : 'QUEUED',
+    };
+  }
+
+  async promote(ref: VercelProjectRef, deploymentId: string): Promise<void> {
+    await this.mutate('promote', 'POST', this.withTeam(`/v10/projects/${encodeURIComponent(ref.projectId)}/promote/${encodeURIComponent(deploymentId)}`, ref), {}, [200, 201, 202, 204]);
+  }
+
+  async rollback(ref: VercelProjectRef, deploymentId: string, description?: string): Promise<void> {
+    await this.mutate('rollback', 'POST', this.withTeam(`/v1/projects/${encodeURIComponent(ref.projectId)}/rollback/${encodeURIComponent(deploymentId)}`, ref), description ? { description } : {}, [200, 201, 202, 204]);
   }
 }

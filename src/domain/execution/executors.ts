@@ -17,6 +17,9 @@ const ELIGIBLE_EXECUTOR_ACTION_TYPES: ReadonlySet<ActionType> = new Set<ActionTy
   // Phase 2C write slice: deploy ONE linked Supabase edge function from a linked repo at an exact
   // source SHA (./../supabase/deploy-executor.ts). Still gated by EXECUTORS_ENABLED at dispatch.
   'supabase_deploy',
+  // Phase 2D mutation slice: one Vercel redeploy/promote/rollback on a linked project
+  // (./../vercel/mutation-executor.ts). Still gated by EXECUTORS_ENABLED at dispatch.
+  'vercel_mutation',
 ]);
 
 /** True when a real executor exists for this action type. */

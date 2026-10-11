@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   getVercelClient,
+  getVercelMutationClient,
   isVercelConfigured,
   resetVercelClientForTests,
   setVercelClientOverrideForTests,
+  setVercelMutationClientOverrideForTests,
   VercelUnconfiguredError,
 } from '@/domain/vercel/client';
 import { LiveVercelClient, type VercelFetchLike } from '@/domain/vercel/live-client';
@@ -19,6 +21,7 @@ const TEAM_REF = { projectId: 'prj_abcd1234efgh5678', teamId: 'team_zzzz1111' };
 
 afterEach(() => {
   setVercelClientOverrideForTests(null);
+  setVercelMutationClientOverrideForTests(null);
   resetVercelClientForTests();
   delete process.env.VERCEL_TOKEN;
 });
@@ -94,5 +97,58 @@ describe('LiveVercelClient — wire shape + mapping', () => {
     try { await client.getProject(REF); } catch (e) { caught = e; }
     expect(caught).toMatchObject({ name: 'VercelApiError', status: 403 });
     expect((caught as Error).message).not.toMatch(/secret detail/);
+  });
+});
+
+function mutationRecorder(responses: Array<{ status: number; body?: unknown }>) {
+  const calls: Array<{ url: string; method: string; body?: string }> = [];
+  let i = 0;
+  const fetchImpl: VercelFetchLike = async (url, init) => {
+    calls.push({ url, method: init.method, body: init.body });
+    const r = responses[i++] ?? { status: 200, body: {} };
+    return { status: r.status, json: async () => r.body ?? {} };
+  };
+  return { fetchImpl, calls };
+}
+
+describe('getVercelMutationClient — fail closed + wire shape', () => {
+  it('every write rejects with VercelUnconfiguredError when the token is absent', async () => {
+    delete process.env.VERCEL_TOKEN;
+    const c = getVercelMutationClient();
+    await expect(c.promote(REF, 'dpl_x00000001')).rejects.toBeInstanceOf(VercelUnconfiguredError);
+    await expect(c.rollback(REF, 'dpl_x00000001')).rejects.toBeInstanceOf(VercelUnconfiguredError);
+    await expect(c.redeploy(REF, { name: 'x', sourceDeploymentId: 'dpl_x00000001' })).rejects.toBeInstanceOf(VercelUnconfiguredError);
+  });
+
+  it('promote POSTs /v10/projects/{id}/promote/{deploymentId}', async () => {
+    const { fetchImpl, calls } = mutationRecorder([{ status: 201, body: {} }]);
+    const client = new LiveVercelClient({ token: 'vt_test', fetchImpl });
+    await client.promote({ projectId: 'prj_abcd1234efgh5678', teamId: 'team_z1' }, 'dpl_target00000001');
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.url).toBe('https://api.vercel.com/v10/projects/prj_abcd1234efgh5678/promote/dpl_target00000001?teamId=team_z1');
+  });
+
+  it('rollback POSTs /v1/projects/{id}/rollback/{deploymentId} with an optional description', async () => {
+    const { fetchImpl, calls } = mutationRecorder([{ status: 200, body: {} }]);
+    const client = new LiveVercelClient({ token: 'vt_test', fetchImpl });
+    await client.rollback({ projectId: 'prj_abcd1234efgh5678', teamId: null }, 'dpl_prev000000001', 'bad deploy');
+    expect(calls[0]!.url).toBe('https://api.vercel.com/v1/projects/prj_abcd1234efgh5678/rollback/dpl_prev000000001');
+    expect(JSON.parse(calls[0]!.body as string)).toMatchObject({ description: 'bad deploy' });
+  });
+
+  it('redeploy POSTs /v13/deployments with name + source deploymentId and returns the new id', async () => {
+    const { fetchImpl, calls } = mutationRecorder([{ status: 200, body: { id: 'dpl_new000000001', readyState: 'QUEUED' } }]);
+    const client = new LiveVercelClient({ token: 'vt_test', fetchImpl });
+    const out = await client.redeploy({ projectId: 'prj_abcd1234efgh5678', teamId: null }, { name: 'accuratebids', sourceDeploymentId: 'dpl_src000000001' });
+    expect(calls[0]!.url).toBe('https://api.vercel.com/v13/deployments');
+    expect(JSON.parse(calls[0]!.body as string)).toMatchObject({ name: 'accuratebids', deploymentId: 'dpl_src000000001' });
+    expect(out).toEqual({ deploymentId: 'dpl_new000000001', readyState: 'QUEUED' });
+  });
+
+  it('getProjectState reads the current production deployment id + SHA', async () => {
+    const { fetchImpl } = mutationRecorder([{ status: 200, body: { name: 'accuratebids', targets: { production: { id: 'dpl_prod00000001', meta: { githubCommitSha: 'a'.repeat(40) } } } } }]);
+    const client = new LiveVercelClient({ token: 'vt_test', fetchImpl });
+    const state = await client.getProjectState({ projectId: 'prj_abcd1234efgh5678', teamId: null });
+    expect(state).toMatchObject({ name: 'accuratebids', productionDeploymentId: 'dpl_prod00000001', productionSha: 'a'.repeat(40) });
   });
 });

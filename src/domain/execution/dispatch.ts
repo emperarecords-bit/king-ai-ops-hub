@@ -9,6 +9,9 @@ import { listRepoLinks } from '@/domain/github/links';
 import { getSupabaseDeployClient } from '@/domain/supabase/client';
 import { listSupabaseProjectLinks } from '@/domain/supabase/links';
 import { SupabaseDeployExecutor } from '@/domain/supabase/deploy-executor';
+import { getVercelMutationClient } from '@/domain/vercel/client';
+import { listVercelProjectLinks } from '@/domain/vercel/links';
+import { VercelMutationExecutor } from '@/domain/vercel/mutation-executor';
 import { canonicalJson } from '@/orchestration/actions';
 import { sha256Hex } from '@/lib/crypto';
 import { type TenantContext } from '@/types/domain';
@@ -80,6 +83,12 @@ function resolveExecutor(tx: DbTx, ctx: TenantContext, actionType: string): Exec
       supabase: getSupabaseDeployClient(),
       loadRepoLinks: () => listRepoLinks(tx, ctx),
       loadProjectLinks: () => listSupabaseProjectLinks(tx, ctx),
+    });
+  }
+  if (actionType === 'vercel_mutation') {
+    return new VercelMutationExecutor({
+      vercel: getVercelMutationClient(),
+      loadProjectLinks: () => listVercelProjectLinks(tx, ctx),
     });
   }
   if (actionType === 'file_write') return noop;

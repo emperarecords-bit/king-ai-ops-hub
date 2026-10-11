@@ -114,6 +114,12 @@ export const ACTION_TYPES = [
   // construction. v1 is validation/dry-run ONLY: there is no live executor and no confirm action for
   // it. The type exists so the risk model is explicit in code and the live gate is testable.
   'supabase_sql',
+  // Phase 2D mutation slice: a single Vercel deployment mutation (redeploy | promote | rollback) against
+  // one LINKED project, bound to exact deployment ids + expected SHAs. external_reversible — Vercel
+  // deployments are immutable artifacts and production is a pointer, so every operation is reversible by
+  // another repoint. Proposed via Ops Chat; executes only after owner confirm through the same governed
+  // choke point as git_pr / supabase_deploy.
+  'vercel_mutation',
 ] as const;
 export type ActionType = (typeof ACTION_TYPES)[number];
 

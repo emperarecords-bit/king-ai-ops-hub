@@ -18,6 +18,7 @@ import {
   executeGitHubRerunFromOpsChat,
 } from '@/domain/opschat/github-action';
 import { executeSupabaseDeployFromOpsChat } from '@/domain/opschat/supabase-action';
+import { executeVercelMutationFromOpsChat, type OpsChatVercelMutationInput } from '@/domain/opschat/vercel-action';
 
 /**
  * POST — execute a confirmed Ops Chat action. The ONLY place Ops Chat writes.
@@ -109,6 +110,20 @@ const Body = z.discriminatedUnion('action', [
     entrypointPath: z.string().trim().min(1).max(200).optional(),
     importMapPath: z.string().trim().min(1).max(200).optional(),
     verifyJwt: z.boolean(),
+  }),
+  z.object({
+    action: z.literal('execute_vercel_mutation'),
+    projectKey: z.string().min(1),
+    operation: z.enum(['redeploy', 'promote', 'rollback']),
+    vercelProjectId: z.string().trim().regex(/^prj_[A-Za-z0-9]{8,64}$/),
+    // redeploy
+    sourceDeploymentId: z.string().trim().regex(/^dpl_[A-Za-z0-9]{8,64}$/).optional(),
+    expectedSourceSha: z.string().trim().regex(/^[0-9a-f]{7,40}$/).optional(),
+    // promote / rollback
+    targetDeploymentId: z.string().trim().regex(/^dpl_[A-Za-z0-9]{8,64}$/).optional(),
+    expectedTargetSha: z.string().trim().regex(/^[0-9a-f]{7,40}$/).optional(),
+    expectedCurrentProductionDeploymentId: z.string().trim().regex(/^dpl_[A-Za-z0-9]{8,64}$/).optional(),
+    description: z.string().trim().max(500).optional(),
   }),
 ]);
 
@@ -260,6 +275,31 @@ export async function POST(req: Request): Promise<Response> {
           importMapPath: body.importMapPath,
           verifyJwt: body.verifyJwt,
         });
+        return Response.json({ ok: true, executed });
+      }
+      case 'execute_vercel_mutation': {
+        // Same governed path as the GitHub/Supabase bridges: admin here (defense-in-depth), then the dispatch
+        // choke point re-verifies admin, payload integrity, executor enablement, a fresh payload-bound
+        // confirmation, and idempotency before the one Vercel mutation.
+        requireAdmin(ctx.projectRole);
+        let input: OpsChatVercelMutationInput;
+        if (body.operation === 'redeploy') {
+          if (!body.sourceDeploymentId || !body.expectedSourceSha) throw new AppError('validation', 'redeploy requires sourceDeploymentId + expectedSourceSha.');
+          input = { operation: 'redeploy', vercelProjectId: body.vercelProjectId, sourceDeploymentId: body.sourceDeploymentId, expectedSourceSha: body.expectedSourceSha };
+        } else {
+          if (!body.targetDeploymentId || !body.expectedTargetSha || !body.expectedCurrentProductionDeploymentId) {
+            throw new AppError('validation', `${body.operation} requires targetDeploymentId + expectedTargetSha + expectedCurrentProductionDeploymentId.`);
+          }
+          input = {
+            operation: body.operation,
+            vercelProjectId: body.vercelProjectId,
+            targetDeploymentId: body.targetDeploymentId,
+            expectedTargetSha: body.expectedTargetSha,
+            expectedCurrentProductionDeploymentId: body.expectedCurrentProductionDeploymentId,
+            ...(body.description ? { description: body.description } : {}),
+          };
+        }
+        const executed = await executeVercelMutationFromOpsChat(ctx, input);
         return Response.json({ ok: true, executed });
       }
     }

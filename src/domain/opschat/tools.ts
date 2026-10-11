@@ -38,6 +38,11 @@ import {
   VercelProjectNotLinkedError,
 } from '@/domain/vercel/inspection';
 import {
+  redeployPayloadSchema,
+  promotePayloadSchema,
+  rollbackPayloadSchema,
+} from '@/domain/vercel/mutation-executor';
+import {
   supabaseWorkspaceCapabilities,
   listWorkspaceSupabaseProjects,
   getWorkspaceSupabaseProject,
@@ -140,6 +145,21 @@ export type OpsChatProposal =
       readonly importMapPath: string | null;
       readonly verifyJwt: boolean;
       readonly riskClass: string;
+    }
+  | {
+      readonly kind: 'vercel_mutation';
+      readonly projectKey: string;
+      readonly workspaceName: string;
+      readonly vercelProjectId: string;
+      readonly operation: 'redeploy' | 'promote' | 'rollback';
+      /** redeploy */
+      readonly sourceDeploymentId?: string;
+      readonly expectedSourceSha?: string;
+      /** promote / rollback */
+      readonly targetDeploymentId?: string;
+      readonly expectedTargetSha?: string;
+      readonly expectedCurrentProductionDeploymentId?: string;
+      readonly riskClass: string;
     };
 
 function proposalKey(p: OpsChatProposal): string {
@@ -160,6 +180,8 @@ function proposalKey(p: OpsChatProposal): string {
       return `ghr:${p.projectKey}:${p.repo}:${p.runId}`;
     case 'supabase_deploy':
       return `sbd:${p.projectKey}:${p.projectRef}:${p.functionSlug}:${p.sourceSha}`;
+    case 'vercel_mutation':
+      return `vm:${p.projectKey}:${p.vercelProjectId}:${p.operation}:${p.targetDeploymentId ?? p.sourceDeploymentId ?? ''}`;
   }
 }
 
@@ -635,6 +657,53 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
         limit: { type: 'number', description: 'How many deployments to return (1..100, default 20).' },
       },
       required: ['project', 'vercel_project_id'],
+    },
+  },
+  {
+    name: 'propose_vercel_redeploy',
+    description:
+      'Prepare to REDEPLOY a Vercel project FOR THE OWNER TO CONFIRM — create a NEW (non-production) deployment from an EXACT existing deployment id. Does NOT move production traffic and creates NOTHING until the owner confirms. Read inspect_vercel_deployments first for the exact source deployment id + its source SHA. On confirm the governed executor refuses an unlinked project, a missing/non-READY source, or a SHA mismatch, then redeploys and returns the new deployment id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        vercel_project_id: { type: 'string', description: 'The Vercel project id (prj_…); must be linked.' },
+        source_deployment_id: { type: 'string', description: 'The EXACT deployment id (dpl_…) to redeploy from.' },
+        expected_source_sha: { type: 'string', description: 'The source deployment’s commit SHA you inspected; a mismatch is refused.' },
+      },
+      required: ['project', 'vercel_project_id', 'source_deployment_id', 'expected_source_sha'],
+    },
+  },
+  {
+    name: 'propose_vercel_promote',
+    description:
+      'Prepare to PROMOTE a Vercel deployment to PRODUCTION FOR THE OWNER TO CONFIRM — move production traffic to one EXACT READY deployment. Creates NOTHING until the owner confirms. Read inspect_vercel_deployments first for the exact target deployment id + SHA and the CURRENT production deployment id. On confirm the governed executor refuses an unlinked project, a non-READY target, a SHA mismatch, or a moved production pointer (stale), then promotes and verifies production now points there.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        vercel_project_id: { type: 'string', description: 'The Vercel project id (prj_…); must be linked.' },
+        target_deployment_id: { type: 'string', description: 'The EXACT deployment id (dpl_…) to promote to production.' },
+        expected_target_sha: { type: 'string', description: 'The target deployment’s commit SHA you inspected; a mismatch is refused.' },
+        expected_current_production_deployment_id: { type: 'string', description: 'The deployment id (dpl_…) production points to NOW; if it moved, the promote is refused.' },
+      },
+      required: ['project', 'vercel_project_id', 'target_deployment_id', 'expected_target_sha', 'expected_current_production_deployment_id'],
+    },
+  },
+  {
+    name: 'propose_vercel_rollback',
+    description:
+      'Prepare to ROLL BACK production to a previous Vercel deployment FOR THE OWNER TO CONFIRM — move production traffic back to one EXACT, previously-verified READY production deployment. Creates NOTHING until the owner confirms. Read inspect_vercel_deployments first for the exact target (a previous production deployment) id + SHA and the CURRENT production deployment id. On confirm the governed executor refuses an unlinked project, a non-READY target, a non-production target, a SHA mismatch, or a moved production pointer (stale), then rolls back and verifies.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        vercel_project_id: { type: 'string', description: 'The Vercel project id (prj_…); must be linked.' },
+        target_deployment_id: { type: 'string', description: 'The EXACT previous production deployment id (dpl_…) to roll back to.' },
+        expected_target_sha: { type: 'string', description: 'The target deployment’s commit SHA you inspected; a mismatch is refused.' },
+        expected_current_production_deployment_id: { type: 'string', description: 'The deployment id (dpl_…) production points to NOW; if it moved, the rollback is refused.' },
+      },
+      required: ['project', 'vercel_project_id', 'target_deployment_id', 'expected_target_sha', 'expected_current_production_deployment_id'],
     },
   },
 ];
@@ -1288,6 +1357,43 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           if (err instanceof VercelProjectNotLinkedError) return JSON.stringify({ error: err.message });
           return JSON.stringify({ error: 'Could not read deployments from Vercel.' });
         }
+      }
+      case 'propose_vercel_redeploy':
+      case 'propose_vercel_promote':
+      case 'propose_vercel_rollback': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        if (p.projectRole !== 'admin') {
+          return JSON.stringify({ error: 'You must be an admin of that workspace to propose a Vercel mutation.' });
+        }
+        const vercelProjectId = argStr(input, 'vercel_project_id');
+        const ctx = ctxFor(auth, p);
+        const linked = await withTenant(ctx, (tx) => listWorkspaceVercelProjects(tx, ctx)).then((ls) => ls.find((l) => l.vercelProjectId === vercelProjectId) ?? null);
+        if (!linked) return JSON.stringify({ error: `Vercel project "${vercelProjectId}" is not linked to this workspace. Use list_vercel_projects.` });
+        const teamId = linked.vercelTeamId ?? undefined;
+
+        if (name === 'propose_vercel_redeploy') {
+          const parsed = redeployPayloadSchema.safeParse({
+            operation: 'redeploy', vercelProjectId, ...(teamId ? { teamId } : {}),
+            sourceDeploymentId: argStr(input, 'source_deployment_id'),
+            expectedSourceSha: argStr(input, 'expected_source_sha').toLowerCase(),
+          });
+          if (!parsed.success) return JSON.stringify({ error: `That redeploy is not valid: ${parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}` });
+          addProposal({ kind: 'vercel_mutation', projectKey: p.key, workspaceName: p.name, vercelProjectId, operation: 'redeploy', sourceDeploymentId: parsed.data.sourceDeploymentId, expectedSourceSha: parsed.data.expectedSourceSha, riskClass: EXECUTOR_RISK_BY_ACTION.vercel_mutation });
+          return JSON.stringify({ prepared: true, note: `Prepared for the owner to confirm: redeploy a NEW (non-production) deployment from ${parsed.data.sourceDeploymentId} in ${vercelProjectId}. Production traffic is unchanged. Do NOT claim it is deployed yet.` });
+        }
+
+        const schema = name === 'propose_vercel_promote' ? promotePayloadSchema : rollbackPayloadSchema;
+        const parsed = schema.safeParse({
+          operation: name === 'propose_vercel_promote' ? 'promote' : 'rollback', vercelProjectId, ...(teamId ? { teamId } : {}),
+          targetDeploymentId: argStr(input, 'target_deployment_id'),
+          expectedTargetSha: argStr(input, 'expected_target_sha').toLowerCase(),
+          expectedCurrentProductionDeploymentId: argStr(input, 'expected_current_production_deployment_id'),
+        });
+        if (!parsed.success) return JSON.stringify({ error: `That ${name === 'propose_vercel_promote' ? 'promote' : 'rollback'} is not valid: ${parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}` });
+        const op = parsed.data.operation as 'promote' | 'rollback';
+        addProposal({ kind: 'vercel_mutation', projectKey: p.key, workspaceName: p.name, vercelProjectId, operation: op, targetDeploymentId: parsed.data.targetDeploymentId, expectedTargetSha: parsed.data.expectedTargetSha, expectedCurrentProductionDeploymentId: (parsed.data as { expectedCurrentProductionDeploymentId: string }).expectedCurrentProductionDeploymentId, riskClass: EXECUTOR_RISK_BY_ACTION.vercel_mutation });
+        return JSON.stringify({ prepared: true, note: `Prepared for the owner to confirm: ${op} production to ${parsed.data.targetDeploymentId} in ${vercelProjectId} (replacing ${(parsed.data as { expectedCurrentProductionDeploymentId: string }).expectedCurrentProductionDeploymentId}). This moves PRODUCTION traffic on confirm. Do NOT claim it is done yet.` });
       }
       default:
         return JSON.stringify({ error: `Unknown tool: ${name}` });
