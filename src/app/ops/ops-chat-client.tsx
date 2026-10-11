@@ -71,6 +71,19 @@ type Proposal =
       importMapPath: string | null;
       verifyJwt: boolean;
       riskClass: string;
+    }
+  | {
+      kind: 'vercel_mutation';
+      projectKey: string;
+      workspaceName: string;
+      vercelProjectId: string;
+      operation: 'redeploy' | 'promote' | 'rollback';
+      sourceDeploymentId?: string;
+      expectedSourceSha?: string;
+      targetDeploymentId?: string;
+      expectedTargetSha?: string;
+      expectedCurrentProductionDeploymentId?: string;
+      riskClass: string;
     };
 
 interface ProposalItem {
@@ -88,6 +101,9 @@ interface ProposalItem {
     runUrl?: string | null;
     version?: number | null;
     contentDigest?: string | null;
+    newDeploymentId?: string | null;
+    productionDeploymentId?: string | null;
+    productionChanged?: boolean | null;
   };
 }
 
@@ -167,6 +183,14 @@ const TOOL_LABEL: Record<string, string> = {
   inspect_edge_functions: 'reading edge functions',
   inspect_migrations: 'reading Supabase migrations',
   propose_supabase_deploy: 'preparing the deploy',
+  validate_supabase_sql: 'validating the SQL',
+  vercel_capabilities: 'checking Vercel capabilities',
+  list_vercel_projects: 'listing linked Vercel projects',
+  inspect_vercel_project: 'reading the Vercel project',
+  inspect_vercel_deployments: 'reading Vercel deployments',
+  propose_vercel_redeploy: 'preparing the redeploy',
+  propose_vercel_promote: 'preparing the promote',
+  propose_vercel_rollback: 'preparing the rollback',
 };
 
 let seq = 0;
@@ -199,6 +223,8 @@ function doneLabel(p: Proposal): string {
       return `✓ Re-run requested for run ${p.runId} in ${p.repo}.`;
     case 'supabase_deploy':
       return `✓ Deploy requested for "${p.functionSlug}" in project ${p.projectRef}.`;
+    case 'vercel_mutation':
+      return `✓ ${p.operation} requested for ${p.vercelProjectId}.`;
   }
 }
 function headerLabel(p: Proposal): string {
@@ -219,6 +245,10 @@ function headerLabel(p: Proposal): string {
       return `Confirm — re-run failed jobs of run ${p.runId} in ${p.repo}`;
     case 'supabase_deploy':
       return `Confirm — deploy "${p.functionSlug}" to project ${p.projectRef}`;
+    case 'vercel_mutation':
+      return p.operation === 'redeploy'
+        ? `Confirm — redeploy in ${p.vercelProjectId} (no traffic change)`
+        : `Confirm — ${p.operation} PRODUCTION in ${p.vercelProjectId}`;
   }
 }
 function confirmLabel(p: Proposal): string {
@@ -239,6 +269,8 @@ function confirmLabel(p: Proposal): string {
       return 'Confirm & re-run';
     case 'supabase_deploy':
       return 'Confirm & deploy';
+    case 'vercel_mutation':
+      return p.operation === 'redeploy' ? 'Confirm & redeploy' : p.operation === 'promote' ? 'Confirm & promote' : 'Confirm & roll back';
   }
 }
 function confirmBody(p: Proposal): Record<string, unknown> {
@@ -305,6 +337,18 @@ function confirmBody(p: Proposal): Record<string, unknown> {
         entrypointPath: p.entrypointPath,
         importMapPath: p.importMapPath ?? undefined,
         verifyJwt: p.verifyJwt,
+      };
+    case 'vercel_mutation':
+      return {
+        action: 'execute_vercel_mutation',
+        projectKey: p.projectKey,
+        operation: p.operation,
+        vercelProjectId: p.vercelProjectId,
+        sourceDeploymentId: p.sourceDeploymentId,
+        expectedSourceSha: p.expectedSourceSha,
+        targetDeploymentId: p.targetDeploymentId,
+        expectedTargetSha: p.expectedTargetSha,
+        expectedCurrentProductionDeploymentId: p.expectedCurrentProductionDeploymentId,
       };
   }
 }
@@ -517,6 +561,9 @@ export function OpsChatClient({ opening }: { opening: string }) {
             runUrl?: string | null;
             version?: number | null;
             contentDigest?: string | null;
+            newDeploymentId?: string | null;
+            productionDeploymentId?: string | null;
+            productionChanged?: boolean | null;
           }
         | undefined;
       // A governed action can reach the confirm path but still be blocked/failed by dispatch (e.g. the
@@ -525,7 +572,8 @@ export function OpsChatClient({ opening }: { opening: string }) {
         item.proposal.kind === 'github_pr' ||
         item.proposal.kind === 'github_merge' ||
         item.proposal.kind === 'github_rerun' ||
-        item.proposal.kind === 'supabase_deploy';
+        item.proposal.kind === 'supabase_deploy' ||
+        item.proposal.kind === 'vercel_mutation';
       if (isGovernedMutation && executed && executed.outcome !== 'succeeded') {
         setItem(msgId, index, { state: 'error', error: executed.message || `The action ${executed.outcome ?? 'did not run'}.` });
         return;
@@ -544,6 +592,9 @@ export function OpsChatClient({ opening }: { opening: string }) {
               runUrl: executed.runUrl ?? null,
               version: executed.version ?? null,
               contentDigest: executed.contentDigest ?? null,
+              newDeploymentId: executed.newDeploymentId ?? null,
+              productionDeploymentId: executed.productionDeploymentId ?? null,
+              productionChanged: executed.productionChanged ?? null,
             }
           : undefined,
       });
@@ -765,6 +816,16 @@ export function OpsChatClient({ opening }: { opening: string }) {
                               <span>Source digest: <span className="font-mono">{item.result.contentDigest.slice(0, 12)}</span></span>
                             ) : null}
                           </div>
+                        ) : p.kind === 'vercel_mutation' ? (
+                          <div className="flex flex-col gap-0.5 text-xs text-[var(--muted)]">
+                            <span>{p.operation} · {p.vercelProjectId}</span>
+                            {item.result?.newDeploymentId ? (
+                              <span>New deployment: <span className="font-mono">{item.result.newDeploymentId}</span> (production unchanged)</span>
+                            ) : null}
+                            {item.result?.productionDeploymentId ? (
+                              <span>Production now: <span className="font-mono">{item.result.productionDeploymentId}</span></span>
+                            ) : null}
+                          </div>
                         ) : null}
                       </div>
                     ) : item.state === 'cancelled' ? (
@@ -833,7 +894,7 @@ export function OpsChatClient({ opening }: { opening: string }) {
                               Risk: {p.riskClass.replace(/_/g, ' ')} · Side effect: starts a fresh CI attempt of the run&apos;s failed jobs (no repo-content change; refused unless the run is completed + failed). Rollback: re-running is idempotent — nothing to undo. Recovery: a server error mid-request is marked ambiguous for reconciliation, never auto-retried.
                             </p>
                           </div>
-                        ) : (
+                        ) : p.kind === 'supabase_deploy' ? (
                           <div className="mt-1 flex flex-col gap-0.5 text-sm">
                             <p className="font-semibold">Deploy edge function “{p.functionSlug}”</p>
                             <p className="text-xs text-[var(--muted)]">
@@ -845,6 +906,28 @@ export function OpsChatClient({ opening }: { opening: string }) {
                             </p>
                             <p className="mt-1 text-xs text-[var(--muted)]">
                               Risk: {p.riskClass.replace(/_/g, ' ')} · Side effect: deploys the function&apos;s exact bytes at that commit SHA to the live project (refused unless the project + repo are linked, the source path has files, and the entrypoint is present). Rollback: redeploy the prior source SHA. Recovery: a server error mid-deploy is marked ambiguous for reconciliation, never auto-retried.
+                            </p>
+                          </div>
+                        ) : (
+                          <div className="mt-1 flex flex-col gap-0.5 text-sm">
+                            <p className="font-semibold">
+                              Vercel {p.operation} — {p.vercelProjectId}
+                            </p>
+                            {p.operation === 'redeploy' ? (
+                              <p className="text-xs text-[var(--muted)]">
+                                from deployment <span className="font-mono">{p.sourceDeploymentId}</span> @ <span className="font-mono">{(p.expectedSourceSha ?? '').slice(0, 7)}</span> · creates a NEW non-production deployment
+                              </p>
+                            ) : (
+                              <p className="text-xs text-[var(--muted)]">
+                                to deployment <span className="font-mono">{p.targetDeploymentId}</span> @ <span className="font-mono">{(p.expectedTargetSha ?? '').slice(0, 7)}</span> · replacing production <span className="font-mono">{p.expectedCurrentProductionDeploymentId}</span>
+                              </p>
+                            )}
+                            <p className="mt-1 text-xs text-[var(--muted)]">
+                              Risk: {p.riskClass.replace(/_/g, ' ')} · Side effect:{' '}
+                              {p.operation === 'redeploy'
+                                ? 'creates a new deployment from the exact source (refused unless the source is READY and the SHA matches); production traffic is NOT changed.'
+                                : `moves PRODUCTION traffic to the exact target (refused unless it is READY, the SHA matches, and production has not moved since review). Rollback: ${p.operation === 'promote' ? 'promote/rollback the previous deployment back' : 'roll forward to the prior deployment'}.`}{' '}
+                              Recovery: a server error mid-operation is marked ambiguous for reconciliation, never auto-retried.
                             </p>
                           </div>
                         )}

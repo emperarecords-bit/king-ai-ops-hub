@@ -1,0 +1,1 @@
+ALTER TYPE "public"."action_type" ADD VALUE 'vercel_mutation';

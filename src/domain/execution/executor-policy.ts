@@ -12,6 +12,9 @@ export const EXECUTOR_RISK_BY_ACTION: Readonly<Record<ActionType, ExecutorRiskCl
   // cascades, sequences, RLS, concurrency) — so its honest class is destructive_irreversible, which
   // the dispatch choke point blocks. v1 ships validation/dry-run only; there is no live executor.
   supabase_sql: 'destructive_irreversible',
+  // A Vercel redeploy/promote/rollback is reversible by another repoint (immutable artifacts + a
+  // production pointer), so external_reversible is honest — proven, not asserted.
+  vercel_mutation: 'external_reversible',
 });
 
 export function executorFoundationStatus(actionType: ActionType) {

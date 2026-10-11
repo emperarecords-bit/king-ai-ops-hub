@@ -16,9 +16,9 @@ export const PRODUCTION_PINS: ReleasePins = {
   databaseIdentity: 'king_ai_ops_hub_production',
   snapshotProvider: FLY_VOLUMES_PROVIDER,
   providerAdapterVersion: FLY_VOLUMES_ADAPTER_VERSION,
-  // Bumped 2026-10-10 (0082 messy_synch — Phase 2D read-only Vercel connector: CREATE TABLE vercel_project_links).
-  expectedMigrationEndpoint: '0082_messy_synch',
-  expectedCommittedMigrationCount: 83,
+  // Bumped 2026-10-11 (0083 graceful_zemo — Phase 2D Vercel mutation: ALTER TYPE action_type ADD VALUE 'vercel_mutation').
+  expectedMigrationEndpoint: '0083_graceful_zemo',
+  expectedCommittedMigrationCount: 84,
   /** Production deployed through 0067 on 2026-08-18; 0068–0072 are pending. */
   defaultAppliedCount: 68,
 } as const;
