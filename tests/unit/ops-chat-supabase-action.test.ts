@@ -52,7 +52,7 @@ beforeEach(() => {
   h.withTenant.mockImplementation((_ctx: unknown, fn: (tx: unknown) => unknown) => fn(fakeTx));
   h.listSupabaseProjectLinks.mockResolvedValue([{ projectRef: PROJECT_REF, label: 'AccurateBids' }]);
   h.listRepoLinks.mockResolvedValue([{ repoFullName: REPO, installationId: 1n, defaultBranch: 'main' }]);
-  h.listAgents.mockResolvedValue([{ id: 'ag1', provider: 'openai', enabled: true }]);
+  h.listAgents.mockResolvedValue([{ id: 'ag1', role: 'primary', provider: 'openai', enabled: true }]);
   h.createTask.mockResolvedValue('t-1');
   h.decideApproval.mockResolvedValue(undefined);
   h.setTaskStatus.mockResolvedValue(undefined);
@@ -98,6 +98,33 @@ describe('executeSupabaseDeployFromOpsChat — governed path only', () => {
   it('an unlinked source repo is refused before any approval/execution', async () => {
     h.listRepoLinks.mockResolvedValue([]);
     await expect(executeSupabaseDeployFromOpsChat(CTX, INPUT)).rejects.toThrow(/not linked/i);
+    expect(h.insertedApproval).not.toHaveBeenCalled();
+    expect(h.executeApprovedIfEligible).not.toHaveBeenCalled();
+  });
+});
+
+describe('executeSupabaseDeployFromOpsChat — anchors on an enabled PRIMARY employee', () => {
+  it('skips a reviewer that sorts first and anchors the approval on the enabled primary', async () => {
+    // Reviewer first in list order (the real failure: createTask rejects a reviewer as primaryAgentId).
+    h.listAgents.mockResolvedValue([
+      { id: 'rev1', role: 'reviewer', provider: 'anthropic', enabled: true },
+      { id: 'prim1', role: 'primary', provider: 'openai', enabled: true },
+    ]);
+    const r = await executeSupabaseDeployFromOpsChat(CTX, INPUT);
+    expect(h.createTask).toHaveBeenCalledTimes(1);
+    const taskInput = h.createTask.mock.calls[0]![2] as { primaryAgentId: string };
+    expect(taskInput.primaryAgentId).toBe('prim1');
+    expect(h.executeApprovedIfEligible).toHaveBeenCalledWith(CTX, 'a-123');
+    expect(r.outcome).toBe('succeeded');
+  });
+
+  it('no enabled primary employee fails closed before approval/execution — no external side effect', async () => {
+    h.listAgents.mockResolvedValue([
+      { id: 'rev1', role: 'reviewer', provider: 'anthropic', enabled: true },
+      { id: 'prim1', role: 'primary', provider: 'openai', enabled: false },
+    ]);
+    await expect(executeSupabaseDeployFromOpsChat(CTX, INPUT)).rejects.toThrow(/no enabled primary/i);
+    expect(h.createTask).not.toHaveBeenCalled();
     expect(h.insertedApproval).not.toHaveBeenCalled();
     expect(h.executeApprovedIfEligible).not.toHaveBeenCalled();
   });

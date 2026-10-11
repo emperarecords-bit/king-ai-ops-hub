@@ -161,9 +161,10 @@ async function runGovernedGitAction(
       throw new AppError('not_found', `Repository "${payload.repo}" is not linked to this workspace.`);
     }
     // An approval must hang off a task (schema invariant). Anchor it to the workspace's first enabled
-    // employee — the action is owner-initiated via Ops Chat; no AI run is enqueued.
-    const agent = (await listAgents(tx, ctx)).find((a) => a.enabled);
-    if (!agent) throw new AppError('conflict', 'This workspace has no enabled employee to anchor the action.');
+    // PRIMARY employee — createTask pins an enabled primary-role agent, so a reviewer-role agent would be
+    // rejected there (ValidationError). The action is owner-initiated via Ops Chat; no AI run is enqueued.
+    const agent = (await listAgents(tx, ctx)).find((a) => a.enabled && a.role === 'primary');
+    if (!agent) throw new AppError('conflict', 'This workspace has no enabled primary employee to anchor the action.');
 
     const anchorTaskId = await createTask(tx, ctx, {
       title: meta.taskTitle.slice(0, 200),
