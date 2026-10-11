@@ -41,7 +41,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.withTenant.mockImplementation((_ctx: unknown, fn: (tx: unknown) => unknown) => fn(fakeTx));
   h.listVercelProjectLinks.mockResolvedValue([{ vercelProjectId: PRJ, vercelTeamId: null, label: 'AccurateBids' }]);
-  h.listAgents.mockResolvedValue([{ id: 'ag1', provider: 'openai', enabled: true }]);
+  h.listAgents.mockResolvedValue([{ id: 'ag1', role: 'primary', provider: 'openai', enabled: true }]);
   h.createTask.mockResolvedValue('t-1');
   h.decideApproval.mockResolvedValue(undefined);
   h.setTaskStatus.mockResolvedValue(undefined);
@@ -75,6 +75,32 @@ describe('executeVercelMutationFromOpsChat — governed path only', () => {
   it('an unlinked project is refused before any approval/execution', async () => {
     h.listVercelProjectLinks.mockResolvedValue([]);
     await expect(executeVercelMutationFromOpsChat(CTX, PROMOTE)).rejects.toThrow(/not linked/i);
+    expect(h.insertedApproval).not.toHaveBeenCalled();
+    expect(h.executeApprovedIfEligible).not.toHaveBeenCalled();
+  });
+});
+
+describe('executeVercelMutationFromOpsChat — anchors on an enabled PRIMARY employee', () => {
+  it('skips a reviewer that sorts first and anchors the approval on the enabled primary', async () => {
+    h.listAgents.mockResolvedValue([
+      { id: 'rev1', role: 'reviewer', provider: 'anthropic', enabled: true },
+      { id: 'prim1', role: 'primary', provider: 'openai', enabled: true },
+    ]);
+    const r = await executeVercelMutationFromOpsChat(CTX, PROMOTE);
+    expect(h.createTask).toHaveBeenCalledTimes(1);
+    const taskInput = h.createTask.mock.calls[0]![2] as { primaryAgentId: string };
+    expect(taskInput.primaryAgentId).toBe('prim1');
+    expect(h.executeApprovedIfEligible).toHaveBeenCalledWith(CTX, 'a-9');
+    expect(r.outcome).toBe('succeeded');
+  });
+
+  it('no enabled primary employee fails closed before approval/execution — no external side effect', async () => {
+    h.listAgents.mockResolvedValue([
+      { id: 'rev1', role: 'reviewer', provider: 'anthropic', enabled: true },
+      { id: 'prim1', role: 'primary', provider: 'openai', enabled: false },
+    ]);
+    await expect(executeVercelMutationFromOpsChat(CTX, PROMOTE)).rejects.toThrow(/no enabled primary/i);
+    expect(h.createTask).not.toHaveBeenCalled();
     expect(h.insertedApproval).not.toHaveBeenCalled();
     expect(h.executeApprovedIfEligible).not.toHaveBeenCalled();
   });

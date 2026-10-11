@@ -44,7 +44,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.withTenant.mockImplementation((_ctx: unknown, fn: (tx: unknown) => unknown) => fn(fakeTx));
   h.listRepoLinks.mockResolvedValue([LINK]);
-  h.listAgents.mockResolvedValue([{ id: 'ag1', provider: 'openai', enabled: true }]);
+  h.listAgents.mockResolvedValue([{ id: 'ag1', role: 'primary', provider: 'openai', enabled: true }]);
   h.createTask.mockResolvedValue('t-1');
   h.decideApproval.mockResolvedValue(undefined);
   h.setTaskStatus.mockResolvedValue(undefined);
@@ -170,6 +170,33 @@ describe('executeGitHubRerunFromOpsChat — governed path only', () => {
   it('an unlinked repo is refused — no approval, no execution', async () => {
     h.listRepoLinks.mockResolvedValue([]);
     await expect(executeGitHubRerunFromOpsChat(CTX, RERUN_INPUT)).rejects.toThrow(/not linked/i);
+    expect(h.insertedApproval).not.toHaveBeenCalled();
+    expect(h.executeApprovedIfEligible).not.toHaveBeenCalled();
+  });
+});
+
+// The anchor-agent selector is shared by all three GitHub confirm functions; exercised here via the PR path.
+describe('GitHub bridge — anchors on an enabled PRIMARY employee', () => {
+  it('skips a reviewer that sorts first and anchors the approval on the enabled primary', async () => {
+    h.listAgents.mockResolvedValue([
+      { id: 'rev1', role: 'reviewer', provider: 'anthropic', enabled: true },
+      { id: 'prim1', role: 'primary', provider: 'openai', enabled: true },
+    ]);
+    const r = await executeGitHubPrFromOpsChat(CTX, INPUT);
+    expect(h.createTask).toHaveBeenCalledTimes(1);
+    const taskInput = h.createTask.mock.calls[0]![2] as { primaryAgentId: string };
+    expect(taskInput.primaryAgentId).toBe('prim1');
+    expect(h.executeApprovedIfEligible).toHaveBeenCalledWith(CTX, 'a-123');
+    expect(r.outcome).toBe('succeeded');
+  });
+
+  it('no enabled primary employee fails closed before approval/execution — no external side effect', async () => {
+    h.listAgents.mockResolvedValue([
+      { id: 'rev1', role: 'reviewer', provider: 'anthropic', enabled: true },
+      { id: 'prim1', role: 'primary', provider: 'openai', enabled: false },
+    ]);
+    await expect(executeGitHubPrFromOpsChat(CTX, INPUT)).rejects.toThrow(/no enabled primary/i);
+    expect(h.createTask).not.toHaveBeenCalled();
     expect(h.insertedApproval).not.toHaveBeenCalled();
     expect(h.executeApprovedIfEligible).not.toHaveBeenCalled();
   });

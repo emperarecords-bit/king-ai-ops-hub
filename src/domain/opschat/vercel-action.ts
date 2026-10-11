@@ -64,8 +64,10 @@ export async function executeVercelMutationFromOpsChat(
     if (!links.some((l) => l.vercelProjectId === payload.vercelProjectId)) {
       throw new AppError('not_found', `Vercel project "${payload.vercelProjectId}" is not linked to this workspace.`);
     }
-    const agent = (await listAgents(tx, ctx)).find((a) => a.enabled);
-    if (!agent) throw new AppError('conflict', 'This workspace has no enabled employee to anchor the action.');
+    // Anchor on an enabled PRIMARY-role employee: createTask pins an enabled primary, so a reviewer-role
+    // agent would be rejected there (ValidationError). No AI run is enqueued — this only anchors the approval.
+    const agent = (await listAgents(tx, ctx)).find((a) => a.enabled && a.role === 'primary');
+    if (!agent) throw new AppError('conflict', 'This workspace has no enabled primary employee to anchor the action.');
 
     const anchorTaskId = await createTask(tx, ctx, {
       title: `Vercel ${payload.operation}: ${payload.vercelProjectId}`.slice(0, 200),
