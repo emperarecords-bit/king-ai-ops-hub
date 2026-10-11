@@ -108,6 +108,12 @@ export const ACTION_TYPES = [
   // owner confirms through the same governed choke point as git_pr. SQL/migration execution is a
   // SEPARATE, later action type — never folded in here.
   'supabase_deploy',
+  // Phase 2C approved-SQL slice: a single parameterized DML against one linked Supabase table. Its
+  // HONEST risk is destructive_irreversible (generic reversibility is unprovable — see
+  // docs/architecture/supabase-approved-sql-risk-model.md), which the dispatch choke point BLOCKS by
+  // construction. v1 is validation/dry-run ONLY: there is no live executor and no confirm action for
+  // it. The type exists so the risk model is explicit in code and the live gate is testable.
+  'supabase_sql',
 ] as const;
 export type ActionType = (typeof ACTION_TYPES)[number];
 

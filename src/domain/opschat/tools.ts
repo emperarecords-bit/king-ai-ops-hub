@@ -27,6 +27,7 @@ import {
 } from '@/domain/execution/git-pr-executor';
 import { EXECUTOR_RISK_BY_ACTION } from '@/domain/execution/executor-policy';
 import { deployEdgeFunctionPayloadSchema } from '@/domain/supabase/deploy-executor';
+import { validateWorkspaceApprovedSql, SupabaseProjectNotLinkedError as SqlProjectNotLinkedError } from '@/domain/supabase/approved-sql';
 import { getSupabaseClient } from '@/domain/supabase/client';
 import {
   supabaseWorkspaceCapabilities,
@@ -565,6 +566,22 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
         verify_jwt: { type: 'boolean', description: 'Whether Supabase should require a verified JWT on the function. Set it explicitly.' },
       },
       required: ['project', 'project_ref', 'function_slug', 'source_repo', 'source_sha', 'source_path', 'verify_jwt'],
+    },
+  },
+  {
+    name: 'validate_supabase_sql',
+    description:
+      'VALIDATE (dry-run) a single parameterized Supabase DML statement against a linked project. Read-only and side-effect-free — it runs a real SQL parser/AST allow-list and reports whether the statement is a single INSERT/UPDATE/DELETE on one explicit schema.table with a mandatory WHERE (for UPDATE/DELETE), its normalized form, referenced parameters, risk, and rollback evidence. IMPORTANT: live execution of approved SQL is NOT available in this slice (a DML is not provably reversible, so it is destructive_irreversible and the governed gate blocks it) — this tool neither writes nor prepares an executable proposal; it only validates. DDL/migrations, multi-statement SQL, CTEs/subqueries, COPY/DO/CALL/SET/GRANT and the like are rejected.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        project_ref: { type: 'string', description: 'The target Supabase project ref; must be linked to this workspace.' },
+        sql: { type: 'string', description: 'One parameterized DML statement (INSERT/UPDATE/DELETE) using $1,$2,… placeholders.' },
+        params: { type: 'array', description: 'Scalar bound parameters for the $N placeholders, in order.', items: {} },
+        max_rows: { type: 'number', description: 'Declared ceiling on affected rows (1..1000).' },
+      },
+      required: ['project', 'project_ref', 'sql', 'max_rows'],
     },
   },
 ];
@@ -1147,6 +1164,34 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           prepared: true,
           note: `Prepared for the owner to confirm: deploy "${parsed.data.functionSlug}" to Supabase project ${parsed.data.projectRef} from ${parsed.data.sourceRepo}@${parsed.data.sourceSha.slice(0, 7)}. Tell the owner it is ready to confirm below. Do NOT claim it is deployed yet.`,
         });
+      }
+      case 'validate_supabase_sql': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        if (p.projectRole !== 'admin') {
+          return JSON.stringify({ error: 'You must be an admin of that workspace to validate a Supabase SQL statement.' });
+        }
+        const projectRef = argStr(input, 'project_ref');
+        const sqlText = argStr(input, 'sql');
+        const maxRowsArg = argNum(input, 'max_rows');
+        const rawParams = input && typeof input === 'object' ? (input as Record<string, unknown>).params : undefined;
+        const params = Array.isArray(rawParams) ? (rawParams as Array<string | number | boolean | null>) : [];
+        const ctx = ctxFor(auth, p);
+        try {
+          const report = await withTenant(ctx, (tx) =>
+            validateWorkspaceApprovedSql(tx, ctx, {
+              projectRef,
+              sql: sqlText,
+              params,
+              ...(maxRowsArg !== null ? { maxRows: maxRowsArg } : {}),
+            }),
+          );
+          // Read-only analysis: records NO proposal and performs NO write. Live execution is unavailable by design.
+          return JSON.stringify({ workspace: p.name, ...report });
+        } catch (err) {
+          if (err instanceof SqlProjectNotLinkedError) return JSON.stringify({ error: err.message });
+          return JSON.stringify({ error: 'Could not validate that SQL statement.' });
+        }
       }
       default:
         return JSON.stringify({ error: `Unknown tool: ${name}` });
