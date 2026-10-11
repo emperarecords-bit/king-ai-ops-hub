@@ -19,6 +19,11 @@ export const PRODUCTION_PINS: ReleasePins = {
   // Bumped 2026-10-11 (0083 graceful_zemo — Phase 2D Vercel mutation: ALTER TYPE action_type ADD VALUE 'vercel_mutation').
   expectedMigrationEndpoint: '0083_graceful_zemo',
   expectedCommittedMigrationCount: 84,
-  /** Production deployed through 0067 on 2026-08-18; 0068–0072 are pending. */
-  defaultAppliedCount: 68,
+  /**
+   * Production REQUIRES an explicit APPLIED_COUNT at signing time and never falls back to a baked default. The
+   * previous `defaultAppliedCount: 68` was a stale assumption (production has since applied through 0078) and, if
+   * relied on, would mis-derive the pending migration set. The applied state must be a deliberate runtime input
+   * read from the live production DB (`drizzle.__drizzle_migrations`), so a missing APPLIED_COUNT fails closed.
+   */
+  requireExplicitAppliedCount: true,
 } as const;
