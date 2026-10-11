@@ -29,6 +29,14 @@ import { EXECUTOR_RISK_BY_ACTION } from '@/domain/execution/executor-policy';
 import { deployEdgeFunctionPayloadSchema } from '@/domain/supabase/deploy-executor';
 import { validateWorkspaceApprovedSql, SupabaseProjectNotLinkedError as SqlProjectNotLinkedError } from '@/domain/supabase/approved-sql';
 import { getSupabaseClient } from '@/domain/supabase/client';
+import { getVercelClient } from '@/domain/vercel/client';
+import {
+  vercelWorkspaceCapabilities,
+  listWorkspaceVercelProjects,
+  getWorkspaceVercelProject,
+  listWorkspaceVercelDeployments,
+  VercelProjectNotLinkedError,
+} from '@/domain/vercel/inspection';
 import {
   supabaseWorkspaceCapabilities,
   listWorkspaceSupabaseProjects,
@@ -582,6 +590,51 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
         max_rows: { type: 'number', description: 'Declared ceiling on affected rows (1..1000).' },
       },
       required: ['project', 'project_ref', 'sql', 'max_rows'],
+    },
+  },
+  {
+    name: 'vercel_capabilities',
+    description:
+      'Read which governed Vercel inspection this workspace can do right now — whether the Vercel connection is configured, which Vercel projects are linked, and whether inspection is available. Read-only. (Phase 2D is read-only: no redeploy/promote/rollback actions exist yet.)',
+    inputSchema: {
+      type: 'object',
+      properties: { project: { type: 'string', description: 'Workspace name or key.' } },
+      required: ['project'],
+    },
+  },
+  {
+    name: 'list_vercel_projects',
+    description: 'List the Vercel projects linked to a workspace (their ids + labels). Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: { project: { type: 'string', description: 'Workspace name or key.' } },
+      required: ['project'],
+    },
+  },
+  {
+    name: 'inspect_vercel_project',
+    description: 'Read one linked Vercel project’s state: name, framework, and production URL. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        vercel_project_id: { type: 'string', description: 'The Vercel project id (prj_…); must be linked to this workspace.' },
+      },
+      required: ['project', 'vercel_project_id'],
+    },
+  },
+  {
+    name: 'inspect_vercel_deployments',
+    description:
+      'List a linked Vercel project’s recent deployments (newest first), each with its production/preview target, state (READY/BUILDING/ERROR/…), source commit SHA + branch, created time, and inspector URL. Read-only — use it to see what source SHA is live in production vs preview.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        vercel_project_id: { type: 'string', description: 'The Vercel project id (prj_…); must be linked to this workspace.' },
+        limit: { type: 'number', description: 'How many deployments to return (1..100, default 20).' },
+      },
+      required: ['project', 'vercel_project_id'],
     },
   },
 ];
@@ -1191,6 +1244,49 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
         } catch (err) {
           if (err instanceof SqlProjectNotLinkedError) return JSON.stringify({ error: err.message });
           return JSON.stringify({ error: 'Could not validate that SQL statement.' });
+        }
+      }
+      case 'vercel_capabilities': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const ctx = ctxFor(auth, p);
+        const caps = await withTenant(ctx, (tx) => vercelWorkspaceCapabilities(tx, ctx));
+        return JSON.stringify({ workspace: p.name, ...caps });
+      }
+      case 'list_vercel_projects': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const ctx = ctxFor(auth, p);
+        const projects = await withTenant(ctx, (tx) => listWorkspaceVercelProjects(tx, ctx));
+        return JSON.stringify({ workspace: p.name, projects });
+      }
+      case 'inspect_vercel_project': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const vid = argStr(input, 'vercel_project_id');
+        const ctx = ctxFor(auth, p);
+        try {
+          const info = await withTenant(ctx, (tx) => getWorkspaceVercelProject(tx, ctx, getVercelClient(), vid));
+          return JSON.stringify({ workspace: p.name, project: info });
+        } catch (err) {
+          if (err instanceof VercelProjectNotLinkedError) return JSON.stringify({ error: err.message });
+          return JSON.stringify({ error: 'Could not read that Vercel project.' });
+        }
+      }
+      case 'inspect_vercel_deployments': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const vid = argStr(input, 'vercel_project_id');
+        const limit = argNum(input, 'limit');
+        const ctx = ctxFor(auth, p);
+        try {
+          const deployments = await withTenant(ctx, (tx) =>
+            listWorkspaceVercelDeployments(tx, ctx, getVercelClient(), vid, limit !== null ? { limit } : undefined),
+          );
+          return JSON.stringify({ workspace: p.name, vercelProjectId: vid, count: deployments.length, deployments });
+        } catch (err) {
+          if (err instanceof VercelProjectNotLinkedError) return JSON.stringify({ error: err.message });
+          return JSON.stringify({ error: 'Could not read deployments from Vercel.' });
         }
       }
       default:
