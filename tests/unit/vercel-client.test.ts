@@ -100,13 +100,14 @@ describe('LiveVercelClient — wire shape + mapping', () => {
   });
 });
 
-function mutationRecorder(responses: Array<{ status: number; body?: unknown }>) {
+function mutationRecorder(responses: Array<{ status: number; body?: unknown; empty?: boolean }>) {
   const calls: Array<{ url: string; method: string; body?: string }> = [];
   let i = 0;
   const fetchImpl: VercelFetchLike = async (url, init) => {
     calls.push({ url, method: init.method, body: init.body });
     const r = responses[i++] ?? { status: 200, body: {} };
-    return { status: r.status, json: async () => r.body ?? {} };
+    // `empty: true` models a 204/empty-body response: real `fetch().json()` throws "Unexpected end of JSON input".
+    return { status: r.status, json: async () => { if (r.empty) throw new SyntaxError('Unexpected end of JSON input'); return r.body ?? {}; } };
   };
   return { fetchImpl, calls };
 }
@@ -134,6 +135,40 @@ describe('getVercelMutationClient — fail closed + wire shape', () => {
     await client.rollback({ projectId: 'prj_abcd1234efgh5678', teamId: null }, 'dpl_prev000000001', 'bad deploy');
     expect(calls[0]!.url).toBe('https://api.vercel.com/v1/projects/prj_abcd1234efgh5678/rollback/dpl_prev000000001');
     expect(JSON.parse(calls[0]!.body as string)).toMatchObject({ description: 'bad deploy' });
+  });
+
+  // Regression: Vercel promote/rollback return 204 No Content (empty body). The client must treat that as a
+  // successful no-content response, NOT force JSON parsing (which throws and would surface a false `ambiguous`).
+  it('promote succeeds on a 204 No Content (empty body) — no JSON parse, no throw', async () => {
+    const { fetchImpl, calls } = mutationRecorder([{ status: 204, empty: true }]);
+    const client = new LiveVercelClient({ token: 'vt_test', fetchImpl });
+    await expect(client.promote({ projectId: 'prj_abcd1234efgh5678', teamId: null }, 'dpl_target00000001')).resolves.toBeUndefined();
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.url).toContain('/v10/projects/prj_abcd1234efgh5678/promote/dpl_target00000001');
+  });
+
+  it('rollback succeeds on a 204 No Content (empty body) — no JSON parse, no throw', async () => {
+    const { fetchImpl, calls } = mutationRecorder([{ status: 204, empty: true }]);
+    const client = new LiveVercelClient({ token: 'vt_test', fetchImpl });
+    await expect(client.rollback({ projectId: 'prj_abcd1234efgh5678', teamId: null }, 'dpl_prev000000001')).resolves.toBeUndefined();
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.url).toContain('/v1/projects/prj_abcd1234efgh5678/rollback/dpl_prev000000001');
+  });
+
+  it('redeploy still parses its JSON body (empty-body handling does not affect responses that carry content)', async () => {
+    const { fetchImpl } = mutationRecorder([{ status: 200, body: { id: 'dpl_new000000001', readyState: 'QUEUED' } }]);
+    const client = new LiveVercelClient({ token: 'vt_test', fetchImpl });
+    const out = await client.redeploy({ projectId: 'prj_abcd1234efgh5678', teamId: null }, { name: 'accuratebids', sourceDeploymentId: 'dpl_src000000001' });
+    expect(out).toEqual({ deploymentId: 'dpl_new000000001', readyState: 'QUEUED' });
+  });
+
+  it('redeploy does NOT swallow a malformed/empty JSON body on an accepted status — it throws (→ executor stays ambiguous)', async () => {
+    // redeploy requires a JSON body for the new deployment id; a truncated/empty body must surface, not become null.
+    const { fetchImpl } = mutationRecorder([{ status: 200, empty: true }]);
+    const client = new LiveVercelClient({ token: 'vt_test', fetchImpl });
+    await expect(
+      client.redeploy({ projectId: 'prj_abcd1234efgh5678', teamId: null }, { name: 'accuratebids', sourceDeploymentId: 'dpl_src000000001' }),
+    ).rejects.toThrow();
   });
 
   it('redeploy POSTs /v13/deployments with name + source deploymentId and returns the new id', async () => {

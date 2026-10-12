@@ -110,13 +110,33 @@ export class LiveVercelClient implements VercelClient, VercelMutationClient {
 
   // ── Mutation surface (Phase 2D mutation slice) ──────────────────────────────
 
-  private async mutate(operation: string, method: string, path: string, body: unknown, okStatuses: readonly number[]): Promise<unknown> {
+  private async mutate(
+    operation: string,
+    method: string,
+    path: string,
+    body: unknown,
+    okStatuses: readonly number[],
+    opts: { allowEmptyBody?: boolean } = {},
+  ): Promise<unknown> {
     const res = await this.fetchImpl(`${this.apiBase}${path}`, {
       method,
       headers: { authorization: `Bearer ${this.token}`, accept: 'application/json', 'content-type': 'application/json' },
       body: JSON.stringify(body ?? {}),
     });
     if (!okStatuses.includes(res.status)) throw new VercelApiError(operation, res.status);
+    // promote/rollback succeed with 204 No Content and return no value: `allowEmptyBody` normalizes a 204 (or an
+    // otherwise-empty body) to a successful `null` instead of forcing JSON parsing, which throws "Unexpected end
+    // of JSON input" on an empty body and would surface a FALSE `ambiguous`. redeploy does NOT set this — it
+    // REQUIRES a JSON body (the new deployment id), so a malformed/empty body throws and the executor
+    // conservatively treats the post-mutation outcome as ambiguous (never silently swallowed).
+    if (opts.allowEmptyBody) {
+      if (res.status === 204) return null;
+      try {
+        return await res.json();
+      } catch {
+        return null;
+      }
+    }
     return res.json();
   }
 
@@ -160,10 +180,10 @@ export class LiveVercelClient implements VercelClient, VercelMutationClient {
   }
 
   async promote(ref: VercelProjectRef, deploymentId: string): Promise<void> {
-    await this.mutate('promote', 'POST', this.withTeam(`/v10/projects/${encodeURIComponent(ref.projectId)}/promote/${encodeURIComponent(deploymentId)}`, ref), {}, [200, 201, 202, 204]);
+    await this.mutate('promote', 'POST', this.withTeam(`/v10/projects/${encodeURIComponent(ref.projectId)}/promote/${encodeURIComponent(deploymentId)}`, ref), {}, [200, 201, 202, 204], { allowEmptyBody: true });
   }
 
   async rollback(ref: VercelProjectRef, deploymentId: string, description?: string): Promise<void> {
-    await this.mutate('rollback', 'POST', this.withTeam(`/v1/projects/${encodeURIComponent(ref.projectId)}/rollback/${encodeURIComponent(deploymentId)}`, ref), description ? { description } : {}, [200, 201, 202, 204]);
+    await this.mutate('rollback', 'POST', this.withTeam(`/v1/projects/${encodeURIComponent(ref.projectId)}/rollback/${encodeURIComponent(deploymentId)}`, ref), description ? { description } : {}, [200, 201, 202, 204], { allowEmptyBody: true });
   }
 }
