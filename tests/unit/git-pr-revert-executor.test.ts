@@ -53,6 +53,10 @@ interface BuildOpts {
   trees?: Record<string, { entries: RepoFullTreeEntry[]; truncated?: boolean }>; // treeSha → entries
   compare?: RepoCompareResult;
   branchExists?: boolean; // getCommit(revertBranch) resolves (collision) when true
+  /** Override the head returned for getCommit('main') on the Nth call (1-indexed) — simulates a base head moving. */
+  mainHead?: (n: number) => string;
+  /** The PR's bound head SHA returned by getPullRequest (defaults to the revert commit). */
+  prHeadSha?: string;
   createTreeError?: unknown;
   createCommitError?: unknown;
   createRefError?: unknown;
@@ -71,6 +75,7 @@ function build(opts: BuildOpts = {}) {
   let createdTree: RepoTreeOverride[] | null = null;
   let committedParent: string | null = null;
   let createdRef: { branch: string; sha: string } | null = null;
+  let mainCalls = 0;
 
   const T_BASELINE = 'tree-baseline';
   const T_TARGET = 'tree-target';
@@ -95,7 +100,7 @@ function build(opts: BuildOpts = {}) {
     listTree: async () => [],
     readBlob: async () => '',
     listPullRequests: async () => [],
-    getPullRequest: async () => { calls.push('getPullRequest'); return { number: 8, title: 'Revert', state: 'open', draft: false, merged: false, headRef: REVERT_BRANCH, headSha: REVERT_COMMIT, baseRef: 'main', url: `https://github.com/${LINK.repoFullName}/pull/8`, mergeCommitSha: null }; },
+    getPullRequest: async () => { calls.push('getPullRequest'); return { number: 8, title: 'Revert', state: 'open', draft: false, merged: false, headRef: REVERT_BRANCH, headSha: opts.prHeadSha ?? REVERT_COMMIT, baseRef: 'main', url: `https://github.com/${LINK.repoFullName}/pull/8`, mergeCommitSha: null }; },
     getRefChecks: async () => ({ ref: '', state: 'unknown', checks: [] }),
     createBranch: async () => {},
     commitToBranch: async () => {},
@@ -111,6 +116,11 @@ function build(opts: BuildOpts = {}) {
         if (createdRef) return commits[REVERT_COMMIT]!;
         if (opts.branchExists) return commits[BASE_HEAD]!; // branch already exists → collision
         throw new GitHubApiError('get commit', 404);
+      }
+      if (ref === 'main' && opts.mainHead) {
+        mainCalls += 1;
+        const s = opts.mainHead(mainCalls);
+        return commits[s] ?? { sha: s, subject: 'main', treeSha: 'tree-base', parents: [TARGET] };
       }
       const sha = branches[ref] ?? ref;
       const c = commits[sha];
@@ -342,5 +352,46 @@ describe('GitPrExecutor — revert_commit (failure / ambiguity contract)', () =>
     expect(result.outcome).toBe('failed');
     // No ref was ever created → no visible side effect.
     expect(getCreatedRef()).toBeNull();
+  });
+});
+
+describe('GitPrExecutor — revert_commit (TOCTOU: base head moving mid-operation)', () => {
+  const MOVED = 'c'.repeat(40);
+
+  it('base head moves AFTER analysis but BEFORE the branch write → blocked, zero visible writes', async () => {
+    // getCommit('main') call #1 = initial staleness read (ok); call #2 = the write-boundary re-read (moved).
+    const { client, calls, getCreatedRef } = build({ mainHead: (n) => (n >= 2 ? MOVED : BASE_HEAD) });
+    const result = await executor(client).execute(action(revertPayload()));
+    expect(result.outcome).toBe('blocked');
+    expect(result.message).toMatch(/moved|stale/i);
+    // The objects may have been minted (orphan, invisible) but NO visible write (branch ref / PR) ever happened.
+    expect(calls).not.toContain('createRefAtSha');
+    expect(calls).not.toContain('openPullRequest');
+    expect(getCreatedRef()).toBeNull();
+  });
+
+  it("PR's bound head SHA differs from the revert commit → ambiguous + reconciliation", async () => {
+    const { client } = build({ prHeadSha: 'a'.repeat(40) });
+    const ex = executor(client);
+    const act = action(revertPayload());
+    const result = validateExecutorResult(act, ex.capability, await ex.execute(act));
+    expect(result.outcome).toBe('ambiguous');
+    expect(result.reconciliation).toBe('required');
+    expect(result.retryAllowed).toBe(false);
+    expect(result.message).toMatch(/PR head|verification/i);
+  });
+
+  it('base head moves AFTER branch/PR creation → ambiguous + reconciliation (branch/PR exist against a changed base)', async () => {
+    // call #1 initial (ok); call #2 write-boundary (ok, branch+PR created); call #3 post-PR verify (moved).
+    const { client, calls, getCreatedRef } = build({ mainHead: (n) => (n >= 3 ? MOVED : BASE_HEAD) });
+    const ex = executor(client);
+    const act = action(revertPayload());
+    const result = validateExecutorResult(act, ex.capability, await ex.execute(act));
+    expect(result.outcome).toBe('ambiguous');
+    expect(result.reconciliation).toBe('required');
+    expect(result.message).toMatch(/moved|changed base/i);
+    // The partial visible state is real: the branch + PR were created before the base moved.
+    expect(getCreatedRef()).toEqual({ branch: REVERT_BRANCH, sha: REVERT_COMMIT });
+    expect(calls).toContain('openPullRequest');
   });
 });

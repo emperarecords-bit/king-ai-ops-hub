@@ -713,6 +713,21 @@ export class GitPrExecutor implements Executor {
       return result('failed', `No visible side effect occurred while preparing the revert objects: ${detail}`, plan, { retryAllowed: retry });
     }
 
+    // Staleness guard AT THE WRITE BOUNDARY (TOCTOU): the base head was read before the analysis + object-minting
+    // window. Re-read it immediately before the first visible write and refuse if it moved — otherwise a branch
+    // built on a now-stale base could still be created. No side effect yet (the minted tree/commit are orphan
+    // objects), so a move here is a clean `blocked`; an inability to re-read is a no-side-effect `failed`.
+    let baseAtWrite;
+    try {
+      baseAtWrite = await this.deps.client.getCommit(repo, baseBranch);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unknown error';
+      return result('failed', `No side effect occurred: could not re-read base branch "${baseBranch}" before creating the revert branch: ${detail}`, plan, { retryAllowed: true });
+    }
+    if (baseAtWrite.sha !== payload.expectedBaseHeadSha) {
+      return result('blocked', `Base branch "${baseBranch}" head moved to ${baseAtWrite.sha} during analysis (expected ${payload.expectedBaseHeadSha}) — stale, refusing to create the revert branch. No side effect (the prepared objects are unreferenced).`, plan);
+    }
+
     // FIRST visible side effect: create the work branch at the exact revert commit.
     try {
       await this.deps.client.createRefAtSha(repo, revertBranch, revertCommitSha);
@@ -737,13 +752,20 @@ export class GitPrExecutor implements Executor {
     }
     const prUrl = `https://github.com/${link.repoFullName}/pull/${prNumber}`;
 
-    // Fail-closed post-action verification: branch head, and the PR's head/base. A mismatch ⇒ ambiguous.
+    // Fail-closed post-action verification. A visible branch + PR now exist, so any mismatch ⇒ ambiguous +
+    // reconciliation (never a silent success, never a retry): the branch head AND the PR's own bound head SHA must
+    // equal the revert commit (not just headRef), and the PR head/base refs must match. Also re-read the base: if
+    // it moved during the operation, a branch/PR now exists against a changed base → reconcile.
     try {
       const headAfter = await this.deps.client.getCommit(repo, revertBranch);
       const pr = await this.deps.client.getPullRequest(repo, prNumber);
-      const ok = headAfter.sha === revertCommitSha && pr.headRef === revertBranch && pr.baseRef === baseBranch;
+      const baseAfter = await this.deps.client.getCommit(repo, baseBranch);
+      if (baseAfter.sha !== payload.expectedBaseHeadSha) {
+        return result('ambiguous', `The revert PR #${prNumber} was created, but base branch "${baseBranch}" moved to ${baseAfter.sha} during the operation (expected ${payload.expectedBaseHeadSha}). A branch/PR now exists against a changed base — reconcile before any retry.`, { ...plan, prNumber, prUrl, revertCommitSha }, { reconciliation: 'required', retryAllowed: false });
+      }
+      const ok = headAfter.sha === revertCommitSha && pr.headSha === revertCommitSha && pr.headRef === revertBranch && pr.baseRef === baseBranch;
       if (!ok) {
-        return result('ambiguous', `The revert PR #${prNumber} was created but post-action verification did not match (branch head ${headAfter.sha} vs ${revertCommitSha}; PR ${pr.headRef}→${pr.baseRef}). Reconcile before any retry.`, { ...plan, prNumber, prUrl, revertCommitSha }, { reconciliation: 'required', retryAllowed: false });
+        return result('ambiguous', `The revert PR #${prNumber} was created but post-action verification did not match (branch head ${headAfter.sha} / PR head ${pr.headSha} vs ${revertCommitSha}; PR ${pr.headRef}→${pr.baseRef}). Reconcile before any retry.`, { ...plan, prNumber, prUrl, revertCommitSha }, { reconciliation: 'required', retryAllowed: false });
       }
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'unknown error';
