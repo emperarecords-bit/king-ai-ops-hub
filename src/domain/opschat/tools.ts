@@ -1336,11 +1336,11 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           return JSON.stringify({ workspace: p.name, projectRef: ref, count: migrations.length, migrations });
         } catch (err) {
           if (err instanceof SupabaseProjectNotLinkedError) return JSON.stringify({ error: err.message });
-          // A 401/403 on the migrations endpoint is almost always a TOKEN-SCOPE limitation (the configured
-          // Supabase Management token lacks Database read for this project), not a project problem — say so, so
-          // the owner knows the fix is a broader-scoped token rather than something to investigate on the project.
+          // A 401/403 on the migrations endpoint is an AUTHORIZATION failure. The status alone does not prove the
+          // exact cause (a 401 can be an invalid/expired token; a 403 can be another authorization restriction), so
+          // state the likely diagnosis without over-claiming — the owner can then check the token/scope deliberately.
           if (err instanceof SupabaseApiError && (err.status === 401 || err.status === 403)) {
-            return JSON.stringify({ error: `Could not read migrations: the Supabase token lacks database (migrations) read scope for this project (HTTP ${err.status}). Other reads (project info, edge functions) are unaffected; grant the token Database read to enable this.` });
+            return JSON.stringify({ error: `Could not read migrations because Supabase authorization failed (HTTP ${err.status}). The configured token may be missing Database/migrations read scope, or otherwise may not have access to this project. (Other reads such as project info and edge functions were unaffected.)` });
           }
           return JSON.stringify({ error: 'Could not read migrations from Supabase.' });
         }
