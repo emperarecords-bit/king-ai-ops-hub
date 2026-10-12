@@ -78,6 +78,8 @@ function build(opts: BuildOpts = {}) {
     createBranch: async () => {}, commitToBranch: async () => {}, openPullRequest: async () => ({ prNumber: 1 }),
     mergePullRequest: async () => ({ merged: true, mergeCommitSha: null }), getWorkflowRun: async () => ({}) as never,
     rerunFailedWorkflowJobs: async () => {},
+    getCommit: async () => ({}) as never, compareCommits: async () => ({}) as never, getFlatTree: async () => ({}) as never,
+    createTree: async () => ({}) as never, createCommit: async () => ({}) as never, createRefAtSha: async () => {},
   } as GitHubRepoClient;
   const supabase: SupabaseDeployClient = {
     deployEdgeFunction: async (_ref, spec) => { deployCalls.push(spec); if (opts.deployError) throw opts.deployError; return opts.deployResult ?? { slug: spec.slug, version: 5 }; },

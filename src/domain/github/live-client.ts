@@ -6,6 +6,11 @@ import {
   type RefCheckStatus,
   type RepoRef,
   type RepoTreeEntry,
+  type RepoCommitSummary,
+  type RepoFullTreeEntry,
+  type RepoFlatTree,
+  type RepoCompareResult,
+  type RepoTreeOverride,
   type WorkflowRunSummary,
 } from './client';
 import { assessGitWrite } from './write-policy';
@@ -230,6 +235,92 @@ export class LiveGitHubClient implements GitHubRepoClient {
       `/repos/${repo.repoFullName}/actions/runs/${runId}`,
     )) as Record<string, unknown>;
     return toWorkflowRunSummary(repo.repoFullName, out);
+  }
+
+  // --- Git Data API reads (Phase 2E revert_commit) -------------------------
+
+  async getCommit(repo: RepoRef, ref: string): Promise<RepoCommitSummary> {
+    // GET /repos/{repo}/commits/{ref} resolves a SHA or a branch name to the commit object.
+    const out = (await this.request(
+      repo,
+      'get commit',
+      'GET',
+      `/repos/${repo.repoFullName}/commits/${encodeURIComponent(ref)}`,
+    )) as { sha?: unknown; commit?: { message?: unknown; tree?: { sha?: unknown } }; parents?: Array<{ sha?: unknown }> };
+    const sha = typeof out.sha === 'string' ? out.sha : '';
+    const treeSha = typeof out.commit?.tree?.sha === 'string' ? out.commit.tree.sha : '';
+    if (!sha || !treeSha) throw new GitHubApiError('get commit (unexpected shape)', 500);
+    const message = typeof out.commit?.message === 'string' ? out.commit.message : '';
+    const parents = (Array.isArray(out.parents) ? out.parents : [])
+      .map((p) => (typeof p.sha === 'string' ? p.sha : ''))
+      .filter((s): s is string => s.length > 0);
+    return { sha, subject: message.split('\n', 1)[0] ?? '', treeSha, parents };
+  }
+
+  async compareCommits(repo: RepoRef, base: string, head: string): Promise<RepoCompareResult> {
+    const out = (await this.request(
+      repo,
+      'compare commits',
+      'GET',
+      `/repos/${repo.repoFullName}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
+    )) as { status?: unknown; ahead_by?: unknown; behind_by?: unknown };
+    const status =
+      out.status === 'ahead' || out.status === 'behind' || out.status === 'identical' || out.status === 'diverged'
+        ? out.status
+        : 'unknown';
+    return {
+      status,
+      aheadBy: typeof out.ahead_by === 'number' ? out.ahead_by : 0,
+      behindBy: typeof out.behind_by === 'number' ? out.behind_by : 0,
+    };
+  }
+
+  async getFlatTree(repo: RepoRef, treeSha: string): Promise<RepoFlatTree> {
+    const out = (await this.request(
+      repo,
+      'get flat tree',
+      'GET',
+      `/repos/${repo.repoFullName}/git/trees/${encodeURIComponent(treeSha)}?recursive=1`,
+    )) as { truncated?: unknown; tree?: Array<{ path?: unknown; mode?: unknown; type?: unknown; sha?: unknown }> };
+    const entries: RepoFullTreeEntry[] = (out.tree ?? [])
+      .filter((e) => typeof e.path === 'string' && typeof e.sha === 'string' && typeof e.mode === 'string' && (e.type === 'blob' || e.type === 'tree' || e.type === 'commit'))
+      .map((e) => ({ path: e.path as string, mode: e.mode as string, type: e.type as 'blob' | 'tree' | 'commit', sha: e.sha as string }));
+    return { entries, truncated: out.truncated === true };
+  }
+
+  // --- Git Data API writes (object mints are refless; the ref write is policy-gated) ----
+
+  async createTree(repo: RepoRef, baseTreeSha: string, overrides: ReadonlyArray<RepoTreeOverride>): Promise<{ treeSha: string }> {
+    const tree = overrides.map((o) => ({ path: o.path, mode: o.mode, type: o.type, sha: o.sha }));
+    const out = (await this.request(
+      repo,
+      'create tree',
+      'POST',
+      `/repos/${repo.repoFullName}/git/trees`,
+      { base_tree: baseTreeSha, tree },
+      [201],
+    )) as { sha?: unknown };
+    if (typeof out.sha !== 'string') throw new GitHubApiError('create tree (unexpected shape)', 500);
+    return { treeSha: out.sha };
+  }
+
+  async createCommit(repo: RepoRef, args: { message: string; treeSha: string; parentSha: string }): Promise<{ commitSha: string }> {
+    const out = (await this.request(
+      repo,
+      'create commit',
+      'POST',
+      `/repos/${repo.repoFullName}/git/commits`,
+      { message: args.message, tree: args.treeSha, parents: [args.parentSha] },
+      [201],
+    )) as { sha?: unknown };
+    if (typeof out.sha !== 'string') throw new GitHubApiError('create commit (unexpected shape)', 500);
+    return { commitSha: out.sha };
+  }
+
+  async createRefAtSha(repo: RepoRef, newBranch: string, sha: string): Promise<void> {
+    // Same policy gate as createBranch: the work branch is never the default branch (fetched live, not trusted).
+    await this.assertWriteAllowed(repo, 'git_commit', newBranch);
+    await this.request(repo, 'create ref', 'POST', `/repos/${repo.repoFullName}/git/refs`, { ref: `refs/heads/${newBranch}`, sha }, [201]);
   }
 
   // --- writes (each one policy-gated BEFORE any mutating request) ----------

@@ -59,6 +59,12 @@ describe('github client — fail closed without owner-gated credentials', () => 
       createBranch: async () => undefined,
       commitToBranch: async () => undefined,
       openPullRequest: async () => ({ prNumber: 7 }),
+      getCommit: async () => ({ sha: 's', subject: '', treeSha: 't', parents: [] }),
+      compareCommits: async () => ({ status: 'ahead' as const, aheadBy: 1, behindBy: 0 }),
+      getFlatTree: async () => ({ entries: [], truncated: false }),
+      createTree: async () => ({ treeSha: 't' }),
+      createCommit: async () => ({ commitSha: 'c' }),
+      createRefAtSha: async () => undefined,
     };
     setGitHubClientOverrideForTests(fake);
     expect(await getGitHubClient().readBlob(REPO, 'main', 'README.md')).toBe('hello');

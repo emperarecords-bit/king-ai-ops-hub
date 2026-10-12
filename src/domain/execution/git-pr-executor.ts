@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { sha256Hex } from '@/lib/crypto';
 import { canonicalJson } from '@/orchestration/actions';
-import { type GitHubRepoClient, type RepoRef } from '@/domain/github/client';
+import { type GitHubRepoClient, type RepoRef, type RepoFullTreeEntry, type RepoTreeOverride } from '@/domain/github/client';
 import { GitHubApiError } from '@/domain/github/live-client';
 import { classifyGitHubMutationError } from '@/domain/github/error-classify';
 import { assessGitWrite } from '@/domain/github/write-policy';
@@ -108,6 +108,29 @@ export const rerunFailedWorkflowPayloadSchema = z.object({
 }).strict();
 
 /**
+ * `revert_commit` (Phase 2E) — construct the exact inverse of ONE already-landed commit as a NEW work branch + PR
+ * back into its base, WITHOUT a local clone and WITHOUT ever writing the default branch. Every field is an exact,
+ * bound input: the repo, the target commit SHA, the base branch and its expected current head (a moved head is
+ * refused — staleness guard), and the dedicated revert branch to create. The baseline is the target's FIRST parent
+ * (works for squash/normal single-parent commits and, for a true merge, the mainline). The executor computes the
+ * baseline→target tree delta and, for every affected path, requires the current base to equal the target entry
+ * EXACTLY (path + object SHA + mode + type) — else it is already-reverted (skip) or a conflict (BLOCK). It never
+ * does a 3-way merge. Reversible by construction (the inverse is itself a PR you can close).
+ */
+export const revertCommitPayloadSchema = z.object({
+  operation: z.literal('revert_commit'),
+  repo: repoSchema,
+  /** The commit to revert (the merge/squash commit for a landed PR). */
+  targetSha: shaSchema,
+  /** The branch the revert PR targets AND whose current head is verified (never written directly). */
+  expectedBaseBranch: z.string().min(1).max(200),
+  /** The base branch's expected current head — a moved head is refused (stale). */
+  expectedBaseHeadSha: shaSchema,
+  /** The NEW dedicated work branch the inverse commit lands on (never a default branch; write policy re-verifies). */
+  revertBranch: z.string().min(1).max(200),
+}).strict();
+
+/**
  * The git_pr payload is an operation-discriminated union. BACKWARD COMPATIBILITY: a create-PR payload stored
  * before Phase 2B has no `operation` key — the preprocess defaults it to 'create_pr' so it still routes. This is
  * safe because the payload HASH is verified over the stored RAW payload BEFORE this parse runs (at the choke
@@ -118,13 +141,14 @@ export const gitPrPayloadSchema = z.preprocess(
     v && typeof v === 'object' && !Array.isArray(v) && (v as { operation?: unknown }).operation === undefined
       ? { operation: 'create_pr', ...(v as Record<string, unknown>) }
       : v,
-  z.discriminatedUnion('operation', [createPrPayloadSchema, mergePrPayloadSchema, rerunFailedWorkflowPayloadSchema]),
+  z.discriminatedUnion('operation', [createPrPayloadSchema, mergePrPayloadSchema, rerunFailedWorkflowPayloadSchema, revertCommitPayloadSchema]),
 );
 
 export type GitPrPayload = z.infer<typeof gitPrPayloadSchema>;
 export type CreatePrPayload = z.infer<typeof createPrPayloadSchema>;
 export type MergePrPayload = z.infer<typeof mergePrPayloadSchema>;
 export type RerunFailedWorkflowPayload = z.infer<typeof rerunFailedWorkflowPayloadSchema>;
+export type RevertCommitPayload = z.infer<typeof revertCommitPayloadSchema>;
 
 export interface GitPrRepoLink {
   readonly installationId: bigint;
@@ -208,6 +232,7 @@ export class GitPrExecutor implements Executor {
     // idempotency, payload hash — already enforced before this executor runs) still bind them.
     if (payload.operation === 'merge_pr') return this.executeMerge(action, payload, result);
     if (payload.operation === 'rerun_failed_workflow') return this.executeRerun(action, payload, result);
+    if (payload.operation === 'revert_commit') return this.executeRevert(action, payload, result);
     // Below here `payload` is narrowed to the create_pr shape — the original flow, unchanged.
 
     // Placeholder-disease guard: pure content check, enforced in every mode before anything else.
@@ -483,6 +508,276 @@ export class GitPrExecutor implements Executor {
         advanced,
       },
     );
+  }
+
+  /**
+   * revert_commit — construct the exact inverse of ONE landed commit as a NEW work branch + PR back into its base.
+   *
+   * All pre-write analysis is DEFINITE gates → `blocked`, no side effect: linked repo; revert branch is a safe
+   * non-default work branch (assessGitWrite); target has ≥1 parent (baseline = parents[0]); the base head matches
+   * the expected head (stale → blocked); the target is an ancestor of the base head (unreachable → blocked). Then
+   * the exact baseline→target tree delta is computed and every affected leaf path is classified against the CURRENT
+   * base entry by FULL identity (path + object SHA + mode + type): equal-to-target ⇒ cleanly revertible; equal-to-
+   * baseline ⇒ already reverted (skipped); anything else ⇒ conflict ⇒ blocked (no 3-way merge). Any non-blob
+   * affected entry (e.g. a submodule) ⇒ blocked (unsupported in v1). All-already-baseline ⇒ no-op ⇒ blocked.
+   *
+   * Writes: createTree + createCommit mint content-addressed objects (no ref, no visible side effect). The FIRST
+   * visible side effect is createRefAtSha (the work branch). A pre-existing revert branch ⇒ blocked (reconcile). A
+   * 4xx before the ref is a definite non-start → `failed`; a 5xx/transport before the ref is `ambiguous`. Once the
+   * branch exists, a PR failure is `ambiguous` + reconciliation (branch created, PR not) — never a blind retry. On
+   * success the branch head, revert commit, and PR head/base are verified.
+   */
+  private async executeRevert(
+    action: ExecutorAction,
+    payload: RevertCommitPayload,
+    result: ResultFn,
+  ): Promise<ExecutorResult> {
+    const links = await this.deps.loadLinks();
+    const link = links.find((l) => l.repoFullName === payload.repo);
+    if (!link) return result('blocked', `Repository "${payload.repo}" is not linked to this workspace.`, null);
+    const repo: RepoRef = { installationId: link.installationId, repoFullName: link.repoFullName };
+    const baseBranch = payload.expectedBaseBranch.replace(/^refs\/heads\//, '');
+    const revertBranch = payload.revertBranch.replace(/^refs\/heads\//, '');
+    const target = {
+      operation: 'revert_commit',
+      repo: payload.repo,
+      targetSha: payload.targetSha,
+      expectedBaseBranch: baseBranch,
+      expectedBaseHeadSha: payload.expectedBaseHeadSha,
+      revertBranch,
+    };
+
+    // The revert branch must be a safe NON-default work branch — same gate as create_pr (fail closed, pre-write).
+    const assessment = assessGitWrite({
+      actionType: 'git_pr',
+      targetRepo: payload.repo,
+      targetBranch: revertBranch,
+      linkedRepo: link.repoFullName,
+      defaultBranch: link.defaultBranch,
+    });
+    if (!assessment.allowed) return result('blocked', assessment.reason, target);
+
+    // 1) Read the target commit → first-parent baseline + subject.
+    let targetCommit;
+    try {
+      targetCommit = await this.deps.client.getCommit(repo, payload.targetSha);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unknown error';
+      return result('failed', `No side effect occurred: could not read target commit ${payload.targetSha}: ${detail}`, target, { retryAllowed: true });
+    }
+    if (targetCommit.parents.length < 1) {
+      return result('blocked', `Target commit ${payload.targetSha} has no parent (a root commit cannot be reverted in v1).`, target);
+    }
+    const baselineSha = targetCommit.parents[0]!;
+
+    // 2) Read the base branch head and enforce the staleness guard.
+    let baseHead;
+    try {
+      baseHead = await this.deps.client.getCommit(repo, baseBranch);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unknown error';
+      return result('failed', `No side effect occurred: could not read base branch "${baseBranch}": ${detail}`, target, { retryAllowed: true });
+    }
+    if (baseHead.sha !== payload.expectedBaseHeadSha) {
+      return result('blocked', `Base branch "${baseBranch}" head has moved (expected ${payload.expectedBaseHeadSha}, found ${baseHead.sha}) — stale, refusing to revert.`, target);
+    }
+
+    // 3) The target must be an ancestor of the base head (reachability) — else the revert is meaningless.
+    let cmp;
+    try {
+      cmp = await this.deps.client.compareCommits(repo, payload.targetSha, baseHead.sha);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unknown error';
+      return result('failed', `No side effect occurred: could not compare ${payload.targetSha}...${baseHead.sha}: ${detail}`, target, { retryAllowed: true });
+    }
+    if (cmp.status !== 'ahead' && cmp.status !== 'identical') {
+      return result('blocked', `Target commit ${payload.targetSha} is not an ancestor of "${baseBranch}" (compare status "${cmp.status}") — refusing to revert.`, target);
+    }
+
+    // 4) Read the three trees: baseline (target's first parent), target, and the current base head.
+    let baselineTree, targetTree, baseTree;
+    try {
+      const baselineCommit = await this.deps.client.getCommit(repo, baselineSha);
+      [baselineTree, targetTree, baseTree] = await Promise.all([
+        this.deps.client.getFlatTree(repo, baselineCommit.treeSha),
+        this.deps.client.getFlatTree(repo, targetCommit.treeSha),
+        this.deps.client.getFlatTree(repo, baseHead.treeSha),
+      ]);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unknown error';
+      return result('failed', `No side effect occurred: could not read trees to compute the revert: ${detail}`, target, { retryAllowed: true });
+    }
+    // A truncated tree cannot yield an exact diff — fail closed rather than reverting on partial data.
+    if (baselineTree.truncated || targetTree.truncated || baseTree.truncated) {
+      return result('failed', `No side effect occurred: a tree was too large for GitHub to return fully (truncated) — cannot compute an exact revert.`, target, { retryAllowed: false });
+    }
+
+    // Leaf-entry maps (blobs + submodules; directory 'tree' markers are implied by blob paths and ignored).
+    const leaves = (t: { entries: readonly RepoFullTreeEntry[] }) =>
+      new Map(t.entries.filter((e) => e.type !== 'tree').map((e) => [e.path, e] as const));
+    const baselineMap = leaves(baselineTree);
+    const targetMap = leaves(targetTree);
+    const baseMap = leaves(baseTree);
+    const sameEntry = (a?: RepoFullTreeEntry, b?: RepoFullTreeEntry): boolean =>
+      !!a && !!b && a.sha === b.sha && a.mode === b.mode && a.type === b.type;
+
+    // Affected = every leaf path where the baseline→target identity differs.
+    const affected = new Set<string>();
+    for (const path of new Set([...baselineMap.keys(), ...targetMap.keys()])) {
+      if (!sameEntry(baselineMap.get(path), targetMap.get(path))) affected.add(path);
+    }
+
+    const overrides: RepoTreeOverride[] = [];
+    const conflicts: string[] = [];
+    const unsupported: string[] = [];
+    let alreadyReverted = 0;
+    for (const path of affected) {
+      const baselineEntry = baselineMap.get(path);
+      const targetEntry = targetMap.get(path);
+      const headEntry = baseMap.get(path);
+      // Unsupported in v1: any affected non-blob leaf (e.g. a submodule 'commit' entry) — BLOCK, never guess.
+      if ((baselineEntry && baselineEntry.type !== 'blob') || (targetEntry && targetEntry.type !== 'blob')) {
+        unsupported.push(path);
+        continue;
+      }
+      if (sameEntry(headEntry, targetEntry) || (!headEntry && !targetEntry)) {
+        // Current base still carries the target's version of this path → cleanly revert to the baseline version.
+        if (baselineEntry) {
+          overrides.push({ path, mode: baselineEntry.mode, type: 'blob', sha: baselineEntry.sha });
+        } else {
+          // Target ADDED this path; reverting removes it.
+          overrides.push({ path, mode: targetEntry?.mode ?? '100644', type: 'blob', sha: null });
+        }
+      } else if (sameEntry(headEntry, baselineEntry) || (!headEntry && !baselineEntry)) {
+        // Already at the baseline version here → nothing to do for this path.
+        alreadyReverted += 1;
+      } else {
+        // A third state: the path diverged after the target (or in a way the revert can't express) → conflict.
+        conflicts.push(path);
+      }
+    }
+
+    if (unsupported.length > 0) {
+      return result('blocked', `Revert of ${payload.targetSha} touches unsupported (non-file) entries not handled in v1: ${unsupported.slice(0, 10).join(', ')}. Refusing.`, target);
+    }
+    if (conflicts.length > 0) {
+      return result('blocked', `Revert of ${payload.targetSha} conflicts with later changes on "${baseBranch}" at: ${conflicts.slice(0, 10).join(', ')}. The current base differs from both the target and the baseline — a clean revert is not possible (no 3-way merge in v1). Refusing.`, target);
+    }
+    if (overrides.length === 0) {
+      return result('blocked', `Revert of ${payload.targetSha} is a no-op on "${baseBranch}" — every affected path is already at the pre-target version (already reverted). Refusing.`, target);
+    }
+
+    const subject = targetCommit.subject.slice(0, 120);
+    const message = `Revert ${payload.targetSha}: ${subject}`.slice(0, 200);
+    const prTitle = message;
+    const prBody =
+      `Automated revert of \`${payload.targetSha}\` (${subject || 'no subject'}).\n\n` +
+      `Baseline (first parent): \`${baselineSha}\`\nBase: \`${baseBranch}\` @ \`${payload.expectedBaseHeadSha}\`\n` +
+      `Restores ${overrides.length} path${overrides.length === 1 ? '' : 's'}` +
+      `${alreadyReverted > 0 ? ` (${alreadyReverted} already at baseline, skipped)` : ''}.`;
+    const plan = {
+      ...target,
+      originalTargetSha: payload.targetSha,
+      baselineSha,
+      affectedPaths: overrides.length,
+      alreadyReverted,
+      paths: overrides.map((o) => o.path).slice(0, 50),
+    };
+
+    if (action.mode === 'dry_run') {
+      return result('not_executed', `Dry run only. Would open a revert pull request for ${payload.targetSha} from ${revertBranch} into ${baseBranch} (${overrides.length} path${overrides.length === 1 ? '' : 's'}).`, { ...plan, wouldExecute: true });
+    }
+
+    // Collision/idempotency guard: a pre-existing revert branch means a prior attempt may have run → reconcile.
+    try {
+      await this.deps.client.getCommit(repo, revertBranch);
+      return result('blocked', `Revert branch "${revertBranch}" already exists in ${link.repoFullName} — a prior attempt may have run. Reconcile (open the PR or delete the branch) before retrying.`, plan);
+    } catch (err) {
+      if (!(err instanceof GitHubApiError && err.status === 404)) {
+        const detail = err instanceof Error ? err.message : 'unknown error';
+        return result('failed', `No side effect occurred: could not check whether revert branch "${revertBranch}" exists: ${detail}`, plan, { retryAllowed: true });
+      }
+      // 404 → the branch does not exist; proceed.
+    }
+
+    // Mint the inverse tree + commit. These are content-addressed objects: no ref points at them yet, so a failure
+    // here has no VISIBLE side effect (an orphan object is invisible and GC'd) → definite/failed, safe to surface.
+    let revertTreeSha: string;
+    let revertCommitSha: string;
+    try {
+      revertTreeSha = (await this.deps.client.createTree(repo, baseHead.treeSha, overrides)).treeSha;
+      revertCommitSha = (await this.deps.client.createCommit(repo, { message, treeSha: revertTreeSha, parentSha: baseHead.sha })).commitSha;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unknown error';
+      const retry = classifyGitHubMutationError(err) !== 'definite';
+      return result('failed', `No visible side effect occurred while preparing the revert objects: ${detail}`, plan, { retryAllowed: retry });
+    }
+
+    // Staleness guard AT THE WRITE BOUNDARY (TOCTOU): the base head was read before the analysis + object-minting
+    // window. Re-read it immediately before the first visible write and refuse if it moved — otherwise a branch
+    // built on a now-stale base could still be created. No side effect yet (the minted tree/commit are orphan
+    // objects), so a move here is a clean `blocked`; an inability to re-read is a no-side-effect `failed`.
+    let baseAtWrite;
+    try {
+      baseAtWrite = await this.deps.client.getCommit(repo, baseBranch);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unknown error';
+      return result('failed', `No side effect occurred: could not re-read base branch "${baseBranch}" before creating the revert branch: ${detail}`, plan, { retryAllowed: true });
+    }
+    if (baseAtWrite.sha !== payload.expectedBaseHeadSha) {
+      return result('blocked', `Base branch "${baseBranch}" head moved to ${baseAtWrite.sha} during analysis (expected ${payload.expectedBaseHeadSha}) — stale, refusing to create the revert branch. No side effect (the prepared objects are unreferenced).`, plan);
+    }
+
+    // FIRST visible side effect: create the work branch at the exact revert commit.
+    try {
+      await this.deps.client.createRefAtSha(repo, revertBranch, revertCommitSha);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unknown error';
+      if (err instanceof GitHubApiError && err.status === 422) {
+        return result('blocked', `Revert branch "${revertBranch}" already exists in ${link.repoFullName} (created concurrently). Reconcile before retrying.`, plan);
+      }
+      if (classifyGitHubMutationError(err) === 'definite') {
+        return result('failed', `GitHub rejected creating the revert branch (no side effect): ${detail}.`, plan, { retryAllowed: false });
+      }
+      return result('ambiguous', `Creating the revert branch "${revertBranch}" failed after a transport/server error — it may or may not exist: ${detail}. Reconcile before any retry.`, plan, { reconciliation: 'required', retryAllowed: false });
+    }
+
+    // The branch now exists: any failure past here is a PARTIAL outcome (branch created, PR not) → ambiguous.
+    let prNumber: number;
+    try {
+      prNumber = (await this.deps.client.openPullRequest(repo, { fromBranch: revertBranch, intoBranch: baseBranch, title: prTitle, body: prBody })).prNumber;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unknown error';
+      return result('ambiguous', `The revert branch "${revertBranch}" was created in ${link.repoFullName} but opening the pull request failed: ${detail}. Reconcile (open the PR manually or delete the branch) before any retry.`, plan, { reconciliation: 'required', retryAllowed: false });
+    }
+    const prUrl = `https://github.com/${link.repoFullName}/pull/${prNumber}`;
+
+    // Fail-closed post-action verification. A visible branch + PR now exist, so any mismatch ⇒ ambiguous +
+    // reconciliation (never a silent success, never a retry): the branch head AND the PR's own bound head SHA must
+    // equal the revert commit (not just headRef), and the PR head/base refs must match. Also re-read the base: if
+    // it moved during the operation, a branch/PR now exists against a changed base → reconcile.
+    try {
+      const headAfter = await this.deps.client.getCommit(repo, revertBranch);
+      const pr = await this.deps.client.getPullRequest(repo, prNumber);
+      const baseAfter = await this.deps.client.getCommit(repo, baseBranch);
+      if (baseAfter.sha !== payload.expectedBaseHeadSha) {
+        return result('ambiguous', `The revert PR #${prNumber} was created, but base branch "${baseBranch}" moved to ${baseAfter.sha} during the operation (expected ${payload.expectedBaseHeadSha}). A branch/PR now exists against a changed base — reconcile before any retry.`, { ...plan, prNumber, prUrl, revertCommitSha }, { reconciliation: 'required', retryAllowed: false });
+      }
+      const ok = headAfter.sha === revertCommitSha && pr.headSha === revertCommitSha && pr.headRef === revertBranch && pr.baseRef === baseBranch;
+      if (!ok) {
+        return result('ambiguous', `The revert PR #${prNumber} was created but post-action verification did not match (branch head ${headAfter.sha} / PR head ${pr.headSha} vs ${revertCommitSha}; PR ${pr.headRef}→${pr.baseRef}). Reconcile before any retry.`, { ...plan, prNumber, prUrl, revertCommitSha }, { reconciliation: 'required', retryAllowed: false });
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unknown error';
+      return result('ambiguous', `The revert PR #${prNumber} was created but could not be verified afterward: ${detail}. Reconcile before any retry.`, { ...plan, prNumber, prUrl, revertCommitSha }, { reconciliation: 'required', retryAllowed: false });
+    }
+
+    return result('succeeded', `Opened revert pull request #${prNumber} in ${link.repoFullName} for ${payload.targetSha}.`, {
+      ...plan,
+      prNumber,
+      prUrl,
+      revertCommitSha,
+    });
   }
 
   private provenance(action: ExecutorAction, attemptedAt: string): Readonly<ExecutorProvenance> {
