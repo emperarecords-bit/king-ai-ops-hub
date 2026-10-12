@@ -240,6 +240,16 @@ describe('live client Git Data API reads (revert support)', () => {
     await expect(client(impl).branchHeadSha(REPO, 'main')).rejects.toBeInstanceOf(GitHubApiError);
   });
 
+  it('branchHeadSha: HTTP 200 with missing/malformed object.sha THROWS (never returns null — absence is by status, not shape)', async () => {
+    for (const body of [{}, { object: {} }, { object: { sha: '' } }, { object: { sha: 123 } }]) {
+      const { impl } = fakeFetch([
+        tokenRoute,
+        { match: (m, u) => m === 'GET' && u.includes('/git/ref/heads/'), status: 200, body },
+      ]);
+      await expect(client(impl).branchHeadSha(REPO, 'main')).rejects.toBeInstanceOf(GitHubApiError);
+    }
+  });
+
   it('compareCommits returns the ahead/behind status (ancestry proof)', async () => {
     const { impl } = fakeFetch([
       tokenRoute,
