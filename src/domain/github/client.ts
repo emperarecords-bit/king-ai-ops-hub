@@ -158,6 +158,13 @@ export interface GitHubRepoClient {
 
   /** Read one commit (resolving a SHA or branch name) — its first-parent baseline, tree, and subject. Read-only. */
   getCommit(repo: RepoRef, ref: string): Promise<RepoCommitSummary>;
+  /**
+   * The head commit SHA of a branch via the Git Refs API (`GET /git/ref/heads/{branch}`), or null when the branch
+   * does NOT exist. ONLY a 404 means "absent"; any other provider error throws (fail-closed read). This exists
+   * because `getCommit` (the commits endpoint) returns 422 — not 404 — for a non-existent ref, which is unusable
+   * as an existence check. Read-only.
+   */
+  branchHeadSha(repo: RepoRef, branch: string): Promise<string | null>;
   /** `git compare base...head` — proves ancestry (target is an ancestor of the base head). Read-only. */
   compareCommits(repo: RepoRef, base: string, head: string): Promise<RepoCompareResult>;
   /** The full recursive tree at a tree SHA, with GitHub's truncated flag. Read-only. */
@@ -216,6 +223,9 @@ class UnconfiguredGitHubClient implements GitHubRepoClient {
     return Promise.reject(new GitHubUnconfiguredError());
   }
   getCommit(): Promise<RepoCommitSummary> {
+    return Promise.reject(new GitHubUnconfiguredError());
+  }
+  branchHeadSha(): Promise<string | null> {
     return Promise.reject(new GitHubUnconfiguredError());
   }
   compareCommits(): Promise<RepoCompareResult> {

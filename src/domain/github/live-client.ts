@@ -257,6 +257,23 @@ export class LiveGitHubClient implements GitHubRepoClient {
     return { sha, subject: message.split('\n', 1)[0] ?? '', treeSha, parents };
   }
 
+  async branchHeadSha(repo: RepoRef, branch: string): Promise<string | null> {
+    // Git Refs API (singular `/git/ref/heads/{branch}` = exact match or 404). Branch names may contain '/', which
+    // is a path separator in the ref, so each segment is encoded individually (never the whole value). A 404 is
+    // "absent" (returned as null); any other non-200 throws via the request helper (fail-closed read).
+    const seg = branch.split('/').map(encodeURIComponent).join('/');
+    const out = (await this.request(
+      repo,
+      'get branch ref',
+      'GET',
+      `/repos/${repo.repoFullName}/git/ref/heads/${seg}`,
+      undefined,
+      [200, 404],
+    )) as { object?: { sha?: unknown } };
+    const sha = out?.object?.sha;
+    return typeof sha === 'string' ? sha : null;
+  }
+
   async compareCommits(repo: RepoRef, base: string, head: string): Promise<RepoCompareResult> {
     const out = (await this.request(
       repo,
