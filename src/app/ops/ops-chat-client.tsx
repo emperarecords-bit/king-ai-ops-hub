@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { consumeOpsChatStream } from './ops-chat-stream';
 import { OPS_CHAT_CLIENT_TIMEOUT_MS, OPS_CHAT_TIMEOUT_MESSAGE } from '@/domain/opschat/limits';
+import { createDeadlineWatchdog } from './ops-chat-watchdog';
 
 type Proposal =
   | { kind: 'answer_question'; questionId: string; projectKey: string; workspaceName: string; question: string; answer: string }
@@ -691,16 +692,21 @@ export function OpsChatClient({ opening }: { opening: string }) {
 
     const controller = new AbortController();
     abortRef.current = controller;
-    // Browser watchdog: no Send may leave the UI stuck on "Thinking…". At the
-    // deadline we abort the fetch; the server enforces its own (slightly shorter)
-    // deadline, so normally a clean timeout error arrives first and this is the
-    // backstop. A timed-out request wrote nothing — the only write path is an
-    // explicit Confirm through /api/ops-chat/confirm.
+    // Browser watchdog: no Send may leave the UI stuck on "Thinking…". At the deadline we abort the fetch; the
+    // server enforces its own (slightly shorter) deadline, so normally a clean timeout error arrives first and
+    // this is the backstop. A timed-out request wrote nothing — the only write path is an explicit Confirm.
+    // A hidden tab THROTTLES the timer, so we also re-check the wall-clock deadline on `visibilitychange`: the
+    // instant the tab is foregrounded again, an overrun fires immediately rather than hanging on "Thinking…".
     let timedOut = false;
-    const watchdog = setTimeout(() => {
+    const watchdog = createDeadlineWatchdog(OPS_CHAT_CLIENT_TIMEOUT_MS, () => {
       timedOut = true;
       controller.abort();
-    }, OPS_CHAT_CLIENT_TIMEOUT_MS);
+    });
+    watchdog.start();
+    const onVisible = (): void => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') watchdog.checkNow();
+    };
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible);
 
     const append = (delta: string) =>
       setMessages((prev) => prev.map((m) => (m.id === replyId ? { ...m, content: m.content + delta } : m)));
@@ -764,7 +770,8 @@ export function OpsChatClient({ opening }: { opening: string }) {
       dropEmptyReply();
     } finally {
       // Always clear the pending state and the watchdog, on every exit path.
-      clearTimeout(watchdog);
+      watchdog.clear();
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible);
       setStreaming(false);
       setToolActivity(null);
       abortRef.current = null;

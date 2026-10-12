@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { consumeOpsChatStream, type OpsChatStreamHandlers } from '@/app/ops/ops-chat-stream';
+import { OPS_CHAT_CONNECTION_CLOSED_MESSAGE } from '@/domain/opschat/limits';
 
 /**
  * Ops Chat SSE consumer. Node-level regression tests for the browser stream
@@ -94,11 +95,27 @@ describe('consumeOpsChatStream', () => {
     expect(h.deltas).toEqual(['ok']); // malformed one skipped
   });
 
-  it('clean close with no done/error → benign {done} (UI never left pending)', async () => {
+  it('close with no done/error → RETRYABLE error (abnormal close, UI clears + reports it, not a silent success)', async () => {
     const h = handlers();
-    const stream = sseStream([ev('delta', { text: 'x' })]); // closes, no done
+    const stream = sseStream([ev('delta', { text: 'x' })]); // closes without a terminal event
     const result = await consumeOpsChatStream(stream, h);
-    expect(result).toEqual({ status: 'done' });
+    expect(result).toEqual({ status: 'error', message: OPS_CHAT_CONNECTION_CLOSED_MESSAGE });
+  });
+
+  it('returns on the terminal event — later events after `error`/`done` are NOT processed (no resurrection)', async () => {
+    const h = handlers();
+    // An error terminal followed by MORE events that must be ignored (the turn is over).
+    const stream = sseStream([
+      ev('delta', { text: 'partial' }),
+      ev('error', { message: 'boom' }),
+      ev('delta', { text: 'LATE — must be ignored' }),
+      ev('proposal', { kind: 'answer_question', questionId: 'late' }),
+      ev('done', {}),
+    ], { leaveOpen: true });
+    const result = await consumeOpsChatStream(stream, h);
+    expect(result).toEqual({ status: 'error', message: 'boom' });
+    expect(h.deltas).toEqual(['partial']); // the late delta never arrived at the handler
+    expect(h.proposals).toHaveLength(0);
   });
 
   it('a reader error (e.g. aborted fetch) rejects so the caller can show its timeout UI', async () => {

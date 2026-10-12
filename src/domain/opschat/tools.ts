@@ -31,6 +31,7 @@ import { EXECUTOR_RISK_BY_ACTION } from '@/domain/execution/executor-policy';
 import { deployEdgeFunctionPayloadSchema } from '@/domain/supabase/deploy-executor';
 import { validateWorkspaceApprovedSql, SupabaseProjectNotLinkedError as SqlProjectNotLinkedError } from '@/domain/supabase/approved-sql';
 import { getSupabaseClient } from '@/domain/supabase/client';
+import { SupabaseApiError } from '@/domain/supabase/live-client';
 import { getVercelClient } from '@/domain/vercel/client';
 import {
   vercelWorkspaceCapabilities,
@@ -1335,6 +1336,12 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           return JSON.stringify({ workspace: p.name, projectRef: ref, count: migrations.length, migrations });
         } catch (err) {
           if (err instanceof SupabaseProjectNotLinkedError) return JSON.stringify({ error: err.message });
+          // A 401/403 on the migrations endpoint is almost always a TOKEN-SCOPE limitation (the configured
+          // Supabase Management token lacks Database read for this project), not a project problem — say so, so
+          // the owner knows the fix is a broader-scoped token rather than something to investigate on the project.
+          if (err instanceof SupabaseApiError && (err.status === 401 || err.status === 403)) {
+            return JSON.stringify({ error: `Could not read migrations: the Supabase token lacks database (migrations) read scope for this project (HTTP ${err.status}). Other reads (project info, edge functions) are unaffected; grant the token Database read to enable this.` });
+          }
           return JSON.stringify({ error: 'Could not read migrations from Supabase.' });
         }
       }
