@@ -14,6 +14,8 @@
  * only ever happen on an explicit user Confirm, through /api/ops-chat/confirm.
  */
 
+import { OPS_CHAT_CONNECTION_CLOSED_MESSAGE } from '@/domain/opschat/limits';
+
 export interface OpsChatStreamHandlers {
   onDelta(text: string): void;
   onToolStart(name: string): void;
@@ -45,8 +47,12 @@ export async function consumeOpsChatStream(
     for (;;) {
       const { done, value } = await reader.read();
       if (done) {
-        // Stream closed without an explicit done/error — treat as benign completion.
-        return { status: 'done' };
+        // The stream closed WITHOUT an explicit `done`/`error` event. The server always emits one of those on a
+        // normal finish or a timeout (and the consumer returns the instant it sees one, before reaching here), so
+        // reaching this point means an ABNORMAL close (proxy cut, crashed server, a timeout whose terminal event
+        // never arrived). Report a retryable failure — never a silent success — so the UI clears "Thinking…" and
+        // tells the owner to try again. A timed-out request wrote nothing.
+        return { status: 'error', message: OPS_CHAT_CONNECTION_CLOSED_MESSAGE };
       }
       buf += decoder.decode(value, { stream: true });
 

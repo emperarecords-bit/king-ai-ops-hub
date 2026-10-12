@@ -74,7 +74,8 @@ To act on several at once (e.g. "approve all three", "answer both duplicates", "
 Rules:
 - Be concise and plain-spoken. Lead with the answer. Use ONLY real data from the snapshot or tool results — never invent counts, names, criteria, or statuses.
 - Do NOT speculate about connections between unrelated things (e.g. a bookkeeping question and an internal model-call error are not "the same issue" just because both involve the word "reconciliation"). Only link things the data actually links.
-- Name the workspace when useful. Tools accept the workspace name or key.`;
+- Name the workspace when useful. Tools accept the workspace name or key.
+- "FINISH THE RELEASE" requests (e.g. "finish the AccurateBids release", "finish the AccurateBids staging release"): do a BOUNDED, efficient inspection — NOT an exhaustive enumeration — so the turn stays fast and well within its time budget. Read only what the release decision needs: GitHub — the base branch's current HEAD + open PRs + the relevant CI; Supabase — project health + the specific function/migration state relevant to the release; Vercel — the current (staging or production) deployment + its source SHA. Then SYNTHESIZE ONCE and state plainly whether anything is actually required — a healthy, consistent release (e.g. the live deployment's source SHA already matches the base branch HEAD and nothing is pending) is a legitimate NO-OP; do not invent work. Do NOT enumerate large inventories (every edge function, every deployment) unless an inconsistency you already found requires deeper inspection. Still, any ACTION only ever prepares a confirm card and changes nothing until the owner confirms.`;
 
 export async function POST(req: Request): Promise<Response> {
   // Auth resolves BEFORE the stream opens so failures are proper status codes.
@@ -167,9 +168,18 @@ export async function POST(req: Request): Promise<Response> {
         }, OPS_CHAT_SERVER_DEADLINE_MS);
       });
 
+      // The client clears "Thinking…" on a `done` or `error` event. Track whether a terminal event has been
+      // emitted so the `finally` can GUARANTEE one (while the client is still connected) even if the loop ever
+      // exits a future way without emitting one — the UI must never be left pending.
+      let sentTerminal = false;
+      const sendTerminal = (event: 'done' | 'error', data: unknown): void => {
+        sentTerminal = true;
+        send(event, data);
+      };
+
       const finalize = (): void => {
         for (const proposal of toolset.getProposals()) send('proposal', proposal);
-        send('done', {});
+        sendTerminal('done', {});
       };
 
       let iterator: AsyncIterator<ToolLoopEvent> | undefined;
@@ -185,7 +195,7 @@ export async function POST(req: Request): Promise<Response> {
         for (;;) {
           const step = await Promise.race([iterator.next(), deadline]);
           if (step === TIMEOUT) {
-            send('error', { message: OPS_CHAT_TIMEOUT_MESSAGE });
+            sendTerminal('error', { message: OPS_CHAT_TIMEOUT_MESSAGE });
             break;
           }
           if (step.done) {
@@ -203,16 +213,19 @@ export async function POST(req: Request): Promise<Response> {
         }
       } catch (err) {
         if (timedOut) {
-          send('error', { message: OPS_CHAT_TIMEOUT_MESSAGE });
+          sendTerminal('error', { message: OPS_CHAT_TIMEOUT_MESSAGE });
         } else if (ac.signal.aborted) {
           // Client disconnected before the deadline — nothing to deliver.
         } else {
           if (!(err instanceof AppError)) log.error('ops-chat stream failed', { err });
-          send('error', { message: toPublicMessage(err) });
+          sendTerminal('error', { message: toPublicMessage(err) });
         }
       } finally {
         if (deadlineTimer) clearTimeout(deadlineTimer);
         req.signal?.removeEventListener('abort', onReqAbort);
+        // GUARANTEE a terminal event: if the loop somehow exited without emitting one and the client is still
+        // connected (not disconnected/aborted), emit a retryable error before closing so the UI never hangs.
+        if (!sentTerminal && !ac.signal.aborted) send('error', { message: OPS_CHAT_TIMEOUT_MESSAGE });
         closed = true;
         try {
           controller.close();
