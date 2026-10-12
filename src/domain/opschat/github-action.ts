@@ -14,10 +14,12 @@ import {
   createPrPayloadSchema,
   mergePrPayloadSchema,
   rerunFailedWorkflowPayloadSchema,
+  revertCommitPayloadSchema,
   findGitPrPlaceholder,
   type CreatePrPayload,
   type MergePrPayload,
   type RerunFailedWorkflowPayload,
+  type RevertCommitPayload,
   type GitPrPayload,
 } from '@/domain/execution/git-pr-executor';
 
@@ -89,6 +91,22 @@ export interface OpsChatGitRerunResult {
   readonly runUrl: string | null;
 }
 
+export interface OpsChatGitRevertInput {
+  readonly repo: string;
+  readonly targetSha: string;
+  readonly expectedBaseBranch: string;
+  readonly expectedBaseHeadSha: string;
+  readonly revertBranch: string;
+}
+export interface OpsChatGitRevertResult {
+  readonly approvalId: string;
+  readonly attempted: boolean;
+  readonly outcome: ApprovalExecutionOutcome['outcome'];
+  readonly message: string | null;
+  readonly prUrl: string | null;
+  readonly revertCommitSha: string | null;
+}
+
 // ── Payload validation (refusal, never repair) ───────────────────────────────
 
 function issuesOf(error: { issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey>; message: string }> }): string {
@@ -138,6 +156,19 @@ function parseRerunPayload(input: OpsChatGitRerunInput): RerunFailedWorkflowPayl
     expectedRunAttempt: input.expectedRunAttempt,
   });
   if (!parsed.success) throw new AppError('validation', `The GitHub rerun is not executable: ${issuesOf(parsed.error)}`);
+  return parsed.data;
+}
+
+function parseRevertPayload(input: OpsChatGitRevertInput): RevertCommitPayload {
+  const parsed = revertCommitPayloadSchema.safeParse({
+    operation: 'revert_commit',
+    repo: input.repo,
+    targetSha: input.targetSha,
+    expectedBaseBranch: input.expectedBaseBranch,
+    expectedBaseHeadSha: input.expectedBaseHeadSha,
+    revertBranch: input.revertBranch,
+  });
+  if (!parsed.success) throw new AppError('validation', `The GitHub revert is not executable: ${issuesOf(parsed.error)}`);
   return parsed.data;
 }
 
@@ -272,5 +303,29 @@ export async function executeGitHubRerunFromOpsChat(ctx: TenantContext, input: O
     attempt: preview && typeof preview.attempt === 'number' ? preview.attempt : null,
     state: preview && typeof preview.state === 'string' ? preview.state : null,
     runUrl: preview && typeof preview.runUrl === 'string' ? preview.runUrl : null,
+  };
+}
+
+export async function executeGitHubRevertFromOpsChat(ctx: TenantContext, input: OpsChatGitRevertInput): Promise<OpsChatGitRevertResult> {
+  const payload = parseRevertPayload(input);
+  const out = await runGovernedGitAction(ctx, payload, {
+    taskTitle: `GitHub revert: ${payload.targetSha.slice(0, 7)} in ${payload.repo}`,
+    taskInput:
+      `Owner-initiated GitHub revert prepared via Ops Chat.\n` +
+      `Repository: ${payload.repo}\nTarget commit: ${payload.targetSha}\n` +
+      `Base: ${payload.expectedBaseBranch} @ ${payload.expectedBaseHeadSha}\nRevert branch: ${payload.revertBranch}`,
+    summary:
+      `Open a revert pull request in ${payload.repo} for commit ${payload.targetSha.slice(0, 7)} — a NEW branch ` +
+      `"${payload.revertBranch}" into ${payload.expectedBaseBranch} (default branch never written). Refused if the base ` +
+      `head has moved, the target is unreachable, or the change conflicts with later edits.`,
+  });
+  const preview = out.preview as { revertCommitSha?: unknown } | null;
+  return {
+    approvalId: out.approvalId,
+    attempted: out.attempted,
+    outcome: out.outcome,
+    message: out.message,
+    prUrl: out.prUrl,
+    revertCommitSha: preview && typeof preview.revertCommitSha === 'string' ? preview.revertCommitSha : null,
   };
 }

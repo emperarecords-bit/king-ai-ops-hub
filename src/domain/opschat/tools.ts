@@ -17,12 +17,14 @@ import {
   listWorkspacePullRequests,
   getWorkspacePullRequest,
   getWorkspaceWorkflowRun,
+  getWorkspaceCommit,
   RepoNotLinkedError,
 } from '@/domain/github/inspection';
 import {
   createPrPayloadSchema,
   mergePrPayloadSchema,
   rerunFailedWorkflowPayloadSchema,
+  revertCommitPayloadSchema,
   findGitPrPlaceholder,
 } from '@/domain/execution/git-pr-executor';
 import { EXECUTOR_RISK_BY_ACTION } from '@/domain/execution/executor-policy';
@@ -133,6 +135,17 @@ export type OpsChatProposal =
       readonly riskClass: string;
     }
   | {
+      readonly kind: 'github_revert';
+      readonly projectKey: string;
+      readonly workspaceName: string;
+      readonly repo: string;
+      readonly targetSha: string;
+      readonly expectedBaseBranch: string;
+      readonly expectedBaseHeadSha: string;
+      readonly revertBranch: string;
+      readonly riskClass: string;
+    }
+  | {
       readonly kind: 'supabase_deploy';
       readonly projectKey: string;
       readonly workspaceName: string;
@@ -178,6 +191,8 @@ function proposalKey(p: OpsChatProposal): string {
       return `ghm:${p.projectKey}:${p.repo}:${p.prNumber}`;
     case 'github_rerun':
       return `ghr:${p.projectKey}:${p.repo}:${p.runId}`;
+    case 'github_revert':
+      return `ghv:${p.projectKey}:${p.repo}:${p.targetSha}`;
     case 'supabase_deploy':
       return `sbd:${p.projectKey}:${p.projectRef}:${p.functionSlug}:${p.sourceSha}`;
     case 'vercel_mutation':
@@ -519,6 +534,37 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
         expected_run_attempt: { type: 'number', description: 'The run attempt number you inspected; a stale attempt is refused.' },
       },
       required: ['project', 'repo', 'run_id', 'expected_head_sha', 'expected_run_attempt'],
+    },
+  },
+  {
+    name: 'propose_github_revert',
+    description:
+      'Prepare to REVERT a merged change on a linked repo FOR THE OWNER TO CONFIRM. Does NOT change anything — it surfaces a confirmation card. Use this to undo a landed commit (e.g. a merged release PR): the governed executor builds the EXACT inverse of that one commit as a NEW work branch and opens a pull request back into the base branch — it NEVER writes the default branch directly. Read the base branch and the target first with get_commit (and get_pull_request for a merged PR, whose merge commit SHA is the target). Provide: the exact target commit SHA; the base branch and its CURRENT head SHA (a moved head is refused); and a new revert branch name. The executor refuses if the target is not an ancestor of the base, if the revert conflicts with later changes (no 3-way merge), if it is already reverted, or if the commit touches non-file entries (e.g. submodules).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        repo: { type: 'string', description: 'Canonical owner/repo; must be linked to this workspace.' },
+        target_sha: { type: 'string', description: 'The exact commit SHA to revert (for a merged PR, its merge commit SHA).' },
+        expected_base_branch: { type: 'string', description: 'The branch the revert PR targets (e.g. main).' },
+        expected_base_head_sha: { type: 'string', description: "The base branch's CURRENT head SHA; a moved head is refused (stale)." },
+        revert_branch: { type: 'string', description: 'A NEW work branch for the revert (never the default branch).' },
+      },
+      required: ['project', 'repo', 'target_sha', 'expected_base_branch', 'expected_base_head_sha', 'revert_branch'],
+    },
+  },
+  {
+    name: 'get_commit',
+    description:
+      'Get one commit on a linked repository by SHA or branch name — its resolved SHA, subject, tree SHA, and parent SHAs. Read-only. Use this to read the CURRENT head SHA of a base branch (pass the branch name) and to inspect a target commit before proposing a revert.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        repo: { type: 'string', description: 'Canonical owner/repo; must be linked to this workspace.' },
+        ref: { type: 'string', description: 'A commit SHA or a branch name to resolve.' },
+      },
+      required: ['project', 'repo', 'ref'],
     },
   },
   {
@@ -1177,6 +1223,66 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
         return JSON.stringify({
           prepared: true,
           note: `Prepared for the owner to confirm: re-run the failed jobs of run ${parsed.data.runId} in ${parsed.data.repo}. Tell the owner it is ready to confirm below. Do NOT claim it is rerun yet.`,
+        });
+      }
+      case 'get_commit': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        const repo = argStr(input, 'repo');
+        const ref = argStr(input, 'ref');
+        if (!ref) return JSON.stringify({ error: 'A commit SHA or branch name is required.' });
+        const ctx = ctxFor(auth, p);
+        try {
+          const commit = await withTenant(ctx, (tx) => getWorkspaceCommit(tx, ctx, getGitHubClient(), repo, ref));
+          return JSON.stringify({ workspace: p.name, repo, commit });
+        } catch (err) {
+          if (err instanceof RepoNotLinkedError) return JSON.stringify({ error: err.message });
+          return JSON.stringify({ error: 'Could not read that commit from GitHub.' });
+        }
+      }
+      case 'propose_github_revert': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        if (p.projectRole !== 'admin') {
+          return JSON.stringify({ error: 'You must be an admin of that workspace to propose a GitHub action.' });
+        }
+        const repo = argStr(input, 'repo');
+        const targetSha = argStr(input, 'target_sha');
+        const expectedBaseBranch = argStr(input, 'expected_base_branch');
+        const expectedBaseHeadSha = argStr(input, 'expected_base_head_sha');
+        const revertBranch = argStr(input, 'revert_branch');
+        const ctx = ctxFor(auth, p);
+        const link = await withTenant(ctx, (tx) => listRepoLinks(tx, ctx)).then((ls) => ls.find((l) => l.repoFullName === repo) ?? null);
+        if (!link) return JSON.stringify({ error: `Repository "${repo}" is not linked to this workspace. Use list_github_repos.` });
+        const parsed = revertCommitPayloadSchema.safeParse({
+          operation: 'revert_commit',
+          repo,
+          targetSha,
+          expectedBaseBranch,
+          expectedBaseHeadSha,
+          revertBranch,
+        });
+        if (!parsed.success) {
+          const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+          return JSON.stringify({ error: `That revert is not valid: ${issues}` });
+        }
+        if (revertBranch === link.defaultBranch || revertBranch === 'main' || revertBranch === 'master') {
+          return JSON.stringify({ error: `"${revertBranch}" is a default/protected branch — the revert must land on a NEW work branch; the PR targets "${parsed.data.expectedBaseBranch}".` });
+        }
+        addProposal({
+          kind: 'github_revert',
+          projectKey: p.key,
+          workspaceName: p.name,
+          repo: parsed.data.repo,
+          targetSha: parsed.data.targetSha,
+          expectedBaseBranch: parsed.data.expectedBaseBranch,
+          expectedBaseHeadSha: parsed.data.expectedBaseHeadSha,
+          revertBranch: parsed.data.revertBranch,
+          riskClass: EXECUTOR_RISK_BY_ACTION.git_pr,
+        });
+        return JSON.stringify({
+          prepared: true,
+          note: `Prepared for the owner to confirm: a revert pull request in ${parsed.data.repo} for commit ${parsed.data.targetSha.slice(0, 7)} on branch ${parsed.data.revertBranch} into ${parsed.data.expectedBaseBranch}. Tell the owner it is ready to confirm below. Do NOT claim it is reverted yet.`,
         });
       }
       case 'supabase_capabilities': {

@@ -162,4 +162,81 @@ describe('live client writes — policy gate BEFORE any mutating request', () =>
     ).rejects.toBeInstanceOf(ForbiddenError);
     expect(calls.filter((c) => c.url.endsWith('/pulls'))).toHaveLength(0);
   });
+
+  it('createRefAtSha to a work branch: policy consulted, then POSTs refs/heads/<branch> at the exact sha', async () => {
+    const { impl, calls } = fakeFetch([
+      tokenRoute,
+      repoInfoRoute('main'),
+      { match: (m, u) => m === 'POST' && u.endsWith('/git/refs'), status: 201, body: {} },
+    ]);
+    await client(impl).createRefAtSha(REPO, 'hub/revert-abcdef', 'f'.repeat(40));
+    const mutating = calls.filter((c) => c.method !== 'GET' && !c.url.includes('/access_tokens'));
+    expect(mutating).toHaveLength(1);
+    expect(mutating[0]!.url).toContain('/git/refs');
+    expect(JSON.parse(mutating[0]!.body!)).toEqual({ ref: 'refs/heads/hub/revert-abcdef', sha: 'f'.repeat(40) });
+  });
+
+  it('createRefAtSha onto the REAL default branch is refused with ZERO mutating requests', async () => {
+    const { impl, calls } = fakeFetch([tokenRoute, repoInfoRoute('develop')]);
+    await expect(client(impl).createRefAtSha(REPO, 'develop', 'f'.repeat(40))).rejects.toBeInstanceOf(ForbiddenError);
+    expect(calls.filter((c) => c.method === 'POST' && c.url.endsWith('/git/refs'))).toHaveLength(0);
+  });
+});
+
+describe('live client Git Data API reads (revert support)', () => {
+  it('getCommit resolves a ref to sha, first-line subject, tree sha, and parent shas', async () => {
+    const { impl } = fakeFetch([
+      tokenRoute,
+      {
+        match: (m, u) => m === 'GET' && u.includes('/commits/main'),
+        status: 200,
+        body: { sha: 'e'.repeat(40), commit: { message: 'Merge PR #1\n\nbody line', tree: { sha: 'tree-e' } }, parents: [{ sha: 'd'.repeat(40) }] },
+      },
+    ]);
+    const c = await client(impl).getCommit(REPO, 'main');
+    expect(c).toEqual({ sha: 'e'.repeat(40), subject: 'Merge PR #1', treeSha: 'tree-e', parents: ['d'.repeat(40)] });
+  });
+
+  it('getFlatTree carries mode/type/sha identity and surfaces the truncated flag', async () => {
+    const { impl } = fakeFetch([
+      tokenRoute,
+      {
+        match: (m, u) => m === 'GET' && u.includes('/git/trees/tree-e'),
+        status: 200,
+        body: { truncated: true, tree: [{ path: 'a', mode: '100755', type: 'blob', sha: 'A1' }, { path: 'd', mode: '040000', type: 'tree', sha: 'T' }] },
+      },
+    ]);
+    const t = await client(impl).getFlatTree(REPO, 'tree-e');
+    expect(t.truncated).toBe(true);
+    expect(t.entries).toEqual([
+      { path: 'a', mode: '100755', type: 'blob', sha: 'A1' },
+      { path: 'd', mode: '040000', type: 'tree', sha: 'T' },
+    ]);
+  });
+
+  it('compareCommits returns the ahead/behind status (ancestry proof)', async () => {
+    const { impl } = fakeFetch([
+      tokenRoute,
+      { match: (m, u) => m === 'GET' && u.includes('/compare/'), status: 200, body: { status: 'ahead', ahead_by: 3, behind_by: 0 } },
+    ]);
+    expect(await client(impl).compareCommits(REPO, 'd'.repeat(40), 'e'.repeat(40))).toEqual({ status: 'ahead', aheadBy: 3, behindBy: 0 });
+  });
+
+  it('createTree (object mint, no policy gate) posts base_tree + overrides and createCommit posts one parent', async () => {
+    const { impl, calls } = fakeFetch([
+      tokenRoute,
+      { match: (m, u) => m === 'POST' && u.endsWith('/git/trees'), status: 201, body: { sha: 'tree-new' } },
+      { match: (m, u) => m === 'POST' && u.endsWith('/git/commits'), status: 201, body: { sha: 'commit-new' } },
+    ]);
+    const c = client(impl);
+    const tree = await c.createTree(REPO, 'tree-base', [{ path: 'fileA', mode: '100644', type: 'blob', sha: 'A1' }, { path: 'gone', mode: '100644', type: 'blob', sha: null }]);
+    expect(tree.treeSha).toBe('tree-new');
+    expect(JSON.parse(calls.find((x) => x.url.endsWith('/git/trees'))!.body!)).toEqual({
+      base_tree: 'tree-base',
+      tree: [{ path: 'fileA', mode: '100644', type: 'blob', sha: 'A1' }, { path: 'gone', mode: '100644', type: 'blob', sha: null }],
+    });
+    const commit = await c.createCommit(REPO, { message: 'Revert d: x', treeSha: 'tree-new', parentSha: 'e'.repeat(40) });
+    expect(commit.commitSha).toBe('commit-new');
+    expect(JSON.parse(calls.find((x) => x.url.endsWith('/git/commits'))!.body!)).toEqual({ message: 'Revert d: x', tree: 'tree-new', parents: ['e'.repeat(40)] });
+  });
 });

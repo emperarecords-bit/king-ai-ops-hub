@@ -16,6 +16,7 @@ import {
   executeGitHubPrFromOpsChat,
   executeGitHubMergeFromOpsChat,
   executeGitHubRerunFromOpsChat,
+  executeGitHubRevertFromOpsChat,
 } from '@/domain/opschat/github-action';
 import { executeSupabaseDeployFromOpsChat } from '@/domain/opschat/supabase-action';
 import { executeVercelMutationFromOpsChat, type OpsChatVercelMutationInput } from '@/domain/opschat/vercel-action';
@@ -98,6 +99,15 @@ const Body = z.discriminatedUnion('action', [
     runId: z.number().int().positive(),
     expectedHeadSha: z.string().trim().regex(/^[0-9a-fA-F]{7,40}$/),
     expectedRunAttempt: z.number().int().positive(),
+  }),
+  z.object({
+    action: z.literal('execute_github_revert'),
+    projectKey: z.string().min(1),
+    repo: z.string().trim().min(1).max(200),
+    targetSha: z.string().trim().regex(/^[0-9a-fA-F]{7,40}$/),
+    expectedBaseBranch: z.string().trim().min(1).max(200),
+    expectedBaseHeadSha: z.string().trim().regex(/^[0-9a-fA-F]{7,40}$/),
+    revertBranch: z.string().trim().min(1).max(200),
   }),
   z.object({
     action: z.literal('execute_supabase_deploy'),
@@ -257,6 +267,20 @@ export async function POST(req: Request): Promise<Response> {
           runId: body.runId,
           expectedHeadSha: body.expectedHeadSha,
           expectedRunAttempt: body.expectedRunAttempt,
+        });
+        return Response.json({ ok: true, executed });
+      }
+      case 'execute_github_revert': {
+        // Same governed path as the other GitHub operations: admin here (defense-in-depth), then payload integrity,
+        // executor enablement, a fresh payload-bound confirmation, and idempotency before any GitHub write. The
+        // executor never writes the default branch — it opens a revert PR from a new work branch.
+        requireAdmin(ctx.projectRole);
+        const executed = await executeGitHubRevertFromOpsChat(ctx, {
+          repo: body.repo,
+          targetSha: body.targetSha,
+          expectedBaseBranch: body.expectedBaseBranch,
+          expectedBaseHeadSha: body.expectedBaseHeadSha,
+          revertBranch: body.revertBranch,
         });
         return Response.json({ ok: true, executed });
       }

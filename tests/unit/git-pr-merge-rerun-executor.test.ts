@@ -59,6 +59,12 @@ function build(opts: BuildOpts = {}) {
     mergePullRequest: async (...a: unknown[]) => { calls.push('mergePullRequest'); mergeArgs.push(a[1]); if (opts.mergeError) throw opts.mergeError; didMerge = true; return opts.mergeResult ?? { merged: true, mergeCommitSha: MERGE_SHA }; },
     getWorkflowRun: async () => { calls.push('getWorkflowRun'); if (opts.getRunError) throw opts.getRunError; getRunCount += 1; return getRunCount >= 2 && opts.afterRun ? { ...run, ...opts.afterRun } : run; },
     rerunFailedWorkflowJobs: async () => { calls.push('rerunFailedWorkflowJobs'); if (opts.rerunError) throw opts.rerunError; },
+    getCommit: async () => { throw new Error('not used'); },
+    compareCommits: async () => { throw new Error('not used'); },
+    getFlatTree: async () => { throw new Error('not used'); },
+    createTree: async () => { throw new Error('not used'); },
+    createCommit: async () => { throw new Error('not used'); },
+    createRefAtSha: async () => { throw new Error('not used'); },
   } as GitHubRepoClient;
   return { client, calls, mergeArgs };
 }

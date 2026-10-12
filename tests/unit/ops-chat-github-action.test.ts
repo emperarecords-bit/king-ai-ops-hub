@@ -30,6 +30,7 @@ import {
   executeGitHubPrFromOpsChat,
   executeGitHubMergeFromOpsChat,
   executeGitHubRerunFromOpsChat,
+  executeGitHubRevertFromOpsChat,
 } from '@/domain/opschat/github-action';
 
 const CTX = { userId: 'u1', orgId: 'o1', projectId: 'p1', orgRole: 'owner' as const, projectRole: 'admin' as const };
@@ -175,7 +176,42 @@ describe('executeGitHubRerunFromOpsChat — governed path only', () => {
   });
 });
 
-// The anchor-agent selector is shared by all three GitHub confirm functions; exercised here via the PR path.
+const REVERT_INPUT = { repo: LINK.repoFullName, targetSha: 'd'.repeat(40), expectedBaseBranch: 'main', expectedBaseHeadSha: 'e'.repeat(40), revertBranch: 'hub/revert-dddddd' };
+
+describe('executeGitHubRevertFromOpsChat — governed path only', () => {
+  it('inserts a git_pr approval carrying operation=revert_commit, decides(admin), executes, returns the revert commit SHA', async () => {
+    h.executeApprovedIfEligible.mockResolvedValue({
+      attempted: true, outcome: 'succeeded', message: 'Opened revert pull request #8.', prUrl: 'https://github.com/x/pull/8',
+      preview: { operation: 'revert_commit', prNumber: 8, prUrl: 'https://github.com/x/pull/8', revertCommitSha: 'f'.repeat(40), originalTargetSha: 'd'.repeat(40) },
+    });
+    const r = await executeGitHubRevertFromOpsChat(CTX, REVERT_INPUT);
+    const approvalRow = h.insertedApproval.mock.calls[0]![0] as { actionType: string; payload: { operation: string; targetSha: string } };
+    expect(approvalRow.actionType).toBe('git_pr');
+    expect(approvalRow.payload.operation).toBe('revert_commit');
+    expect(approvalRow.payload.targetSha).toBe('d'.repeat(40));
+    expect(h.decideApproval).toHaveBeenCalledWith(fakeTx, CTX, 'a-123', 'approved', expect.any(String));
+    expect(h.executeApprovedIfEligible).toHaveBeenCalledWith(CTX, 'a-123');
+    expect(h.decideApproval.mock.invocationCallOrder[0]!).toBeLessThan(h.executeApprovedIfEligible.mock.invocationCallOrder[0]!);
+    expect(r.outcome).toBe('succeeded');
+    expect(r.prUrl).toBe('https://github.com/x/pull/8');
+    expect(r.revertCommitSha).toBe('f'.repeat(40));
+  });
+
+  it('an unlinked repo is refused — no approval, no execution', async () => {
+    h.listRepoLinks.mockResolvedValue([]);
+    await expect(executeGitHubRevertFromOpsChat(CTX, REVERT_INPUT)).rejects.toThrow(/not linked/i);
+    expect(h.insertedApproval).not.toHaveBeenCalled();
+    expect(h.executeApprovedIfEligible).not.toHaveBeenCalled();
+  });
+
+  it('a bad target SHA throws before any approval/execution', async () => {
+    await expect(executeGitHubRevertFromOpsChat(CTX, { ...REVERT_INPUT, targetSha: 'nope' })).rejects.toThrow();
+    expect(h.insertedApproval).not.toHaveBeenCalled();
+    expect(h.executeApprovedIfEligible).not.toHaveBeenCalled();
+  });
+});
+
+// The anchor-agent selector is shared by all GitHub confirm functions; exercised here via the PR path.
 describe('GitHub bridge — anchors on an enabled PRIMARY employee', () => {
   it('skips a reviewer that sorts first and anchors the approval on the enabled primary', async () => {
     h.listAgents.mockResolvedValue([

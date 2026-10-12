@@ -25,6 +25,53 @@ export interface RepoTreeEntry {
   readonly size: number | null;
 }
 
+/**
+ * A single commit's safe summary (Git Data API) — used by the governed revert to read a commit's first parent
+ * (the revert baseline), its tree, and its subject. `ref` may be a SHA or a branch name; GitHub resolves it and
+ * `sha` is the resolved commit. No secrets.
+ */
+export interface RepoCommitSummary {
+  readonly sha: string;
+  /** First line of the commit message (UNTRUSTED repo content; carried only into a revert message/PR body). */
+  readonly subject: string;
+  /** The commit's tree SHA. */
+  readonly treeSha: string;
+  /** Parent commit SHAs in order; `parents[0]` is the first-parent / mainline. */
+  readonly parents: readonly string[];
+}
+
+/** One recursive tree entry with FULL identity — path + object SHA + mode + type. Reads carry a non-null sha. */
+export interface RepoFullTreeEntry {
+  readonly path: string;
+  /** Git file mode, e.g. '100644' (file), '100755' (exec), '120000' (symlink), '160000' (submodule), '040000' (dir). */
+  readonly mode: string;
+  readonly type: 'blob' | 'tree' | 'commit';
+  readonly sha: string;
+}
+
+/** The full recursive tree plus GitHub's `truncated` flag — a truncated tree is unusable for an exact diff. */
+export interface RepoFlatTree {
+  readonly entries: readonly RepoFullTreeEntry[];
+  /** GitHub returns `truncated: true` when the tree exceeds its response cap; the diff then cannot be trusted. */
+  readonly truncated: boolean;
+}
+
+/** `git compare` status between two commits — used to prove the revert target is an ancestor of the base head. */
+export interface RepoCompareResult {
+  readonly status: 'ahead' | 'behind' | 'identical' | 'diverged' | 'unknown';
+  readonly aheadBy: number;
+  readonly behindBy: number;
+}
+
+/** One tree override for `createTree`: restore a path to a blob (sha set) or delete it (sha null). */
+export interface RepoTreeOverride {
+  readonly path: string;
+  readonly mode: string;
+  readonly type: 'blob';
+  /** The blob SHA to restore, or null to delete the path from the base tree. */
+  readonly sha: string | null;
+}
+
 /** A pull request's safe, UNTRUSTED summary — carries no secrets (title/body are repo content). */
 export interface PullRequestSummary {
   readonly number: number;
@@ -102,6 +149,25 @@ export interface GitHubRepoClient {
    * never workflow_dispatch. No repo-content side effect; it starts a fresh CI attempt of the same run.
    */
   rerunFailedWorkflowJobs(repo: RepoRef, runId: number): Promise<void>;
+
+  // --- Git Data API (Phase 2E revert_commit) -------------------------------
+  // Read primitives + the three object/ref writes a governed revert needs to construct an exact inverse commit
+  // WITHOUT a local clone and WITHOUT ever writing the default branch (the ref write is policy-gated to a work
+  // branch, same as createBranch). createTree/createCommit only mint content-addressed objects (no visible
+  // side effect until a ref points at them); createRefAtSha is the first visible side effect.
+
+  /** Read one commit (resolving a SHA or branch name) — its first-parent baseline, tree, and subject. Read-only. */
+  getCommit(repo: RepoRef, ref: string): Promise<RepoCommitSummary>;
+  /** `git compare base...head` — proves ancestry (target is an ancestor of the base head). Read-only. */
+  compareCommits(repo: RepoRef, base: string, head: string): Promise<RepoCompareResult>;
+  /** The full recursive tree at a tree SHA, with GitHub's truncated flag. Read-only. */
+  getFlatTree(repo: RepoRef, treeSha: string): Promise<RepoFlatTree>;
+  /** Create a new tree from a base tree plus overrides (restore/delete paths). Mints an object; no ref moves. */
+  createTree(repo: RepoRef, baseTreeSha: string, overrides: ReadonlyArray<RepoTreeOverride>): Promise<{ treeSha: string }>;
+  /** Create a commit object with one parent. Mints an object; no ref moves. */
+  createCommit(repo: RepoRef, args: { message: string; treeSha: string; parentSha: string }): Promise<{ commitSha: string }>;
+  /** Create a NEW ref (work branch) at an exact commit SHA. Policy-gated: never the default branch. First visible side effect. */
+  createRefAtSha(repo: RepoRef, newBranch: string, sha: string): Promise<void>;
 }
 
 /** Thrown for every operation while the owner-gated GitHub App credentials are absent. */
@@ -147,6 +213,24 @@ class UnconfiguredGitHubClient implements GitHubRepoClient {
     return Promise.reject(new GitHubUnconfiguredError());
   }
   rerunFailedWorkflowJobs(): Promise<void> {
+    return Promise.reject(new GitHubUnconfiguredError());
+  }
+  getCommit(): Promise<RepoCommitSummary> {
+    return Promise.reject(new GitHubUnconfiguredError());
+  }
+  compareCommits(): Promise<RepoCompareResult> {
+    return Promise.reject(new GitHubUnconfiguredError());
+  }
+  getFlatTree(): Promise<RepoFlatTree> {
+    return Promise.reject(new GitHubUnconfiguredError());
+  }
+  createTree(): Promise<{ treeSha: string }> {
+    return Promise.reject(new GitHubUnconfiguredError());
+  }
+  createCommit(): Promise<{ commitSha: string }> {
+    return Promise.reject(new GitHubUnconfiguredError());
+  }
+  createRefAtSha(): Promise<void> {
     return Promise.reject(new GitHubUnconfiguredError());
   }
 }

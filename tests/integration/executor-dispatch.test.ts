@@ -115,6 +115,12 @@ describe.skipIf(!available)('trusted executor dispatch', { timeout: 15_000 }, ()
       createBranch: async () => { calls.push('createBranch'); },
       commitToBranch: async () => { calls.push('commitToBranch'); },
       openPullRequest: async () => { calls.push('openPullRequest'); return { prNumber: 7 }; },
+      getCommit: async () => { throw new Error('not used'); },
+      compareCommits: async () => { throw new Error('not used'); },
+      getFlatTree: async () => { throw new Error('not used'); },
+      createTree: async () => { throw new Error('not used'); },
+      createCommit: async () => { throw new Error('not used'); },
+      createRefAtSha: async () => { throw new Error('not used'); },
     } as GitHubRepoClient);
     try {
       const first = await executeApprovedIfEligible(ctx, approval!.id, { enabledExecutorIds: ['git_pr'] });
@@ -165,6 +171,12 @@ describe.skipIf(!available)('trusted executor dispatch', { timeout: 15_000 }, ()
       mergePullRequest: async () => { mergeCalls.push('merge'); merged = true; return { merged: true, mergeCommitSha: 'c'.repeat(40) }; },
       getWorkflowRun: async () => ({ id: 0, headSha: '', runAttempt: 1, status: 'completed', conclusion: 'failure', url: '', name: '' }),
       rerunFailedWorkflowJobs: async () => {},
+      getCommit: async () => { throw new Error('not used'); },
+      compareCommits: async () => { throw new Error('not used'); },
+      getFlatTree: async () => { throw new Error('not used'); },
+      createTree: async () => { throw new Error('not used'); },
+      createCommit: async () => { throw new Error('not used'); },
+      createRefAtSha: async () => { throw new Error('not used'); },
     } as GitHubRepoClient);
     try {
       const first = await executeApprovedIfEligible(ctx, approval!.id, { enabledExecutorIds: ['git_pr'] });

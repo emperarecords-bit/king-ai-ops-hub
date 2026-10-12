@@ -59,6 +59,17 @@ type Proposal =
       riskClass: string;
     }
   | {
+      kind: 'github_revert';
+      projectKey: string;
+      workspaceName: string;
+      repo: string;
+      targetSha: string;
+      expectedBaseBranch: string;
+      expectedBaseHeadSha: string;
+      revertBranch: string;
+      riskClass: string;
+    }
+  | {
       kind: 'supabase_deploy';
       projectKey: string;
       workspaceName: string;
@@ -95,6 +106,7 @@ interface ProposalItem {
     message?: string | null;
     prUrl?: string | null;
     mergeCommitSha?: string | null;
+    revertCommitSha?: string | null;
     runId?: number | null;
     attempt?: number | null;
     runState?: string | null;
@@ -174,9 +186,11 @@ const TOOL_LABEL: Record<string, string> = {
   list_pull_requests: 'reading pull requests',
   get_pull_request: 'reading the pull request & CI',
   get_workflow_run: 'reading the workflow run',
+  get_commit: 'reading the commit',
   propose_github_pr: 'preparing the pull request',
   propose_github_merge: 'preparing the merge',
   propose_github_rerun: 'preparing the re-run',
+  propose_github_revert: 'preparing the revert',
   supabase_capabilities: 'checking Supabase capabilities',
   list_supabase_projects: 'listing linked Supabase projects',
   inspect_supabase_project: 'reading the Supabase project',
@@ -221,6 +235,8 @@ function doneLabel(p: Proposal): string {
       return `✓ Merge requested for PR #${p.prNumber} in ${p.repo}.`;
     case 'github_rerun':
       return `✓ Re-run requested for run ${p.runId} in ${p.repo}.`;
+    case 'github_revert':
+      return `✓ Revert pull request requested for ${p.targetSha.slice(0, 7)} in ${p.repo}.`;
     case 'supabase_deploy':
       return `✓ Deploy requested for "${p.functionSlug}" in project ${p.projectRef}.`;
     case 'vercel_mutation':
@@ -243,6 +259,8 @@ function headerLabel(p: Proposal): string {
       return `Confirm — merge PR #${p.prNumber} in ${p.repo}`;
     case 'github_rerun':
       return `Confirm — re-run failed jobs of run ${p.runId} in ${p.repo}`;
+    case 'github_revert':
+      return `Confirm — revert merged change ${p.targetSha.slice(0, 7)} in ${p.repo}`;
     case 'supabase_deploy':
       return `Confirm — deploy "${p.functionSlug}" to project ${p.projectRef}`;
     case 'vercel_mutation':
@@ -267,6 +285,8 @@ function confirmLabel(p: Proposal): string {
       return 'Confirm & merge';
     case 'github_rerun':
       return 'Confirm & re-run';
+    case 'github_revert':
+      return 'Confirm & open revert PR';
     case 'supabase_deploy':
       return 'Confirm & deploy';
     case 'vercel_mutation':
@@ -324,6 +344,16 @@ function confirmBody(p: Proposal): Record<string, unknown> {
         runId: p.runId,
         expectedHeadSha: p.expectedHeadSha,
         expectedRunAttempt: p.expectedRunAttempt,
+      };
+    case 'github_revert':
+      return {
+        action: 'execute_github_revert',
+        projectKey: p.projectKey,
+        repo: p.repo,
+        targetSha: p.targetSha,
+        expectedBaseBranch: p.expectedBaseBranch,
+        expectedBaseHeadSha: p.expectedBaseHeadSha,
+        revertBranch: p.revertBranch,
       };
     case 'supabase_deploy':
       return {
@@ -555,6 +585,7 @@ export function OpsChatClient({ opening }: { opening: string }) {
             message?: string | null;
             prUrl?: string | null;
             mergeCommitSha?: string | null;
+            revertCommitSha?: string | null;
             runId?: number | null;
             attempt?: number | null;
             state?: string | null;
@@ -572,6 +603,7 @@ export function OpsChatClient({ opening }: { opening: string }) {
         item.proposal.kind === 'github_pr' ||
         item.proposal.kind === 'github_merge' ||
         item.proposal.kind === 'github_rerun' ||
+        item.proposal.kind === 'github_revert' ||
         item.proposal.kind === 'supabase_deploy' ||
         item.proposal.kind === 'vercel_mutation';
       if (isGovernedMutation && executed && executed.outcome !== 'succeeded') {
@@ -586,6 +618,7 @@ export function OpsChatClient({ opening }: { opening: string }) {
               message: executed.message,
               prUrl: executed.prUrl ?? null,
               mergeCommitSha: executed.mergeCommitSha ?? null,
+              revertCommitSha: executed.revertCommitSha ?? null,
               runId: executed.runId ?? null,
               attempt: executed.attempt ?? null,
               runState: executed.state ?? null,
@@ -803,6 +836,18 @@ export function OpsChatClient({ opening }: { opening: string }) {
                               {item.result?.runState ? ` · ${item.result.runState}` : ''}
                             </span>
                           </div>
+                        ) : p.kind === 'github_revert' ? (
+                          <div className="flex flex-col gap-0.5 text-xs text-[var(--muted)]">
+                            {item.result?.prUrl ? (
+                              <a href={item.result.prUrl} target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] underline underline-offset-2 break-all">
+                                {item.result.prUrl}
+                              </a>
+                            ) : null}
+                            <span>Reverts <span className="font-mono">{p.targetSha.slice(0, 10)}</span> → <span className="font-mono">{p.expectedBaseBranch}</span></span>
+                            {item.result?.revertCommitSha ? (
+                              <span>Revert commit: <span className="font-mono">{item.result.revertCommitSha.slice(0, 10)}</span></span>
+                            ) : null}
+                          </div>
                         ) : p.kind === 'supabase_deploy' ? (
                           <div className="flex flex-col gap-0.5 text-xs text-[var(--muted)]">
                             <span>
@@ -892,6 +937,16 @@ export function OpsChatClient({ opening }: { opening: string }) {
                             </p>
                             <p className="mt-1 text-xs text-[var(--muted)]">
                               Risk: {p.riskClass.replace(/_/g, ' ')} · Side effect: starts a fresh CI attempt of the run&apos;s failed jobs (no repo-content change; refused unless the run is completed + failed). Rollback: re-running is idempotent — nothing to undo. Recovery: a server error mid-request is marked ambiguous for reconciliation, never auto-retried.
+                            </p>
+                          </div>
+                        ) : p.kind === 'github_revert' ? (
+                          <div className="mt-1 flex flex-col gap-0.5 text-sm">
+                            <p className="font-semibold">Revert merged change {p.targetSha.slice(0, 7)}</p>
+                            <p className="text-xs text-[var(--muted)]">
+                              {p.repo} · reverts <span className="font-mono">{p.targetSha.slice(0, 7)}</span> · new branch <span className="font-mono">{p.revertBranch}</span> → <span className="font-mono">{p.expectedBaseBranch}</span> @ <span className="font-mono">{p.expectedBaseHeadSha.slice(0, 7)}</span>
+                            </p>
+                            <p className="mt-1 text-xs text-[var(--muted)]">
+                              Risk: {p.riskClass.replace(/_/g, ' ')} · Side effect: opens a pull request that applies the exact inverse of {p.targetSha.slice(0, 7)} on a NEW branch — the default branch is never written (no merge). Refused if the base head moved, the target is unreachable, the change conflicts with later edits (no 3-way merge), it is already reverted, or it touches non-file entries. Rollback: close the PR / delete the branch. Recovery: a branch-created-but-PR-failed outcome is marked ambiguous for reconciliation, never auto-retried.
                             </p>
                           </div>
                         ) : p.kind === 'supabase_deploy' ? (

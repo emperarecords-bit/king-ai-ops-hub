@@ -8,6 +8,7 @@ import {
   type PullRequestSummary,
   type RefCheckStatus,
   type RepoRef,
+  type RepoCommitSummary,
   type WorkflowRunSummary,
 } from './client';
 import { hasEligibleExecutor } from '@/domain/execution/executors';
@@ -130,4 +131,17 @@ export async function getWorkspaceWorkflowRun(
   const ref = await resolveLinkedRepoRef(tx, ctx, repoFullName);
   if (!ref) throw new RepoNotLinkedError(repoFullName);
   return client.getWorkflowRun(ref, runId);
+}
+
+/** One commit (by SHA or branch name) on a linked repo — used to read a base-branch head or inspect a revert target. */
+export async function getWorkspaceCommit(
+  tx: DbTx,
+  ctx: TenantContext,
+  client: GitHubRepoClient,
+  repoFullName: string,
+  ref: string,
+): Promise<RepoCommitSummary> {
+  const repoRef = await resolveLinkedRepoRef(tx, ctx, repoFullName);
+  if (!repoRef) throw new RepoNotLinkedError(repoFullName);
+  return client.getCommit(repoRef, ref);
 }
