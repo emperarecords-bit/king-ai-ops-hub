@@ -117,7 +117,16 @@ export class LiveVercelClient implements VercelClient, VercelMutationClient {
       body: JSON.stringify(body ?? {}),
     });
     if (!okStatuses.includes(res.status)) throw new VercelApiError(operation, res.status);
-    return res.json();
+    // promote/rollback succeed with 204 No Content (empty body). Treat a 204 — or an empty/unparseable body on
+    // any already-accepted status — as a successful no-content response rather than forcing JSON parsing, which
+    // throws "Unexpected end of JSON input" on an empty body and would be surfaced as a FALSE `ambiguous`.
+    // Responses that DO carry a body (e.g. redeploy's new-deployment JSON) are still parsed normally.
+    if (res.status === 204) return null;
+    try {
+      return await res.json();
+    } catch {
+      return null;
+    }
   }
 
   async getDeployment(ref: VercelProjectRef, deploymentId: string): Promise<VercelDeploymentState | null> {
