@@ -162,6 +162,15 @@ describe('getVercelMutationClient — fail closed + wire shape', () => {
     expect(out).toEqual({ deploymentId: 'dpl_new000000001', readyState: 'QUEUED' });
   });
 
+  it('redeploy does NOT swallow a malformed/empty JSON body on an accepted status — it throws (→ executor stays ambiguous)', async () => {
+    // redeploy requires a JSON body for the new deployment id; a truncated/empty body must surface, not become null.
+    const { fetchImpl } = mutationRecorder([{ status: 200, empty: true }]);
+    const client = new LiveVercelClient({ token: 'vt_test', fetchImpl });
+    await expect(
+      client.redeploy({ projectId: 'prj_abcd1234efgh5678', teamId: null }, { name: 'accuratebids', sourceDeploymentId: 'dpl_src000000001' }),
+    ).rejects.toThrow();
+  });
+
   it('redeploy POSTs /v13/deployments with name + source deploymentId and returns the new id', async () => {
     const { fetchImpl, calls } = mutationRecorder([{ status: 200, body: { id: 'dpl_new000000001', readyState: 'QUEUED' } }]);
     const client = new LiveVercelClient({ token: 'vt_test', fetchImpl });
