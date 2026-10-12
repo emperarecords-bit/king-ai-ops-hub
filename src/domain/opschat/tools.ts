@@ -1340,7 +1340,7 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           // exact cause (a 401 can be an invalid/expired token; a 403 can be another authorization restriction), so
           // state the likely diagnosis without over-claiming — the owner can then check the token/scope deliberately.
           if (err instanceof SupabaseApiError && (err.status === 401 || err.status === 403)) {
-            return JSON.stringify({ error: `Could not read migrations because Supabase authorization failed (HTTP ${err.status}). The configured token may be missing Database/migrations read scope, or otherwise may not have access to this project. (Other reads such as project info and edge functions were unaffected.)` });
+            return JSON.stringify({ error: `Could not read migrations because Supabase authorization failed (HTTP ${err.status}). The configured token may be missing Database/migrations read scope, or otherwise may not have access to this project. This error is specific to the migrations read and does not by itself establish whether other Supabase reads are available.` });
           }
           return JSON.stringify({ error: 'Could not read migrations from Supabase.' });
         }
