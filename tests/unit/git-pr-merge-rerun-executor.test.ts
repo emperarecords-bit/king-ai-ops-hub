@@ -60,6 +60,7 @@ function build(opts: BuildOpts = {}) {
     getWorkflowRun: async () => { calls.push('getWorkflowRun'); if (opts.getRunError) throw opts.getRunError; getRunCount += 1; return getRunCount >= 2 && opts.afterRun ? { ...run, ...opts.afterRun } : run; },
     rerunFailedWorkflowJobs: async () => { calls.push('rerunFailedWorkflowJobs'); if (opts.rerunError) throw opts.rerunError; },
     getCommit: async () => { throw new Error('not used'); },
+    branchHeadSha: async () => { throw new Error('not used'); },
     compareCommits: async () => { throw new Error('not used'); },
     getFlatTree: async () => { throw new Error('not used'); },
     createTree: async () => { throw new Error('not used'); },

@@ -57,6 +57,11 @@ interface BuildOpts {
   mainHead?: (n: number) => string;
   /** The PR's bound head SHA returned by getPullRequest (defaults to the revert commit). */
   prHeadSha?: string;
+  /** Pre-existing revert branch head SHA for the collision case (branchExists:true defaults to BASE_HEAD). */
+  branchExistsSha?: string;
+  /** branchHeadSha(revertBranch) result AFTER a create-ref attempt (422 reconciliation): a SHA, or null = absent. */
+  reconcileBranchSha?: string | null;
+  branchHeadShaError?: unknown;
   createTreeError?: unknown;
   createCommitError?: unknown;
   createRefError?: unknown;
@@ -75,6 +80,7 @@ function build(opts: BuildOpts = {}) {
   let createdTree: RepoTreeOverride[] | null = null;
   let committedParent: string | null = null;
   let createdRef: { branch: string; sha: string } | null = null;
+  let createRefAttempted = false;
   let mainCalls = 0;
 
   const T_BASELINE = 'tree-baseline';
@@ -114,8 +120,9 @@ function build(opts: BuildOpts = {}) {
       if (ref === REVERT_BRANCH) {
         // After the ref is created, the branch resolves to the revert commit (post-action verification path).
         if (createdRef) return commits[REVERT_COMMIT]!;
-        if (opts.branchExists) return commits[BASE_HEAD]!; // branch already exists → collision
-        throw new GitHubApiError('get commit', 404);
+        // REAL GitHub behavior: the commits endpoint returns 422 (not 404) for a non-existent ref. The executor
+        // MUST NOT use getCommit for branch existence — it uses branchHeadSha (refs endpoint) instead.
+        throw new GitHubApiError('get commit', 422);
       }
       if (ref === 'main' && opts.mainHead) {
         mainCalls += 1;
@@ -127,6 +134,19 @@ function build(opts: BuildOpts = {}) {
       if (!c) throw new GitHubApiError('get commit', 404);
       return c;
     },
+    branchHeadSha: async (_repo: RepoRef, branch: string) => {
+      calls.push(`branchHeadSha:${branch}`);
+      // branchHeadShaError models a provider read failure during the POST-422 reconciliation (after a create-ref
+      // attempt), leaving the pre-write existence check working so execution reaches the create.
+      if (opts.branchHeadShaError && createRefAttempted) throw opts.branchHeadShaError;
+      if (branch === REVERT_BRANCH) {
+        if (createdRef) return REVERT_COMMIT; // created by us → exists at the revert commit
+        if (createRefAttempted && opts.reconcileBranchSha !== undefined) return opts.reconcileBranchSha; // post-422 reconcile
+        if (opts.branchExists) return opts.branchExistsSha ?? BASE_HEAD; // pre-existing collision
+        return null; // absent (refs endpoint 404 → null)
+      }
+      return null;
+    },
     compareCommits: async () => { calls.push('compareCommits'); if (opts.compareError) throw opts.compareError; return opts.compare ?? { status: 'ahead', aheadBy: 1, behindBy: 0 }; },
     getFlatTree: async (_repo: RepoRef, treeSha: string) => {
       calls.push(`getFlatTree:${treeSha}`);
@@ -137,7 +157,7 @@ function build(opts: BuildOpts = {}) {
     },
     createTree: async (_repo: RepoRef, _baseTreeSha: string, overrides: ReadonlyArray<RepoTreeOverride>) => { calls.push('createTree'); if (opts.createTreeError) throw opts.createTreeError; createdTree = [...overrides]; return { treeSha: 'tree-revert' }; },
     createCommit: async (_repo: RepoRef, args: { parentSha: string }) => { calls.push('createCommit'); if (opts.createCommitError) throw opts.createCommitError; committedParent = args.parentSha; return { commitSha: REVERT_COMMIT }; },
-    createRefAtSha: async (_repo: RepoRef, branch: string, sha: string) => { calls.push('createRefAtSha'); if (opts.createRefError) throw opts.createRefError; createdRef = { branch, sha }; },
+    createRefAtSha: async (_repo: RepoRef, branch: string, sha: string) => { calls.push('createRefAtSha'); createRefAttempted = true; if (opts.createRefError) throw opts.createRefError; createdRef = { branch, sha }; },
   } as GitHubRepoClient;
 
   return { client, calls, getCreatedTree: () => createdTree, getCommittedParent: () => committedParent, getCreatedRef: () => createdRef };
@@ -302,6 +322,18 @@ describe('GitPrExecutor — revert_commit (BLOCK boundaries, no side effect)', (
     expect(result.message).toMatch(/already exists|reconcile/i);
     noMutations(calls);
   });
+
+  it('REGRESSION (canary): a missing revert branch (commits endpoint 422, refs endpoint 404) PROCEEDS — existence is checked via branchHeadSha, never getCommit', async () => {
+    // The fake's getCommit(revertBranch) throws 422 (real GitHub) when absent; branchHeadSha returns null (refs 404).
+    const { client, calls } = build();
+    const result = await executor(client).execute(action(revertPayload()));
+    expect(result.outcome).toBe('succeeded');
+    // The pre-write existence check used branchHeadSha (refs endpoint), and it ran before the first ref write.
+    expect(calls).toContain(`branchHeadSha:${REVERT_BRANCH}`);
+    expect(calls.indexOf(`branchHeadSha:${REVERT_BRANCH}`)).toBeLessThan(calls.indexOf('createRefAtSha'));
+    // getCommit was NOT used to test the revert branch's existence before the write (only after, for verification).
+    expect(calls.indexOf(`getCommit:${REVERT_BRANCH}`)).toBeGreaterThan(calls.indexOf('createRefAtSha'));
+  });
 });
 
 describe('GitPrExecutor — revert_commit (failure / ambiguity contract)', () => {
@@ -315,11 +347,48 @@ describe('GitPrExecutor — revert_commit (failure / ambiguity contract)', () =>
     expect(result.reconciliation).toBe('not_required');
   });
 
-  it('a 422 (ref already exists) during the create is a reconcile-first BLOCK', async () => {
-    const { client } = build({ createRefError: new GitHubApiError('create ref', 422) });
+  it('create-ref 422 + branch ABSENT on reconciliation → definite failed (provider validation), no retry', async () => {
+    // 422 from create-ref, and the refs reconciliation finds the branch still absent → the 422 was a real
+    // validation failure, not a collision. No side effect; never retried.
+    const { client, getCreatedRef } = build({ createRefError: new GitHubApiError('create ref', 422), reconcileBranchSha: null });
+    const ex = executor(client);
+    const act = action(revertPayload());
+    const result = validateExecutorResult(act, ex.capability, await ex.execute(act));
+    expect(result.outcome).toBe('failed');
+    expect(result.retryAllowed).toBe(false);
+    expect(result.reconciliation).toBe('not_required');
+    expect(result.message).toMatch(/422.*no branch|definite validation/i);
+    expect(getCreatedRef()).toBeNull();
+  });
+
+  it('create-ref 422 + branch EXISTS at the intended revert commit → ambiguous + reconcile (may have been our write)', async () => {
+    const { client } = build({ createRefError: new GitHubApiError('create ref', 422), reconcileBranchSha: REVERT_COMMIT });
+    const ex = executor(client);
+    const act = action(revertPayload());
+    const result = validateExecutorResult(act, ex.capability, await ex.execute(act));
+    expect(result.outcome).toBe('ambiguous');
+    expect(result.reconciliation).toBe('required');
+    expect(result.retryAllowed).toBe(false);
+    expect(result.message).toMatch(/intended revert commit|may have been created/i);
+  });
+
+  it('create-ref 422 + branch EXISTS at a DIFFERENT commit → collision blocked, never success', async () => {
+    const other = '9'.repeat(40);
+    const { client } = build({ createRefError: new GitHubApiError('create ref', 422), reconcileBranchSha: other });
     const result = await executor(client).execute(action(revertPayload()));
     expect(result.outcome).toBe('blocked');
-    expect(result.message).toMatch(/already exists|reconcile/i);
+    expect(result.outcome).not.toBe('succeeded');
+    expect(result.message).toMatch(/different commit|collision/i);
+  });
+
+  it('create-ref 422 + the reconciliation read itself fails → ambiguous + reconcile (state unknown)', async () => {
+    const { client } = build({ createRefError: new GitHubApiError('create ref', 422), branchHeadShaError: new GitHubApiError('get branch ref', 500) });
+    const ex = executor(client);
+    const act = action(revertPayload());
+    const result = validateExecutorResult(act, ex.capability, await ex.execute(act));
+    expect(result.outcome).toBe('ambiguous');
+    expect(result.reconciliation).toBe('required');
+    expect(result.retryAllowed).toBe(false);
   });
 
   it('a 5xx while creating the branch is AMBIGUOUS + reconciliation required + never auto-retried', async () => {

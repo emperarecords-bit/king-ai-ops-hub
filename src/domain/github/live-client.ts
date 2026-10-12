@@ -257,6 +257,29 @@ export class LiveGitHubClient implements GitHubRepoClient {
     return { sha, subject: message.split('\n', 1)[0] ?? '', treeSha, parents };
   }
 
+  async branchHeadSha(repo: RepoRef, branch: string): Promise<string | null> {
+    // Git Refs API (singular `/git/ref/heads/{branch}` = exact match or 404). Branch names may contain '/', which
+    // is a path separator in the ref, so each segment is encoded individually (never the whole value).
+    //
+    // Status-aware, fail-closed — absence is distinguished from a malformed response by the HTTP STATUS, never by
+    // the body shape: the request helper throws on any non-200, so ONLY a 404 is caught as "absent" (null). A 200
+    // whose body lacks a valid `object.sha` is an unexpected shape and THROWS (it must never read as absent and let
+    // a revert proceed on a branch that may exist); any other provider error propagates.
+    const seg = branch.split('/').map(encodeURIComponent).join('/');
+    let out: { object?: { sha?: unknown } };
+    try {
+      out = (await this.request(repo, 'get branch ref', 'GET', `/repos/${repo.repoFullName}/git/ref/heads/${seg}`)) as {
+        object?: { sha?: unknown };
+      };
+    } catch (err) {
+      if (err instanceof GitHubApiError && err.status === 404) return null; // branch absent
+      throw err; // any other provider error → fail-closed read
+    }
+    const sha = out?.object?.sha;
+    if (typeof sha !== 'string' || sha.length === 0) throw new GitHubApiError('get branch ref (unexpected shape)', 500);
+    return sha;
+  }
+
   async compareCommits(repo: RepoRef, base: string, head: string): Promise<RepoCompareResult> {
     const out = (await this.request(
       repo,

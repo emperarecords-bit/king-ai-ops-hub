@@ -2,7 +2,7 @@ import { createVerify, generateKeyPairSync } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { ForbiddenError } from '@/lib/errors';
 import { buildAppJwt, InstallationTokenSource, type FetchLike } from '@/domain/github/app-auth';
-import { LiveGitHubClient } from '@/domain/github/live-client';
+import { LiveGitHubClient, GitHubApiError } from '@/domain/github/live-client';
 
 /**
  * Live-client tests — ZERO network: `fetchImpl` is a scripted recorder. The load-bearing assertions are the
@@ -212,6 +212,42 @@ describe('live client Git Data API reads (revert support)', () => {
       { path: 'a', mode: '100755', type: 'blob', sha: 'A1' },
       { path: 'd', mode: '040000', type: 'tree', sha: 'T' },
     ]);
+  });
+
+  it('branchHeadSha returns the head SHA via the Git Refs API when the branch exists', async () => {
+    const { impl, calls } = fakeFetch([
+      tokenRoute,
+      { match: (m, u) => m === 'GET' && u.includes('/git/ref/heads/'), status: 200, body: { ref: 'refs/heads/feature/x', object: { sha: 'a'.repeat(40), type: 'commit' } } },
+    ]);
+    expect(await client(impl).branchHeadSha(REPO, 'feature/x')).toBe('a'.repeat(40));
+    // The branch is segment-encoded (slash preserved as a path separator), NOT %2F.
+    expect(calls.find((c) => c.url.includes('/git/ref/heads/'))!.url).toContain('/git/ref/heads/feature/x');
+  });
+
+  it('branchHeadSha returns null when the branch is absent (refs endpoint 404, NOT the commits-endpoint 422)', async () => {
+    const { impl } = fakeFetch([
+      tokenRoute,
+      { match: (m, u) => m === 'GET' && u.includes('/git/ref/heads/'), status: 404, body: { message: 'Not Found' } },
+    ]);
+    expect(await client(impl).branchHeadSha(REPO, 'hub/revert-abcdef')).toBeNull();
+  });
+
+  it('branchHeadSha throws (fail-closed read) on any non-404 provider error', async () => {
+    const { impl } = fakeFetch([
+      tokenRoute,
+      { match: (m, u) => m === 'GET' && u.includes('/git/ref/heads/'), status: 500, body: {} },
+    ]);
+    await expect(client(impl).branchHeadSha(REPO, 'main')).rejects.toBeInstanceOf(GitHubApiError);
+  });
+
+  it('branchHeadSha: HTTP 200 with missing/malformed object.sha THROWS (never returns null — absence is by status, not shape)', async () => {
+    for (const body of [{}, { object: {} }, { object: { sha: '' } }, { object: { sha: 123 } }]) {
+      const { impl } = fakeFetch([
+        tokenRoute,
+        { match: (m, u) => m === 'GET' && u.includes('/git/ref/heads/'), status: 200, body },
+      ]);
+      await expect(client(impl).branchHeadSha(REPO, 'main')).rejects.toBeInstanceOf(GitHubApiError);
+    }
   });
 
   it('compareCommits returns the ahead/behind status (ancestry proof)', async () => {

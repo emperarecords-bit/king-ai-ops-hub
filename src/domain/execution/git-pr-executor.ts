@@ -689,15 +689,18 @@ export class GitPrExecutor implements Executor {
     }
 
     // Collision/idempotency guard: a pre-existing revert branch means a prior attempt may have run → reconcile.
+    // Existence is checked via the Git Refs API (branchHeadSha: null == absent), NOT getCommit — GitHub's commits
+    // endpoint returns 422 (not 404) for a non-existent ref, which would mis-classify every fresh revert as a
+    // "could not check" failure (the exact bug the canary caught). A non-404 provider error is still fail-closed.
+    let existingRevertHead: string | null;
     try {
-      await this.deps.client.getCommit(repo, revertBranch);
-      return result('blocked', `Revert branch "${revertBranch}" already exists in ${link.repoFullName} — a prior attempt may have run. Reconcile (open the PR or delete the branch) before retrying.`, plan);
+      existingRevertHead = await this.deps.client.branchHeadSha(repo, revertBranch);
     } catch (err) {
-      if (!(err instanceof GitHubApiError && err.status === 404)) {
-        const detail = err instanceof Error ? err.message : 'unknown error';
-        return result('failed', `No side effect occurred: could not check whether revert branch "${revertBranch}" exists: ${detail}`, plan, { retryAllowed: true });
-      }
-      // 404 → the branch does not exist; proceed.
+      const detail = err instanceof Error ? err.message : 'unknown error';
+      return result('failed', `No side effect occurred: could not check whether revert branch "${revertBranch}" exists: ${detail}`, plan, { retryAllowed: true });
+    }
+    if (existingRevertHead !== null) {
+      return result('blocked', `Revert branch "${revertBranch}" already exists in ${link.repoFullName} (head ${existingRevertHead}) — a prior attempt may have run. Reconcile (open the PR or delete the branch) before retrying.`, plan);
     }
 
     // Mint the inverse tree + commit. These are content-addressed objects: no ref points at them yet, so a failure
@@ -734,7 +737,27 @@ export class GitPrExecutor implements Executor {
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'unknown error';
       if (err instanceof GitHubApiError && err.status === 422) {
-        return result('blocked', `Revert branch "${revertBranch}" already exists in ${link.repoFullName} (created concurrently). Reconcile before retrying.`, plan);
+        // EVIDENCE-BASED 422 handling: a 422 from create-ref does NOT by itself mean "branch already exists" —
+        // GitHub also returns 422 for other validation failures. Reconcile with a read-only refs lookup and decide
+        // from the ACTUAL state, never from the status code alone. Never auto-retried in any branch.
+        let afterHead: string | null;
+        try {
+          afterHead = await this.deps.client.branchHeadSha(repo, revertBranch);
+        } catch (reErr) {
+          const rd = reErr instanceof Error ? reErr.message : 'unknown error';
+          return result('ambiguous', `Creating the revert branch "${revertBranch}" returned 422 and the follow-up existence check failed (${rd}) — state unknown. Reconcile before any retry.`, plan, { reconciliation: 'required', retryAllowed: false });
+        }
+        if (afterHead === null) {
+          // Branch still absent → the 422 was a definite provider validation failure with no side effect.
+          return result('failed', `GitHub rejected creating the revert branch with HTTP 422 and no branch exists afterward — a definite validation failure, no side effect: ${detail}.`, plan, { retryAllowed: false });
+        }
+        if (afterHead === revertCommitSha) {
+          // Branch exists at OUR intended commit → the ref may have been created by this attempt (422 despite a
+          // partial write) → ambiguous/partial, reconcile. Not a clean retry, not blindly blocked.
+          return result('ambiguous', `The revert branch "${revertBranch}" returned 422 but now exists at the intended revert commit ${revertCommitSha} — it may have been created by this attempt. Reconcile (open the PR or delete the branch) before any retry.`, { ...plan, revertCommitSha }, { reconciliation: 'required', retryAllowed: false });
+        }
+        // Branch exists at a DIFFERENT commit → a pre-existing/foreign branch collided; our call made no change.
+        return result('blocked', `The revert branch "${revertBranch}" already exists at a different commit ${afterHead} (not the intended ${revertCommitSha}) — collision; our write made no change. Reconcile (choose a new revert branch or delete the stale one) before any retry.`, { ...plan, revertCommitSha });
       }
       if (classifyGitHubMutationError(err) === 'definite') {
         return result('failed', `GitHub rejected creating the revert branch (no side effect): ${detail}.`, plan, { retryAllowed: false });
