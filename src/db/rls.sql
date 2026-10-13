@@ -1029,6 +1029,50 @@ begin
 end
 $$;
 
+-- Ops Chat persistence (migration 0084). Owner-private, USER-scoped — Ops Chat is the
+-- owner's cross-workspace front door (no single org/project), so these follow the
+-- notification_*_self shape (user_id = app.current_user_id()), not the (org,project)
+-- tenant shape. Read/written under withUser({ userId }); with no app.user_id set,
+-- current_user_id() is NULL and every policy fails closed (no rows). No delete grant:
+-- a conversation and its messages/proposals are governance history. to_regclass-guarded
+-- so the penultimate-schema incremental bootstrap tolerates their absence.
+do $$
+begin
+  if to_regclass('public.ops_chat_conversations') is not null then
+    grant select, insert, update on ops_chat_conversations to app_server;
+    alter table ops_chat_conversations enable row level security;
+    alter table ops_chat_conversations force row level security;
+    drop policy if exists ops_chat_conversations_self on ops_chat_conversations;
+    execute
+      'create policy ops_chat_conversations_self on ops_chat_conversations
+         using (user_id = app.current_user_id())
+         with check (user_id = app.current_user_id())';
+  end if;
+
+  if to_regclass('public.ops_chat_messages') is not null then
+    grant select, insert, update on ops_chat_messages to app_server;
+    alter table ops_chat_messages enable row level security;
+    alter table ops_chat_messages force row level security;
+    drop policy if exists ops_chat_messages_self on ops_chat_messages;
+    execute
+      'create policy ops_chat_messages_self on ops_chat_messages
+         using (user_id = app.current_user_id())
+         with check (user_id = app.current_user_id())';
+  end if;
+
+  if to_regclass('public.ops_chat_proposals') is not null then
+    grant select, insert, update on ops_chat_proposals to app_server;
+    alter table ops_chat_proposals enable row level security;
+    alter table ops_chat_proposals force row level security;
+    drop policy if exists ops_chat_proposals_self on ops_chat_proposals;
+    execute
+      'create policy ops_chat_proposals_self on ops_chat_proposals
+         using (user_id = app.current_user_id())
+         with check (user_id = app.current_user_id())';
+  end if;
+end
+$$;
+
 -- Portfolio ledger (migration 0067). to_regclass-guarded like owner_questions so the
 -- penultimate-schema incremental bootstrap tolerates absence. Trades may be deleted
 -- (typo correction by the owner); accounts and quotes are never deleted by the app.

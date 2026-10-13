@@ -17,8 +17,9 @@ export const PRODUCTION_PINS: ReleasePins = {
   snapshotProvider: FLY_VOLUMES_PROVIDER,
   providerAdapterVersion: FLY_VOLUMES_ADAPTER_VERSION,
   // Bumped 2026-10-11 (0083 graceful_zemo — Phase 2D Vercel mutation: ALTER TYPE action_type ADD VALUE 'vercel_mutation').
-  expectedMigrationEndpoint: '0083_graceful_zemo',
-  expectedCommittedMigrationCount: 84,
+  // Bumped 2026-10-13 (0084 previous_frightful_four — Persistent Ops Chat: ops_chat_conversations/messages/proposals tables).
+  expectedMigrationEndpoint: '0084_previous_frightful_four',
+  expectedCommittedMigrationCount: 85,
   /**
    * Production REQUIRES an explicit APPLIED_COUNT at signing time and never falls back to a baked default. The
    * previous `defaultAppliedCount: 68` was a stale assumption (production has since applied through 0078) and, if
