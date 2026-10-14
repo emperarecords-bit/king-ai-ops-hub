@@ -55,6 +55,41 @@ export async function createConversation(tx: DbTx, userId: string): Promise<{ id
   return row!;
 }
 
+/** Does this conversation exist AND belong to this user? (RLS already scopes to the user;
+ *  this gives the route a clean not-found instead of a downstream FK violation when a
+ *  client sends a conversation id that isn't theirs.) */
+export async function conversationExists(tx: DbTx, userId: string, conversationId: string): Promise<boolean> {
+  const rows = await tx
+    .select({ id: opsChatConversations.id })
+    .from(opsChatConversations)
+    .where(and(eq(opsChatConversations.id, conversationId), eq(opsChatConversations.userId, userId)))
+    .limit(1);
+  return !!rows[0];
+}
+
+/**
+ * The bounded prompt history the server sends to the provider — the last `limit` messages
+ * (by seq) as {role, content}, in chronological order. Deliberately lighter than
+ * loadConversation (no proposals, no status/question) and more tightly bounded, so a long
+ * thread never bloats model context. The just-persisted owner message is the final turn.
+ */
+export async function loadRecentTurnsForPrompt(
+  tx: DbTx,
+  userId: string,
+  conversationId: string,
+  limit: number,
+): Promise<Array<{ role: OpsChatMessageRole; content: string }>> {
+  const n = Math.max(1, Math.min(limit, 100));
+  const rows = await tx
+    .select({ role: opsChatMessages.role, content: opsChatMessages.content })
+    .from(opsChatMessages)
+    .where(and(eq(opsChatMessages.conversationId, conversationId), eq(opsChatMessages.userId, userId)))
+    .orderBy(desc(opsChatMessages.seq))
+    .limit(n);
+  rows.reverse();
+  return rows.map((r) => ({ role: r.role as OpsChatMessageRole, content: r.content }));
+}
+
 /**
  * Append the owner's message, IDEMPOTENTLY on a caller-provided `id` (the turn id the
  * client mints once per send). A browser/network retry re-sends the same id; the insert

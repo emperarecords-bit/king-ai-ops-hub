@@ -2,17 +2,29 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ForbiddenError, NotFoundError, RateLimitedError, UnauthenticatedError } from '@/lib/errors';
 
 /**
- * Ops Chat v2 POST /api/ops-chat/confirm — the ONLY write boundary. Fully
- * mocked: no real auth, DB, provider, or execution. Asserts that every mutation
- * is authenticated, tenant-resolved through the current user, admin-gated, and
- * that a rejected request produces ZERO writes.
+ * POST /api/ops-chat/confirm — the ONLY Ops Chat write boundary, PROPOSAL-ID AUTHORITATIVE.
+ * Fully mocked: no real auth, DB, provider, or execution. The client sends only
+ * { proposalId, intent }; the server loads the owner's persisted, immutable proposal and uses
+ * THAT as the payload. Asserts: every mutation is authenticated, the action is reconstructed +
+ * validated from the STORED payload, tenant-resolved through the current user, admin-gated, and
+ * CAS-guarded; a rejected request produces ZERO writes; cancel never executes; a lost CAS is a
+ * clean 409; and an executed-but-unpersisted terminal is surfaced as `unrecorded`.
  */
 
 const UUID = '11111111-1111-4111-8111-111111111111';
+const CONV = '22222222-2222-4222-8222-222222222222';
+const MSG = '33333333-3333-4333-8333-333333333333';
+const PROP = '44444444-4444-4444-8444-444444444444';
+
+type Kind = 'answer_question' | 'decide_approval' | 'dispatch_task' | 'rerun_task';
 
 const h = vi.hoisted(() => ({
+  requireUser: vi.fn(),
   requireTenant: vi.fn(),
+  withUser: vi.fn(),
   withTenant: vi.fn(),
+  loadProposal: vi.fn(),
+  transitionProposal: vi.fn(),
   consumeRateLimit: vi.fn(),
   answerOwnerQuestion: vi.fn(),
   decideApproval: vi.fn(),
@@ -23,8 +35,8 @@ const h = vi.hoisted(() => ({
   listAgents: vi.fn(),
 }));
 
-vi.mock('@/domain/auth/guard', () => ({ requireTenant: h.requireTenant }));
-vi.mock('@/db/tenant', () => ({ withTenant: h.withTenant }));
+vi.mock('@/domain/auth/guard', () => ({ requireUser: h.requireUser, requireTenant: h.requireTenant }));
+vi.mock('@/db/tenant', () => ({ withUser: h.withUser, withTenant: h.withTenant }));
 vi.mock('@/db/client', () => ({ getDb: () => ({ transaction: (fn: (tx: unknown) => unknown) => fn({}) }) }));
 vi.mock('@/domain/usage/rate-limit', () => ({ consumeRateLimit: h.consumeRateLimit }));
 vi.mock('@/lib/env.server', () => ({ serverEnv: () => ({ RATE_LIMIT_RUNS_PER_MINUTE: 10 }) }));
@@ -35,6 +47,17 @@ vi.mock('@/domain/execution/execute-on-approval', () => ({ executeApprovedIfElig
 vi.mock('@/domain/tasks/tasks', () => ({ createTask: h.createTask, getTask: h.getTask }));
 vi.mock('@/domain/jobs/jobs', () => ({ enqueueRun: h.enqueueRun }));
 vi.mock('@/domain/agents/agents', () => ({ listAgents: h.listAgents }));
+vi.mock('@/domain/opschat/conversations', () => ({ loadProposal: h.loadProposal, transitionProposal: h.transitionProposal }));
+// The confirm route imports the governed external executors at top level; mock them so the
+// module loads without their server-only dependencies (they are not exercised in this suite).
+vi.mock('@/domain/opschat/github-action', () => ({
+  executeGitHubPrFromOpsChat: vi.fn(),
+  executeGitHubMergeFromOpsChat: vi.fn(),
+  executeGitHubRerunFromOpsChat: vi.fn(),
+  executeGitHubRevertFromOpsChat: vi.fn(),
+}));
+vi.mock('@/domain/opschat/supabase-action', () => ({ executeSupabaseDeployFromOpsChat: vi.fn() }));
+vi.mock('@/domain/opschat/vercel-action', () => ({ executeVercelMutationFromOpsChat: vi.fn() }));
 
 import { POST } from '@/app/api/ops-chat/confirm/route';
 
@@ -48,6 +71,25 @@ function ctxWithRole(projectRole: 'admin' | 'member') {
   return { userId: 'u1', orgId: 'o1', projectId: 'p-ab', orgRole: 'owner', projectRole };
 }
 
+/** The stored (immutable) proposal payload for a kind — carries the fields the confirm route
+ *  reconstructs the action from, plus display-only fields the server ignores. */
+function payloadFor(kind: Kind): Record<string, unknown> {
+  switch (kind) {
+    case 'answer_question':
+      return { kind, projectKey: 'ab', questionId: UUID, answer: 'yes', workspaceName: 'W', question: 'x?' };
+    case 'decide_approval':
+      return { kind, projectKey: 'ab', approvalId: UUID, decision: 'approved', note: undefined, workspaceName: 'W', summary: 's' };
+    case 'dispatch_task':
+      return { kind, projectKey: 'ab', title: 'Research', instructions: 'go', agentId: UUID, workspaceName: 'W', agentName: 'Scout' };
+    case 'rerun_task':
+      return { kind, projectKey: 'ab', taskId: UUID, workspaceName: 'W', taskTitle: 'T' };
+  }
+}
+
+function storedProposal(kind: Kind, over: Record<string, unknown> = {}) {
+  return { id: PROP, conversationId: CONV, messageId: MSG, kind, proposal: { ...payloadFor(kind), ...over }, state: 'pending' as const };
+}
+
 /** No write-domain function was invoked. */
 function expectNoWrites() {
   expect(h.answerOwnerQuestion).not.toHaveBeenCalled();
@@ -59,9 +101,16 @@ function expectNoWrites() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  h.requireUser.mockResolvedValue({ id: 'u1', email: 'o@e.com', displayName: 'Owner' });
   h.requireTenant.mockResolvedValue(ctxWithRole('admin'));
-  h.withTenant.mockImplementation((_ctx: unknown, fn: (tx: unknown) => unknown) => fn({}));
+  h.withUser.mockImplementation((_s: unknown, fn: (tx: unknown) => unknown) => fn({}));
+  h.withTenant.mockImplementation((_c: unknown, fn: (tx: unknown) => unknown) => fn({}));
   h.consumeRateLimit.mockResolvedValue(undefined);
+  // CAS succeeds by default: the row transitions to the requested state.
+  h.transitionProposal.mockImplementation((_tx: unknown, _uid: unknown, args: { proposalId: string; to: string }) =>
+    Promise.resolve({ id: args.proposalId, state: args.to }),
+  );
+  h.loadProposal.mockResolvedValue(storedProposal('answer_question'));
   h.answerOwnerQuestion.mockResolvedValue(undefined);
   h.decideApproval.mockResolvedValue(undefined);
   h.executeApprovedIfEligible.mockResolvedValue({ outcome: 'done', message: null });
@@ -73,95 +122,146 @@ beforeEach(() => {
 
 describe('confirm — auth & validation gates (zero writes on rejection)', () => {
   it('unauthenticated → 401', async () => {
-    h.requireTenant.mockRejectedValue(new UnauthenticatedError());
-    const res = await call({ action: 'answer_question', projectKey: 'ab', questionId: UUID, answer: 'y' });
+    h.requireUser.mockRejectedValue(new UnauthenticatedError());
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
     expect(res.status).toBe(401);
     expectNoWrites();
   });
 
-  it('malformed body → 400 (before tenant resolve)', async () => {
-    const res = await call({ action: 'answer_question', projectKey: 'ab' }); // missing fields
+  it('malformed body → 400 (before auth or load)', async () => {
+    const res = await call({ proposalId: 'not-a-uuid', intent: 'confirm' });
     expect(res.status).toBe(400);
-    expect(h.requireTenant).not.toHaveBeenCalled();
+    expect(h.requireUser).not.toHaveBeenCalled();
+    expect(h.loadProposal).not.toHaveBeenCalled();
+    expectNoWrites();
+  });
+
+  it('proposal not found → 404', async () => {
+    h.loadProposal.mockResolvedValue(null);
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
+    expect(res.status).toBe(404);
     expectNoWrites();
   });
 
   it('unknown / cross-tenant project → 403', async () => {
     h.requireTenant.mockRejectedValue(new ForbiddenError());
-    const res = await call({ action: 'answer_question', projectKey: 'not-mine', questionId: UUID, answer: 'y' });
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
     expect(res.status).toBe(403);
     expectNoWrites();
   });
 
   it('rate-limited → 429, zero writes', async () => {
     h.consumeRateLimit.mockRejectedValue(new RateLimitedError());
-    const res = await call({ action: 'answer_question', projectKey: 'ab', questionId: UUID, answer: 'y' });
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
     expect(res.status).toBe(429);
     expectNoWrites();
   });
 });
 
 describe('confirm — role enforcement (every action requires admin)', () => {
-  it.each([
-    { action: 'answer_question', projectKey: 'ab', questionId: UUID, answer: 'y' },
-    { action: 'decide_approval', projectKey: 'ab', approvalId: UUID, decision: 'approved' },
-    { action: 'dispatch_task', projectKey: 'ab', title: 't', instructions: 'i', agentId: UUID },
-    { action: 'rerun_task', projectKey: 'ab', taskId: UUID },
-  ])('non-admin → 403 for $action', async (body) => {
-    h.requireTenant.mockResolvedValue(ctxWithRole('member'));
-    const res = await call(body);
-    expect(res.status).toBe(403);
-    expectNoWrites();
-  });
+  it.each<Kind>(['answer_question', 'decide_approval', 'dispatch_task', 'rerun_task'])(
+    'non-admin → 403 for %s',
+    async (kind) => {
+      h.loadProposal.mockResolvedValue(storedProposal(kind));
+      h.requireTenant.mockResolvedValue(ctxWithRole('member'));
+      const res = await call({ proposalId: PROP, intent: 'confirm' });
+      expect(res.status).toBe(403);
+      expectNoWrites();
+    },
+  );
 });
 
-describe('confirm — writes happen only after a valid confirm', () => {
+describe('confirm — writes happen only after a valid confirm (from the stored payload)', () => {
   it('answer_question (admin) calls answerOwnerQuestion exactly once', async () => {
-    const res = await call({ action: 'answer_question', projectKey: 'ab', questionId: UUID, answer: 'yes' });
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
     expect(res.status).toBe(200);
     expect(h.answerOwnerQuestion).toHaveBeenCalledTimes(1);
+    expect(await res.json()).toMatchObject({ ok: true, state: 'done' });
   });
 
   it('decide_approval approved → decideApproval + executeApprovedIfEligible', async () => {
-    const res = await call({ action: 'decide_approval', projectKey: 'ab', approvalId: UUID, decision: 'approved' });
+    h.loadProposal.mockResolvedValue(storedProposal('decide_approval', { decision: 'approved' }));
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
     expect(res.status).toBe(200);
     expect(h.decideApproval).toHaveBeenCalledTimes(1);
     expect(h.executeApprovedIfEligible).toHaveBeenCalledTimes(1);
   });
 
   it('decide_approval rejected → decideApproval only, no execution', async () => {
-    const res = await call({ action: 'decide_approval', projectKey: 'ab', approvalId: UUID, decision: 'rejected', note: 'no' });
+    h.loadProposal.mockResolvedValue(storedProposal('decide_approval', { decision: 'rejected', note: 'no' }));
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
     expect(res.status).toBe(200);
     expect(h.decideApproval).toHaveBeenCalledTimes(1);
     expect(h.executeApprovedIfEligible).not.toHaveBeenCalled();
   });
 
-  it('dispatch_task (admin) → createTask + enqueueRun, returns taskId', async () => {
-    const res = await call({ action: 'dispatch_task', projectKey: 'ab', title: 'Research', instructions: 'go', agentId: UUID });
+  it('dispatch_task (admin) → createTask + enqueueRun, returns taskId in executed', async () => {
+    h.loadProposal.mockResolvedValue(storedProposal('dispatch_task'));
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, taskId: 'task-123' });
+    expect(await res.json()).toMatchObject({ ok: true, executed: { taskId: 'task-123' }, state: 'done' });
     expect(h.createTask).toHaveBeenCalledTimes(1);
     expect(h.enqueueRun).toHaveBeenCalledTimes(1);
   });
 
-  it('dispatch_task with an unavailable agent → 409, no writes', async () => {
+  it('dispatch_task with an unavailable agent → 409 (stale), no writes', async () => {
+    h.loadProposal.mockResolvedValue(storedProposal('dispatch_task'));
     h.listAgents.mockResolvedValue([]); // agent not found
-    const res = await call({ action: 'dispatch_task', projectKey: 'ab', title: 'x', instructions: 'y', agentId: UUID });
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
     expect(res.status).toBe(409);
     expect(h.createTask).not.toHaveBeenCalled();
     expect(h.enqueueRun).not.toHaveBeenCalled();
   });
 
   it('rerun_task (admin) → tenant-verifies task then enqueueRun', async () => {
-    const res = await call({ action: 'rerun_task', projectKey: 'ab', taskId: UUID });
+    h.loadProposal.mockResolvedValue(storedProposal('rerun_task'));
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
     expect(res.status).toBe(200);
     expect(h.getTask).toHaveBeenCalledTimes(1);
     expect(h.enqueueRun).toHaveBeenCalledTimes(1);
   });
 
-  it('stale/missing target → 409 (NotFound mapped), surfaced as a clean status', async () => {
+  it('stale/missing target → 409 (NotFound mapped to the stale terminal)', async () => {
     h.answerOwnerQuestion.mockRejectedValue(new NotFoundError('Owner question'));
-    const res = await call({ action: 'answer_question', projectKey: 'ab', questionId: UUID, answer: 'y' });
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
     expect(res.status).toBe(409);
+  });
+});
+
+describe('confirm — CAS & cancel (proposal-id authoritative)', () => {
+  it('cancel → CAS pending→cancelled, never executes', async () => {
+    const res = await call({ proposalId: PROP, intent: 'cancel' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, state: 'cancelled' });
+    expect(h.transitionProposal).toHaveBeenCalledWith(expect.anything(), 'u1', expect.objectContaining({ from: 'pending', to: 'cancelled' }));
+    expectNoWrites();
+  });
+
+  it('cancel on a non-pending proposal → 409 (CAS miss)', async () => {
+    h.transitionProposal.mockResolvedValue(null);
+    const res = await call({ proposalId: PROP, intent: 'cancel' });
+    expect(res.status).toBe(409);
+    expectNoWrites();
+  });
+
+  it('confirm losing the pending→confirming CAS → 409, no execution', async () => {
+    // Precheck passes, but another tab already acquired `confirming`.
+    h.transitionProposal.mockImplementation((_tx: unknown, _uid: unknown, args: { to: string }) =>
+      Promise.resolve(args.to === 'confirming' ? null : { id: PROP, state: args.to }),
+    );
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
+    expect(res.status).toBe(409);
+    expectNoWrites();
+  });
+
+  it('executed but the terminal CAS does not land → state "unrecorded" (never a false "done")', async () => {
+    h.transitionProposal.mockImplementation((_tx: unknown, _uid: unknown, args: { from: string; to: string }) =>
+      // Acquire `confirming`, but fail to persist `done`.
+      Promise.resolve(args.to === 'done' ? null : { id: PROP, state: args.to }),
+    );
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
+    expect(res.status).toBe(200);
+    expect(h.answerOwnerQuestion).toHaveBeenCalledTimes(1); // the action DID run
+    expect(await res.json()).toMatchObject({ ok: true, state: 'unrecorded' });
   });
 });

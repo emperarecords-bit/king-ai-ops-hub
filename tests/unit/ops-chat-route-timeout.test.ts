@@ -18,6 +18,16 @@ const h = vi.hoisted(() => ({
   streamWithTools: vi.fn(),
   consumeRateLimit: vi.fn(),
   getProposals: vi.fn(),
+  // persistence (PR 2) — mocked so this stays a DB-free timeout/stream-close test.
+  appendOwnerMessage: vi.fn(),
+  appendAssistantMessage: vi.fn(),
+  addProposal: vi.fn(),
+  createConversation: vi.fn(),
+  conversationExists: vi.fn(),
+  loadReplyForOwnerMessage: vi.fn(),
+  loadRecentTurnsForPrompt: vi.fn(),
+  tryClaimTurn: vi.fn(),
+  release: vi.fn(),
 }));
 
 vi.mock('@/domain/auth/guard', () => ({
@@ -27,10 +37,22 @@ vi.mock('@/domain/auth/guard', () => ({
 vi.mock('@/domain/opschat/pulse', () => ({ buildPulse: h.buildPulse, pulseContext: () => 'CTX' }));
 vi.mock('@/domain/opschat/tools', () => ({
   createOpsChatToolset: () => ({ tools: [], runTool: vi.fn(), getProposals: h.getProposals }),
+  proposalKey: (p: { kind: string }) => `k:${p.kind}`,
 }));
 vi.mock('@/providers/registry', () => ({ getProvider: () => ({ streamWithTools: h.streamWithTools }) }));
 vi.mock('@/domain/usage/rate-limit', () => ({ consumeRateLimit: h.consumeRateLimit }));
 vi.mock('@/db/client', () => ({ getDb: () => ({ transaction: (fn: (tx: unknown) => unknown) => fn({}) }) }));
+vi.mock('@/db/tenant', () => ({ withUser: (_s: unknown, fn: (tx: unknown) => unknown) => fn({}) }));
+vi.mock('@/domain/opschat/conversations', () => ({
+  appendOwnerMessage: h.appendOwnerMessage,
+  appendAssistantMessage: h.appendAssistantMessage,
+  addProposal: h.addProposal,
+  createConversation: h.createConversation,
+  conversationExists: h.conversationExists,
+  loadReplyForOwnerMessage: h.loadReplyForOwnerMessage,
+  loadRecentTurnsForPrompt: h.loadRecentTurnsForPrompt,
+}));
+vi.mock('@/domain/opschat/turn-claim', () => ({ tryClaimTurn: h.tryClaimTurn }));
 vi.mock('@/lib/env.server', () => ({ serverEnv: () => ({ RATE_LIMIT_RUNS_PER_MINUTE: 10 }) }));
 vi.mock('@/lib/log', () => ({ log: { error: vi.fn(), info: vi.fn(), warn: vi.fn() } }));
 // Tiny server deadline so real timers fire fast; same message as production.
@@ -40,6 +62,9 @@ vi.mock('@/domain/opschat/limits', () => ({
   OPS_CHAT_SERVER_DEADLINE_MS: 40,
   OPS_CHAT_TIMEOUT_MESSAGE: 'The AI request timed out. Nothing was changed. Try again.',
   OPS_CHAT_CLIENT_TIMEOUT_MS: 120_000,
+  OPS_CHAT_MAX_PROMPT_MESSAGES: 16,
+  OPS_CHAT_PERSIST_FAILED_MESSAGE: 'The reply could not be saved. Nothing was changed — try again.',
+  OPS_CHAT_TURN_IN_PROGRESS_MESSAGE: 'This message is already being answered. Reload in a moment to see the reply.',
 }));
 
 import { POST } from '@/app/api/ops-chat/route';
@@ -73,6 +98,15 @@ beforeEach(() => {
   h.buildPulse.mockResolvedValue({});
   h.consumeRateLimit.mockResolvedValue(undefined);
   h.getProposals.mockReturnValue([]);
+  h.createConversation.mockResolvedValue({ id: 'conv1' });
+  h.conversationExists.mockResolvedValue(true);
+  h.appendOwnerMessage.mockResolvedValue({ id: 'owner1', seq: 1n, inserted: true });
+  h.loadReplyForOwnerMessage.mockResolvedValue(null);
+  h.loadRecentTurnsForPrompt.mockResolvedValue([{ role: 'user', content: 'hi' }]);
+  h.appendAssistantMessage.mockResolvedValue({ id: 'asst1', seq: 2n });
+  h.addProposal.mockResolvedValue({ id: 'prop1' });
+  h.release.mockResolvedValue(undefined);
+  h.tryClaimTurn.mockResolvedValue({ claimed: true, release: h.release });
 });
 
 describe('POST /api/ops-chat — overall deadline', () => {
@@ -82,6 +116,7 @@ describe('POST /api/ops-chat — overall deadline', () => {
     expect(text).toContain('event: error');
     expect(text).toContain(TIMEOUT_MSG);
     expect(text).not.toContain('event: done');
+    expect(h.release).toHaveBeenCalledTimes(1); // claim released in finally on timeout
   });
 
   it('stalled tool → clean timeout error + stream closes', async () => {
@@ -102,6 +137,7 @@ describe('POST /api/ops-chat — overall deadline', () => {
     const text = await res.text();
     expect(text).toContain('event: error');
     expect(text).not.toContain('event: done');
+    expect(h.release).toHaveBeenCalledTimes(1); // claim released in finally on provider failure
   });
 
   it('normal completion streams delta/tool/proposal/done within the deadline', async () => {
