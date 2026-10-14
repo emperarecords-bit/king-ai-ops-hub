@@ -32,16 +32,19 @@ export async function tryClaimTurn(ownerMessageId: string): Promise<TurnClaim> {
       reserved.release();
       return { claimed: false, release: NOOP_RELEASE };
     }
-    return {
-      claimed: true,
-      release: async () => {
-        try {
-          await reserved`select pg_advisory_unlock(hashtextextended(${ownerMessageId}, 0))`;
-        } finally {
-          reserved.release();
-        }
-      },
+    // Idempotent release — safe to call more than once (e.g. a cleanup path plus a finally),
+    // so releasing can never itself become a second failure path.
+    let released = false;
+    const release = async (): Promise<void> => {
+      if (released) return;
+      released = true;
+      try {
+        await reserved`select pg_advisory_unlock(hashtextextended(${ownerMessageId}, 0))`;
+      } finally {
+        reserved.release();
+      }
     };
+    return { claimed: true, release };
   } catch (err) {
     reserved.release();
     throw err;

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { AppError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { opsChatConversations, opsChatMessages, opsChatProposals } from '@/db/schema';
@@ -107,24 +107,18 @@ export async function loadReplyForOwnerMessage(
   userId: string,
   ownerMessageId: string,
 ): Promise<{ conversationId: string; messageId: string; content: string; status: OpsChatMessageStatus; question: string | null; proposals: Array<{ id: string; kind: string; proposal: unknown; state: OpsChatProposalState; result: unknown; error: string | null }> } | null> {
-  const owner = await tx
-    .select({ conversationId: opsChatMessages.conversationId, seq: opsChatMessages.seq })
-    .from(opsChatMessages)
-    .where(and(eq(opsChatMessages.id, ownerMessageId), eq(opsChatMessages.userId, userId), eq(opsChatMessages.role, 'user')))
-    .limit(1);
-  if (!owner[0]) return null;
+  // Explicit linkage: the assistant message whose reply_to_message_id IS this owner message.
+  // (Never seq-adjacency, which would misassociate two interleaved owner turns.)
   const reply = await tx
-    .select({ id: opsChatMessages.id, content: opsChatMessages.content, status: opsChatMessages.status, question: opsChatMessages.question })
+    .select({ id: opsChatMessages.id, conversationId: opsChatMessages.conversationId, content: opsChatMessages.content, status: opsChatMessages.status, question: opsChatMessages.question })
     .from(opsChatMessages)
     .where(
       and(
-        eq(opsChatMessages.conversationId, owner[0].conversationId),
+        eq(opsChatMessages.replyToMessageId, ownerMessageId),
         eq(opsChatMessages.userId, userId),
         eq(opsChatMessages.role, 'assistant'),
-        gt(opsChatMessages.seq, owner[0].seq),
       ),
     )
-    .orderBy(asc(opsChatMessages.seq))
     .limit(1);
   if (!reply[0]) return null;
   const props = await tx
@@ -133,7 +127,7 @@ export async function loadReplyForOwnerMessage(
     .where(and(eq(opsChatProposals.messageId, reply[0].id), eq(opsChatProposals.userId, userId)))
     .orderBy(asc(opsChatProposals.seq));
   return {
-    conversationId: owner[0].conversationId,
+    conversationId: reply[0].conversationId,
     messageId: reply[0].id,
     content: reply[0].content,
     status: reply[0].status as OpsChatMessageStatus,
@@ -148,7 +142,7 @@ export async function loadReplyForOwnerMessage(
 export async function appendAssistantMessage(
   tx: DbTx,
   userId: string,
-  args: { conversationId: string; content: string; question?: string | null; status?: OpsChatMessageStatus },
+  args: { conversationId: string; content: string; question?: string | null; status?: OpsChatMessageStatus; replyToMessageId?: string },
 ): Promise<{ id: string; seq: bigint }> {
   const [msg] = await tx
     .insert(opsChatMessages)
@@ -159,6 +153,7 @@ export async function appendAssistantMessage(
       status: args.status ?? 'complete',
       content: args.content,
       question: args.question ?? null,
+      replyToMessageId: args.replyToMessageId ?? null,
     })
     .returning({ id: opsChatMessages.id, seq: opsChatMessages.seq });
   await tx

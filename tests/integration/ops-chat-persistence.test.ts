@@ -13,6 +13,7 @@ import {
   listConversations,
   loadConversation,
   loadProposal,
+  loadReplyForOwnerMessage,
   mostRecentConversationId,
   transitionProposal,
 } from '@/domain/opschat/conversations';
@@ -321,5 +322,35 @@ describe('tryClaimTurn — serializes model execution per owner turn', () => {
     const other = await tryClaimTurn(randomUUID()); // a different turn is independent
     expect(other.claimed).toBe(true);
     await other.release();
+  });
+});
+
+describe('loadReplyForOwnerMessage — explicit owner->assistant linkage (no seq misassociation)', () => {
+  it.runIf(available)('associates a reply by reply_to_message_id, not by sequence adjacency', async () => {
+    const { ownerA, ownerB } = await withUser({ userId: userA }, async (tx) => {
+      const c = await createConversation(tx, userA);
+      const a = await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'owner A' });
+      const b = await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'owner B' }); // interleaved: B submitted before A is answered
+      await appendAssistantMessage(tx, userA, { conversationId: c.id, content: 'reply to A', replyToMessageId: a.id }); // reply to A lands AFTER B (higher seq)
+      return { ownerA: a.id, ownerB: b.id };
+    });
+    const forA = await withUser({ userId: userA }, (tx) => loadReplyForOwnerMessage(tx, userA, ownerA));
+    expect(forA?.content).toBe('reply to A');
+    // B has no reply yet. seq-adjacency would wrongly hand it A's reply (higher seq); the
+    // explicit link does not.
+    const forB = await withUser({ userId: userA }, (tx) => loadReplyForOwnerMessage(tx, userA, ownerB));
+    expect(forB).toBeNull();
+  });
+
+  it.runIf(available)('enforces at most one assistant reply per owner turn', async () => {
+    const { convId, owner } = await withUser({ userId: userA }, async (tx) => {
+      const c = await createConversation(tx, userA);
+      const o = await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'owner' });
+      await appendAssistantMessage(tx, userA, { conversationId: c.id, content: 'first reply', replyToMessageId: o.id });
+      return { convId: c.id, owner: o.id };
+    });
+    await expect(
+      withUser({ userId: userA }, (tx) => appendAssistantMessage(tx, userA, { conversationId: convId, content: 'second reply', replyToMessageId: owner })),
+    ).rejects.toThrow();
   });
 });
