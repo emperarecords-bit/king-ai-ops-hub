@@ -22,9 +22,11 @@ const h = vi.hoisted(() => ({
   createConversation: vi.fn(),
   conversationExists: vi.fn(),
   loadReplyForOwnerMessage: vi.fn(),
-  loadRecentTurnsForPrompt: vi.fn(),
+  loadPromptTurns: vi.fn(),
   tryClaimTurn: vi.fn(),
+  tryClaimConversation: vi.fn(),
   release: vi.fn(),
+  convRelease: vi.fn(),
 }));
 
 vi.mock('@/domain/auth/guard', () => ({
@@ -47,9 +49,9 @@ vi.mock('@/domain/opschat/conversations', () => ({
   createConversation: h.createConversation,
   conversationExists: h.conversationExists,
   loadReplyForOwnerMessage: h.loadReplyForOwnerMessage,
-  loadRecentTurnsForPrompt: h.loadRecentTurnsForPrompt,
+  loadPromptTurns: h.loadPromptTurns,
 }));
-vi.mock('@/domain/opschat/turn-claim', () => ({ tryClaimTurn: h.tryClaimTurn }));
+vi.mock('@/domain/opschat/turn-claim', () => ({ tryClaimTurn: h.tryClaimTurn, tryClaimConversation: h.tryClaimConversation }));
 vi.mock('@/lib/env.server', () => ({ serverEnv: () => ({ RATE_LIMIT_RUNS_PER_MINUTE: 10 }) }));
 vi.mock('@/lib/log', () => ({ log: { error: vi.fn(), info: vi.fn(), warn: vi.fn() } }));
 
@@ -80,11 +82,13 @@ beforeEach(() => {
   h.conversationExists.mockResolvedValue(true);
   h.appendOwnerMessage.mockResolvedValue({ id: 'owner1', seq: 1n, inserted: true });
   h.loadReplyForOwnerMessage.mockResolvedValue(null);
-  h.loadRecentTurnsForPrompt.mockResolvedValue([{ role: 'user', content: 'what needs me' }]);
+  h.loadPromptTurns.mockResolvedValue([{ role: 'user', content: 'what needs me' }]);
   h.appendAssistantMessage.mockResolvedValue({ id: 'asst1', seq: 2n });
   h.addProposal.mockResolvedValue({ id: 'prop1' });
   h.release.mockResolvedValue(undefined);
+  h.convRelease.mockResolvedValue(undefined);
   h.tryClaimTurn.mockResolvedValue({ claimed: true, release: h.release });
+  h.tryClaimConversation.mockResolvedValue({ claimed: true, release: h.convRelease });
   h.streamWithTools.mockImplementation(async function* () {
     yield { kind: 'delta', text: 'Hello' };
     yield { kind: 'tool_start', name: 'list_tasks' };
@@ -204,8 +208,22 @@ describe('POST /api/ops-chat — persistence turn protocol (PR 2)', () => {
     const saved = events.find((e) => e.event === 'saved')!.data!;
     expect(saved).toMatchObject({ conversationId: CONV, messageId: 'asst1', status: 'complete', proposals: [{ correlationKey: 'k:answer_question', proposalId: 'prop1' }] });
 
-    // point 3 — the per-turn claim is released on the success path.
+    // point 3 — BOTH claims (turn + conversation) are released on the success path.
     expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.convRelease).toHaveBeenCalledTimes(1);
+    // the prompt is built turn-aware for THIS owner message (not raw-seq).
+    expect(h.loadPromptTurns).toHaveBeenCalledWith(expect.anything(), 'u1', CONV, 'owner1', expect.anything());
+  });
+
+  it('serializes per conversation — a busy conversation (different turn running) returns a retry and does NOT run the model', async () => {
+    h.tryClaimConversation.mockResolvedValue({ claimed: false, release: h.convRelease });
+    h.loadReplyForOwnerMessage.mockResolvedValue(null);
+    const events = parseSse(await (await call({ message: 'second tab', conversationId: CONV, turnId: TURN })).text());
+    expect(h.streamWithTools).not.toHaveBeenCalled();
+    expect(h.consumeRateLimit).not.toHaveBeenCalled(); // conversation claim gates BEFORE the spend gate
+    expect(String(events.find((e) => e.event === 'error')!.data!.message)).toContain('still being answered');
+    expect(h.release).toHaveBeenCalledTimes(1); // turn claim released
+    expect(h.convRelease).toHaveBeenCalledTimes(1); // NOOP conversation release still invoked
   });
 
   it('a conversationId that is not the user\'s is a clean 404 and never calls the model', async () => {

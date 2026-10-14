@@ -25,9 +25,11 @@ const h = vi.hoisted(() => ({
   createConversation: vi.fn(),
   conversationExists: vi.fn(),
   loadReplyForOwnerMessage: vi.fn(),
-  loadRecentTurnsForPrompt: vi.fn(),
+  loadPromptTurns: vi.fn(),
   tryClaimTurn: vi.fn(),
+  tryClaimConversation: vi.fn(),
   release: vi.fn(),
+  convRelease: vi.fn(),
 }));
 
 vi.mock('@/domain/auth/guard', () => ({
@@ -50,9 +52,9 @@ vi.mock('@/domain/opschat/conversations', () => ({
   createConversation: h.createConversation,
   conversationExists: h.conversationExists,
   loadReplyForOwnerMessage: h.loadReplyForOwnerMessage,
-  loadRecentTurnsForPrompt: h.loadRecentTurnsForPrompt,
+  loadPromptTurns: h.loadPromptTurns,
 }));
-vi.mock('@/domain/opschat/turn-claim', () => ({ tryClaimTurn: h.tryClaimTurn }));
+vi.mock('@/domain/opschat/turn-claim', () => ({ tryClaimTurn: h.tryClaimTurn, tryClaimConversation: h.tryClaimConversation }));
 vi.mock('@/lib/env.server', () => ({ serverEnv: () => ({ RATE_LIMIT_RUNS_PER_MINUTE: 10 }) }));
 vi.mock('@/lib/log', () => ({ log: { error: vi.fn(), info: vi.fn(), warn: vi.fn() } }));
 // Tiny server deadline so real timers fire fast; same message as production.
@@ -62,9 +64,10 @@ vi.mock('@/domain/opschat/limits', () => ({
   OPS_CHAT_SERVER_DEADLINE_MS: 40,
   OPS_CHAT_TIMEOUT_MESSAGE: 'The AI request timed out. Nothing was changed. Try again.',
   OPS_CHAT_CLIENT_TIMEOUT_MS: 120_000,
-  OPS_CHAT_MAX_PROMPT_MESSAGES: 16,
+  OPS_CHAT_MAX_PROMPT_TURNS: 8,
   OPS_CHAT_PERSIST_FAILED_MESSAGE: 'The reply could not be saved. Nothing was changed — try again.',
   OPS_CHAT_TURN_IN_PROGRESS_MESSAGE: 'This message is already being answered. Reload in a moment to see the reply.',
+  OPS_CHAT_CONVERSATION_BUSY_MESSAGE: 'Another message in this conversation is still being answered. Try again in a moment.',
   OPS_CHAT_INTERRUPTED_REPLAY_MESSAGE: 'This reply was interrupted. Send a new message to continue.',
 }));
 
@@ -107,11 +110,13 @@ beforeEach(() => {
   h.conversationExists.mockResolvedValue(true);
   h.appendOwnerMessage.mockResolvedValue({ id: 'owner1', seq: 1n, inserted: true });
   h.loadReplyForOwnerMessage.mockResolvedValue(null);
-  h.loadRecentTurnsForPrompt.mockResolvedValue([{ role: 'user', content: 'hi' }]);
+  h.loadPromptTurns.mockResolvedValue([{ role: 'user', content: 'hi' }]);
   h.appendAssistantMessage.mockResolvedValue({ id: 'asst1', seq: 2n });
   h.addProposal.mockResolvedValue({ id: 'prop1' });
   h.release.mockResolvedValue(undefined);
+  h.convRelease.mockResolvedValue(undefined);
   h.tryClaimTurn.mockResolvedValue({ claimed: true, release: h.release });
+  h.tryClaimConversation.mockResolvedValue({ claimed: true, release: h.convRelease });
 });
 
 describe('POST /api/ops-chat — overall deadline', () => {

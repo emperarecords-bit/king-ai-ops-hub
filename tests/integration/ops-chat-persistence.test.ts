@@ -14,11 +14,12 @@ import {
   listConversations,
   loadConversation,
   loadProposal,
+  loadPromptTurns,
   loadReplyForOwnerMessage,
   mostRecentConversationId,
   transitionProposal,
 } from '@/domain/opschat/conversations';
-import { tryClaimTurn } from '@/domain/opschat/turn-claim';
+import { tryClaimConversation, tryClaimTurn } from '@/domain/opschat/turn-claim';
 
 /**
  * Ops Chat persistence (PR 1) — the owner-private, user-scoped conversation store.
@@ -364,6 +365,82 @@ describe('tryClaimTurn — serializes model execution per owner turn', () => {
     const other = await tryClaimTurn(randomUUID()); // a different turn is independent
     expect(other.claimed).toBe(true);
     await other.release();
+  });
+});
+
+describe('tryClaimConversation — serializes execution per conversation (distinct lock namespace)', () => {
+  it.runIf(available)('only one turn executes in a conversation at a time; reacquirable; independent per id', async () => {
+    const id = randomUUID();
+    const c1 = await tryClaimConversation(id);
+    expect(c1.claimed).toBe(true);
+    const c2 = await tryClaimConversation(id); // a second turn in the SAME conversation loses
+    expect(c2.claimed).toBe(false);
+    await c1.release();
+    const c3 = await tryClaimConversation(id); // reacquirable once released
+    expect(c3.claimed).toBe(true);
+    await c3.release();
+    const other = await tryClaimConversation(randomUUID());
+    expect(other.claimed).toBe(true);
+    await other.release();
+  });
+
+  it.runIf(available)('turn and conversation locks do NOT collide even on the SAME uuid (namespaced keys)', async () => {
+    const id = randomUUID();
+    const turn = await tryClaimTurn(id);
+    const conv = await tryClaimConversation(id);
+    // Both acquire simultaneously — they live in different lock namespaces.
+    expect(turn.claimed).toBe(true);
+    expect(conv.claimed).toBe(true);
+    await turn.release();
+    await conv.release();
+  });
+});
+
+describe('loadPromptTurns — turn-aware prompt reconstruction (owner order + linked complete replies)', () => {
+  it.runIf(available)('reconstructs user A → assistant A → user B even when A\'s reply has a HIGHER seq than B', async () => {
+    const { convId, a, b } = await withUser({ userId: userA }, async (tx) => {
+      const c = await createConversation(tx, userA);
+      const ma = await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'question A' });
+      const mb = await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'question B' }); // B persisted before A is answered
+      await appendAssistantMessage(tx, userA, { conversationId: c.id, content: 'answer A', replyToMessageId: ma.id }); // reply A: seq > B
+      return { convId: c.id, a: ma.id, b: mb.id };
+    });
+
+    // Prompt for turn B: A's reply is attached to A by the link, not dropped by a seq<=B filter,
+    // and B is the final (current) turn with no trailing assistant.
+    const forB = await withUser({ userId: userA }, (tx) => loadPromptTurns(tx, userA, convId, b, { maxOwnerTurns: 8 }));
+    expect(forB).toEqual([
+      { role: 'user', content: 'question A' },
+      { role: 'assistant', content: 'answer A' },
+      { role: 'user', content: 'question B' },
+    ]);
+
+    // Prompt for turn A (while A is the current turn): only up through A, and A's own reply is NOT
+    // appended (we are generating it); B (higher seq) is excluded.
+    const forA = await withUser({ userId: userA }, (tx) => loadPromptTurns(tx, userA, convId, a, { maxOwnerTurns: 8 }));
+    expect(forA).toEqual([{ role: 'user', content: 'question A' }]);
+  });
+
+  it.runIf(available)('excludes an INTERRUPTED assistant reply from the prompt, but keeps it in the display transcript', async () => {
+    const { convId, b } = await withUser({ userId: userA }, async (tx) => {
+      const c = await createConversation(tx, userA);
+      const ma = await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'q A' });
+      await appendAssistantMessage(tx, userA, { conversationId: c.id, content: 'partial A', replyToMessageId: ma.id, status: 'interrupted' });
+      const mb = await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'q B' });
+      return { convId: c.id, b: mb.id };
+    });
+
+    // The interrupted reply is NOT fed back as model history — A appears with no assistant turn.
+    const forB = await withUser({ userId: userA }, (tx) => loadPromptTurns(tx, userA, convId, b, { maxOwnerTurns: 8 }));
+    expect(forB).toEqual([
+      { role: 'user', content: 'q A' },
+      { role: 'user', content: 'q B' },
+    ]);
+
+    // ...but it remains in the persisted display transcript (UI/history evidence).
+    const shown = await withUser({ userId: userA }, (tx) => loadConversation(tx, userA, convId));
+    const interrupted = shown!.messages.find((m) => m.role === 'assistant' && m.status === 'interrupted');
+    expect(interrupted?.content).toBe('partial A');
   });
 });
 

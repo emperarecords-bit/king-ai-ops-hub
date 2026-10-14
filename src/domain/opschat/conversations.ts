@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lte, sql } from 'drizzle-orm';
 import { AppError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { opsChatConversations, opsChatMessages, opsChatProposals } from '@/db/schema';
@@ -80,26 +80,78 @@ export async function conversationExists(tx: DbTx, userId: string, conversationI
 }
 
 /**
- * The bounded prompt history the server sends to the provider — the last `limit` messages
- * (by seq) as {role, content}, in chronological order. Deliberately lighter than
- * loadConversation (no proposals, no status/question) and more tightly bounded, so a long
- * thread never bloats model context. The just-persisted owner message is the final turn.
+ * The bounded, TURN-AWARE prompt history the server sends to the provider for `ownerMessageId`.
+ *
+ * Built from OWNER turns in owner-message order (by seq), up to and including the current owner
+ * message, each followed by its COMPLETE linked assistant reply (via reply_to_message_id) — NEVER
+ * by raw message seq. This is deliberate: a second owner message can be persisted while the first
+ * turn is still executing, so the first turn's assistant reply can end up with a HIGHER seq than
+ * the second owner message. A naive `seq <= owner.seq` window would then drop that reply from the
+ * later turn's prompt (or, worse, let a turn see a later owner message as the "latest" user turn).
+ * Reconstructing by the explicit owner→reply link attaches every reply to its own turn regardless
+ * of seq interleaving.
+ *
+ * INTERRUPTED assistant output is EXCLUDED — it is historical/UI evidence, not a completed answer,
+ * and must never be fed back as model history. The current owner message is always the final turn
+ * and never carries a trailing assistant (its reply is what we are about to generate). Bounded to
+ * the last `maxOwnerTurns` owner turns (≤ ~2× messages).
  */
-export async function loadRecentTurnsForPrompt(
+export async function loadPromptTurns(
   tx: DbTx,
   userId: string,
   conversationId: string,
-  limit: number,
+  ownerMessageId: string,
+  opts: { maxOwnerTurns?: number } = {},
 ): Promise<Array<{ role: OpsChatMessageRole; content: string }>> {
-  const n = Math.max(1, Math.min(limit, 100));
-  const rows = await tx
-    .select({ role: opsChatMessages.role, content: opsChatMessages.content })
+  const maxTurns = Math.max(1, Math.min(opts.maxOwnerTurns ?? 8, 50));
+
+  // The current owner message fixes the upper bound (its seq). It is always persisted first.
+  const cur = await tx
+    .select({ seq: opsChatMessages.seq })
     .from(opsChatMessages)
-    .where(and(eq(opsChatMessages.conversationId, conversationId), eq(opsChatMessages.userId, userId)))
+    .where(and(eq(opsChatMessages.id, ownerMessageId), eq(opsChatMessages.userId, userId), eq(opsChatMessages.conversationId, conversationId), eq(opsChatMessages.role, 'user')))
+    .limit(1);
+  if (!cur[0]) throw new AppError('not_found', 'The owner message for this turn was not found.');
+  const curSeq = cur[0].seq;
+
+  // The last `maxTurns` OWNER messages with seq ≤ the current one, newest first → chronological.
+  const owners = await tx
+    .select({ id: opsChatMessages.id, content: opsChatMessages.content })
+    .from(opsChatMessages)
+    .where(and(eq(opsChatMessages.conversationId, conversationId), eq(opsChatMessages.userId, userId), eq(opsChatMessages.role, 'user'), lte(opsChatMessages.seq, curSeq)))
     .orderBy(desc(opsChatMessages.seq))
-    .limit(n);
-  rows.reverse();
-  return rows.map((r) => ({ role: r.role as OpsChatMessageRole, content: r.content }));
+    .limit(maxTurns);
+  owners.reverse();
+
+  // Their COMPLETE assistant replies, resolved by the explicit owner→reply link (not seq).
+  const ownerIds = owners.map((o) => o.id);
+  const replies = ownerIds.length
+    ? await tx
+        .select({ replyTo: opsChatMessages.replyToMessageId, content: opsChatMessages.content })
+        .from(opsChatMessages)
+        .where(
+          and(
+            eq(opsChatMessages.conversationId, conversationId),
+            eq(opsChatMessages.userId, userId),
+            eq(opsChatMessages.role, 'assistant'),
+            eq(opsChatMessages.status, 'complete'),
+            inArray(opsChatMessages.replyToMessageId, ownerIds),
+          ),
+        )
+    : [];
+  const replyByOwner = new Map<string, string>();
+  for (const r of replies) if (r.replyTo) replyByOwner.set(r.replyTo, r.content);
+
+  const turns: Array<{ role: OpsChatMessageRole; content: string }> = [];
+  for (const o of owners) {
+    turns.push({ role: 'user', content: o.content });
+    // The current owner message is the turn we are answering now — never attach a trailing reply.
+    if (o.id !== ownerMessageId) {
+      const reply = replyByOwner.get(o.id);
+      if (reply !== undefined) turns.push({ role: 'assistant', content: reply });
+    }
+  }
+  return turns;
 }
 
 /**

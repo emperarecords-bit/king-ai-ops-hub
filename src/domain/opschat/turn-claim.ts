@@ -1,21 +1,23 @@
 import { getPool } from '@/db/client';
 
 /**
- * Serialize model execution per owner turn.
+ * Serialize Ops Chat model execution with session-level Postgres advisory locks, at TWO scopes:
  *
- * Persisting the owner message before execution is not enough on its own: two HTTP retries
- * can both observe the same persisted owner row with "no reply yet" and both enter the
- * provider/tool loop. A session-level Postgres advisory lock keyed on the stable
- * `ownerMessageId` closes that race — AT MOST ONE server execution may hold the claim for a
- * given turn at a time. The lock is held on a reserved connection for the whole execution and
- * released (and the connection returned to the pool) via `release()`. If it drops (crash,
- * disconnect), Postgres frees the lock automatically, so a genuinely dead attempt does not
- * strand the turn.
+ *   - PER TURN (`opschat:turn:<ownerMessageId>`) — stops two HTTP retries of the SAME send from
+ *     both entering the provider loop (duplicate-request protection).
+ *   - PER CONVERSATION (`opschat:conversation:<conversationId>`) — stops two DIFFERENT owner
+ *     messages in the same conversation (from two tabs/devices) from executing simultaneously,
+ *     which would otherwise race on prompt history and let one turn answer against the other's
+ *     message. The route acquires this before the spend gate/provider loop; if another turn in the
+ *     conversation is already running, the caller returns an in-progress/retry and the persisted
+ *     owner row simply runs later.
  *
- * If the claim is NOT acquired, another request is actively running this turn: the caller must
- * replay an already-persisted result or return "in progress" — never launch a duplicate
- * provider turn. No migration: the key is a bigint derived from the id via hashtextextended,
- * and advisory locks are session-scoped.
+ * The keys are NAMESPACED strings hashed with hashtextextended, not raw UUIDs, so a turn lock and a
+ * conversation lock can never collide even if a client reused one UUID for both ids. Each lock is
+ * held on its own reserved connection for the whole execution and freed via `release()` (idempotent;
+ * if the connection drops, Postgres frees the lock automatically so a dead attempt never strands the
+ * turn/conversation). Both `tryClaim*` use pg_try_advisory_lock (non-blocking), so there is no
+ * deadlock risk between the two scopes — a lost acquire returns `{ claimed: false }` immediately.
  */
 export interface TurnClaim {
   readonly claimed: boolean;
@@ -24,10 +26,11 @@ export interface TurnClaim {
 
 const NOOP_RELEASE = async (): Promise<void> => {};
 
-export async function tryClaimTurn(ownerMessageId: string): Promise<TurnClaim> {
+/** Acquire a session advisory lock for a namespaced string key. */
+async function acquireAdvisory(lockKey: string): Promise<TurnClaim> {
   const reserved = await getPool().reserve();
   try {
-    const rows = await reserved<{ ok: boolean }[]>`select pg_try_advisory_lock(hashtextextended(${ownerMessageId}, 0)) as ok`;
+    const rows = await reserved<{ ok: boolean }[]>`select pg_try_advisory_lock(hashtextextended(${lockKey}, 0)) as ok`;
     if (rows[0]?.ok !== true) {
       reserved.release();
       return { claimed: false, release: NOOP_RELEASE };
@@ -39,7 +42,7 @@ export async function tryClaimTurn(ownerMessageId: string): Promise<TurnClaim> {
       if (released) return;
       released = true;
       try {
-        await reserved`select pg_advisory_unlock(hashtextextended(${ownerMessageId}, 0))`;
+        await reserved`select pg_advisory_unlock(hashtextextended(${lockKey}, 0))`;
       } finally {
         reserved.release();
       }
@@ -49,4 +52,16 @@ export async function tryClaimTurn(ownerMessageId: string): Promise<TurnClaim> {
     reserved.release();
     throw err;
   }
+}
+
+/** Claim exclusive execution of ONE owner turn. Loser must replay a persisted reply or return
+ *  "in progress" — never launch a duplicate provider turn. */
+export function tryClaimTurn(ownerMessageId: string): Promise<TurnClaim> {
+  return acquireAdvisory(`opschat:turn:${ownerMessageId}`);
+}
+
+/** Claim exclusive execution within ONE conversation. Loser means another turn in the same
+ *  conversation is executing — return "busy, retry" and let the persisted owner turn run later. */
+export function tryClaimConversation(conversationId: string): Promise<TurnClaim> {
+  return acquireAdvisory(`opschat:conversation:${conversationId}`);
 }

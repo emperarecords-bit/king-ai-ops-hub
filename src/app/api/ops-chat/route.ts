@@ -15,15 +15,16 @@ import {
   appendOwnerMessage,
   conversationExists,
   createConversation,
-  loadRecentTurnsForPrompt,
+  loadPromptTurns,
   loadReplyForOwnerMessage,
   type OpsChatMessageStatus,
 } from '@/domain/opschat/conversations';
-import { tryClaimTurn, type TurnClaim } from '@/domain/opschat/turn-claim';
+import { tryClaimConversation, tryClaimTurn, type TurnClaim } from '@/domain/opschat/turn-claim';
 import { type ToolLoopEvent } from '@/types/provider';
 import {
+  OPS_CHAT_CONVERSATION_BUSY_MESSAGE,
   OPS_CHAT_INTERRUPTED_REPLAY_MESSAGE,
-  OPS_CHAT_MAX_PROMPT_MESSAGES,
+  OPS_CHAT_MAX_PROMPT_TURNS,
   OPS_CHAT_PERSIST_FAILED_MESSAGE,
   OPS_CHAT_SERVER_DEADLINE_MS,
   OPS_CHAT_TIMEOUT_MESSAGE,
@@ -45,8 +46,11 @@ import {
  *      message is committed (idempotently on `turnId`) BEFORE any provider work. A retry re-sends
  *      the same ids; both inserts are no-ops and the route does NOT run the model twice. (Because
  *      the conversation id is client-stable, a first-turn retry can never fork a second conversation.)
- *   2. CLAIM — a Postgres advisory lock keyed on the owner message id serializes execution: at
- *      most one request runs the model for a given turn. The claim is released in `finally`.
+ *   2. CLAIM (two scopes, both released in `finally`) — a per-TURN advisory lock keyed on the owner
+ *      message id stops duplicate execution of the SAME send; a per-CONVERSATION advisory lock then
+ *      stops two DIFFERENT owner messages in the same conversation (two tabs/devices) from executing
+ *      at once and racing on prompt history. If the conversation is busy, the owner row stays
+ *      persisted and the turn simply runs later.
  *   3. REPLAY (before any spend) — an already-persisted reply is AUTHORITATIVE and is replayed
  *      WITHOUT consuming provider budget or building a pulse: a complete reply replays text +
  *      proposals + `done`; an INTERRUPTED reply replays its partial text + `saved(interrupted,
@@ -233,6 +237,7 @@ export async function POST(req: Request): Promise<Response> {
       };
 
       let claim: TurnClaim | undefined;
+      let convClaim: TurnClaim | undefined;
       let ac: AbortController | undefined;
       let onReqAbort: (() => void) | undefined;
       let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
@@ -272,14 +277,24 @@ export async function POST(req: Request): Promise<Response> {
           return;
         }
 
-        // No reply yet, and we did NOT win the claim ⇒ another request is actively running this
-        // turn. Never launch a duplicate provider turn; tell the client to reload shortly.
+        // No reply yet, and we did NOT win the TURN claim ⇒ another request is actively running
+        // this turn. Never launch a duplicate provider turn; tell the client to reload shortly.
         if (!claim.claimed) {
           sendTerminal('error', { message: OPS_CHAT_TURN_IN_PROGRESS_MESSAGE });
           return;
         }
 
-        // 4. SPEND GATE (only now that we hold the claim and there is no reply to replay). The
+        // 3b. CONVERSATION CLAIM — before the spend gate/provider loop, serialize execution across
+        //     the whole conversation so two different owner messages (two tabs/devices) can't run at
+        //     once and race on prompt history. If busy, the owner row stays persisted and the turn
+        //     runs later on retry; we never start the provider.
+        convClaim = await tryClaimConversation(conversationId);
+        if (!convClaim.claimed) {
+          sendTerminal('error', { message: OPS_CHAT_CONVERSATION_BUSY_MESSAGE });
+          return;
+        }
+
+        // 4. SPEND GATE (only now that we hold both claims and there is no reply to replay). The
         //    tool loop makes one or more paid Anthropic calls; bound it with the per-user rate
         //    limiter. A persisted reply would have replayed above, so a rate limit can never make
         //    an already-saved reply unreplayable. Fail-closed on an unexpected limiter error.
@@ -330,9 +345,12 @@ export async function POST(req: Request): Promise<Response> {
           }, OPS_CHAT_SERVER_DEADLINE_MS);
         });
 
-        // Bounded prompt history from the persisted store (ends with the owner message we just
-        // committed) — the client never supplies conversation context.
-        const turns = await withUser({ userId }, (tx) => loadRecentTurnsForPrompt(tx, userId, conversationId, OPS_CHAT_MAX_PROMPT_MESSAGES));
+        // Turn-aware prompt history from the persisted store: owner turns in order, each followed by
+        // its COMPLETE linked assistant reply, ending with the owner message we just committed.
+        // Reconstructed by the owner→reply link (not raw seq), so an interleaved reply with a higher
+        // seq than a later owner message is still attached to the right turn; interrupted output is
+        // excluded. The client never supplies conversation context.
+        const turns = await withUser({ userId }, (tx) => loadPromptTurns(tx, userId, conversationId, ownerMessageId, { maxOwnerTurns: OPS_CHAT_MAX_PROMPT_TURNS }));
 
         // A completed model turn: commit the reply + proposals, then emit saved+done. A failed
         // transaction emits NO saved (client keeps cards disabled) and a retryable error; the
@@ -414,8 +432,10 @@ export async function POST(req: Request): Promise<Response> {
         // Best-effort unwind of the provider generator (fire-and-forget; a generator stalled
         // inside a tool call is orphaned — it holds no write and is GC'd). Never awaited.
         void iterator?.return?.(undefined)?.catch(() => {});
-        // Release the per-turn execution claim LAST, in finally, so success / timeout / provider
-        // / tool failure all free it (and the reserved connection). A NOOP when we never claimed.
+        // Release BOTH execution claims LAST, in finally, so success / timeout / provider / tool
+        // failure all free them (and their reserved connections). Each is a NOOP when never claimed.
+        // Conversation first, then turn (reverse of acquisition); both releases are idempotent.
+        await convClaim?.release();
         await claim?.release();
       }
     },
