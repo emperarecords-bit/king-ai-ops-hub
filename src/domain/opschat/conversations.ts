@@ -142,8 +142,20 @@ export async function loadReplyForOwnerMessage(
 export async function appendAssistantMessage(
   tx: DbTx,
   userId: string,
-  args: { conversationId: string; content: string; question?: string | null; status?: OpsChatMessageStatus; replyToMessageId?: string },
+  args: { conversationId: string; content: string; replyToMessageId: string; question?: string | null; status?: OpsChatMessageStatus },
 ): Promise<{ id: string; seq: bigint }> {
+  // The reply target MUST be an owner (role='user') message in the same conversation/user.
+  // The composite FK enforces "same conversation" and RLS enforces "same user", but neither
+  // can enforce role — so verify it here and fail closed, otherwise a bug could permanently
+  // (messages are append-only) link an assistant reply to another assistant message.
+  const target = await tx
+    .select({ role: opsChatMessages.role })
+    .from(opsChatMessages)
+    .where(and(eq(opsChatMessages.id, args.replyToMessageId), eq(opsChatMessages.userId, userId), eq(opsChatMessages.conversationId, args.conversationId)))
+    .limit(1);
+  if (!target[0] || target[0].role !== 'user') {
+    throw new AppError('conflict', 'An assistant reply must link to an owner message in the same conversation.');
+  }
   const [msg] = await tx
     .insert(opsChatMessages)
     .values({
@@ -153,7 +165,7 @@ export async function appendAssistantMessage(
       status: args.status ?? 'complete',
       content: args.content,
       question: args.question ?? null,
-      replyToMessageId: args.replyToMessageId ?? null,
+      replyToMessageId: args.replyToMessageId,
     })
     .returning({ id: opsChatMessages.id, seq: opsChatMessages.seq });
   await tx

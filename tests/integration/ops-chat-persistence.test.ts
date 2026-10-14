@@ -141,10 +141,10 @@ describe('conversations domain — ordering, title, CAS, immutability, bounds', 
   it.runIf(available)('persists a deterministic transcript ordered by seq, titled from the first owner message', async () => {
     const convId = await withUser({ userId: userA }, async (tx) => {
       const c = await createConversation(tx, userA);
-      await appendOwnerMessage(tx, userA, { conversationId: c.id, content: '  First   owner question  ' });
-      await appendAssistantMessage(tx, userA, { conversationId: c.id, content: 'assistant reply 1', question: 'First owner question' });
-      await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'second owner question' });
-      await appendAssistantMessage(tx, userA, { conversationId: c.id, content: 'assistant reply 2' });
+      const o1 = await appendOwnerMessage(tx, userA, { conversationId: c.id, content: '  First   owner question  ' });
+      await appendAssistantMessage(tx, userA, { conversationId: c.id, content: 'assistant reply 1', question: 'First owner question', replyToMessageId: o1.id });
+      const o2 = await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'second owner question' });
+      await appendAssistantMessage(tx, userA, { conversationId: c.id, content: 'assistant reply 2', replyToMessageId: o2.id });
       return c.id;
     });
     const loaded = await withUser({ userId: userA }, (tx) => loadConversation(tx, userA, convId));
@@ -165,8 +165,7 @@ describe('conversations domain — ordering, title, CAS, immutability, bounds', 
     const { convId, proposalId, payload } = await withUser({ userId: userA }, async (tx) => {
       const c = await createConversation(tx, userA);
       const m = await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'do the thing' });
-      const a = await appendAssistantMessage(tx, userA, { conversationId: c.id, content: 'here is a proposal' });
-      void m;
+      const a = await appendAssistantMessage(tx, userA, { conversationId: c.id, content: 'here is a proposal', replyToMessageId: m.id });
       const pl = { kind: 'answer_question', projectKey: 'ws', questionId: randomUUID(), answer: 'yes' };
       const p = await addProposal(tx, userA, { conversationId: c.id, messageId: a.id, kind: 'answer_question', proposal: pl });
       return { convId: c.id, proposalId: p.id, payload: pl };
@@ -236,8 +235,8 @@ describe('DB-enforced immutability — column privileges (not just convention)',
   it.runIf(available)('app_server cannot rewrite the proposal payload, message content, or relationship keys', async () => {
     const { msgId, propId } = await withUser({ userId: userA }, async (tx) => {
       const c = await createConversation(tx, userA);
-      await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'immutability test' });
-      const a = await appendAssistantMessage(tx, userA, { conversationId: c.id, content: 'reply' });
+      const o = await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'immutability test' });
+      const a = await appendAssistantMessage(tx, userA, { conversationId: c.id, content: 'reply', replyToMessageId: o.id });
       const p = await addProposal(tx, userA, { conversationId: c.id, messageId: a.id, kind: 'answer_question', proposal: { kind: 'answer_question', answer: 'original' } });
       return { msgId: a.id, propId: p.id };
     });
@@ -352,5 +351,32 @@ describe('loadReplyForOwnerMessage — explicit owner->assistant linkage (no seq
     await expect(
       withUser({ userId: userA }, (tx) => appendAssistantMessage(tx, userA, { conversationId: convId, content: 'second reply', replyToMessageId: owner })),
     ).rejects.toThrow();
+  });
+
+  it.runIf(available)('rejects an assistant reply that links to another assistant message (fail closed)', async () => {
+    const { convId, assistantId } = await withUser({ userId: userA }, async (tx) => {
+      const c = await createConversation(tx, userA);
+      const o = await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'owner' });
+      const a = await appendAssistantMessage(tx, userA, { conversationId: c.id, content: 'assistant reply', replyToMessageId: o.id });
+      return { convId: c.id, assistantId: a.id };
+    });
+    // reply_to_message_id must point at an owner/user message. Linking to an assistant
+    // row is rejected in the domain layer before any insert.
+    await expect(
+      withUser({ userId: userA }, (tx) => appendAssistantMessage(tx, userA, { conversationId: convId, content: 'reply to an assistant', replyToMessageId: assistantId })),
+    ).rejects.toThrow(/owner message/);
+  });
+
+  it.runIf(available)('rejects an assistant reply whose target is in a different conversation', async () => {
+    const { conv2Id, ownerInConv1 } = await withUser({ userId: userA }, async (tx) => {
+      const c1 = await createConversation(tx, userA);
+      const c2 = await createConversation(tx, userA);
+      const o = await appendOwnerMessage(tx, userA, { conversationId: c1.id, content: 'owner in conv 1' });
+      return { conv2Id: c2.id, ownerInConv1: o.id };
+    });
+    // Same user, but the owner message belongs to a different conversation: fail closed.
+    await expect(
+      withUser({ userId: userA }, (tx) => appendAssistantMessage(tx, userA, { conversationId: conv2Id, content: 'cross-conversation reply', replyToMessageId: ownerInConv1 })),
+    ).rejects.toThrow(/owner message/);
   });
 });
