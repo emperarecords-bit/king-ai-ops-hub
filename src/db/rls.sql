@@ -1029,6 +1029,63 @@ begin
 end
 $$;
 
+-- Ops Chat persistence (migration 0084). Owner-private, USER-scoped — Ops Chat is the
+-- owner's cross-workspace front door (no single org/project), so these follow the
+-- notification_*_self shape (user_id = app.current_user_id()), not the (org,project)
+-- tenant shape. Read/written under withUser({ userId }); with no app.user_id set,
+-- current_user_id() is NULL and every policy fails closed (no rows). No delete grant:
+-- a conversation and its messages/proposals are governance history. to_regclass-guarded
+-- so the penultimate-schema incremental bootstrap tolerates their absence.
+--
+-- Immutability is enforced at the DB boundary by COLUMN-level UPDATE privileges, not by
+-- convention in the domain layer. RLS only governs WHICH owner's row may change, not WHICH
+-- columns — so `app_server` gets UPDATE on exactly the mutable columns and nothing else.
+-- Messages are append-only (no UPDATE at all); a proposal's immutable `proposal` payload
+-- and its relationship keys (conversation_id/message_id/user_id/kind/seq) are never updatable.
+-- Each block revokes any prior table-wide UPDATE first so re-running rls.sql converges to
+-- the tightened grant on a DB that was previously granted the broad privilege.
+do $$
+begin
+  if to_regclass('public.ops_chat_conversations') is not null then
+    grant select, insert on ops_chat_conversations to app_server;
+    revoke update on ops_chat_conversations from app_server;
+    grant update (title, updated_at) on ops_chat_conversations to app_server;
+    alter table ops_chat_conversations enable row level security;
+    alter table ops_chat_conversations force row level security;
+    drop policy if exists ops_chat_conversations_self on ops_chat_conversations;
+    execute
+      'create policy ops_chat_conversations_self on ops_chat_conversations
+         using (user_id = app.current_user_id())
+         with check (user_id = app.current_user_id())';
+  end if;
+
+  if to_regclass('public.ops_chat_messages') is not null then
+    grant select, insert on ops_chat_messages to app_server;
+    revoke update on ops_chat_messages from app_server; -- append-only history
+    alter table ops_chat_messages enable row level security;
+    alter table ops_chat_messages force row level security;
+    drop policy if exists ops_chat_messages_self on ops_chat_messages;
+    execute
+      'create policy ops_chat_messages_self on ops_chat_messages
+         using (user_id = app.current_user_id())
+         with check (user_id = app.current_user_id())';
+  end if;
+
+  if to_regclass('public.ops_chat_proposals') is not null then
+    grant select, insert on ops_chat_proposals to app_server;
+    revoke update on ops_chat_proposals from app_server;
+    grant update (state, result, error, decided_at, updated_at) on ops_chat_proposals to app_server;
+    alter table ops_chat_proposals enable row level security;
+    alter table ops_chat_proposals force row level security;
+    drop policy if exists ops_chat_proposals_self on ops_chat_proposals;
+    execute
+      'create policy ops_chat_proposals_self on ops_chat_proposals
+         using (user_id = app.current_user_id())
+         with check (user_id = app.current_user_id())';
+  end if;
+end
+$$;
+
 -- Portfolio ledger (migration 0067). to_regclass-guarded like owner_questions so the
 -- penultimate-schema incremental bootstrap tolerates absence. Trades may be deleted
 -- (typo correction by the owner); accounts and quotes are never deleted by the app.

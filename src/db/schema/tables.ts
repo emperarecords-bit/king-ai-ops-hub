@@ -2490,3 +2490,114 @@ export const symbolQuotes = pgTable(
     index('symbol_quotes_org_idx').on(t.orgId),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// Ops Chat persistence (owner-private, user-scoped)
+// ---------------------------------------------------------------------------
+// Ops Chat is the owner's cross-workspace front door: it authenticates owner-wide
+// (requireUser + listMyProjectsWithOrgRoles), has no single (org, project), and its
+// assistant turns are NOT tasks. So — unlike Employee Chat's project/agent-scoped
+// `conversations` + shared `messages` — these are keyed on the USER and gated by the
+// notification_*_self RLS shape (user_id = app.current_user_id()), read and written
+// under withUser({ userId }). No delete grant: a conversation is governance history
+// (see src/db/rls.sql). Deterministic ordering is a generated bigint identity `seq`,
+// never created_at alone.
+
+export const opsChatConversations = pgTable(
+  'ops_chat_conversations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'restrict' }),
+    // Derived from the first OWNER message (whitespace-normalized + truncated), never
+    // from the opening pulse or an assistant turn. Null until the first message lands.
+    title: text('title'),
+    ...timestamps, // updatedAt is bumped on each new message → most-recent-first list
+  },
+  (t) => [
+    // History list for a user, most-recent first (ORDER BY updated_at desc at read).
+    index('ops_chat_conversations_user_updated_idx').on(t.userId, t.updatedAt),
+    // Lets children pin (id, user_id) so a message/proposal can never cross users.
+    unique('ops_chat_conversations_id_user_uq').on(t.id, t.userId),
+  ],
+);
+
+export const opsChatMessages = pgTable(
+  'ops_chat_messages',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    conversationId: uuid('conversation_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    // Global monotonic identity = the deterministic total order. created_at alone is
+    // not a strong key (ties); order by seq.
+    seq: bigint('seq', { mode: 'bigint' }).notNull().generatedAlwaysAsIdentity(),
+    role: text('role').notNull(), // 'user' | 'assistant' (check below)
+    // A completed turn vs an interrupted assistant stream — an interrupted response is
+    // kept for history but must never masquerade as a completed answer.
+    status: text('status').notNull().default('complete'), // 'complete' | 'interrupted'
+    content: text('content').notNull(),
+    // The owner question that produced an assistant answer (re-enables Ask Council on reload).
+    question: text('question'),
+    ...timestamps,
+  },
+  (t) => [
+    // A message belongs to a conversation owned by the SAME user — DB-enforced, not app-only.
+    foreignKey({
+      columns: [t.conversationId, t.userId],
+      foreignColumns: [opsChatConversations.id, opsChatConversations.userId],
+      name: 'ops_chat_messages_conversation_user_fk',
+    }).onDelete('restrict'),
+    // Deterministic per-conversation ordering.
+    uniqueIndex('ops_chat_messages_conversation_seq_uq').on(t.conversationId, t.seq),
+    // Target for the proposal → message composite FK (pins same conversation).
+    unique('ops_chat_messages_id_conversation_uq').on(t.id, t.conversationId),
+    index('ops_chat_messages_conversation_created_idx').on(t.conversationId, t.createdAt),
+    check('ops_chat_messages_role_chk', sql`role in ('user', 'assistant')`),
+    check('ops_chat_messages_status_chk', sql`status in ('complete', 'interrupted')`),
+  ],
+);
+
+export const opsChatProposals = pgTable(
+  'ops_chat_proposals',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    conversationId: uuid('conversation_id').notNull(),
+    messageId: uuid('message_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    seq: bigint('seq', { mode: 'bigint' }).notNull().generatedAlwaysAsIdentity(),
+    kind: text('kind').notNull(), // answer_question | decide_approval | … | vercel_mutation
+    // IMMUTABLE after creation. On confirm the server loads THIS persisted proposal
+    // (never trusts the browser payload), re-validates + executes, then CAS-updates
+    // only state/result/error/decided_at below.
+    proposal: jsonb('proposal').notNull(),
+    // pending → confirming → done | error | stale ; or pending → cancelled.
+    // `confirming` guards double-submit / cross-device races (CAS); `stale` distinguishes
+    // "valid when proposed but target no longer current" from a genuine execution error.
+    state: text('state').notNull().default('pending'),
+    result: jsonb('result'),
+    error: text('error'),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    // Pin the proposal to a message IN THE SAME conversation — DB-enforced.
+    foreignKey({
+      columns: [t.messageId, t.conversationId],
+      foreignColumns: [opsChatMessages.id, opsChatMessages.conversationId],
+      name: 'ops_chat_proposals_message_conversation_fk',
+    }).onDelete('restrict'),
+    // Pin the conversation to the SAME user.
+    foreignKey({
+      columns: [t.conversationId, t.userId],
+      foreignColumns: [opsChatConversations.id, opsChatConversations.userId],
+      name: 'ops_chat_proposals_conversation_user_fk',
+    }).onDelete('restrict'),
+    index('ops_chat_proposals_conversation_created_idx').on(t.conversationId, t.createdAt),
+    index('ops_chat_proposals_message_idx').on(t.messageId),
+    check(
+      'ops_chat_proposals_state_chk',
+      sql`state in ('pending', 'confirming', 'done', 'error', 'cancelled', 'stale')`,
+    ),
+  ],
+);
