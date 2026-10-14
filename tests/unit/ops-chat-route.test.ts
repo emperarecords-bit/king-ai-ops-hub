@@ -126,7 +126,7 @@ describe('POST /api/ops-chat (v2) — input validation', () => {
 
 describe('POST /api/ops-chat (v2) — spend boundary preserved', () => {
   it('a valid Send reaches the tool loop and streams delta/tool/proposal/done', async () => {
-    const res = await call({ message: 'what needs me' });
+    const res = await call({ message: 'what needs me', conversationId: CONV, turnId: TURN });
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/event-stream');
     const text = await res.text();
@@ -138,19 +138,26 @@ describe('POST /api/ops-chat (v2) — spend boundary preserved', () => {
     expect(h.streamWithTools).toHaveBeenCalledTimes(1);
   });
 
-  it('consumes the owner-scoped rate limit BEFORE any model call (v1 preserved)', async () => {
-    await (await call({ message: 'what needs me' })).text();
+  it('consumes the owner-scoped rate limit before the model call, but only in the run branch', async () => {
+    await (await call({ message: 'what needs me', conversationId: CONV, turnId: TURN })).text();
     expect(h.consumeRateLimit).toHaveBeenCalledTimes(1);
     const [, scopeKey, limit] = h.consumeRateLimit.mock.calls[0]!;
     expect(scopeKey).toBe('ops-chat:user:u1');
     expect(limit).toBe(10);
+    // spend gate runs AFTER the owner message is persisted (owner-first) and after the claim.
+    expect(h.appendOwnerMessage.mock.invocationCallOrder[0]!).toBeLessThan(h.consumeRateLimit.mock.invocationCallOrder[0]!);
+    expect(h.consumeRateLimit.mock.invocationCallOrder[0]!).toBeLessThan(h.streamWithTools.mock.invocationCallOrder[0]!);
   });
 
-  it('rate-limited → 429 and no model call', async () => {
+  it('rate-limited → in-stream error (stream already open), no model call, claim released', async () => {
     h.consumeRateLimit.mockRejectedValue(new RateLimitedError());
-    const res = await call({ message: 'what needs me' });
-    expect(res.status).toBe(429);
+    const res = await call({ message: 'what needs me', conversationId: CONV, turnId: TURN });
+    expect(res.status).toBe(200); // the spend gate now lives inside the opened stream
+    const events = parseSse(await res.text());
+    expect(events.some((e) => e.event === 'error')).toBe(true);
+    expect(events.some((e) => e.event === 'saved' || e.event === 'done')).toBe(false);
     expect(h.streamWithTools).not.toHaveBeenCalled();
+    expect(h.release).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -201,16 +208,23 @@ describe('POST /api/ops-chat — persistence turn protocol (PR 2)', () => {
     expect(h.release).toHaveBeenCalledTimes(1);
   });
 
-  it('a bad conversationId (not the user\'s) is a clean 404 and never calls the model', async () => {
+  it('a conversationId that is not the user\'s is a clean 404 and never calls the model', async () => {
     h.conversationExists.mockResolvedValue(false);
-    const res = await call({ message: 'hi', conversationId: CONV });
+    const res = await call({ message: 'hi', conversationId: CONV, turnId: TURN });
     expect(res.status).toBe(404);
+    expect(h.streamWithTools).not.toHaveBeenCalled();
+  });
+
+  it('a missing turnId or conversationId → 400 (idempotency ids are mandatory, not a convention)', async () => {
+    expect((await call({ message: 'hi', conversationId: CONV })).status).toBe(400); // no turnId
+    expect((await call({ message: 'hi', turnId: TURN })).status).toBe(400); // no conversationId
+    expect(h.appendOwnerMessage).not.toHaveBeenCalled();
     expect(h.streamWithTools).not.toHaveBeenCalled();
   });
 
   it('point 6 — a failed persist emits NO `saved`, a retryable error, and still releases the claim', async () => {
     h.appendAssistantMessage.mockRejectedValue(new Error('db unavailable'));
-    const events = parseSse(await (await call({ message: 'hi', turnId: TURN })).text());
+    const events = parseSse(await (await call({ message: 'hi', conversationId: CONV, turnId: TURN })).text());
     expect(events.some((e) => e.event === 'saved')).toBe(false);
     const err = events.find((e) => e.event === 'error')!.data!;
     expect(String(err.message)).toContain('could not be saved');
@@ -221,8 +235,9 @@ describe('POST /api/ops-chat — persistence turn protocol (PR 2)', () => {
   it('point 2 — losing the execution claim with no persisted reply yields an in-progress error and does NOT run the model', async () => {
     h.tryClaimTurn.mockResolvedValue({ claimed: false, release: h.release });
     h.loadReplyForOwnerMessage.mockResolvedValue(null);
-    const events = parseSse(await (await call({ message: 'hi', turnId: TURN })).text());
+    const events = parseSse(await (await call({ message: 'hi', conversationId: CONV, turnId: TURN })).text());
     expect(h.streamWithTools).not.toHaveBeenCalled();
+    expect(h.consumeRateLimit).not.toHaveBeenCalled(); // spend gate never reached on claim loss
     expect(String(events.find((e) => e.event === 'error')!.data!.message)).toContain('already being answered');
     expect(h.release).toHaveBeenCalledTimes(1); // NOOP release still invoked in finally
   });
@@ -238,8 +253,10 @@ describe('POST /api/ops-chat — persistence turn protocol (PR 2)', () => {
         { id: 'propPrior', kind: 'answer_question', proposal: { kind: 'answer_question', questionId: 'q1', projectKey: 'ab', workspaceName: 'W', question: 'x?', answer: 'y' }, state: 'pending', result: null, error: null },
       ],
     });
-    const events = parseSse(await (await call({ message: 'what needs me', turnId: TURN })).text());
+    const events = parseSse(await (await call({ message: 'what needs me', conversationId: CONV, turnId: TURN })).text());
     expect(h.streamWithTools).not.toHaveBeenCalled();
+    expect(h.consumeRateLimit).not.toHaveBeenCalled(); // replay bypasses the spend gate
+    expect(h.buildPulse).not.toHaveBeenCalled(); // and the pulse build
     expect(h.appendAssistantMessage).not.toHaveBeenCalled(); // never create a second reply
     expect(events.find((e) => e.event === 'delta')!.data!.text).toBe('the prior answer');
     const saved = events.find((e) => e.event === 'saved')!.data!;
@@ -248,17 +265,52 @@ describe('POST /api/ops-chat — persistence turn protocol (PR 2)', () => {
     expect(h.release).toHaveBeenCalledTimes(1);
   });
 
-  it('point 3/4 — a provider failure persists an INTERRUPTED reply linked to the owner turn and releases the claim', async () => {
+  it('replaying an INTERRUPTED reply replays partial text + saved(interrupted, proposals:[]) + error, NEVER done', async () => {
+    h.loadReplyForOwnerMessage.mockResolvedValue({
+      conversationId: CONV,
+      messageId: 'asstPartial',
+      content: 'partial thought…',
+      status: 'interrupted',
+      question: 'what needs me',
+      proposals: [], // interrupted turns never persist proposals
+    });
+    const events = parseSse(await (await call({ message: 'what needs me', conversationId: CONV, turnId: TURN })).text());
+    expect(h.streamWithTools).not.toHaveBeenCalled();
+    expect(events.find((e) => e.event === 'delta')!.data!.text).toBe('partial thought…');
+    const saved = events.find((e) => e.event === 'saved')!.data!;
+    expect(saved).toMatchObject({ messageId: 'asstPartial', status: 'interrupted', proposals: [] });
+    expect(events.some((e) => e.event === 'done')).toBe(false); // never masquerades as complete
+    const err = events.find((e) => e.event === 'error')!.data!;
+    expect(String(err.message)).toContain('interrupted');
+    expect(h.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('point 3/6 — a provider failure persists the partial TEXT as interrupted with ZERO proposals, then errors and releases the claim', async () => {
+    // Model streams some text, proposes a card, then the provider throws mid-turn.
     h.streamWithTools.mockImplementation(() => ({
-      [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(new Error('provider boom')) }),
+      [Symbol.asyncIterator]: () => {
+        let n = 0;
+        return {
+          next: () =>
+            n++ === 0
+              ? Promise.resolve({ done: false, value: { kind: 'delta', text: 'partial' } })
+              : Promise.reject(new Error('provider boom')),
+        };
+      },
     }));
-    const events = parseSse(await (await call({ message: 'hi', turnId: TURN })).text());
-    // getProposals returns one proposal (the model proposed before failing) → interrupted reply is kept.
+    const events = parseSse(await (await call({ message: 'hi', conversationId: CONV, turnId: TURN })).text());
+    // interrupted reply keeps the partial TEXT...
     expect(h.appendAssistantMessage).toHaveBeenCalledWith(
       expect.anything(),
       'u1',
-      expect.objectContaining({ replyToMessageId: 'owner1', status: 'interrupted' }),
+      expect.objectContaining({ replyToMessageId: 'owner1', status: 'interrupted', content: 'partial' }),
     );
+    // ...but NEVER persists proposals (governed writes only at a successful finalize).
+    expect(h.addProposal).not.toHaveBeenCalled();
+    expect(events.some((e) => e.event === 'proposal')).toBe(false);
+    const saved = events.find((e) => e.event === 'saved')!.data!;
+    expect(saved).toMatchObject({ status: 'interrupted', proposals: [] });
+    expect(events.some((e) => e.event === 'done')).toBe(false);
     expect(events.some((e) => e.event === 'error')).toBe(true);
     expect(h.release).toHaveBeenCalledTimes(1);
   });

@@ -8,6 +8,7 @@ import {
   appendAssistantMessage,
   appendOwnerMessage,
   canTransition,
+  conversationExists,
   createConversation,
   deriveTitle,
   listConversations,
@@ -92,6 +93,48 @@ describe('canTransition — the proposal state machine', () => {
     }
     // not a shortcut
     expect(canTransition('pending', 'done')).toBe(false);
+  });
+});
+
+describe('createConversation — idempotent by caller-provided id (first-turn retry recovery)', () => {
+  it.runIf(available)('creating the same client id twice is a no-op; a full (conversationId, turnId, content) replay never forks', async () => {
+    const convId = randomUUID();
+    const turnId = randomUUID();
+    const content = 'first message of a brand-new conversation';
+
+    // First attempt: create by client id + append the owner turn.
+    const first = await withUser({ userId: userA }, async (tx) => {
+      await createConversation(tx, userA, { id: convId });
+      return appendOwnerMessage(tx, userA, { conversationId: convId, content, id: turnId });
+    });
+    expect(first.inserted).toBe(true);
+
+    // Total-failure retry: the EXACT same request (same ids + content) — must not fork a second
+    // conversation and must not duplicate the owner message.
+    const retry = await withUser({ userId: userA }, async (tx) => {
+      await createConversation(tx, userA, { id: convId });
+      return appendOwnerMessage(tx, userA, { conversationId: convId, content, id: turnId });
+    });
+    expect(retry.inserted).toBe(false);
+    expect(retry.id).toBe(first.id);
+
+    const convCount = await admin`select count(*)::int n from ops_chat_conversations where id = ${convId}`;
+    expect(convCount[0]!.n).toBe(1);
+    const msgCount = await admin`select count(*)::int n from ops_chat_messages where conversation_id = ${convId}`;
+    expect(msgCount[0]!.n).toBe(1);
+  });
+
+  it.runIf(available)('a client id that already belongs to ANOTHER user is left untouched; conversationExists stays false for the intruder', async () => {
+    const convId = randomUUID();
+    // A owns it.
+    await withUser({ userId: userA }, (tx) => createConversation(tx, userA, { id: convId }));
+    // B tries the same id — onConflictDoNothing leaves A's row intact; B does not own it.
+    await withUser({ userId: userB }, (tx) => createConversation(tx, userB, { id: convId }));
+    expect(await withUser({ userId: userB }, (tx) => conversationExists(tx, userB, convId))).toBe(false);
+    expect(await withUser({ userId: userA }, (tx) => conversationExists(tx, userA, convId))).toBe(true);
+    // The row still belongs to A (never re-owned).
+    const owner = await admin`select user_id from ops_chat_conversations where id = ${convId}`;
+    expect(owner[0]!.user_id).toBe(userA);
   });
 });
 

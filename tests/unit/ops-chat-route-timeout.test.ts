@@ -65,13 +65,18 @@ vi.mock('@/domain/opschat/limits', () => ({
   OPS_CHAT_MAX_PROMPT_MESSAGES: 16,
   OPS_CHAT_PERSIST_FAILED_MESSAGE: 'The reply could not be saved. Nothing was changed — try again.',
   OPS_CHAT_TURN_IN_PROGRESS_MESSAGE: 'This message is already being answered. Reload in a moment to see the reply.',
+  OPS_CHAT_INTERRUPTED_REPLAY_MESSAGE: 'This reply was interrupted. Send a new message to continue.',
 }));
 
 import { POST } from '@/app/api/ops-chat/route';
 
-function call(body: unknown): Promise<Response> {
+const CONV = '11111111-1111-4111-8111-111111111111';
+const TURN = '22222222-2222-4222-8222-222222222222';
+
+function call(body: Record<string, unknown>): Promise<Response> {
   const init: RequestInit = { method: 'POST', headers: { 'content-type': 'application/json' } };
-  init.body = JSON.stringify(body);
+  // conversationId + turnId are now required; inject stable defaults unless the test overrides them.
+  init.body = JSON.stringify({ conversationId: CONV, turnId: TURN, ...body });
   return POST(new Request('http://localhost/api/ops-chat', init));
 }
 

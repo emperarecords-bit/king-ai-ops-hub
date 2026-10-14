@@ -50,7 +50,19 @@ export function deriveTitle(firstOwnerMessage: string): string {
   return `${t.slice(0, TITLE_MAX - 1).trimEnd()}…`;
 }
 
-export async function createConversation(tx: DbTx, userId: string): Promise<{ id: string }> {
+/**
+ * Create a conversation. With a caller-provided `id` the insert is IDEMPOTENT
+ * (onConflictDoNothing) so the exact same request — `(conversationId, turnId, content)` — can be
+ * replayed after a total network failure without forking a second conversation; the caller then
+ * verifies ownership separately (an id that already belongs to another user is left untouched and
+ * `conversationExists` returns false → the route rejects it). Without an `id` a fresh random id is
+ * minted and always returned.
+ */
+export async function createConversation(tx: DbTx, userId: string, opts: { id?: string } = {}): Promise<{ id: string }> {
+  if (opts.id) {
+    await tx.insert(opsChatConversations).values({ id: opts.id, userId }).onConflictDoNothing();
+    return { id: opts.id };
+  }
   const [row] = await tx.insert(opsChatConversations).values({ userId }).returning({ id: opsChatConversations.id });
   return row!;
 }

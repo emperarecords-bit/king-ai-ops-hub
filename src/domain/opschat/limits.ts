@@ -46,3 +46,7 @@ export const OPS_CHAT_PERSIST_FAILED_MESSAGE = 'The reply could not be saved. No
 
 /** Shown when another request already holds this turn's execution claim and no reply exists yet. */
 export const OPS_CHAT_TURN_IN_PROGRESS_MESSAGE = 'This message is already being answered. Reload in a moment to see the reply.';
+
+/** Shown when replaying a persisted INTERRUPTED reply. An interrupted turn is kept for history but
+ *  must never masquerade as a completed answer, so its replay ends in `error`, not `done`. */
+export const OPS_CHAT_INTERRUPTED_REPLAY_MESSAGE = 'This reply was interrupted. Send a new message to continue.';
