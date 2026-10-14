@@ -374,19 +374,35 @@ export async function POST(req: Request): Promise<Response> {
   );
   if (!lock) return Response.json({ error: 'This proposal is already being confirmed or is no longer pending.', state: stored.state }, { status: 409 });
 
-  // 6. Execute, then CAS to the terminal state.
+  // 6. Execute, then CAS to the terminal state. The ACTION may be externally real (a PR
+  //    merged, a deploy shipped), so we must never report a terminal state we did not persist:
+  //    if the terminal CAS does not land, surface it as `unrecorded` rather than pretending.
   try {
     const executed = await runAction(body, ctx);
-    await withUser({ userId: user.id }, (tx) =>
+    const done = await withUser({ userId: user.id }, (tx) =>
       transitionProposal(tx, user.id, { proposalId: input.proposalId, from: 'confirming', to: 'done', result: executed ?? null }),
-    );
+    ).catch(() => null);
+    if (!done) {
+      log.error('ops-chat confirm: executed but failed to persist done state', { proposalId: input.proposalId, action: body.action });
+      return Response.json({ ok: true, executed, state: 'unrecorded', warning: 'The action executed, but its card state could not be recorded — reload to see the true state.' });
+    }
     return Response.json({ ok: true, executed, state: 'done' });
   } catch (err) {
     const to = isStaleFailure(err) ? 'stale' : 'error';
     if (!(err instanceof AppError)) log.error('ops-chat confirm execution failed', { err, action: body.action });
-    await withUser({ userId: user.id }, (tx) =>
+    const recorded = await withUser({ userId: user.id }, (tx) =>
       transitionProposal(tx, user.id, { proposalId: input.proposalId, from: 'confirming', to, error: toPublicMessage(err) }),
-    ).catch((e) => log.error('ops-chat confirm: failed to record terminal proposal state', { e, proposalId: input.proposalId }));
-    return Response.json({ error: toPublicMessage(err), state: to }, { status: statusFor(err) });
+    ).catch((e) => {
+      log.error('ops-chat confirm: failed to record terminal proposal state', { e, proposalId: input.proposalId });
+      return null;
+    });
+    return Response.json(
+      {
+        error: toPublicMessage(err),
+        state: recorded ? to : 'unrecorded',
+        ...(recorded ? {} : { warning: 'The card state could not be recorded — reload to see the true state.' }),
+      },
+      { status: statusFor(err) },
+    );
   }
 }

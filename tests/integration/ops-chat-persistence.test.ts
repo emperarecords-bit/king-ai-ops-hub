@@ -16,6 +16,7 @@ import {
   mostRecentConversationId,
   transitionProposal,
 } from '@/domain/opschat/conversations';
+import { tryClaimTurn } from '@/domain/opschat/turn-claim';
 
 /**
  * Ops Chat persistence (PR 1) — the owner-private, user-scoped conversation store.
@@ -278,5 +279,47 @@ describe('loadConversation — the proposal query is bounded to the message wind
     expect(ids).toContain(pNew); // in-window proposal is loaded
     expect(ids).not.toContain(pOld); // out-of-window proposal is NOT loaded
     expect(ids.length).toBe(1);
+  });
+});
+
+describe('appendOwnerMessage — strict idempotency on a caller-provided turn id', () => {
+  it.runIf(available)('reuses the row only for an identical turn; a reused id with different content/conversation is a hard conflict', async () => {
+    const turnId = randomUUID();
+    const { convId, convId2 } = await withUser({ userId: userA }, async (tx) => {
+      const c = await createConversation(tx, userA);
+      const c2 = await createConversation(tx, userA);
+      return { convId: c.id, convId2: c2.id };
+    });
+    const first = await withUser({ userId: userA }, (tx) => appendOwnerMessage(tx, userA, { conversationId: convId, content: 'hello', id: turnId }));
+    expect(first.inserted).toBe(true);
+    expect(first.id).toBe(turnId);
+
+    // Legitimate retry: same id + same conversation + same content.
+    const retry = await withUser({ userId: userA }, (tx) => appendOwnerMessage(tx, userA, { conversationId: convId, content: 'hello', id: turnId }));
+    expect(retry.inserted).toBe(false);
+    expect(retry.id).toBe(turnId);
+    expect(retry.seq).toBe(first.seq);
+
+    // Same id, different content → hard conflict (never silently reused).
+    await expect(withUser({ userId: userA }, (tx) => appendOwnerMessage(tx, userA, { conversationId: convId, content: 'DIFFERENT', id: turnId }))).rejects.toThrow();
+    // Same id, different conversation → hard conflict.
+    await expect(withUser({ userId: userA }, (tx) => appendOwnerMessage(tx, userA, { conversationId: convId2, content: 'hello', id: turnId }))).rejects.toThrow();
+  });
+});
+
+describe('tryClaimTurn — serializes model execution per owner turn', () => {
+  it.runIf(available)('only one holder at a time; reacquirable after release; independent per id', async () => {
+    const id = randomUUID();
+    const c1 = await tryClaimTurn(id);
+    expect(c1.claimed).toBe(true);
+    const c2 = await tryClaimTurn(id); // another request for the SAME turn loses
+    expect(c2.claimed).toBe(false);
+    await c1.release();
+    const c3 = await tryClaimTurn(id); // reacquirable once the first releases
+    expect(c3.claimed).toBe(true);
+    await c3.release();
+    const other = await tryClaimTurn(randomUUID()); // a different turn is independent
+    expect(other.claimed).toBe(true);
+    await other.release();
   });
 });

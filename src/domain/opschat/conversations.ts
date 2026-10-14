@@ -1,4 +1,5 @@
 import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm';
+import { AppError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { opsChatConversations, opsChatMessages, opsChatProposals } from '@/db/schema';
 
@@ -79,13 +80,20 @@ export async function appendOwnerMessage(
       .where(and(eq(opsChatConversations.id, args.conversationId), eq(opsChatConversations.userId, userId)));
     return { ...inserted[0], inserted: true };
   }
-  // Retry: the turn already exists — reuse it, do NOT re-bump or re-title.
+  // Retry path — a conflict is only a LEGITIMATE retry when the existing row is THE SAME
+  // turn: same id + same user + same conversation + same content + role=user. Anything else
+  // (a client reusing one of its ids with a different conversation or different text) is a
+  // hard conflict and is never silently reinterpreted as a retry.
   const existing = await tx
-    .select({ id: opsChatMessages.id, seq: opsChatMessages.seq })
+    .select({ id: opsChatMessages.id, seq: opsChatMessages.seq, conversationId: opsChatMessages.conversationId, content: opsChatMessages.content, role: opsChatMessages.role })
     .from(opsChatMessages)
     .where(and(eq(opsChatMessages.id, args.id!), eq(opsChatMessages.userId, userId)))
     .limit(1);
-  return { ...existing[0]!, inserted: false };
+  const e = existing[0];
+  if (!e || e.conversationId !== args.conversationId || e.content !== args.content || e.role !== 'user') {
+    throw new AppError('conflict', 'This turn id does not match its original message.');
+  }
+  return { id: e.id, seq: e.seq, inserted: false };
 }
 
 /**
