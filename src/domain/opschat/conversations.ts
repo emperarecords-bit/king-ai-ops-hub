@@ -1,4 +1,5 @@
-import { and, asc, desc, eq, inArray, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 import { AppError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { opsChatConversations, opsChatMessages, opsChatProposals } from '@/db/schema';
@@ -233,6 +234,46 @@ export async function loadReplyForOwnerMessage(
     question: reply[0].question,
     proposals: props.map((p) => ({ id: p.id, kind: p.kind, proposal: p.proposal, state: p.state as OpsChatProposalState, result: p.result, error: p.error })),
   };
+}
+
+/**
+ * The EARLIEST owner message in a conversation (by seq) that has no TERMINAL assistant reply —
+ * i.e. the next owner turn that must be answered. A reply is terminal whether it is 'complete' or
+ * 'interrupted': an interrupted turn is not model history, but it DOES close that owner turn (the
+ * user must send a new message to continue), so it must not block later turns forever.
+ *
+ * The route uses this to enforce FIFO execution within a conversation: the conversation lock only
+ * guarantees one execution at a time, not ORDER — if B and C both queued behind a running A and C
+ * retries first, C must not execute before B. The route runs a turn only when THIS owner message is
+ * the earliest unanswered one; otherwise it returns a retry and lets the earlier turn go first.
+ * Returns null only if the conversation has no owner messages at all (never, in the route path).
+ */
+export async function earliestUnansweredOwnerId(tx: DbTx, userId: string, conversationId: string): Promise<string | null> {
+  const reply = alias(opsChatMessages, 'reply');
+  const rows = await tx
+    .select({ id: opsChatMessages.id })
+    .from(opsChatMessages)
+    // Anti-join: owner messages whose (at-most-one) assistant reply with a terminal status is absent.
+    .leftJoin(
+      reply,
+      and(
+        eq(reply.replyToMessageId, opsChatMessages.id),
+        eq(reply.userId, userId),
+        eq(reply.role, 'assistant'),
+        inArray(reply.status, ['complete', 'interrupted']),
+      ),
+    )
+    .where(
+      and(
+        eq(opsChatMessages.conversationId, conversationId),
+        eq(opsChatMessages.userId, userId),
+        eq(opsChatMessages.role, 'user'),
+        isNull(reply.id),
+      ),
+    )
+    .orderBy(asc(opsChatMessages.seq))
+    .limit(1);
+  return rows[0]?.id ?? null;
 }
 
 /** Append the assistant turn. `status` is 'complete' for a finished answer or

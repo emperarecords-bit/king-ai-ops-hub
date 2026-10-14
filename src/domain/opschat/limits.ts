@@ -55,6 +55,11 @@ export const OPS_CHAT_TURN_IN_PROGRESS_MESSAGE = 'This message is already being 
  *  the in-flight turn finishes. */
 export const OPS_CHAT_CONVERSATION_BUSY_MESSAGE = 'Another message in this conversation is still being answered. Try again in a moment.';
 
+/** Shown when an EARLIER owner message in the same conversation has not been answered yet. Owner
+ *  turns execute in persisted order (FIFO), so this turn waits its place — retrying runs it once
+ *  the earlier turn reaches a terminal reply. */
+export const OPS_CHAT_EARLIER_TURN_PENDING_MESSAGE = 'An earlier message in this conversation is still waiting to be answered. Try again in a moment.';
+
 /** Shown when replaying a persisted INTERRUPTED reply. An interrupted turn is kept for history but
  *  must never masquerade as a completed answer, so its replay ends in `error`, not `done`. */
 export const OPS_CHAT_INTERRUPTED_REPLAY_MESSAGE = 'This reply was interrupted. Send a new message to continue.';

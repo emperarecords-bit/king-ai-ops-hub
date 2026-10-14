@@ -26,6 +26,7 @@ const h = vi.hoisted(() => ({
   conversationExists: vi.fn(),
   loadReplyForOwnerMessage: vi.fn(),
   loadPromptTurns: vi.fn(),
+  earliestUnansweredOwnerId: vi.fn(),
   tryClaimTurn: vi.fn(),
   tryClaimConversation: vi.fn(),
   release: vi.fn(),
@@ -53,6 +54,7 @@ vi.mock('@/domain/opschat/conversations', () => ({
   conversationExists: h.conversationExists,
   loadReplyForOwnerMessage: h.loadReplyForOwnerMessage,
   loadPromptTurns: h.loadPromptTurns,
+  earliestUnansweredOwnerId: h.earliestUnansweredOwnerId,
 }));
 vi.mock('@/domain/opschat/turn-claim', () => ({ tryClaimTurn: h.tryClaimTurn, tryClaimConversation: h.tryClaimConversation }));
 vi.mock('@/lib/env.server', () => ({ serverEnv: () => ({ RATE_LIMIT_RUNS_PER_MINUTE: 10 }) }));
@@ -111,6 +113,7 @@ beforeEach(() => {
   h.appendOwnerMessage.mockResolvedValue({ id: 'owner1', seq: 1n, inserted: true });
   h.loadReplyForOwnerMessage.mockResolvedValue(null);
   h.loadPromptTurns.mockResolvedValue([{ role: 'user', content: 'hi' }]);
+  h.earliestUnansweredOwnerId.mockResolvedValue('owner1');
   h.appendAssistantMessage.mockResolvedValue({ id: 'asst1', seq: 2n });
   h.addProposal.mockResolvedValue({ id: 'prop1' });
   h.release.mockResolvedValue(undefined);

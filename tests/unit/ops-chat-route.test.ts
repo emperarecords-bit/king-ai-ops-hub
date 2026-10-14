@@ -23,6 +23,7 @@ const h = vi.hoisted(() => ({
   conversationExists: vi.fn(),
   loadReplyForOwnerMessage: vi.fn(),
   loadPromptTurns: vi.fn(),
+  earliestUnansweredOwnerId: vi.fn(),
   tryClaimTurn: vi.fn(),
   tryClaimConversation: vi.fn(),
   release: vi.fn(),
@@ -50,6 +51,7 @@ vi.mock('@/domain/opschat/conversations', () => ({
   conversationExists: h.conversationExists,
   loadReplyForOwnerMessage: h.loadReplyForOwnerMessage,
   loadPromptTurns: h.loadPromptTurns,
+  earliestUnansweredOwnerId: h.earliestUnansweredOwnerId,
 }));
 vi.mock('@/domain/opschat/turn-claim', () => ({ tryClaimTurn: h.tryClaimTurn, tryClaimConversation: h.tryClaimConversation }));
 vi.mock('@/lib/env.server', () => ({ serverEnv: () => ({ RATE_LIMIT_RUNS_PER_MINUTE: 10 }) }));
@@ -83,6 +85,7 @@ beforeEach(() => {
   h.appendOwnerMessage.mockResolvedValue({ id: 'owner1', seq: 1n, inserted: true });
   h.loadReplyForOwnerMessage.mockResolvedValue(null);
   h.loadPromptTurns.mockResolvedValue([{ role: 'user', content: 'what needs me' }]);
+  h.earliestUnansweredOwnerId.mockResolvedValue('owner1'); // this turn IS next in order → proceeds
   h.appendAssistantMessage.mockResolvedValue({ id: 'asst1', seq: 2n });
   h.addProposal.mockResolvedValue({ id: 'prop1' });
   h.release.mockResolvedValue(undefined);
@@ -224,6 +227,24 @@ describe('POST /api/ops-chat — persistence turn protocol (PR 2)', () => {
     expect(String(events.find((e) => e.event === 'error')!.data!.message)).toContain('still being answered');
     expect(h.release).toHaveBeenCalledTimes(1); // turn claim released
     expect(h.convRelease).toHaveBeenCalledTimes(1); // NOOP conversation release still invoked
+  });
+
+  it('enforces FIFO — an earlier unanswered owner turn blocks this one (retry), model not run, both claims released', async () => {
+    h.earliestUnansweredOwnerId.mockResolvedValue('ownerEARLIER'); // an older turn is still pending
+    const events = parseSse(await (await call({ message: 'third turn', conversationId: CONV, turnId: TURN })).text());
+    expect(h.streamWithTools).not.toHaveBeenCalled();
+    expect(h.consumeRateLimit).not.toHaveBeenCalled(); // FIFO gate is before the spend gate
+    expect(String(events.find((e) => e.event === 'error')!.data!.message)).toContain('earlier message');
+    expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.convRelease).toHaveBeenCalledTimes(1);
+  });
+
+  it('lock releases are failure-independent — a conversation-release failure still releases the turn claim', async () => {
+    h.convRelease.mockRejectedValue(new Error('pg_advisory_unlock failed'));
+    await (await call({ message: 'what needs me', conversationId: CONV, turnId: TURN })).text();
+    // conversation release threw, but the turn claim was still released (separate reserved session).
+    expect(h.convRelease).toHaveBeenCalledTimes(1);
+    expect(h.release).toHaveBeenCalledTimes(1);
   });
 
   it('a conversationId that is not the user\'s is a clean 404 and never calls the model', async () => {

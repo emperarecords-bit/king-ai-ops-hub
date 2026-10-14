@@ -15,6 +15,7 @@ import {
   appendOwnerMessage,
   conversationExists,
   createConversation,
+  earliestUnansweredOwnerId,
   loadPromptTurns,
   loadReplyForOwnerMessage,
   type OpsChatMessageStatus,
@@ -23,6 +24,7 @@ import { tryClaimConversation, tryClaimTurn, type TurnClaim } from '@/domain/ops
 import { type ToolLoopEvent } from '@/types/provider';
 import {
   OPS_CHAT_CONVERSATION_BUSY_MESSAGE,
+  OPS_CHAT_EARLIER_TURN_PENDING_MESSAGE,
   OPS_CHAT_INTERRUPTED_REPLAY_MESSAGE,
   OPS_CHAT_MAX_PROMPT_TURNS,
   OPS_CHAT_PERSIST_FAILED_MESSAGE,
@@ -294,9 +296,21 @@ export async function POST(req: Request): Promise<Response> {
           return;
         }
 
-        // 4. SPEND GATE (only now that we hold both claims and there is no reply to replay). The
-        //    tool loop makes one or more paid Anthropic calls; bound it with the per-user rate
-        //    limiter. A persisted reply would have replayed above, so a rate limit can never make
+        // 3c. FIFO ORDER GATE — the conversation lock serializes execution but NOT order: if B and
+        //     C both queued behind a running A and C retries first, C would otherwise execute before
+        //     B. Owner turns must execute in persisted owner-message order, so run this turn ONLY if
+        //     it is the earliest owner message without a terminal reply. If an earlier unanswered
+        //     owner exists, release (in finally) and return a retry; the earlier turn goes first.
+        const nextToAnswer = await withUser({ userId }, (tx) => earliestUnansweredOwnerId(tx, userId, conversationId));
+        if (nextToAnswer !== null && nextToAnswer !== ownerMessageId) {
+          sendTerminal('error', { message: OPS_CHAT_EARLIER_TURN_PENDING_MESSAGE });
+          return;
+        }
+
+        // 4. SPEND GATE (only now that we hold both claims, this is the next turn in order, and
+        //    there is no reply to replay). The tool loop makes one or more paid Anthropic calls;
+        //    bound it with the per-user rate limiter. A persisted reply would have replayed above,
+        //    so a rate limit can never make
         //    an already-saved reply unreplayable. Fail-closed on an unexpected limiter error.
         try {
           await getDb().transaction((tx) =>
@@ -434,9 +448,19 @@ export async function POST(req: Request): Promise<Response> {
         void iterator?.return?.(undefined)?.catch(() => {});
         // Release BOTH execution claims LAST, in finally, so success / timeout / provider / tool
         // failure all free them (and their reserved connections). Each is a NOOP when never claimed.
-        // Conversation first, then turn (reverse of acquisition); both releases are idempotent.
-        await convClaim?.release();
-        await claim?.release();
+        // The two are separate reserved sessions, so the releases must be FAILURE-INDEPENDENT: if
+        // one release throws (e.g. the reserved connection errors during pg_advisory_unlock), the
+        // other must still run or its lock/session would be stranded. Guard each on its own.
+        try {
+          await convClaim?.release();
+        } catch (err) {
+          log.error('ops-chat conversation claim release failed', { err });
+        }
+        try {
+          await claim?.release();
+        } catch (err) {
+          log.error('ops-chat turn claim release failed', { err });
+        }
       }
     },
   });

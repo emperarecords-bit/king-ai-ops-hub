@@ -10,6 +10,7 @@ import {
   canTransition,
   conversationExists,
   createConversation,
+  earliestUnansweredOwnerId,
   deriveTitle,
   listConversations,
   loadConversation,
@@ -441,6 +442,35 @@ describe('loadPromptTurns — turn-aware prompt reconstruction (owner order + li
     const shown = await withUser({ userId: userA }, (tx) => loadConversation(tx, userA, convId));
     const interrupted = shown!.messages.find((m) => m.role === 'assistant' && m.status === 'interrupted');
     expect(interrupted?.content).toBe('partial A');
+  });
+});
+
+describe('earliestUnansweredOwnerId — FIFO execution order within a conversation', () => {
+  it.runIf(available)('A/B/C queued: only the earliest unanswered owner may run; a terminal reply (complete OR interrupted) advances the order', async () => {
+    const { convId, a, b, c } = await withUser({ userId: userA }, async (tx) => {
+      const conv = await createConversation(tx, userA);
+      const ma = await appendOwnerMessage(tx, userA, { conversationId: conv.id, content: 'A' });
+      const mb = await appendOwnerMessage(tx, userA, { conversationId: conv.id, content: 'B' });
+      const mc = await appendOwnerMessage(tx, userA, { conversationId: conv.id, content: 'C' });
+      return { convId: conv.id, a: ma.id, b: mb.id, c: mc.id };
+    });
+
+    // B and C queued behind A (nothing answered). Even if C retries first, the gate names A as the
+    // only runnable turn — C (and B) must wait.
+    expect(await withUser({ userId: userA }, (tx) => earliestUnansweredOwnerId(tx, userA, convId))).toBe(a);
+
+    // A completes → B is next; C is still refused.
+    await withUser({ userId: userA }, (tx) => appendAssistantMessage(tx, userA, { conversationId: convId, content: 'ans A', replyToMessageId: a }));
+    expect(await withUser({ userId: userA }, (tx) => earliestUnansweredOwnerId(tx, userA, convId))).toBe(b);
+
+    // B's reply is INTERRUPTED — not model history, but it CLOSES B's turn (terminal), so the
+    // order advances to C rather than stalling forever.
+    await withUser({ userId: userA }, (tx) => appendAssistantMessage(tx, userA, { conversationId: convId, content: 'partial B', replyToMessageId: b, status: 'interrupted' }));
+    expect(await withUser({ userId: userA }, (tx) => earliestUnansweredOwnerId(tx, userA, convId))).toBe(c);
+
+    // C answered → nothing left pending.
+    await withUser({ userId: userA }, (tx) => appendAssistantMessage(tx, userA, { conversationId: convId, content: 'ans C', replyToMessageId: c }));
+    expect(await withUser({ userId: userA }, (tx) => earliestUnansweredOwnerId(tx, userA, convId))).toBeNull();
   });
 });
 
