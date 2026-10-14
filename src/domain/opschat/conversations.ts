@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 import { type DbTx } from '@/db/client';
 import { opsChatConversations, opsChatMessages, opsChatProposals } from '@/db/schema';
 
@@ -54,23 +54,84 @@ export async function createConversation(tx: DbTx, userId: string): Promise<{ id
   return row!;
 }
 
-/** Append the owner's message. On the FIRST owner message, set the conversation title
- *  (coalesce — only if still null, so the first one wins), and bump updated_at so the
- *  conversation floats to the top of the history list. */
+/**
+ * Append the owner's message, IDEMPOTENTLY on a caller-provided `id` (the turn id the
+ * client mints once per send). A browser/network retry re-sends the same id; the insert
+ * is onConflictDoNothing, so a retry neither duplicates the turn nor lets the route run
+ * the model twice (the route checks `inserted`). Only on a genuine first insert do we set
+ * the conversation title (coalesce — first owner message wins) and bump updated_at.
+ * Without an `id` a fresh UUID is generated and `inserted` is always true.
+ */
 export async function appendOwnerMessage(
   tx: DbTx,
   userId: string,
-  args: { conversationId: string; content: string },
-): Promise<{ id: string; seq: bigint }> {
-  const [msg] = await tx
+  args: { conversationId: string; content: string; id?: string },
+): Promise<{ id: string; seq: bigint; inserted: boolean }> {
+  const inserted = await tx
     .insert(opsChatMessages)
-    .values({ conversationId: args.conversationId, userId, role: 'user', status: 'complete', content: args.content })
+    .values({ ...(args.id ? { id: args.id } : {}), conversationId: args.conversationId, userId, role: 'user', status: 'complete', content: args.content })
+    .onConflictDoNothing()
     .returning({ id: opsChatMessages.id, seq: opsChatMessages.seq });
-  await tx
-    .update(opsChatConversations)
-    .set({ title: sql`coalesce(${opsChatConversations.title}, ${deriveTitle(args.content)})`, updatedAt: sql`now()` })
-    .where(and(eq(opsChatConversations.id, args.conversationId), eq(opsChatConversations.userId, userId)));
-  return msg!;
+  if (inserted[0]) {
+    await tx
+      .update(opsChatConversations)
+      .set({ title: sql`coalesce(${opsChatConversations.title}, ${deriveTitle(args.content)})`, updatedAt: sql`now()` })
+      .where(and(eq(opsChatConversations.id, args.conversationId), eq(opsChatConversations.userId, userId)));
+    return { ...inserted[0], inserted: true };
+  }
+  // Retry: the turn already exists — reuse it, do NOT re-bump or re-title.
+  const existing = await tx
+    .select({ id: opsChatMessages.id, seq: opsChatMessages.seq })
+    .from(opsChatMessages)
+    .where(and(eq(opsChatMessages.id, args.id!), eq(opsChatMessages.userId, userId)))
+    .limit(1);
+  return { ...existing[0]!, inserted: false };
+}
+
+/**
+ * The assistant reply that followed an owner message (for an idempotent retry replay):
+ * the first assistant message after the owner message in the same conversation, with its
+ * proposals. Returns null if the turn produced no reply yet (the prior attempt didn't
+ * finish) — the route may then run the model, since the owner message is already persisted.
+ */
+export async function loadReplyForOwnerMessage(
+  tx: DbTx,
+  userId: string,
+  ownerMessageId: string,
+): Promise<{ conversationId: string; messageId: string; content: string; status: OpsChatMessageStatus; question: string | null; proposals: Array<{ id: string; kind: string; proposal: unknown; state: OpsChatProposalState; result: unknown; error: string | null }> } | null> {
+  const owner = await tx
+    .select({ conversationId: opsChatMessages.conversationId, seq: opsChatMessages.seq })
+    .from(opsChatMessages)
+    .where(and(eq(opsChatMessages.id, ownerMessageId), eq(opsChatMessages.userId, userId), eq(opsChatMessages.role, 'user')))
+    .limit(1);
+  if (!owner[0]) return null;
+  const reply = await tx
+    .select({ id: opsChatMessages.id, content: opsChatMessages.content, status: opsChatMessages.status, question: opsChatMessages.question })
+    .from(opsChatMessages)
+    .where(
+      and(
+        eq(opsChatMessages.conversationId, owner[0].conversationId),
+        eq(opsChatMessages.userId, userId),
+        eq(opsChatMessages.role, 'assistant'),
+        gt(opsChatMessages.seq, owner[0].seq),
+      ),
+    )
+    .orderBy(asc(opsChatMessages.seq))
+    .limit(1);
+  if (!reply[0]) return null;
+  const props = await tx
+    .select({ id: opsChatProposals.id, kind: opsChatProposals.kind, proposal: opsChatProposals.proposal, state: opsChatProposals.state, result: opsChatProposals.result, error: opsChatProposals.error })
+    .from(opsChatProposals)
+    .where(and(eq(opsChatProposals.messageId, reply[0].id), eq(opsChatProposals.userId, userId)))
+    .orderBy(asc(opsChatProposals.seq));
+  return {
+    conversationId: owner[0].conversationId,
+    messageId: reply[0].id,
+    content: reply[0].content,
+    status: reply[0].status as OpsChatMessageStatus,
+    question: reply[0].question,
+    proposals: props.map((p) => ({ id: p.id, kind: p.kind, proposal: p.proposal, state: p.state as OpsChatProposalState, result: p.result, error: p.error })),
+  };
 }
 
 /** Append the assistant turn. `status` is 'complete' for a finished answer or
