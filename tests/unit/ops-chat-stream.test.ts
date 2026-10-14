@@ -127,4 +127,41 @@ describe('consumeOpsChatStream', () => {
     });
     await expect(consumeOpsChatStream(stream, h)).rejects.toBeTruthy();
   });
+
+  it('`saved` (after proposal, before done) surfaces the correlationKey→proposalId mapping', async () => {
+    const h = handlers();
+    const saved: unknown[] = [];
+    const stream = sseStream([
+      ev('proposal', { kind: 'rerun_task', correlationKey: 'k1' }),
+      ev('saved', { conversationId: 'c1', messageId: 'm1', status: 'complete', proposals: [{ correlationKey: 'k1', proposalId: 'p1' }] }),
+      ev('done', {}),
+    ]);
+    const result = await consumeOpsChatStream(stream, { ...h, onSaved: (s) => saved.push(s) });
+    expect(result).toEqual({ status: 'done' });
+    expect(saved).toEqual([{ conversationId: 'c1', messageId: 'm1', status: 'complete', proposals: [{ correlationKey: 'k1', proposalId: 'p1' }] }]);
+  });
+
+  it('an INTERRUPTED turn delivers `saved(interrupted, [])` and then ends in error (never done)', async () => {
+    const saved: Array<{ status: string }> = [];
+    const stream = sseStream([
+      ev('delta', { text: 'partial' }),
+      ev('saved', { conversationId: 'c1', messageId: 'm1', status: 'interrupted', proposals: [] }),
+      ev('error', { message: 'interrupted' }),
+    ]);
+    const result = await consumeOpsChatStream(stream, { ...handlers(), onSaved: (s) => saved.push(s) });
+    expect(result).toEqual({ status: 'error', message: 'interrupted' });
+    expect(saved.map((s) => s.status)).toEqual(['interrupted']);
+  });
+
+  it('a malformed `saved` (bad status / missing ids) is ignored — cards are never made actionable by guesswork', async () => {
+    const saved: unknown[] = [];
+    const stream = sseStream([
+      ev('saved', { messageId: 'm1', status: 'done', proposals: [] }),
+      ev('saved', { status: 'complete', proposals: [] }),
+      ev('saved', { messageId: 'm1', status: 'complete', proposals: [{ correlationKey: 'k1' }, { correlationKey: 'k2', proposalId: 'p2' }] }),
+      ev('done', {}),
+    ]);
+    await consumeOpsChatStream(stream, { ...handlers(), onSaved: (s) => saved.push(s) });
+    expect(saved).toEqual([{ conversationId: '', messageId: 'm1', status: 'complete', proposals: [{ correlationKey: 'k2', proposalId: 'p2' }] }]);
+  });
 });

@@ -11,6 +11,7 @@ import {
   conversationExists,
   createConversation,
   earliestUnansweredOwnerId,
+  earliestUnansweredOwnerTurn,
   deriveTitle,
   listConversations,
   loadConversation,
@@ -471,6 +472,26 @@ describe('earliestUnansweredOwnerId — FIFO execution order within a conversati
     // C answered → nothing left pending.
     await withUser({ userId: userA }, (tx) => appendAssistantMessage(tx, userA, { conversationId: convId, content: 'ans C', replyToMessageId: c }));
     expect(await withUser({ userId: userA }, (tx) => earliestUnansweredOwnerId(tx, userA, convId))).toBeNull();
+  });
+
+  it.runIf(available)('earliestUnansweredOwnerTurn gives the page the exact pending turn (id = turnId, original content); another user sees none', async () => {
+    const turnB = randomUUID();
+    const convId = await withUser({ userId: userA }, async (tx) => {
+      const conv = await createConversation(tx, userA);
+      const ma = await appendOwnerMessage(tx, userA, { conversationId: conv.id, content: 'first' });
+      await appendOwnerMessage(tx, userA, { conversationId: conv.id, content: 'second, unanswered', id: turnB });
+      await appendAssistantMessage(tx, userA, { conversationId: conv.id, content: 'ans first', replyToMessageId: ma.id });
+      return conv.id;
+    });
+    expect(await withUser({ userId: userA }, (tx) => earliestUnansweredOwnerTurn(tx, userA, convId))).toEqual({ id: turnB, content: 'second, unanswered' });
+    expect(await withUser({ userId: userB }, (tx) => earliestUnansweredOwnerTurn(tx, userB, convId))).toBeNull();
+
+    // The display load carries the explicit reply linkage the client uses for turn-aware order.
+    const loaded = await withUser({ userId: userA }, (tx) => loadConversation(tx, userA, convId));
+    const reply = loaded!.messages.find((m) => m.role === 'assistant')!;
+    const first = loaded!.messages.find((m) => m.content === 'first')!;
+    expect(reply.replyToMessageId).toBe(first.id);
+    expect(first.replyToMessageId).toBeNull();
   });
 });
 

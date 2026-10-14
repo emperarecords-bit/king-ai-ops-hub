@@ -249,9 +249,26 @@ export async function loadReplyForOwnerMessage(
  * Returns null only if the conversation has no owner messages at all (never, in the route path).
  */
 export async function earliestUnansweredOwnerId(tx: DbTx, userId: string, conversationId: string): Promise<string | null> {
+  return (await earliestUnansweredOwnerTurn(tx, userId, conversationId))?.id ?? null;
+}
+
+/**
+ * The same earliest-unanswered owner turn as `earliestUnansweredOwnerId`, with its ORIGINAL content —
+ * what the page needs to offer an explicit "Resume message" that re-sends the exact
+ * `(conversationId, turnId, content)`. The owner message id IS the client-minted turnId.
+ *
+ * A pending turn can mean several things (rate-limited before the provider ran, a setup failure, a
+ * reply generated but not persisted, …); the UI recovers from this DATABASE FACT rather than guessing
+ * why — and never auto-retries it, since a retry can spend a new model call.
+ */
+export async function earliestUnansweredOwnerTurn(
+  tx: DbTx,
+  userId: string,
+  conversationId: string,
+): Promise<{ id: string; content: string } | null> {
   const reply = alias(opsChatMessages, 'reply');
   const rows = await tx
-    .select({ id: opsChatMessages.id })
+    .select({ id: opsChatMessages.id, content: opsChatMessages.content })
     .from(opsChatMessages)
     // Anti-join: owner messages whose (at-most-one) assistant reply with a terminal status is absent.
     .leftJoin(
@@ -273,7 +290,7 @@ export async function earliestUnansweredOwnerId(tx: DbTx, userId: string, conver
     )
     .orderBy(asc(opsChatMessages.seq))
     .limit(1);
-  return rows[0]?.id ?? null;
+  return rows[0] ?? null;
 }
 
 /** Append the assistant turn. `status` is 'complete' for a finished answer or
@@ -406,6 +423,8 @@ export interface LoadedMessage {
   status: OpsChatMessageStatus;
   content: string;
   question: string | null;
+  /** For an assistant message: the owner message it answers (explicit linkage). Null for owner rows. */
+  replyToMessageId: string | null;
   createdAt: Date;
   proposals: Array<{
     id: string;
@@ -447,6 +466,7 @@ export async function loadConversation(
       status: opsChatMessages.status,
       content: opsChatMessages.content,
       question: opsChatMessages.question,
+      replyToMessageId: opsChatMessages.replyToMessageId,
       createdAt: opsChatMessages.createdAt,
     })
     .from(opsChatMessages)
@@ -498,6 +518,7 @@ export async function loadConversation(
       status: m.status as OpsChatMessageStatus,
       content: m.content,
       question: m.question,
+      replyToMessageId: m.replyToMessageId,
       createdAt: m.createdAt,
       proposals: byMessage.get(m.id) ?? [],
     })),

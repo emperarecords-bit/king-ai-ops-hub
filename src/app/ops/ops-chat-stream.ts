@@ -21,6 +21,17 @@ export interface OpsChatStreamHandlers {
   onToolStart(name: string): void;
   onToolEnd(): void;
   onProposal(proposal: Record<string, unknown>): void;
+  /** The commit point: the reply (and, for a complete turn, its proposals) is persisted. Carries the
+   *  {correlationKey → proposalId} mapping that makes streamed cards actionable. Arrives BEFORE the
+   *  terminal `done` (complete) or `error` (interrupted). No `saved` ⇒ nothing terminal was recorded. */
+  onSaved?(saved: OpsChatSaved): void;
+}
+
+export interface OpsChatSaved {
+  conversationId: string;
+  messageId: string;
+  status: 'complete' | 'interrupted';
+  proposals: Array<{ correlationKey: string; proposalId: string }>;
 }
 
 export type OpsChatStreamResult = { status: 'done' } | { status: 'error'; message: string };
@@ -89,6 +100,25 @@ export async function consumeOpsChatStream(
           else if (payload.phase === 'end') handlers.onToolEnd();
         } else if (event === 'proposal') {
           handlers.onProposal(payload);
+        } else if (event === 'saved') {
+          // Malformed `saved` is ignored (cards then stay non-actionable) — never guessed.
+          if (
+            typeof payload.messageId === 'string' &&
+            (payload.status === 'complete' || payload.status === 'interrupted') &&
+            Array.isArray(payload.proposals)
+          ) {
+            handlers.onSaved?.({
+              conversationId: typeof payload.conversationId === 'string' ? payload.conversationId : '',
+              messageId: payload.messageId,
+              status: payload.status,
+              proposals: (payload.proposals as unknown[]).flatMap((p) => {
+                const r = p as Record<string, unknown> | null;
+                return r && typeof r.correlationKey === 'string' && typeof r.proposalId === 'string'
+                  ? [{ correlationKey: r.correlationKey, proposalId: r.proposalId }]
+                  : [];
+              }),
+            });
+          }
         } else if (event === 'error') {
           release();
           return { status: 'error', message: typeof payload.message === 'string' ? payload.message : 'The assistant hit an error.' };
