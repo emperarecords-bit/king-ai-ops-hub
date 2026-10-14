@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { type DbTx } from '@/db/client';
 import { opsChatConversations, opsChatMessages, opsChatProposals } from '@/db/schema';
 
@@ -239,20 +239,32 @@ export async function loadConversation(
     .limit(limit);
   recent.reverse();
 
-  const props = await tx
-    .select({
-      id: opsChatProposals.id,
-      seq: opsChatProposals.seq,
-      messageId: opsChatProposals.messageId,
-      kind: opsChatProposals.kind,
-      proposal: opsChatProposals.proposal,
-      state: opsChatProposals.state,
-      result: opsChatProposals.result,
-      error: opsChatProposals.error,
-    })
-    .from(opsChatProposals)
-    .where(and(eq(opsChatProposals.conversationId, conversationId), eq(opsChatProposals.userId, userId)))
-    .orderBy(asc(opsChatProposals.seq));
+  // Bound the proposal load to the message WINDOW — not every card ever created in the
+  // conversation — so a long thread with many cards never loads unbounded JSONB. Skip the
+  // query entirely when the window is empty.
+  const windowIds = recent.map((m) => m.id);
+  const props = windowIds.length === 0
+    ? []
+    : await tx
+        .select({
+          id: opsChatProposals.id,
+          seq: opsChatProposals.seq,
+          messageId: opsChatProposals.messageId,
+          kind: opsChatProposals.kind,
+          proposal: opsChatProposals.proposal,
+          state: opsChatProposals.state,
+          result: opsChatProposals.result,
+          error: opsChatProposals.error,
+        })
+        .from(opsChatProposals)
+        .where(
+          and(
+            eq(opsChatProposals.conversationId, conversationId),
+            eq(opsChatProposals.userId, userId),
+            inArray(opsChatProposals.messageId, windowIds),
+          ),
+        )
+        .orderBy(asc(opsChatProposals.seq));
 
   const byMessage = new Map<string, LoadedMessage['proposals']>();
   for (const p of props) {

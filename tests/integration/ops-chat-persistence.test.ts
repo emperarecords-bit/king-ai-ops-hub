@@ -229,3 +229,54 @@ describe('conversations domain — ordering, title, CAS, immutability, bounds', 
     expect(loaded!.messages.map((m) => m.content)).toEqual(['m5', 'm6', 'm7']); // last 3, in order
   });
 });
+
+describe('DB-enforced immutability — column privileges (not just convention)', () => {
+  it.runIf(available)('app_server cannot rewrite the proposal payload, message content, or relationship keys', async () => {
+    const { msgId, propId } = await withUser({ userId: userA }, async (tx) => {
+      const c = await createConversation(tx, userA);
+      await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'immutability test' });
+      const a = await appendAssistantMessage(tx, userA, { conversationId: c.id, content: 'reply' });
+      const p = await addProposal(tx, userA, { conversationId: c.id, messageId: a.id, kind: 'answer_question', proposal: { kind: 'answer_question', answer: 'original' } });
+      return { msgId: a.id, propId: p.id };
+    });
+
+    // The immutable proposal payload is not updatable — even on the owner's own row.
+    await expect(asUser(app, userA, (tx) => tx`update ops_chat_proposals set proposal = '{"tampered":true}'::jsonb where id = ${propId}`)).rejects.toThrow();
+    // Messages are append-only history — no UPDATE grant at all.
+    await expect(asUser(app, userA, (tx) => tx`update ops_chat_messages set content = 'tampered' where id = ${msgId}`)).rejects.toThrow();
+    await expect(asUser(app, userA, (tx) => tx`update ops_chat_messages set role = 'assistant' where id = ${msgId}`)).rejects.toThrow();
+    // Relationship keys are not updatable (would re-parent a proposal).
+    await expect(asUser(app, userA, (tx) => tx`update ops_chat_proposals set conversation_id = ${randomUUID()} where id = ${propId}`)).rejects.toThrow();
+
+    // But the sanctioned mutable columns ARE updatable (the CAS path).
+    const ok = await asUser(app, userA, (tx) => tx`update ops_chat_proposals set state = 'confirming' where id = ${propId} returning id`);
+    expect(ok.length).toBe(1);
+
+    // Read back as the migration role: payload + content survived every rejected write.
+    const p = await admin`select proposal, state from ops_chat_proposals where id = ${propId}`;
+    expect(p[0]!.proposal).toEqual({ kind: 'answer_question', answer: 'original' });
+    expect(p[0]!.state).toBe('confirming');
+    const m = await admin`select content, role from ops_chat_messages where id = ${msgId}`;
+    expect(m[0]!.content).toBe('reply');
+    expect(m[0]!.role).toBe('assistant');
+  });
+});
+
+describe('loadConversation — the proposal query is bounded to the message window', () => {
+  it.runIf(available)('does not load proposals attached to out-of-window messages', async () => {
+    const { convId, pOld, pNew } = await withUser({ userId: userA }, async (tx) => {
+      const c = await createConversation(tx, userA);
+      const first = await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'old' });
+      const oldP = await addProposal(tx, userA, { conversationId: c.id, messageId: first.id, kind: 'answer_question', proposal: { old: true } });
+      for (let i = 0; i < 4; i++) await appendOwnerMessage(tx, userA, { conversationId: c.id, content: `mid${i}` });
+      const last = await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'new' });
+      const newP = await addProposal(tx, userA, { conversationId: c.id, messageId: last.id, kind: 'answer_question', proposal: { new: true } });
+      return { convId: c.id, pOld: oldP.id, pNew: newP.id };
+    });
+    const loaded = await withUser({ userId: userA }, (tx) => loadConversation(tx, userA, convId, { limit: 2 }));
+    const ids = loaded!.messages.flatMap((m) => m.proposals.map((p) => p.id));
+    expect(ids).toContain(pNew); // in-window proposal is loaded
+    expect(ids).not.toContain(pOld); // out-of-window proposal is NOT loaded
+    expect(ids.length).toBe(1);
+  });
+});
