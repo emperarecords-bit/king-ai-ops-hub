@@ -247,6 +247,109 @@ describe('POST /api/ops-chat — persistence turn protocol (PR 2)', () => {
     expect(h.release).toHaveBeenCalledTimes(1);
   });
 
+  // End-to-end FIFO scenario through the route, against a small in-memory model of the store and
+  // the conversation lock: A executes; B and C persist while A runs and both fail the conversation
+  // claim; A completes; C retries BEFORE B and is still refused; only after B reaches a terminal
+  // reply (complete OR interrupted) may C execute.
+  for (const bOutcome of ['complete', 'interrupted'] as const) {
+    it(`FIFO scenario — C retrying before B is refused until B is terminal (B ${bOutcome})`, async () => {
+      const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+      const B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+      const C = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+      const owners: string[] = []; // persisted owner order (seq)
+      const replies = new Map<string, string>(); // ownerId -> terminal reply status
+      const providerRuns: string[] = []; // owner turns that reached the provider, in order
+      let convHeld = false;
+
+      h.appendOwnerMessage.mockImplementation(async (_tx: unknown, _u: string, args: { id: string }) => {
+        const inserted = !owners.includes(args.id);
+        if (inserted) owners.push(args.id);
+        return { id: args.id, seq: BigInt(owners.indexOf(args.id) + 1), inserted };
+      });
+      h.loadReplyForOwnerMessage.mockImplementation(async () => null);
+      h.earliestUnansweredOwnerId.mockImplementation(async () => owners.find((o) => !replies.has(o)) ?? null);
+      h.appendAssistantMessage.mockImplementation(async (_tx: unknown, _u: string, args: { replyToMessageId: string; status?: string }) => {
+        replies.set(args.replyToMessageId, args.status ?? 'complete');
+        return { id: `asst-${args.replyToMessageId}`, seq: 99n };
+      });
+      h.tryClaimConversation.mockImplementation(async () => {
+        if (convHeld) return { claimed: false, release: h.convRelease };
+        convHeld = true;
+        return {
+          claimed: true,
+          release: async () => {
+            await h.convRelease();
+            convHeld = false;
+          },
+        };
+      });
+
+      let unblockA!: () => void;
+      const aGate = new Promise<void>((r) => (unblockA = r));
+      let aStarted!: () => void;
+      const aRunning = new Promise<void>((r) => (aStarted = r));
+      h.streamWithTools.mockImplementation(() => {
+        const turn = owners.find((o) => !replies.has(o))!; // the FIFO gate guarantees this is the runner
+        providerRuns.push(turn);
+        let n = 0;
+        return {
+          [Symbol.asyncIterator]: () => ({
+            next: async () => {
+              if (turn === A && n === 0) {
+                aStarted();
+                await aGate;
+              }
+              if (turn === B && bOutcome === 'interrupted' && n === 1) throw new Error('provider boom');
+              const step = n++;
+              if (step === 0) return { done: false, value: { kind: 'delta', text: `ans ${turn}` } };
+              if (step === 1) return { done: false, value: { kind: 'done', usage: { inputTokens: 1, outputTokens: 1 }, stopReason: 'end_turn' } };
+              return { done: true, value: undefined };
+            },
+          }),
+        };
+      });
+
+      const send = async (turnId: string) => parseSse(await (await call({ message: `msg ${turnId}`, conversationId: CONV, turnId })).text());
+      const errorOf = (events: Array<{ event: string; data: Record<string, unknown> | undefined }>) =>
+        String(events.find((e) => e.event === 'error')?.data?.message ?? '');
+
+      // A is executing (holds the conversation lock, blocked inside the provider).
+      const aDone = send(A);
+      await aRunning;
+
+      // B and C persist while A runs; both fail the conversation claim — no spend.
+      expect(errorOf(await send(B))).toContain('still being answered');
+      expect(errorOf(await send(C))).toContain('still being answered');
+      expect(owners).toEqual([A, B, C]);
+      expect(providerRuns).toEqual([A]);
+
+      // A completes and releases.
+      unblockA();
+      await aDone;
+      expect(replies.get(A)).toBe('complete');
+      expect(convHeld).toBe(false);
+
+      // C retries BEFORE B: refused by the FIFO gate (B is earlier and unanswered); provider not called.
+      const spendBefore = h.consumeRateLimit.mock.calls.length;
+      expect(errorOf(await send(C))).toContain('earlier message');
+      expect(providerRuns).toEqual([A]);
+      expect(h.consumeRateLimit.mock.calls.length).toBe(spendBefore); // refused before the spend gate
+      expect(replies.has(C)).toBe(false);
+      expect(owners).toEqual([A, B, C]); // C's owner row stays persisted for a later retry
+
+      // B executes and reaches a terminal reply.
+      await send(B);
+      expect(replies.get(B)).toBe(bOutcome);
+
+      // Now C may execute.
+      const cEvents = await send(C);
+      expect(cEvents.some((e) => e.event === 'done')).toBe(true);
+      expect(replies.get(C)).toBe('complete');
+      expect(providerRuns).toEqual([A, B, C]);
+      expect(convHeld).toBe(false);
+    });
+  }
+
   it('a conversationId that is not the user\'s is a clean 404 and never calls the model', async () => {
     h.conversationExists.mockResolvedValue(false);
     const res = await call({ message: 'hi', conversationId: CONV, turnId: TURN });
