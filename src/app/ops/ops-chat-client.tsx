@@ -734,6 +734,9 @@ export function OpsChatClient({
           patchReply((m) => ({ ...m, cards: [...(m.cards ?? []), { proposal, correlationKey, state: 'pending' as const }] }));
         },
         onSaved: (s) => {
+          // The commit point that makes cards actionable — only accept it for THIS request's conversation.
+          // (The server never emits another; if it did, ignore it: the turn stays pending, cards stay inert.)
+          if (s.conversationId !== t.conversationId) return;
           saved = true;
           patchReply((m) => ({ ...m, status: s.status, cards: applySavedMapping(m.cards, s.proposals) }));
           // The owner turn now has a terminal reply (complete OR interrupted) — it no longer blocks sending.
@@ -923,6 +926,9 @@ export function OpsChatClient({
                       </div>
                     ) : (
                       <>
+                        {card.fromHistory && card.state === 'pending' ? (
+                          <p className="mb-1 text-[11px] font-semibold text-[var(--muted)]">Proposed earlier</p>
+                        ) : null}
                         <p className="text-xs uppercase tracking-wide text-[var(--muted)]">{headerLabel(p)}</p>
 
                         {p.kind === 'answer_question' ? (

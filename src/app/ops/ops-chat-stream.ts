@@ -36,6 +36,24 @@ export interface OpsChatSaved {
 
 export type OpsChatStreamResult = { status: 'done' } | { status: 'error'; message: string };
 
+const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
+
+/** A structurally valid `saved` payload, or null. Every field is required; one malformed proposal
+ *  mapping rejects the whole event (a partial mapping is never applied). */
+export function parseSaved(payload: Record<string, unknown>): OpsChatSaved | null {
+  const { conversationId, messageId, status, proposals } = payload;
+  if (!nonEmpty(conversationId) || !nonEmpty(messageId)) return null;
+  if (status !== 'complete' && status !== 'interrupted') return null;
+  if (!Array.isArray(proposals)) return null;
+  const mapped: OpsChatSaved['proposals'] = [];
+  for (const p of proposals as unknown[]) {
+    const r = p !== null && typeof p === 'object' ? (p as Record<string, unknown>) : null;
+    if (!r || !nonEmpty(r.correlationKey) || !nonEmpty(r.proposalId)) return null;
+    mapped.push({ correlationKey: r.correlationKey, proposalId: r.proposalId });
+  }
+  return { conversationId, messageId, status, proposals: mapped };
+}
+
 export async function consumeOpsChatStream(
   body: ReadableStream<Uint8Array>,
   handlers: OpsChatStreamHandlers,
@@ -101,24 +119,11 @@ export async function consumeOpsChatStream(
         } else if (event === 'proposal') {
           handlers.onProposal(payload);
         } else if (event === 'saved') {
-          // Malformed `saved` is ignored (cards then stay non-actionable) — never guessed.
-          if (
-            typeof payload.messageId === 'string' &&
-            (payload.status === 'complete' || payload.status === 'interrupted') &&
-            Array.isArray(payload.proposals)
-          ) {
-            handlers.onSaved?.({
-              conversationId: typeof payload.conversationId === 'string' ? payload.conversationId : '',
-              messageId: payload.messageId,
-              status: payload.status,
-              proposals: (payload.proposals as unknown[]).flatMap((p) => {
-                const r = p as Record<string, unknown> | null;
-                return r && typeof r.correlationKey === 'string' && typeof r.proposalId === 'string'
-                  ? [{ correlationKey: r.correlationKey, proposalId: r.proposalId }]
-                  : [];
-              }),
-            });
-          }
+          // `saved` is the persistence commit point that makes cards actionable, so it is STRICTLY
+          // validated: unless every field is structurally valid the whole event is ignored (cards stay
+          // non-actionable, the turn stays pending) — nothing is defaulted or guessed.
+          const saved = parseSaved(payload);
+          if (saved) handlers.onSaved?.(saved);
         } else if (event === 'error') {
           release();
           return { status: 'error', message: typeof payload.message === 'string' ? payload.message : 'The assistant hit an error.' };

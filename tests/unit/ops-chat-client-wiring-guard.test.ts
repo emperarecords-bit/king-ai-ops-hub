@@ -65,6 +65,26 @@ describe('Ops Chat client wiring — recovery is explicit and exact', () => {
   });
 });
 
+describe('Ops Chat client wiring — `saved` is accepted only for this request', () => {
+  it('onSaved ignores a commit for any other conversation before marking anything saved', () => {
+    const onSaved = body(CLIENT, 'onSaved: (s) => {', 'saved = true;');
+    expect(onSaved).toContain('if (s.conversationId !== t.conversationId) return;');
+  });
+
+  it('reloaded pending cards carry the "Proposed earlier" cue', () => {
+    expect(CLIENT).toMatch(/card\.fromHistory && card\.state === 'pending'[\s\S]{0,200}Proposed earlier/);
+  });
+});
+
+describe('Ops Chat page — copy states the real safety boundary', () => {
+  it('no longer claims read-only / "doesn\'t change anything"; says nothing changes until you confirm', () => {
+    expect(PAGE).not.toMatch(/read-only/i);
+    expect(PAGE).not.toMatch(/change anything yet/);
+    expect(PAGE).toContain('persistent · governed actions');
+    expect(PAGE.replace(/\s+/g, ' ')).toContain('Nothing changes until you explicitly confirm an action.');
+  });
+});
+
 describe('Ops Chat client wiring — confirm is proposalId-authoritative', () => {
   it('confirm/cancel send only { proposalId, intent }', () => {
     const act = body(CLIENT, 'async function act(', 'function setCouncil(');

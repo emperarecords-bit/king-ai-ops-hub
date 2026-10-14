@@ -77,7 +77,7 @@ export default async function OpsChatPage({
         <div className="flex items-center gap-2">
           <h1 className="text-lg font-bold">Ops Chat</h1>
           <span className="rounded-full border border-[var(--border)] px-2 py-0.5 text-xs text-[var(--muted)]">
-            read-only · v1
+            persistent · governed actions
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -120,8 +120,9 @@ export default async function OpsChatPage({
       />
 
       <p className="mt-3 text-center text-xs text-[var(--muted)]">
-        Signed in as {user.email}. Ops Chat reads your live hub — it can explain and summarize, but
-        doesn&apos;t change anything yet. The pulse above is free; sending a question uses Anthropic.
+        Signed in as {user.email}. Ops Chat can read your Hub and prepare governed actions. Nothing
+        changes until you explicitly confirm an action. The pulse above is free; sending a question uses
+        Anthropic.
       </p>
     </main>
   );

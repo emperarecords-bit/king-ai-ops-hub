@@ -153,15 +153,21 @@ describe('consumeOpsChatStream', () => {
     expect(saved.map((s) => s.status)).toEqual(['interrupted']);
   });
 
-  it('a malformed `saved` (bad status / missing ids) is ignored — cards are never made actionable by guesswork', async () => {
+  it('a malformed `saved` is ignored ENTIRELY — no defaulted conversationId, no partial mapping', async () => {
     const saved: unknown[] = [];
+    const good = { conversationId: 'c1', messageId: 'm1', status: 'complete', proposals: [{ correlationKey: 'k2', proposalId: 'p2' }] };
     const stream = sseStream([
-      ev('saved', { messageId: 'm1', status: 'done', proposals: [] }),
-      ev('saved', { status: 'complete', proposals: [] }),
-      ev('saved', { messageId: 'm1', status: 'complete', proposals: [{ correlationKey: 'k1' }, { correlationKey: 'k2', proposalId: 'p2' }] }),
+      ev('saved', { ...good, conversationId: undefined }), // missing conversationId — never defaulted to ''
+      ev('saved', { ...good, conversationId: '' }),
+      ev('saved', { ...good, messageId: undefined }),
+      ev('saved', { ...good, status: 'done' }),
+      ev('saved', { ...good, proposals: 'nope' }),
+      ev('saved', { ...good, proposals: [{ correlationKey: 'k1' }, { correlationKey: 'k2', proposalId: 'p2' }] }), // one bad entry rejects all
+      ev('saved', { ...good, proposals: [null] }),
+      ev('saved', good),
       ev('done', {}),
     ]);
     await consumeOpsChatStream(stream, { ...handlers(), onSaved: (s) => saved.push(s) });
-    expect(saved).toEqual([{ conversationId: '', messageId: 'm1', status: 'complete', proposals: [{ correlationKey: 'k2', proposalId: 'p2' }] }]);
+    expect(saved).toEqual([good]);
   });
 });

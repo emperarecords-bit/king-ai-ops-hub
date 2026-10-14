@@ -82,6 +82,8 @@ describe('buildTranscript — turn-aware order from the persisted store', () => 
       ['p3', 'unrecorded'],
     ]);
     expect(cards[1]!.executed).toEqual({ outcome: 'succeeded' });
+    // Reloaded cards are marked as historical ("Proposed earlier") — display only.
+    expect(cards.every((c) => c.fromHistory === true)).toBe(true);
     expect(isActionable(cards[0]!)).toBe(true);
     expect(isActionable(cards[2]!)).toBe(false);
   });
@@ -122,6 +124,7 @@ describe('applySavedMapping — cards become actionable ONLY through `saved`', (
       { proposal: { kind: 'rerun_task' }, correlationKey: 'k2', state: 'pending' as const },
     ];
     expect(cards.some(isActionable)).toBe(false); // streamed but not yet saved
+    expect(cards.some((c) => 'fromHistory' in c)).toBe(false); // streamed cards are not "proposed earlier"
     const out = applySavedMapping(cards, [{ correlationKey: 'k1', proposalId: 'p1' }])!;
     expect(out[0]!.proposalId).toBe('p1');
     expect(isActionable(out[0]!)).toBe(true);

@@ -38,6 +38,9 @@ export interface TranscriptCard {
   error?: string;
   /** The executed result as returned by confirm / stored on the proposal row. */
   executed?: Record<string, unknown> | null;
+  /** Loaded from the store (a card proposed in an earlier session / on another device), as opposed
+   *  to one generated in the current stream. Display only — actionability never depends on it. */
+  fromHistory?: boolean;
 }
 
 export interface TranscriptMsg {
@@ -107,6 +110,7 @@ export function buildTranscript(persisted: readonly PersistedMessage[]): Transcr
             state: (SERVER_STATES.has(p.state) ? p.state : 'unrecorded') as CardState,
             error: p.error ?? undefined,
             executed: asRecord(p.result),
+            fromHistory: true,
           }))
         : undefined,
   });
