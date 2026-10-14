@@ -176,7 +176,14 @@ export type OpsChatProposal =
       readonly riskClass: string;
     };
 
-function proposalKey(p: OpsChatProposal): string {
+/**
+ * A stable, content-derived correlation key for a proposal. Used in-turn to dedup, and by
+ * the ops-chat stream route as the SSE `correlationKey` that ties a streamed proposal card
+ * to its persisted `proposalId` (delivered in the `saved` event) — the same key is derivable
+ * live (before the id exists) and on reload from the stored payload, so the client never
+ * needs an actionable id before persistence commits.
+ */
+export function proposalKey(p: OpsChatProposal): string {
   switch (p.kind) {
     case 'answer_question':
       return `q:${p.questionId}`;

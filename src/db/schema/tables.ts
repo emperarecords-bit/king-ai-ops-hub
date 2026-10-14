@@ -2539,6 +2539,10 @@ export const opsChatMessages = pgTable(
     content: text('content').notNull(),
     // The owner question that produced an assistant answer (re-enables Ask Council on reload).
     question: text('question'),
+    // Explicit owner->assistant turn linkage: an assistant reply stores the id of the OWNER
+    // message it answers (set at persist time). Durable turn identity across refresh / retries /
+    // tabs / devices — never inferred from seq adjacency, which misassociates interleaved turns.
+    replyToMessageId: uuid('reply_to_message_id'),
     ...timestamps,
   },
   (t) => [
@@ -2548,11 +2552,19 @@ export const opsChatMessages = pgTable(
       foreignColumns: [opsChatConversations.id, opsChatConversations.userId],
       name: 'ops_chat_messages_conversation_user_fk',
     }).onDelete('restrict'),
+    // The reply target must be a message IN THE SAME conversation (self composite FK).
+    foreignKey({
+      columns: [t.replyToMessageId, t.conversationId],
+      foreignColumns: [t.id, t.conversationId],
+      name: 'ops_chat_messages_reply_to_fk',
+    }).onDelete('restrict'),
     // Deterministic per-conversation ordering.
     uniqueIndex('ops_chat_messages_conversation_seq_uq').on(t.conversationId, t.seq),
     // Target for the proposal → message composite FK (pins same conversation).
     unique('ops_chat_messages_id_conversation_uq').on(t.id, t.conversationId),
     index('ops_chat_messages_conversation_created_idx').on(t.conversationId, t.createdAt),
+    // At most ONE assistant reply per owner turn.
+    uniqueIndex('ops_chat_messages_reply_to_uq').on(t.replyToMessageId).where(sql`reply_to_message_id is not null`),
     check('ops_chat_messages_role_chk', sql`role in ('user', 'assistant')`),
     check('ops_chat_messages_status_chk', sql`status in ('complete', 'interrupted')`),
   ],

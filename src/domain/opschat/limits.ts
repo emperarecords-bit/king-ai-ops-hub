@@ -30,3 +30,36 @@ export const OPS_CHAT_TIMEOUT_MESSAGE = 'The AI request timed out. Nothing was c
 
 /** Shown when the stream closes without a terminal `done`/`error` event (abnormal close) — retryable, no write. */
 export const OPS_CHAT_CONNECTION_CLOSED_MESSAGE = 'The connection closed before the reply finished. Nothing was changed — try again.';
+
+/**
+ * How many prior OWNER turns (up through the current one, in owner-message order) the server
+ * reconstructs into the provider prompt — each owner message followed by its COMPLETE linked
+ * assistant reply (via reply_to_message_id). Bounded so a long thread never bloats model context;
+ * this is the MODEL window, tighter than the display window (loadConversation). The prompt is built
+ * turn-by-turn (NOT by raw message seq) so an assistant reply that landed with a higher seq than a
+ * later owner message is still attached to the correct turn. A turn yields up to 2 messages, so the
+ * effective message cap is ~2× this value.
+ */
+export const OPS_CHAT_MAX_PROMPT_TURNS = 8;
+
+/** Shown when the owner message persisted and the model answered, but writing the reply to the
+ *  store failed — no `saved` is emitted, so the client keeps any cards disabled. Retryable: the
+ *  turn id is already committed, so a retry replays if a reply exists or re-runs if not. */
+export const OPS_CHAT_PERSIST_FAILED_MESSAGE = 'The reply could not be saved. Nothing was changed — try again.';
+
+/** Shown when another request already holds this turn's execution claim and no reply exists yet. */
+export const OPS_CHAT_TURN_IN_PROGRESS_MESSAGE = 'This message is already being answered. Reload in a moment to see the reply.';
+
+/** Shown when a DIFFERENT turn in the same conversation is still executing (conversation-level
+ *  serialization). The owner message stays persisted; retrying the same turn later runs it after
+ *  the in-flight turn finishes. */
+export const OPS_CHAT_CONVERSATION_BUSY_MESSAGE = 'Another message in this conversation is still being answered. Try again in a moment.';
+
+/** Shown when an EARLIER owner message in the same conversation has not been answered yet. Owner
+ *  turns execute in persisted order (FIFO), so this turn waits its place — retrying runs it once
+ *  the earlier turn reaches a terminal reply. */
+export const OPS_CHAT_EARLIER_TURN_PENDING_MESSAGE = 'An earlier message in this conversation is still waiting to be answered. Try again in a moment.';
+
+/** Shown when replaying a persisted INTERRUPTED reply. An interrupted turn is kept for history but
+ *  must never masquerade as a completed answer, so its replay ends in `error`, not `done`. */
+export const OPS_CHAT_INTERRUPTED_REPLAY_MESSAGE = 'This reply was interrupted. Send a new message to continue.';

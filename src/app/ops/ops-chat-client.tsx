@@ -1,9 +1,26 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { consumeOpsChatStream } from './ops-chat-stream';
-import { OPS_CHAT_CLIENT_TIMEOUT_MS, OPS_CHAT_TIMEOUT_MESSAGE } from '@/domain/opschat/limits';
+import {
+  OPS_CHAT_CLIENT_TIMEOUT_MS,
+  OPS_CHAT_EARLIER_TURN_PENDING_MESSAGE,
+  OPS_CHAT_TIMEOUT_MESSAGE,
+} from '@/domain/opschat/limits';
 import { createDeadlineWatchdog } from './ops-chat-watchdog';
+import {
+  applySavedMapping,
+  buildTranscript,
+  confirmOutcome,
+  isActionable,
+  pendingOutsideWindow,
+  pendingTurnOf,
+  RELOAD_TO_SEE_STATE,
+  type PendingTurn,
+  type PersistedMessage,
+  type TranscriptCard,
+  type TranscriptMsg,
+} from './ops-chat-transcript';
 
 type Proposal =
   | { kind: 'answer_question'; questionId: string; projectKey: string; workspaceName: string; question: string; answer: string }
@@ -98,27 +115,54 @@ type Proposal =
       riskClass: string;
     };
 
-interface ProposalItem {
-  proposal: Proposal;
-  state: 'pending' | 'confirming' | 'done' | 'error' | 'cancelled';
-  error?: string;
-  result?: {
-    outcome?: string | null;
-    message?: string | null;
-    prUrl?: string | null;
-    mergeCommitSha?: string | null;
-    revertCommitSha?: string | null;
-    runId?: number | null;
-    attempt?: number | null;
-    runState?: string | null;
-    runUrl?: string | null;
-    version?: number | null;
-    contentDigest?: string | null;
-    newDeploymentId?: string | null;
-    productionDeploymentId?: string | null;
-    productionChanged?: boolean | null;
+/** The executed result of a confirmed card, as displayed (from the confirm response or the stored row). */
+interface CardResult {
+  outcome?: string | null;
+  message?: string | null;
+  prUrl?: string | null;
+  mergeCommitSha?: string | null;
+  revertCommitSha?: string | null;
+  runId?: number | null;
+  attempt?: number | null;
+  runState?: string | null;
+  runUrl?: string | null;
+  version?: number | null;
+  contentDigest?: string | null;
+  newDeploymentId?: string | null;
+  productionDeploymentId?: string | null;
+  productionChanged?: boolean | null;
+}
+
+function resultOf(executed: Record<string, unknown> | null | undefined): CardResult | undefined {
+  if (!executed) return undefined;
+  const str = (k: string): string | null => (typeof executed[k] === 'string' ? (executed[k] as string) : null);
+  const num = (k: string): number | null => (typeof executed[k] === 'number' ? (executed[k] as number) : null);
+  return {
+    outcome: str('outcome'),
+    message: str('message'),
+    prUrl: str('prUrl'),
+    mergeCommitSha: str('mergeCommitSha'),
+    revertCommitSha: str('revertCommitSha'),
+    runId: num('runId'),
+    attempt: num('attempt'),
+    runState: str('state'),
+    runUrl: str('runUrl'),
+    version: num('version'),
+    contentDigest: str('contentDigest'),
+    newDeploymentId: str('newDeploymentId'),
+    productionDeploymentId: str('productionDeploymentId'),
+    productionChanged: typeof executed.productionChanged === 'boolean' ? executed.productionChanged : null,
   };
 }
+
+const GOVERNED_MUTATION_KINDS: ReadonlySet<string> = new Set([
+  'github_pr',
+  'github_merge',
+  'github_rerun',
+  'github_revert',
+  'supabase_deploy',
+  'vercel_mutation',
+]);
 
 type Confidence = 'low' | 'medium' | 'high';
 
@@ -152,13 +196,9 @@ interface CouncilState {
   showReviewers?: boolean;
 }
 
-interface Msg {
-  id: string;
-  role: 'owner' | 'assistant';
-  content: string;
-  /** The owner question that produced this assistant answer (enables "Ask Council"). */
-  question?: string;
-  proposals?: ProposalItem[];
+/** A transcript row (see ops-chat-transcript.ts) plus client-only Council state. Owner rows use the
+ *  owner message id — which IS the client-minted turnId — as their id. */
+interface Msg extends TranscriptMsg {
   council?: CouncilState;
 }
 
@@ -292,95 +332,6 @@ function confirmLabel(p: Proposal): string {
       return 'Confirm & deploy';
     case 'vercel_mutation':
       return p.operation === 'redeploy' ? 'Confirm & redeploy' : p.operation === 'promote' ? 'Confirm & promote' : 'Confirm & roll back';
-  }
-}
-function confirmBody(p: Proposal): Record<string, unknown> {
-  switch (p.kind) {
-    case 'answer_question':
-      return { action: 'answer_question', projectKey: p.projectKey, questionId: p.questionId, answer: p.answer };
-    case 'decide_approval':
-      return {
-        action: 'decide_approval',
-        projectKey: p.projectKey,
-        approvalId: p.approvalId,
-        decision: p.decision,
-        note: p.note || undefined,
-      };
-    case 'dispatch_task':
-      return {
-        action: 'dispatch_task',
-        projectKey: p.projectKey,
-        title: p.title,
-        instructions: p.instructions,
-        agentId: p.agentId,
-      };
-    case 'rerun_task':
-      return { action: 'rerun_task', projectKey: p.projectKey, taskId: p.taskId };
-    case 'github_pr':
-      return {
-        action: 'execute_github_pr',
-        projectKey: p.projectKey,
-        repo: p.repo,
-        branch: p.branch,
-        baseBranch: p.baseBranch,
-        title: p.title,
-        body: p.body || undefined,
-        files: p.files,
-      };
-    case 'github_merge':
-      return {
-        action: 'execute_github_merge',
-        projectKey: p.projectKey,
-        repo: p.repo,
-        prNumber: p.prNumber,
-        expectedHeadSha: p.expectedHeadSha,
-        expectedBaseBranch: p.expectedBaseBranch,
-        mergeMethod: p.mergeMethod,
-      };
-    case 'github_rerun':
-      return {
-        action: 'execute_github_rerun',
-        projectKey: p.projectKey,
-        repo: p.repo,
-        runId: p.runId,
-        expectedHeadSha: p.expectedHeadSha,
-        expectedRunAttempt: p.expectedRunAttempt,
-      };
-    case 'github_revert':
-      return {
-        action: 'execute_github_revert',
-        projectKey: p.projectKey,
-        repo: p.repo,
-        targetSha: p.targetSha,
-        expectedBaseBranch: p.expectedBaseBranch,
-        expectedBaseHeadSha: p.expectedBaseHeadSha,
-        revertBranch: p.revertBranch,
-      };
-    case 'supabase_deploy':
-      return {
-        action: 'execute_supabase_deploy',
-        projectKey: p.projectKey,
-        projectRef: p.projectRef,
-        functionSlug: p.functionSlug,
-        sourceRepo: p.sourceRepo,
-        sourceSha: p.sourceSha,
-        sourcePath: p.sourcePath,
-        entrypointPath: p.entrypointPath,
-        importMapPath: p.importMapPath ?? undefined,
-        verifyJwt: p.verifyJwt,
-      };
-    case 'vercel_mutation':
-      return {
-        action: 'execute_vercel_mutation',
-        projectKey: p.projectKey,
-        operation: p.operation,
-        vercelProjectId: p.vercelProjectId,
-        sourceDeploymentId: p.sourceDeploymentId,
-        expectedSourceSha: p.expectedSourceSha,
-        targetDeploymentId: p.targetDeploymentId,
-        expectedTargetSha: p.expectedTargetSha,
-        expectedCurrentProductionDeploymentId: p.expectedCurrentProductionDeploymentId,
-      };
   }
 }
 
@@ -525,15 +476,60 @@ function CouncilBlock({
   );
 }
 
+/** Display state for a card: a governed action can be RECORDED `done` while its executor reported a
+ *  non-success outcome (blocked / precondition failed) — show that honestly, never as a false "done". */
+function effectiveCard(card: TranscriptCard): TranscriptCard {
+  const ex = card.executed;
+  if (card.state === 'done' && ex && GOVERNED_MUTATION_KINDS.has(String(card.proposal.kind)) && ex.outcome !== 'succeeded') {
+    const outcome = typeof ex.outcome === 'string' ? ex.outcome : 'did not run';
+    return { ...card, state: 'error', error: typeof ex.message === 'string' && ex.message ? ex.message : `The action ${outcome}.` };
+  }
+  return card;
+}
+
 /**
- * Ops Chat surface (v2.2 + Council). Streams replies over SSE, shows what it's
- * looking up, and renders a confirm card per proposed action — answering a
- * question, approving/rejecting, or dispatching/re-running work. The write (or
- * run) happens only on Confirm. Each completed answer also offers an optional,
- * owner-triggered Council review (multiple independent model reviews → synthesis).
+ * Ops Chat surface (v2.2 + Council + persistence). Streams replies over SSE, shows what it's
+ * looking up, and renders a confirm card per proposed action — answering a question,
+ * approving/rejecting, or dispatching/re-running work. The write (or run) happens only on Confirm.
+ * Each completed answer also offers an optional, owner-triggered Council review.
+ *
+ * PERSISTENCE: the transcript comes from the server store (see page.tsx), so it survives refresh and
+ * resumes on any device. Every send carries a client-minted `conversationId` (minted once, on the
+ * first send of a new conversation) and a fresh `turnId`; a card becomes actionable only when the
+ * `saved` event supplies its persisted proposalId, and Confirm/Cancel send ONLY that id — the server
+ * reloads the immutable stored proposal.
+ *
+ * RECOVERY: an owner turn with no saved reply (whatever the cause) is the conversation's pending turn.
+ * It pauses new sends (the server runs turns in order) and is offered as an explicit "Resume message"
+ * that re-sends the exact (conversationId, turnId, content) — never a new turnId, and never automatic,
+ * because a resume can spend a model call.
  */
-export function OpsChatClient({ opening }: { opening: string }) {
-  const [messages, setMessages] = useState<Msg[]>([{ id: 'opening', role: 'assistant', content: opening }]);
+export function OpsChatClient({
+  opening,
+  conversationId: initialConversationId,
+  persisted,
+  pendingTurn: serverPending,
+  conversations,
+}: {
+  opening: string;
+  conversationId: string | null;
+  persisted: PersistedMessage[];
+  pendingTurn: PendingTurn | null;
+  conversations: Array<{ id: string; title: string | null }>;
+}) {
+  const [initialTranscript] = useState(() => buildTranscript(persisted));
+  const [messages, setMessages] = useState<Msg[]>(() => [
+    { id: 'opening', role: 'assistant', content: opening },
+    ...initialTranscript,
+  ]);
+  // The server's earliest unanswered turn when it is NOT in the loaded window (a very long thread):
+  // the page-supplied copy is then the only handle on it. Cleared once it gets a saved reply.
+  const [outsidePending, setOutsidePending] = useState<PendingTurn | null>(() =>
+    pendingOutsideWindow(initialTranscript, serverPending),
+  );
+  // Minted on the first send of a NEW conversation and then stable, so a first-turn retry can never
+  // fork a second conversation.
+  const [currentId, setCurrentId] = useState<string | null>(initialConversationId);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [toolActivity, setToolActivity] = useState<string | null>(null);
@@ -541,6 +537,8 @@ export function OpsChatClient({ opening }: { opening: string }) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  const pending = useMemo(() => pendingTurnOf(messages, outsidePending), [messages, outsidePending]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
@@ -557,84 +555,35 @@ export function OpsChatClient({ opening }: { opening: string }) {
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  function setItem(msgId: string, index: number, fields: Partial<ProposalItem>) {
+  function setCard(msgId: string, index: number, fields: Partial<TranscriptCard>) {
     setMessages((prev) =>
       prev.map((m) =>
-        m.id === msgId && m.proposals
-          ? { ...m, proposals: m.proposals.map((it, i) => (i === index ? { ...it, ...fields } : it)) }
-          : m,
+        m.id === msgId && m.cards ? { ...m, cards: m.cards.map((c, i) => (i === index ? { ...c, ...fields } : c)) } : m,
       ),
     );
   }
 
-  async function confirmProposal(msgId: string, index: number) {
-    const m = messages.find((x) => x.id === msgId);
-    const item = m?.proposals?.[index];
-    if (!item) return;
-    setItem(msgId, index, { state: 'confirming', error: undefined });
+  /** Confirm or cancel a persisted proposal by id. The server reloads the immutable stored payload. */
+  async function act(msgId: string, index: number, intent: 'confirm' | 'cancel') {
+    const card = messages.find((x) => x.id === msgId)?.cards?.[index];
+    if (!card || !isActionable(card)) return;
+    setCard(msgId, index, { state: 'confirming', error: undefined });
+    let status: number;
+    let json: unknown;
     try {
       const res = await fetch('/api/ops-chat/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(confirmBody(item.proposal)),
+        body: JSON.stringify({ proposalId: card.proposalId, intent }),
       });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(j.error || 'That did not go through.');
-      const executed = j?.executed as
-        | {
-            outcome?: string | null;
-            message?: string | null;
-            prUrl?: string | null;
-            mergeCommitSha?: string | null;
-            revertCommitSha?: string | null;
-            runId?: number | null;
-            attempt?: number | null;
-            state?: string | null;
-            runUrl?: string | null;
-            version?: number | null;
-            contentDigest?: string | null;
-            newDeploymentId?: string | null;
-            productionDeploymentId?: string | null;
-            productionChanged?: boolean | null;
-          }
-        | undefined;
-      // A governed action can reach the confirm path but still be blocked/failed by dispatch (e.g. the
-      // executor is disabled, or a merge precondition failed). Surface that honestly rather than a false "done".
-      const isGovernedMutation =
-        item.proposal.kind === 'github_pr' ||
-        item.proposal.kind === 'github_merge' ||
-        item.proposal.kind === 'github_rerun' ||
-        item.proposal.kind === 'github_revert' ||
-        item.proposal.kind === 'supabase_deploy' ||
-        item.proposal.kind === 'vercel_mutation';
-      if (isGovernedMutation && executed && executed.outcome !== 'succeeded') {
-        setItem(msgId, index, { state: 'error', error: executed.message || `The action ${executed.outcome ?? 'did not run'}.` });
-        return;
-      }
-      setItem(msgId, index, {
-        state: 'done',
-        result: executed
-          ? {
-              outcome: executed.outcome,
-              message: executed.message,
-              prUrl: executed.prUrl ?? null,
-              mergeCommitSha: executed.mergeCommitSha ?? null,
-              revertCommitSha: executed.revertCommitSha ?? null,
-              runId: executed.runId ?? null,
-              attempt: executed.attempt ?? null,
-              runState: executed.state ?? null,
-              runUrl: executed.runUrl ?? null,
-              version: executed.version ?? null,
-              contentDigest: executed.contentDigest ?? null,
-              newDeploymentId: executed.newDeploymentId ?? null,
-              productionDeploymentId: executed.productionDeploymentId ?? null,
-              productionChanged: executed.productionChanged ?? null,
-            }
-          : undefined,
-      });
-    } catch (e) {
-      setItem(msgId, index, { state: 'error', error: e instanceof Error ? e.message : 'That did not go through.' });
+      status = res.status;
+      json = await res.json().catch(() => null);
+    } catch {
+      // The request may or may not have reached the server — never confirm again blind.
+      setCard(msgId, index, { state: 'unrecorded', error: RELOAD_TO_SEE_STATE });
+      return;
     }
+    setCard(msgId, index, confirmOutcome(status, json));
   }
 
   function setCouncil(msgId: string, fields: Partial<CouncilState>) {
@@ -673,21 +622,46 @@ export function OpsChatClient({ opening }: { opening: string }) {
     }
   }
 
+  function openConversation(id: string | null) {
+    if (streaming) return;
+    window.location.assign(id ? `/ops?c=${encodeURIComponent(id)}` : '/ops?new=1');
+  }
+
   async function send(text: string) {
     const trimmed = text.trim();
-    if (!trimmed || streaming) return;
+    // A pending turn pauses new sends: the server answers owner turns strictly in order.
+    if (!trimmed || streaming || pending) return;
     setError(null);
     setInput('');
+    const conversationId = currentId ?? crypto.randomUUID();
+    if (!currentId) setCurrentId(conversationId);
+    // Keep the URL on this conversation so a refresh (or the same link on another device) resumes it.
+    window.history.replaceState(null, '', `/ops?c=${conversationId}`);
+    const turnId = crypto.randomUUID();
+    setMessages((prev) => [...prev, { id: turnId, role: 'owner', content: trimmed, awaitingReply: true }]);
+    await runTurn({ conversationId, turnId, content: trimmed, fresh: true });
+  }
+
+  /** Explicit, owner-clicked recovery: re-send the EXACT pending turn (same ids, same content). The
+   *  idempotent route replays a reply that was saved meanwhile, or runs the turn now. */
+  async function resume() {
+    const turn = pending;
+    const conversationId = currentId;
+    if (!turn || !conversationId || streaming) return;
+    setError(null);
+    await runTurn({ conversationId, turnId: turn.turnId, content: turn.content, fresh: false });
+  }
+
+  async function runTurn(t: { conversationId: string; turnId: string; content: string; fresh: boolean }) {
     setToolActivity(null);
-
-    const history = messages
-      .filter((m) => m.content.trim().length > 0)
-      .slice(-10)
-      .map((m) => ({ role: m.role === 'owner' ? ('user' as const) : ('assistant' as const), content: m.content }));
-
-    const ownerMsg: Msg = { id: nextId(), role: 'owner', content: trimmed };
     const replyId = nextId();
-    setMessages((prev) => [...prev, ownerMsg, { id: replyId, role: 'assistant', content: '', question: trimmed }]);
+    // The reply sits directly after its own owner turn (turn-aware), or at the end when that turn is
+    // outside the loaded window.
+    setMessages((prev) => {
+      const reply: Msg = { id: replyId, role: 'assistant', content: '', question: t.content, replyTo: t.turnId };
+      const at = prev.findIndex((m) => m.role === 'owner' && m.id === t.turnId);
+      return at < 0 ? [...prev, reply] : [...prev.slice(0, at + 1), reply, ...prev.slice(at + 1)];
+    });
     setStreaming(true);
 
     const controller = new AbortController();
@@ -708,16 +682,22 @@ export function OpsChatClient({ opening }: { opening: string }) {
     };
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible);
 
-    const append = (delta: string) =>
-      setMessages((prev) => prev.map((m) => (m.id === replyId ? { ...m, content: m.content + delta } : m)));
-    const dropEmptyReply = () =>
-      setMessages((prev) => prev.filter((m) => !(m.id === replyId && m.content.trim().length === 0 && !m.proposals)));
+    const patchReply = (fn: (m: Msg) => Msg) => setMessages((prev) => prev.map((m) => (m.id === replyId ? fn(m) : m)));
+    const append = (delta: string) => patchReply((m) => ({ ...m, content: m.content + delta }));
+    // No `saved` ⇒ no terminal reply was recorded. Drop the local bubble so the transcript matches the
+    // store; the owner turn stays awaiting and becomes the recovery state (Resume message).
+    let saved = false;
+    const dropUnsavedReply = () => {
+      if (!saved) setMessages((prev) => prev.filter((m) => m.id !== replyId));
+    };
+    const showError = (message: string) =>
+      setError(message === OPS_CHAT_EARLIER_TURN_PENDING_MESSAGE ? `${message} Reload to see it.` : message);
 
     try {
       const res = await fetch('/api/ops-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: trimmed, history }),
+        body: JSON.stringify({ message: t.content, conversationId: t.conversationId, turnId: t.turnId }),
         signal: controller.signal,
       });
       if (!res.ok || !res.body) {
@@ -727,6 +707,12 @@ export function OpsChatClient({ opening }: { opening: string }) {
           if (j?.error) msg = String(j.error);
         } catch {
           /* non-JSON */
+        }
+        // A 4xx is rejected BEFORE the owner turn is persisted (invalid / not found / id conflict), so a
+        // fresh send leaves nothing to resume — remove it. A 5xx may or may not have persisted it: keep
+        // it as pending; Resume is idempotent either way.
+        if (t.fresh && res.status >= 400 && res.status < 500) {
+          setMessages((prev) => prev.filter((m) => !(m.role === 'owner' && m.id === t.turnId)));
         }
         throw new Error(msg);
       }
@@ -741,20 +727,27 @@ export function OpsChatClient({ opening }: { opening: string }) {
         onToolStart: (name) => setToolActivity(TOOL_LABEL[name] ?? 'looking that up'),
         onToolEnd: () => setToolActivity(null),
         onProposal: (payload) => {
-          const proposal = payload as unknown as Proposal;
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === replyId
-                ? { ...m, proposals: [...(m.proposals ?? []), { proposal, state: 'pending' as const }] }
-                : m,
-            ),
-          );
+          // Shown as proposed, but NOT actionable until `saved` supplies its persisted proposalId.
+          const proposal: Record<string, unknown> = { ...payload };
+          const correlationKey = typeof proposal.correlationKey === 'string' ? proposal.correlationKey : undefined;
+          delete proposal.correlationKey;
+          patchReply((m) => ({ ...m, cards: [...(m.cards ?? []), { proposal, correlationKey, state: 'pending' as const }] }));
+        },
+        onSaved: (s) => {
+          // The commit point that makes cards actionable — only accept it for THIS request's conversation.
+          // (The server never emits another; if it did, ignore it: the turn stays pending, cards stay inert.)
+          if (s.conversationId !== t.conversationId) return;
+          saved = true;
+          patchReply((m) => ({ ...m, status: s.status, cards: applySavedMapping(m.cards, s.proposals) }));
+          // The owner turn now has a terminal reply (complete OR interrupted) — it no longer blocks sending.
+          setMessages((prev) => prev.map((m) => (m.role === 'owner' && m.id === t.turnId ? { ...m, awaitingReply: false } : m)));
+          setOutsidePending((p) => (p?.turnId === t.turnId ? null : p));
         },
       });
 
       if (result.status === 'error') {
-        setError(result.message);
-        dropEmptyReply();
+        showError(result.message);
+        dropUnsavedReply();
       }
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') {
@@ -762,12 +755,12 @@ export function OpsChatClient({ opening }: { opening: string }) {
         // Any other abort (component unmount / navigation) stays silent.
         if (timedOut) {
           setError(OPS_CHAT_TIMEOUT_MESSAGE);
-          dropEmptyReply();
+          dropUnsavedReply();
         }
         return;
       }
-      setError(err instanceof Error ? err.message : 'Something went wrong.');
-      dropEmptyReply();
+      showError(err instanceof Error ? err.message : 'Something went wrong.');
+      dropUnsavedReply();
     } finally {
       // Always clear the pending state and the watchdog, on every exit path.
       watchdog.clear();
@@ -780,6 +773,33 @@ export function OpsChatClient({ opening }: { opening: string }) {
 
   return (
     <div className="flex flex-1 flex-col gap-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="sr-only" htmlFor="ops-chat-conversation">Conversation</label>
+        <select
+          id="ops-chat-conversation"
+          value={currentId ?? ''}
+          disabled={streaming}
+          onChange={(e) => openConversation(e.target.value || null)}
+          className="min-w-0 flex-1 rounded border border-[var(--border)] bg-transparent px-2 py-1.5 text-xs text-[var(--muted)]"
+        >
+          {currentId && !conversations.some((c) => c.id === currentId) ? <option value={currentId}>This conversation</option> : null}
+          {!currentId ? <option value="">New conversation</option> : null}
+          {conversations.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.title ?? 'Untitled conversation'}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          disabled={streaming}
+          onClick={() => openConversation(null)}
+          className="rounded border border-[var(--border)] px-3 py-1.5 text-xs text-[var(--muted)] hover:text-[var(--foreground)] disabled:opacity-40"
+        >
+          New conversation
+        </button>
+      </div>
+
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto pr-1">
         {messages.map((m) => (
           <div key={m.id} className={m.role === 'owner' ? 'flex justify-end' : 'flex justify-start'}>
@@ -796,94 +816,119 @@ export function OpsChatClient({ opening }: { opening: string }) {
               </div>
               {m.content.length > 0 ? (
                 <Rich text={m.content} />
-              ) : m.role === 'assistant' && !m.proposals ? (
+              ) : m.role === 'assistant' && !m.cards ? (
                 <span className="opacity-60">{toolActivity ? `🔍 ${toolActivity}…` : 'Thinking…'}</span>
               ) : null}
+              {m.role === 'assistant' && m.status === 'interrupted' ? (
+                <p className="mt-1 text-[11px] text-[var(--muted)]">Interrupted — partial reply, kept for history only.</p>
+              ) : null}
 
-              {m.proposals?.map((item, i) => {
-                const p = item.proposal;
+              {m.cards?.map((raw, i) => {
+                const card = effectiveCard(raw);
+                const actionable = isActionable(card) && !streaming;
+                const p = card.proposal as unknown as Proposal;
+                const result = resultOf(card.executed);
                 return (
                   <div
                     key={i}
                     className="mt-3 rounded-md border border-[var(--accent)] bg-[var(--surface-raised,rgba(120,160,255,0.06))] p-3"
                   >
-                    {item.state === 'done' ? (
+                    {card.state === 'done' ? (
                       <div className="flex flex-col gap-1">
                         <p className="text-sm text-[var(--success,#6bbf73)]">{doneLabel(p)}</p>
-                        {p.kind === 'github_pr' && item.result?.prUrl ? (
+                        {p.kind === 'github_pr' && result?.prUrl ? (
                           <a
-                            href={item.result.prUrl}
+                            href={result.prUrl}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="text-xs text-[var(--accent)] underline underline-offset-2 break-all"
                           >
-                            {item.result.prUrl}
+                            {result.prUrl}
                           </a>
                         ) : p.kind === 'github_merge' ? (
                           <div className="flex flex-col gap-0.5 text-xs text-[var(--muted)]">
-                            {item.result?.prUrl ? (
-                              <a href={item.result.prUrl} target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] underline underline-offset-2 break-all">
-                                {item.result.prUrl}
+                            {result?.prUrl ? (
+                              <a href={result.prUrl} target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] underline underline-offset-2 break-all">
+                                {result.prUrl}
                               </a>
                             ) : null}
-                            {item.result?.mergeCommitSha ? (
-                              <span>Merge commit: <span className="font-mono">{item.result.mergeCommitSha.slice(0, 10)}</span></span>
+                            {result?.mergeCommitSha ? (
+                              <span>Merge commit: <span className="font-mono">{result.mergeCommitSha.slice(0, 10)}</span></span>
                             ) : null}
                           </div>
                         ) : p.kind === 'github_rerun' ? (
                           <div className="flex flex-col gap-0.5 text-xs text-[var(--muted)]">
-                            {item.result?.runUrl ? (
-                              <a href={item.result.runUrl} target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] underline underline-offset-2 break-all">
-                                {item.result.runUrl}
+                            {result?.runUrl ? (
+                              <a href={result.runUrl} target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] underline underline-offset-2 break-all">
+                                {result.runUrl}
                               </a>
                             ) : null}
                             <span>
-                              Run {item.result?.runId ?? p.runId}
-                              {item.result?.attempt ? ` · attempt ${item.result.attempt}` : ''}
-                              {item.result?.runState ? ` · ${item.result.runState}` : ''}
+                              Run {result?.runId ?? p.runId}
+                              {result?.attempt ? ` · attempt ${result.attempt}` : ''}
+                              {result?.runState ? ` · ${result.runState}` : ''}
                             </span>
                           </div>
                         ) : p.kind === 'github_revert' ? (
                           <div className="flex flex-col gap-0.5 text-xs text-[var(--muted)]">
-                            {item.result?.prUrl ? (
-                              <a href={item.result.prUrl} target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] underline underline-offset-2 break-all">
-                                {item.result.prUrl}
+                            {result?.prUrl ? (
+                              <a href={result.prUrl} target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] underline underline-offset-2 break-all">
+                                {result.prUrl}
                               </a>
                             ) : null}
                             <span>Reverts <span className="font-mono">{p.targetSha.slice(0, 10)}</span> → <span className="font-mono">{p.expectedBaseBranch}</span></span>
-                            {item.result?.revertCommitSha ? (
-                              <span>Revert commit: <span className="font-mono">{item.result.revertCommitSha.slice(0, 10)}</span></span>
+                            {result?.revertCommitSha ? (
+                              <span>Revert commit: <span className="font-mono">{result.revertCommitSha.slice(0, 10)}</span></span>
                             ) : null}
                           </div>
                         ) : p.kind === 'supabase_deploy' ? (
                           <div className="flex flex-col gap-0.5 text-xs text-[var(--muted)]">
                             <span>
                               {p.functionSlug} → project {p.projectRef}
-                              {item.result?.version != null ? ` · version ${item.result.version}` : ''}
+                              {result?.version != null ? ` · version ${result.version}` : ''}
                             </span>
                             <span>
                               from <span className="font-mono">{p.sourceRepo}@{p.sourceSha.slice(0, 7)}</span>
                             </span>
-                            {item.result?.contentDigest ? (
-                              <span>Source digest: <span className="font-mono">{item.result.contentDigest.slice(0, 12)}</span></span>
+                            {result?.contentDigest ? (
+                              <span>Source digest: <span className="font-mono">{result.contentDigest.slice(0, 12)}</span></span>
                             ) : null}
                           </div>
                         ) : p.kind === 'vercel_mutation' ? (
                           <div className="flex flex-col gap-0.5 text-xs text-[var(--muted)]">
                             <span>{p.operation} · {p.vercelProjectId}</span>
-                            {item.result?.newDeploymentId ? (
-                              <span>New deployment: <span className="font-mono">{item.result.newDeploymentId}</span> (production unchanged)</span>
+                            {result?.newDeploymentId ? (
+                              <span>New deployment: <span className="font-mono">{result.newDeploymentId}</span> (production unchanged)</span>
                             ) : null}
-                            {item.result?.productionDeploymentId ? (
-                              <span>Production now: <span className="font-mono">{item.result.productionDeploymentId}</span></span>
+                            {result?.productionDeploymentId ? (
+                              <span>Production now: <span className="font-mono">{result.productionDeploymentId}</span></span>
                             ) : null}
                           </div>
                         ) : null}
                       </div>
-                    ) : item.state === 'cancelled' ? (
+                    ) : card.state === 'cancelled' ? (
                       <p className="text-sm text-[var(--muted)]">Cancelled — nothing was changed.</p>
+                    ) : card.state === 'stale' ? (
+                      <p className="text-sm text-[var(--muted)]">
+                        No longer valid — {card.error ?? 'things changed since this was proposed'}. Ask Ops Chat for a fresh proposal.
+                      </p>
+                    ) : card.state === 'unrecorded' || card.state === 'conflict' ? (
+                      <div className="flex flex-col gap-1">
+                        <p className="text-xs uppercase tracking-wide text-[var(--muted)]">{headerLabel(p)}</p>
+                        <p className="text-sm text-[var(--danger,#c37474)]">{card.error ?? RELOAD_TO_SEE_STATE}</p>
+                        <button
+                          type="button"
+                          onClick={() => window.location.reload()}
+                          className="self-start rounded-md border border-[var(--border)] px-3 py-1 text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
+                        >
+                          Reload
+                        </button>
+                      </div>
                     ) : (
                       <>
+                        {card.fromHistory && card.state === 'pending' ? (
+                          <p className="mb-1 text-[11px] font-semibold text-[var(--muted)]">Proposed earlier</p>
+                        ) : null}
                         <p className="text-xs uppercase tracking-wide text-[var(--muted)]">{headerLabel(p)}</p>
 
                         {p.kind === 'answer_question' ? (
@@ -994,34 +1039,43 @@ export function OpsChatClient({ opening }: { opening: string }) {
                           </div>
                         )}
 
-                        {item.state === 'error' ? (
-                          <p className="mt-2 text-xs text-[var(--danger,#c37474)]">{item.error}</p>
+                        {card.error ? (
+                          <p className="mt-2 text-xs text-[var(--danger,#c37474)]">{card.error}</p>
                         ) : null}
-                        <div className="mt-3 flex items-center gap-2">
-                          <button
-                            type="button"
-                            disabled={item.state === 'confirming'}
-                            onClick={() => confirmProposal(m.id, i)}
-                            className="rounded-md bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[#0b0e14] hover:bg-[var(--accent-strong)] disabled:opacity-50"
-                          >
-                            {item.state === 'confirming' ? 'Working…' : confirmLabel(p)}
-                          </button>
-                          <button
-                            type="button"
-                            disabled={item.state === 'confirming'}
-                            onClick={() => setItem(m.id, i, { state: 'cancelled', error: undefined })}
-                            className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--muted)] hover:text-[var(--foreground)] disabled:opacity-50"
-                          >
-                            Cancel
-                          </button>
-                        </div>
+                        {card.state === 'pending' || card.state === 'confirming' ? (
+                          <>
+                            <div className="mt-3 flex items-center gap-2">
+                              <button
+                                type="button"
+                                disabled={!actionable}
+                                onClick={() => void act(m.id, i, 'confirm')}
+                                className="rounded-md bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[#0b0e14] hover:bg-[var(--accent-strong)] disabled:opacity-50"
+                              >
+                                {card.state === 'confirming' ? 'Working…' : confirmLabel(p)}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={!actionable}
+                                onClick={() => void act(m.id, i, 'cancel')}
+                                className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--muted)] hover:text-[var(--foreground)] disabled:opacity-50"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                            {card.state === 'pending' && !card.proposalId ? (
+                              <p className="mt-1 text-[11px] text-[var(--muted)]">
+                                {streaming ? 'Saving…' : 'This card was not saved and cannot be confirmed — ask again for a fresh one.'}
+                              </p>
+                            ) : null}
+                          </>
+                        ) : null}
                       </>
                     )}
                   </div>
                 );
               })}
 
-              {m.role === 'assistant' && m.id !== 'opening' && m.question && m.content.trim().length > 0 ? (
+              {m.role === 'assistant' && m.id !== 'opening' && m.status === 'complete' && m.question && m.content.trim().length > 0 ? (
                 <CouncilBlock
                   state={m.council}
                   disabled={streaming}
@@ -1035,7 +1089,26 @@ export function OpsChatClient({ opening }: { opening: string }) {
         <div ref={bottomRef} />
       </div>
 
-      {messages.length <= 1 ? (
+      {pending ? (
+        <div role="status" className="rounded-md border border-[var(--accent)] bg-[var(--surface-raised,rgba(120,160,255,0.06))] p-3">
+          <p className="text-sm font-semibold">This conversation has an unfinished message.</p>
+          <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs text-[var(--muted)]">“{pending.content}”</p>
+          <p className="mt-1 text-xs text-[var(--muted)]">
+            It never got a saved reply. Resume re-sends exactly this message — it shows the reply if one was saved
+            meanwhile, otherwise it runs now (uses Anthropic). New messages are paused until it finishes.
+          </p>
+          <button
+            type="button"
+            disabled={streaming}
+            onClick={() => void resume()}
+            className="mt-2 rounded-md bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[#0b0e14] hover:bg-[var(--accent-strong)] disabled:opacity-50"
+          >
+            {streaming ? 'Resuming…' : 'Resume message'}
+          </button>
+        </div>
+      ) : null}
+
+      {messages.length <= 1 && !pending ? (
         <div className="flex flex-wrap gap-2">
           {SUGGESTIONS.map((s) => (
             <button
@@ -1066,7 +1139,7 @@ export function OpsChatClient({ opening }: { opening: string }) {
           onChange={(e) => setInput(e.target.value)}
           rows={2}
           maxLength={4000}
-          placeholder="Ask, answer, approve, or start work — all from here…"
+          placeholder={pending ? 'Resume the unfinished message above to continue…' : 'Ask, answer, approve, or start work — all from here…'}
           className="max-h-80 min-h-[3.5rem] w-full resize-none overflow-y-auto rounded border border-[var(--border)] bg-transparent p-2.5 text-sm leading-relaxed"
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
@@ -1079,7 +1152,7 @@ export function OpsChatClient({ opening }: { opening: string }) {
           <span className="text-xs opacity-50">Enter to send · Shift+Enter for a new line</span>
           <button
             type="submit"
-            disabled={streaming || input.trim().length === 0}
+            disabled={streaming || !!pending || input.trim().length === 0}
             className="rounded border border-[var(--border)] px-4 py-1.5 text-sm hover:opacity-80 disabled:opacity-40"
           >
             {streaming ? 'Answering…' : 'Send'}

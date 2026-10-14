@@ -21,9 +21,38 @@ export interface OpsChatStreamHandlers {
   onToolStart(name: string): void;
   onToolEnd(): void;
   onProposal(proposal: Record<string, unknown>): void;
+  /** The commit point: the reply (and, for a complete turn, its proposals) is persisted. Carries the
+   *  {correlationKey → proposalId} mapping that makes streamed cards actionable. Arrives BEFORE the
+   *  terminal `done` (complete) or `error` (interrupted). No `saved` ⇒ nothing terminal was recorded. */
+  onSaved?(saved: OpsChatSaved): void;
+}
+
+export interface OpsChatSaved {
+  conversationId: string;
+  messageId: string;
+  status: 'complete' | 'interrupted';
+  proposals: Array<{ correlationKey: string; proposalId: string }>;
 }
 
 export type OpsChatStreamResult = { status: 'done' } | { status: 'error'; message: string };
+
+const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
+
+/** A structurally valid `saved` payload, or null. Every field is required; one malformed proposal
+ *  mapping rejects the whole event (a partial mapping is never applied). */
+export function parseSaved(payload: Record<string, unknown>): OpsChatSaved | null {
+  const { conversationId, messageId, status, proposals } = payload;
+  if (!nonEmpty(conversationId) || !nonEmpty(messageId)) return null;
+  if (status !== 'complete' && status !== 'interrupted') return null;
+  if (!Array.isArray(proposals)) return null;
+  const mapped: OpsChatSaved['proposals'] = [];
+  for (const p of proposals as unknown[]) {
+    const r = p !== null && typeof p === 'object' ? (p as Record<string, unknown>) : null;
+    if (!r || !nonEmpty(r.correlationKey) || !nonEmpty(r.proposalId)) return null;
+    mapped.push({ correlationKey: r.correlationKey, proposalId: r.proposalId });
+  }
+  return { conversationId, messageId, status, proposals: mapped };
+}
 
 export async function consumeOpsChatStream(
   body: ReadableStream<Uint8Array>,
@@ -89,6 +118,12 @@ export async function consumeOpsChatStream(
           else if (payload.phase === 'end') handlers.onToolEnd();
         } else if (event === 'proposal') {
           handlers.onProposal(payload);
+        } else if (event === 'saved') {
+          // `saved` is the persistence commit point that makes cards actionable, so it is STRICTLY
+          // validated: unless every field is structurally valid the whole event is ignored (cards stay
+          // non-actionable, the turn stays pending) — nothing is defaulted or guessed.
+          const saved = parseSaved(payload);
+          if (saved) handlers.onSaved?.(saved);
         } else if (event === 'error') {
           release();
           return { status: 'error', message: typeof payload.message === 'string' ? payload.message : 'The assistant hit an error.' };

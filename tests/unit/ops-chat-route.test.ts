@@ -15,6 +15,19 @@ const h = vi.hoisted(() => ({
   streamWithTools: vi.fn(),
   consumeRateLimit: vi.fn(),
   getProposals: vi.fn(),
+  // persistence (PR 2) — mocked so this suite stays a fast, DB-free gate/stream-shape test.
+  appendOwnerMessage: vi.fn(),
+  appendAssistantMessage: vi.fn(),
+  addProposal: vi.fn(),
+  createConversation: vi.fn(),
+  conversationExists: vi.fn(),
+  loadReplyForOwnerMessage: vi.fn(),
+  loadPromptTurns: vi.fn(),
+  earliestUnansweredOwnerId: vi.fn(),
+  tryClaimTurn: vi.fn(),
+  tryClaimConversation: vi.fn(),
+  release: vi.fn(),
+  convRelease: vi.fn(),
 }));
 
 vi.mock('@/domain/auth/guard', () => ({
@@ -24,10 +37,23 @@ vi.mock('@/domain/auth/guard', () => ({
 vi.mock('@/domain/opschat/pulse', () => ({ buildPulse: h.buildPulse, pulseContext: () => 'CTX' }));
 vi.mock('@/domain/opschat/tools', () => ({
   createOpsChatToolset: () => ({ tools: [], runTool: vi.fn(), getProposals: h.getProposals }),
+  proposalKey: (p: { kind: string }) => `k:${p.kind}`,
 }));
 vi.mock('@/providers/registry', () => ({ getProvider: () => ({ streamWithTools: h.streamWithTools }) }));
 vi.mock('@/domain/usage/rate-limit', () => ({ consumeRateLimit: h.consumeRateLimit }));
 vi.mock('@/db/client', () => ({ getDb: () => ({ transaction: (fn: (tx: unknown) => unknown) => fn({}) }) }));
+vi.mock('@/db/tenant', () => ({ withUser: (_s: unknown, fn: (tx: unknown) => unknown) => fn({}) }));
+vi.mock('@/domain/opschat/conversations', () => ({
+  appendOwnerMessage: h.appendOwnerMessage,
+  appendAssistantMessage: h.appendAssistantMessage,
+  addProposal: h.addProposal,
+  createConversation: h.createConversation,
+  conversationExists: h.conversationExists,
+  loadReplyForOwnerMessage: h.loadReplyForOwnerMessage,
+  loadPromptTurns: h.loadPromptTurns,
+  earliestUnansweredOwnerId: h.earliestUnansweredOwnerId,
+}));
+vi.mock('@/domain/opschat/turn-claim', () => ({ tryClaimTurn: h.tryClaimTurn, tryClaimConversation: h.tryClaimConversation }));
 vi.mock('@/lib/env.server', () => ({ serverEnv: () => ({ RATE_LIMIT_RUNS_PER_MINUTE: 10 }) }));
 vi.mock('@/lib/log', () => ({ log: { error: vi.fn(), info: vi.fn(), warn: vi.fn() } }));
 
@@ -52,6 +78,20 @@ beforeEach(() => {
   h.getProposals.mockReturnValue([
     { kind: 'answer_question', questionId: 'q1', projectKey: 'ab', workspaceName: 'AccurateBids', question: 'x?', answer: 'y' },
   ]);
+  // persistence defaults: a fresh conversation, a first-insert owner turn, no prior reply
+  // (so the model runs), and a claimed turn.
+  h.createConversation.mockResolvedValue({ id: 'conv1' });
+  h.conversationExists.mockResolvedValue(true);
+  h.appendOwnerMessage.mockResolvedValue({ id: 'owner1', seq: 1n, inserted: true });
+  h.loadReplyForOwnerMessage.mockResolvedValue(null);
+  h.loadPromptTurns.mockResolvedValue([{ role: 'user', content: 'what needs me' }]);
+  h.earliestUnansweredOwnerId.mockResolvedValue('owner1'); // this turn IS next in order → proceeds
+  h.appendAssistantMessage.mockResolvedValue({ id: 'asst1', seq: 2n });
+  h.addProposal.mockResolvedValue({ id: 'prop1' });
+  h.release.mockResolvedValue(undefined);
+  h.convRelease.mockResolvedValue(undefined);
+  h.tryClaimTurn.mockResolvedValue({ claimed: true, release: h.release });
+  h.tryClaimConversation.mockResolvedValue({ claimed: true, release: h.convRelease });
   h.streamWithTools.mockImplementation(async function* () {
     yield { kind: 'delta', text: 'Hello' };
     yield { kind: 'tool_start', name: 'list_tasks' };
@@ -93,7 +133,7 @@ describe('POST /api/ops-chat (v2) — input validation', () => {
 
 describe('POST /api/ops-chat (v2) — spend boundary preserved', () => {
   it('a valid Send reaches the tool loop and streams delta/tool/proposal/done', async () => {
-    const res = await call({ message: 'what needs me' });
+    const res = await call({ message: 'what needs me', conversationId: CONV, turnId: TURN });
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/event-stream');
     const text = await res.text();
@@ -105,18 +145,315 @@ describe('POST /api/ops-chat (v2) — spend boundary preserved', () => {
     expect(h.streamWithTools).toHaveBeenCalledTimes(1);
   });
 
-  it('consumes the owner-scoped rate limit BEFORE any model call (v1 preserved)', async () => {
-    await (await call({ message: 'what needs me' })).text();
+  it('consumes the owner-scoped rate limit before the model call, but only in the run branch', async () => {
+    await (await call({ message: 'what needs me', conversationId: CONV, turnId: TURN })).text();
     expect(h.consumeRateLimit).toHaveBeenCalledTimes(1);
     const [, scopeKey, limit] = h.consumeRateLimit.mock.calls[0]!;
     expect(scopeKey).toBe('ops-chat:user:u1');
     expect(limit).toBe(10);
+    // spend gate runs AFTER the owner message is persisted (owner-first) and after the claim.
+    expect(h.appendOwnerMessage.mock.invocationCallOrder[0]!).toBeLessThan(h.consumeRateLimit.mock.invocationCallOrder[0]!);
+    expect(h.consumeRateLimit.mock.invocationCallOrder[0]!).toBeLessThan(h.streamWithTools.mock.invocationCallOrder[0]!);
   });
 
-  it('rate-limited → 429 and no model call', async () => {
+  it('rate-limited → in-stream error (stream already open), no model call, claim released', async () => {
     h.consumeRateLimit.mockRejectedValue(new RateLimitedError());
-    const res = await call({ message: 'what needs me' });
-    expect(res.status).toBe(429);
+    const res = await call({ message: 'what needs me', conversationId: CONV, turnId: TURN });
+    expect(res.status).toBe(200); // the spend gate now lives inside the opened stream
+    const events = parseSse(await res.text());
+    expect(events.some((e) => e.event === 'error')).toBe(true);
+    expect(events.some((e) => e.event === 'saved' || e.event === 'done')).toBe(false);
     expect(h.streamWithTools).not.toHaveBeenCalled();
+    expect(h.release).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** event/data pairs from an SSE response body. */
+function parseSse(text: string): Array<{ event: string; data: Record<string, unknown> | undefined }> {
+  const out: Array<{ event: string; data: Record<string, unknown> | undefined }> = [];
+  for (const block of text.split('\n\n')) {
+    let event: string | undefined;
+    let data: string | undefined;
+    for (const line of block.split('\n')) {
+      if (line.startsWith('event: ')) event = line.slice(7);
+      else if (line.startsWith('data: ')) data = line.slice(6);
+    }
+    if (event) out.push({ event, data: data ? JSON.parse(data) : undefined });
+  }
+  return out;
+}
+
+const CONV = '11111111-1111-4111-8111-111111111111';
+const TURN = '22222222-2222-4222-8222-222222222222';
+
+describe('POST /api/ops-chat — persistence turn protocol (PR 2)', () => {
+  it('owner commits BEFORE the provider; reply links to the owner turn; proposals correlate via `saved` (after proposal, before done); claim released', async () => {
+    const events = parseSse(await (await call({ message: 'what needs me', conversationId: CONV, turnId: TURN })).text());
+
+    // point 1 — owner message persisted before any provider call.
+    expect(h.appendOwnerMessage.mock.invocationCallOrder[0]!).toBeLessThan(h.streamWithTools.mock.invocationCallOrder[0]!);
+    expect(h.appendOwnerMessage).toHaveBeenCalledWith(expect.anything(), 'u1', expect.objectContaining({ conversationId: CONV, content: 'what needs me', id: TURN }));
+
+    // point 4 — the completed reply is explicitly linked to the owner turn.
+    expect(h.appendAssistantMessage).toHaveBeenCalledWith(
+      expect.anything(),
+      'u1',
+      expect.objectContaining({ conversationId: CONV, replyToMessageId: 'owner1', status: 'complete' }),
+    );
+
+    // point 5 + 8 — assistant + proposals commit, THEN `saved` carries the correlationKey→proposalId map;
+    // a proposal card is streamed (with only a correlationKey) and `saved` makes it actionable.
+    const order = events.map((e) => e.event);
+    expect(order.indexOf('proposal')).toBeLessThan(order.indexOf('saved'));
+    expect(order.indexOf('saved')).toBeLessThan(order.indexOf('done'));
+    const proposalEv = events.find((e) => e.event === 'proposal')!.data!;
+    expect(proposalEv.correlationKey).toBe('k:answer_question');
+    const saved = events.find((e) => e.event === 'saved')!.data!;
+    expect(saved).toMatchObject({ conversationId: CONV, messageId: 'asst1', status: 'complete', proposals: [{ correlationKey: 'k:answer_question', proposalId: 'prop1' }] });
+
+    // point 3 — BOTH claims (turn + conversation) are released on the success path.
+    expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.convRelease).toHaveBeenCalledTimes(1);
+    // the prompt is built turn-aware for THIS owner message (not raw-seq).
+    expect(h.loadPromptTurns).toHaveBeenCalledWith(expect.anything(), 'u1', CONV, 'owner1', expect.anything());
+  });
+
+  it('serializes per conversation — a busy conversation (different turn running) returns a retry and does NOT run the model', async () => {
+    h.tryClaimConversation.mockResolvedValue({ claimed: false, release: h.convRelease });
+    h.loadReplyForOwnerMessage.mockResolvedValue(null);
+    const events = parseSse(await (await call({ message: 'second tab', conversationId: CONV, turnId: TURN })).text());
+    expect(h.streamWithTools).not.toHaveBeenCalled();
+    expect(h.consumeRateLimit).not.toHaveBeenCalled(); // conversation claim gates BEFORE the spend gate
+    expect(String(events.find((e) => e.event === 'error')!.data!.message)).toContain('still being answered');
+    expect(h.release).toHaveBeenCalledTimes(1); // turn claim released
+    expect(h.convRelease).toHaveBeenCalledTimes(1); // NOOP conversation release still invoked
+  });
+
+  it('enforces FIFO — an earlier unanswered owner turn blocks this one (retry), model not run, both claims released', async () => {
+    h.earliestUnansweredOwnerId.mockResolvedValue('ownerEARLIER'); // an older turn is still pending
+    const events = parseSse(await (await call({ message: 'third turn', conversationId: CONV, turnId: TURN })).text());
+    expect(h.streamWithTools).not.toHaveBeenCalled();
+    expect(h.consumeRateLimit).not.toHaveBeenCalled(); // FIFO gate is before the spend gate
+    expect(String(events.find((e) => e.event === 'error')!.data!.message)).toContain('earlier message');
+    expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.convRelease).toHaveBeenCalledTimes(1);
+  });
+
+  it('lock releases are failure-independent — a conversation-release failure still releases the turn claim', async () => {
+    h.convRelease.mockRejectedValue(new Error('pg_advisory_unlock failed'));
+    await (await call({ message: 'what needs me', conversationId: CONV, turnId: TURN })).text();
+    // conversation release threw, but the turn claim was still released (separate reserved session).
+    expect(h.convRelease).toHaveBeenCalledTimes(1);
+    expect(h.release).toHaveBeenCalledTimes(1);
+  });
+
+  // End-to-end FIFO scenario through the route, against a small in-memory model of the store and
+  // the conversation lock: A executes; B and C persist while A runs and both fail the conversation
+  // claim; A completes; C retries BEFORE B and is still refused; only after B reaches a terminal
+  // reply (complete OR interrupted) may C execute.
+  for (const bOutcome of ['complete', 'interrupted'] as const) {
+    it(`FIFO scenario — C retrying before B is refused until B is terminal (B ${bOutcome})`, async () => {
+      const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+      const B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+      const C = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+      const owners: string[] = []; // persisted owner order (seq)
+      const replies = new Map<string, string>(); // ownerId -> terminal reply status
+      const providerRuns: string[] = []; // owner turns that reached the provider, in order
+      let convHeld = false;
+
+      h.appendOwnerMessage.mockImplementation(async (_tx: unknown, _u: string, args: { id: string }) => {
+        const inserted = !owners.includes(args.id);
+        if (inserted) owners.push(args.id);
+        return { id: args.id, seq: BigInt(owners.indexOf(args.id) + 1), inserted };
+      });
+      h.loadReplyForOwnerMessage.mockImplementation(async () => null);
+      h.earliestUnansweredOwnerId.mockImplementation(async () => owners.find((o) => !replies.has(o)) ?? null);
+      h.appendAssistantMessage.mockImplementation(async (_tx: unknown, _u: string, args: { replyToMessageId: string; status?: string }) => {
+        replies.set(args.replyToMessageId, args.status ?? 'complete');
+        return { id: `asst-${args.replyToMessageId}`, seq: 99n };
+      });
+      h.tryClaimConversation.mockImplementation(async () => {
+        if (convHeld) return { claimed: false, release: h.convRelease };
+        convHeld = true;
+        return {
+          claimed: true,
+          release: async () => {
+            await h.convRelease();
+            convHeld = false;
+          },
+        };
+      });
+
+      let unblockA!: () => void;
+      const aGate = new Promise<void>((r) => (unblockA = r));
+      let aStarted!: () => void;
+      const aRunning = new Promise<void>((r) => (aStarted = r));
+      h.streamWithTools.mockImplementation(() => {
+        const turn = owners.find((o) => !replies.has(o))!; // the FIFO gate guarantees this is the runner
+        providerRuns.push(turn);
+        let n = 0;
+        return {
+          [Symbol.asyncIterator]: () => ({
+            next: async () => {
+              if (turn === A && n === 0) {
+                aStarted();
+                await aGate;
+              }
+              if (turn === B && bOutcome === 'interrupted' && n === 1) throw new Error('provider boom');
+              const step = n++;
+              if (step === 0) return { done: false, value: { kind: 'delta', text: `ans ${turn}` } };
+              if (step === 1) return { done: false, value: { kind: 'done', usage: { inputTokens: 1, outputTokens: 1 }, stopReason: 'end_turn' } };
+              return { done: true, value: undefined };
+            },
+          }),
+        };
+      });
+
+      const send = async (turnId: string) => parseSse(await (await call({ message: `msg ${turnId}`, conversationId: CONV, turnId })).text());
+      const errorOf = (events: Array<{ event: string; data: Record<string, unknown> | undefined }>) =>
+        String(events.find((e) => e.event === 'error')?.data?.message ?? '');
+
+      // A is executing (holds the conversation lock, blocked inside the provider).
+      const aDone = send(A);
+      await aRunning;
+
+      // B and C persist while A runs; both fail the conversation claim — no spend.
+      expect(errorOf(await send(B))).toContain('still being answered');
+      expect(errorOf(await send(C))).toContain('still being answered');
+      expect(owners).toEqual([A, B, C]);
+      expect(providerRuns).toEqual([A]);
+
+      // A completes and releases.
+      unblockA();
+      await aDone;
+      expect(replies.get(A)).toBe('complete');
+      expect(convHeld).toBe(false);
+
+      // C retries BEFORE B: refused by the FIFO gate (B is earlier and unanswered); provider not called.
+      const spendBefore = h.consumeRateLimit.mock.calls.length;
+      expect(errorOf(await send(C))).toContain('earlier message');
+      expect(providerRuns).toEqual([A]);
+      expect(h.consumeRateLimit.mock.calls.length).toBe(spendBefore); // refused before the spend gate
+      expect(replies.has(C)).toBe(false);
+      expect(owners).toEqual([A, B, C]); // C's owner row stays persisted for a later retry
+
+      // B executes and reaches a terminal reply.
+      await send(B);
+      expect(replies.get(B)).toBe(bOutcome);
+
+      // Now C may execute.
+      const cEvents = await send(C);
+      expect(cEvents.some((e) => e.event === 'done')).toBe(true);
+      expect(replies.get(C)).toBe('complete');
+      expect(providerRuns).toEqual([A, B, C]);
+      expect(convHeld).toBe(false);
+    });
+  }
+
+  it('a conversationId that is not the user\'s is a clean 404 and never calls the model', async () => {
+    h.conversationExists.mockResolvedValue(false);
+    const res = await call({ message: 'hi', conversationId: CONV, turnId: TURN });
+    expect(res.status).toBe(404);
+    expect(h.streamWithTools).not.toHaveBeenCalled();
+  });
+
+  it('a missing turnId or conversationId → 400 (idempotency ids are mandatory, not a convention)', async () => {
+    expect((await call({ message: 'hi', conversationId: CONV })).status).toBe(400); // no turnId
+    expect((await call({ message: 'hi', turnId: TURN })).status).toBe(400); // no conversationId
+    expect(h.appendOwnerMessage).not.toHaveBeenCalled();
+    expect(h.streamWithTools).not.toHaveBeenCalled();
+  });
+
+  it('point 6 — a failed persist emits NO `saved`, a retryable error, and still releases the claim', async () => {
+    h.appendAssistantMessage.mockRejectedValue(new Error('db unavailable'));
+    const events = parseSse(await (await call({ message: 'hi', conversationId: CONV, turnId: TURN })).text());
+    expect(events.some((e) => e.event === 'saved')).toBe(false);
+    const err = events.find((e) => e.event === 'error')!.data!;
+    expect(String(err.message)).toContain('could not be saved');
+    expect(events.some((e) => e.event === 'done')).toBe(false);
+    expect(h.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('point 2 — losing the execution claim with no persisted reply yields an in-progress error and does NOT run the model', async () => {
+    h.tryClaimTurn.mockResolvedValue({ claimed: false, release: h.release });
+    h.loadReplyForOwnerMessage.mockResolvedValue(null);
+    const events = parseSse(await (await call({ message: 'hi', conversationId: CONV, turnId: TURN })).text());
+    expect(h.streamWithTools).not.toHaveBeenCalled();
+    expect(h.consumeRateLimit).not.toHaveBeenCalled(); // spend gate never reached on claim loss
+    expect(String(events.find((e) => e.event === 'error')!.data!.message)).toContain('already being answered');
+    expect(h.release).toHaveBeenCalledTimes(1); // NOOP release still invoked in finally
+  });
+
+  it('point 7 — an already-persisted reply is replayed EXACTLY (not re-run); provider is never called', async () => {
+    h.loadReplyForOwnerMessage.mockResolvedValue({
+      conversationId: CONV,
+      messageId: 'asstPrior',
+      content: 'the prior answer',
+      status: 'complete',
+      question: 'what needs me',
+      proposals: [
+        { id: 'propPrior', kind: 'answer_question', proposal: { kind: 'answer_question', questionId: 'q1', projectKey: 'ab', workspaceName: 'W', question: 'x?', answer: 'y' }, state: 'pending', result: null, error: null },
+      ],
+    });
+    const events = parseSse(await (await call({ message: 'what needs me', conversationId: CONV, turnId: TURN })).text());
+    expect(h.streamWithTools).not.toHaveBeenCalled();
+    expect(h.consumeRateLimit).not.toHaveBeenCalled(); // replay bypasses the spend gate
+    expect(h.buildPulse).not.toHaveBeenCalled(); // and the pulse build
+    expect(h.appendAssistantMessage).not.toHaveBeenCalled(); // never create a second reply
+    expect(events.find((e) => e.event === 'delta')!.data!.text).toBe('the prior answer');
+    const saved = events.find((e) => e.event === 'saved')!.data!;
+    expect(saved).toMatchObject({ messageId: 'asstPrior', status: 'complete', proposals: [{ correlationKey: 'k:answer_question', proposalId: 'propPrior' }] });
+    expect(events.some((e) => e.event === 'done')).toBe(true);
+    expect(h.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('replaying an INTERRUPTED reply replays partial text + saved(interrupted, proposals:[]) + error, NEVER done', async () => {
+    h.loadReplyForOwnerMessage.mockResolvedValue({
+      conversationId: CONV,
+      messageId: 'asstPartial',
+      content: 'partial thought…',
+      status: 'interrupted',
+      question: 'what needs me',
+      proposals: [], // interrupted turns never persist proposals
+    });
+    const events = parseSse(await (await call({ message: 'what needs me', conversationId: CONV, turnId: TURN })).text());
+    expect(h.streamWithTools).not.toHaveBeenCalled();
+    expect(events.find((e) => e.event === 'delta')!.data!.text).toBe('partial thought…');
+    const saved = events.find((e) => e.event === 'saved')!.data!;
+    expect(saved).toMatchObject({ messageId: 'asstPartial', status: 'interrupted', proposals: [] });
+    expect(events.some((e) => e.event === 'done')).toBe(false); // never masquerades as complete
+    const err = events.find((e) => e.event === 'error')!.data!;
+    expect(String(err.message)).toContain('interrupted');
+    expect(h.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('point 3/6 — a provider failure persists the partial TEXT as interrupted with ZERO proposals, then errors and releases the claim', async () => {
+    // Model streams some text, proposes a card, then the provider throws mid-turn.
+    h.streamWithTools.mockImplementation(() => ({
+      [Symbol.asyncIterator]: () => {
+        let n = 0;
+        return {
+          next: () =>
+            n++ === 0
+              ? Promise.resolve({ done: false, value: { kind: 'delta', text: 'partial' } })
+              : Promise.reject(new Error('provider boom')),
+        };
+      },
+    }));
+    const events = parseSse(await (await call({ message: 'hi', conversationId: CONV, turnId: TURN })).text());
+    // interrupted reply keeps the partial TEXT...
+    expect(h.appendAssistantMessage).toHaveBeenCalledWith(
+      expect.anything(),
+      'u1',
+      expect.objectContaining({ replyToMessageId: 'owner1', status: 'interrupted', content: 'partial' }),
+    );
+    // ...but NEVER persists proposals (governed writes only at a successful finalize).
+    expect(h.addProposal).not.toHaveBeenCalled();
+    expect(events.some((e) => e.event === 'proposal')).toBe(false);
+    const saved = events.find((e) => e.event === 'saved')!.data!;
+    expect(saved).toMatchObject({ status: 'interrupted', proposals: [] });
+    expect(events.some((e) => e.event === 'done')).toBe(false);
+    expect(events.some((e) => e.event === 'error')).toBe(true);
+    expect(h.release).toHaveBeenCalledTimes(1);
   });
 });

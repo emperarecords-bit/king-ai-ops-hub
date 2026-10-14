@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import { AppError, RateLimitedError, toPublicMessage } from '@/lib/errors';
 import { log } from '@/lib/log';
-import { requireTenant } from '@/domain/auth/guard';
-import { withTenant } from '@/db/tenant';
+import { requireTenant, requireUser } from '@/domain/auth/guard';
+import { withTenant, withUser } from '@/db/tenant';
 import { getDb } from '@/db/client';
+import { type TenantContext } from '@/types/domain';
 import { consumeRateLimit } from '@/domain/usage/rate-limit';
 import { serverEnv } from '@/lib/env.server';
 import { answerOwnerQuestion } from '@/domain/questions/questions';
@@ -20,31 +21,45 @@ import {
 } from '@/domain/opschat/github-action';
 import { executeSupabaseDeployFromOpsChat } from '@/domain/opschat/supabase-action';
 import { executeVercelMutationFromOpsChat, type OpsChatVercelMutationInput } from '@/domain/opschat/vercel-action';
+import { loadProposal, transitionProposal } from '@/domain/opschat/conversations';
 
 /**
- * POST — execute a confirmed Ops Chat action. The ONLY place Ops Chat writes.
+ * POST — act on a persisted Ops Chat proposal. The ONLY place Ops Chat writes.
  *
- * The client-supplied proposal is NEVER trusted as authorization. Each action:
- *   - authenticates and resolves the workspace through the CURRENT user's access
- *     (`requireTenant(projectKey)` — membership-gated, returns a fresh ctx);
- *   - re-enters tenant context (`withTenant`, RLS) and re-fetches/re-validates
- *     the target where appropriate;
- *   - enforces the required role at the ROUTE (defense-in-depth) in addition to
- *     the domain layer, which also enforces it:
- *       answer_question  → admin (route) + answerOwnerQuestion enforces admin
- *       decide_approval  → admin (route) + decideApproval enforces admin
- *       dispatch_task    → admin (route); createTask validates pinned agents
- *       rerun_task       → admin (route); getTask tenant-verifies before enqueue
- *   - maps domain errors to status (403 forbidden / 409 not-found|conflict / 400).
+ * PROPOSAL-ID AUTHORITATIVE: the client sends ONLY `{ proposalId, intent }`. The server
+ * loads the owner's persisted, IMMUTABLE proposal row and uses THAT as the authoritative
+ * payload — the browser is out of the trust boundary entirely. A stored payload cannot be
+ * tampered with (column-grant immutability, see rls.sql), and a stale client cannot forge
+ * a different action.
  *
- * SPEND: answer_question / decide_approval do not themselves call a model.
- * dispatch_task / rerun_task ENQUEUE a run — real, spend-producing work whose
- * budget/authorization is governed by the existing task/run machinery on the
- * execution path. A bounded per-user anti-abuse rate limit guards this endpoint;
- * it is NOT a substitute for the role/budget enforcement above.
+ * Ordering (deliberate):
+ *   1. authenticate the user; load the immutable proposal (user-scoped).
+ *   2. `cancel` → CAS pending→cancelled only; never acquires `confirming`, never executes.
+ *   3. `confirm` → PRECHECK first (reconstruct + validate the action from the stored payload,
+ *      then tenant/current-access + admin), so a membership failure never strands a card in
+ *      `confirming`. THEN CAS pending→confirming immediately before execution — two tabs can
+ *      both pass the precheck, but only one acquires `confirming`; the other gets 409.
+ *   4. execute the governed action with the SERVER-stored fields.
+ *   5. success → CAS confirming→done (storing the executed result). An authz / live-state
+ *      "no longer valid" failure → confirming→stale (a new proposal is required). An
+ *      execution / provider failure → confirming→error.
+ *
+ * The governed executors (github/supabase/vercel) still re-verify admin, payload integrity,
+ * executor enablement, a fresh payload-bound confirmation, and idempotency before any write.
+ *
+ * SPEND: answer_question / decide_approval do not themselves call a model. dispatch_task /
+ * rerun_task ENQUEUE a run whose budget/authorization is governed on the execution path. A
+ * bounded per-user anti-abuse rate limit guards this endpoint.
  */
 
-const Body = z.discriminatedUnion('action', [
+const Input = z.object({
+  proposalId: z.string().uuid(),
+  intent: z.enum(['confirm', 'cancel']),
+});
+
+/** The validated, server-reconstructed action body — same per-kind fields the proposal was
+ *  created with, keyed by the confirm `action` (derived from the stored proposal `kind`). */
+const ActionBody = z.discriminatedUnion('action', [
   z.object({
     action: z.literal('answer_question'),
     projectKey: z.string().min(1),
@@ -126,10 +141,8 @@ const Body = z.discriminatedUnion('action', [
     projectKey: z.string().min(1),
     operation: z.enum(['redeploy', 'promote', 'rollback']),
     vercelProjectId: z.string().trim().regex(/^prj_[A-Za-z0-9]{8,64}$/),
-    // redeploy
     sourceDeploymentId: z.string().trim().regex(/^dpl_[A-Za-z0-9]{8,64}$/).optional(),
     expectedSourceSha: z.string().trim().regex(/^[0-9a-f]{7,40}$/).optional(),
-    // promote / rollback
     targetDeploymentId: z.string().trim().regex(/^dpl_[A-Za-z0-9]{8,64}$/).optional(),
     expectedTargetSha: z.string().trim().regex(/^[0-9a-f]{7,40}$/).optional(),
     expectedCurrentProductionDeploymentId: z.string().trim().regex(/^dpl_[A-Za-z0-9]{8,64}$/).optional(),
@@ -137,28 +150,199 @@ const Body = z.discriminatedUnion('action', [
   }),
 ]);
 
+/** The stored proposal `kind` → the confirm `action`. */
+const KIND_TO_ACTION: Record<string, z.infer<typeof ActionBody>['action']> = {
+  answer_question: 'answer_question',
+  decide_approval: 'decide_approval',
+  dispatch_task: 'dispatch_task',
+  rerun_task: 'rerun_task',
+  github_pr: 'execute_github_pr',
+  github_merge: 'execute_github_merge',
+  github_rerun: 'execute_github_rerun',
+  github_revert: 'execute_github_revert',
+  supabase_deploy: 'execute_supabase_deploy',
+  vercel_mutation: 'execute_vercel_mutation',
+};
+
 function statusFor(err: unknown): number {
   if (err instanceof AppError && err.code === 'forbidden') return 403;
   if (err instanceof AppError && (err.code === 'not_found' || err.code === 'conflict')) return 409;
   return 400;
 }
 
-/** Every confirmed action requires workspace-admin — matches the domain layer, enforced here too. */
+/** A failure that means the proposal is no longer VALID (authorization lost, or the target
+ *  moved / was already acted on) → the card becomes `stale` and a new proposal is required.
+ *  Everything else is an execution/provider `error`. */
+function isStaleFailure(err: unknown): boolean {
+  return err instanceof AppError && (err.code === 'forbidden' || err.code === 'not_found' || err.code === 'conflict');
+}
+
 function requireAdmin(projectRole: string): void {
   if (projectRole !== 'admin') {
     throw new AppError('forbidden', 'Only workspace admins can perform this action.');
   }
 }
 
+/** Run the governed action with server-stored fields. Returns the `executed` result (or null
+ *  for actions that produce none). Throws on failure — the caller maps that to stale/error. */
+async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext): Promise<unknown> {
+  switch (body.action) {
+    case 'answer_question': {
+      await withTenant(ctx, (tx) => answerOwnerQuestion(tx, ctx, body.questionId, body.answer));
+      return null;
+    }
+    case 'decide_approval': {
+      await withTenant(ctx, (tx) => decideApproval(tx, ctx, body.approvalId, body.decision, body.note));
+      let executed: { outcome: string | null; message: string | null } | null = null;
+      if (body.decision === 'approved') {
+        try {
+          const outcome = await executeApprovedIfEligible(ctx, body.approvalId);
+          executed = { outcome: outcome.outcome, message: outcome.message };
+        } catch (err) {
+          // The decision itself IS recorded; only the downstream execution failed. The
+          // proposal (recording the decision) still succeeds — we surface the failed
+          // execution in the result rather than failing the whole confirm.
+          log.error('ops-chat executeApprovedIfEligible failed', { err, approvalId: body.approvalId });
+          executed = { outcome: 'failed', message: 'Execution failed; the approval itself is recorded.' };
+        }
+      }
+      return executed;
+    }
+    case 'dispatch_task': {
+      const agent = (await withTenant(ctx, (tx) => listAgents(tx, ctx))).find((a) => a.id === body.agentId && a.enabled);
+      if (!agent) throw new AppError('not_found', 'That agent is not available in this workspace.');
+      const taskId = await withTenant(ctx, async (tx) => {
+        const id = await createTask(tx, ctx, {
+          title: body.title,
+          input: body.instructions,
+          providerSelection: agent.provider,
+          reviewEnabled: false,
+          modelTier: 'standard',
+          flagshipCategory: null,
+          objectiveId: null,
+          scheduleId: null,
+          primaryAgentId: agent.id,
+          reviewerAgentId: null,
+        });
+        await enqueueRun(tx, ctx, id);
+        return id;
+      });
+      return { taskId };
+    }
+    case 'rerun_task': {
+      await withTenant(ctx, async (tx) => {
+        await getTask(tx, ctx, body.taskId); // throws NotFound if outside tenant
+        await enqueueRun(tx, ctx, body.taskId);
+      });
+      return null;
+    }
+    case 'execute_github_pr':
+      return executeGitHubPrFromOpsChat(ctx, {
+        repo: body.repo,
+        branch: body.branch,
+        baseBranch: body.baseBranch,
+        title: body.title,
+        body: body.body ?? '',
+        files: body.files,
+      });
+    case 'execute_github_merge':
+      return executeGitHubMergeFromOpsChat(ctx, {
+        repo: body.repo,
+        prNumber: body.prNumber,
+        expectedHeadSha: body.expectedHeadSha,
+        expectedBaseBranch: body.expectedBaseBranch,
+        mergeMethod: body.mergeMethod,
+      });
+    case 'execute_github_rerun':
+      return executeGitHubRerunFromOpsChat(ctx, {
+        repo: body.repo,
+        runId: body.runId,
+        expectedHeadSha: body.expectedHeadSha,
+        expectedRunAttempt: body.expectedRunAttempt,
+      });
+    case 'execute_github_revert':
+      return executeGitHubRevertFromOpsChat(ctx, {
+        repo: body.repo,
+        targetSha: body.targetSha,
+        expectedBaseBranch: body.expectedBaseBranch,
+        expectedBaseHeadSha: body.expectedBaseHeadSha,
+        revertBranch: body.revertBranch,
+      });
+    case 'execute_supabase_deploy':
+      return executeSupabaseDeployFromOpsChat(ctx, {
+        projectRef: body.projectRef,
+        functionSlug: body.functionSlug,
+        sourceRepo: body.sourceRepo,
+        sourceSha: body.sourceSha,
+        sourcePath: body.sourcePath,
+        entrypointPath: body.entrypointPath,
+        importMapPath: body.importMapPath,
+        verifyJwt: body.verifyJwt,
+      });
+    case 'execute_vercel_mutation': {
+      let input: OpsChatVercelMutationInput;
+      if (body.operation === 'redeploy') {
+        if (!body.sourceDeploymentId || !body.expectedSourceSha) throw new AppError('validation', 'redeploy requires sourceDeploymentId + expectedSourceSha.');
+        input = { operation: 'redeploy', vercelProjectId: body.vercelProjectId, sourceDeploymentId: body.sourceDeploymentId, expectedSourceSha: body.expectedSourceSha };
+      } else {
+        if (!body.targetDeploymentId || !body.expectedTargetSha || !body.expectedCurrentProductionDeploymentId) {
+          throw new AppError('validation', `${body.operation} requires targetDeploymentId + expectedTargetSha + expectedCurrentProductionDeploymentId.`);
+        }
+        input = {
+          operation: body.operation,
+          vercelProjectId: body.vercelProjectId,
+          targetDeploymentId: body.targetDeploymentId,
+          expectedTargetSha: body.expectedTargetSha,
+          expectedCurrentProductionDeploymentId: body.expectedCurrentProductionDeploymentId,
+          ...(body.description ? { description: body.description } : {}),
+        };
+      }
+      return executeVercelMutationFromOpsChat(ctx, input);
+    }
+  }
+}
+
 export async function POST(req: Request): Promise<Response> {
-  let body: z.infer<typeof Body>;
+  let input: z.infer<typeof Input>;
   try {
-    body = Body.parse(await req.json());
+    input = Input.parse(await req.json());
   } catch {
     return Response.json({ error: 'Invalid request.' }, { status: 400 });
   }
 
-  let ctx;
+  // 1. Authenticate (the proposal is user-private) and load the immutable proposal.
+  let user: Awaited<ReturnType<typeof requireUser>>;
+  try {
+    user = await requireUser();
+  } catch (err) {
+    return Response.json({ error: toPublicMessage(err) }, { status: 401 });
+  }
+  const stored = await withUser({ userId: user.id }, (tx) => loadProposal(tx, user.id, input.proposalId));
+  if (!stored) return Response.json({ error: 'That proposal was not found.' }, { status: 404 });
+
+  // 2. CANCEL — CAS pending→cancelled only; never executes, never acquires `confirming`.
+  if (input.intent === 'cancel') {
+    const cancelled = await withUser({ userId: user.id }, (tx) =>
+      transitionProposal(tx, user.id, { proposalId: input.proposalId, from: 'pending', to: 'cancelled' }),
+    );
+    if (!cancelled) return Response.json({ error: 'This proposal is no longer pending.', state: stored.state }, { status: 409 });
+    return Response.json({ ok: true, state: 'cancelled' });
+  }
+
+  // 3. CONFIRM — reconstruct + validate the action from the STORED payload (not the client).
+  const action = KIND_TO_ACTION[stored.kind];
+  if (!action) return Response.json({ error: 'Unsupported proposal.' }, { status: 400 });
+  let body: z.infer<typeof ActionBody>;
+  try {
+    body = ActionBody.parse({ ...(stored.proposal as Record<string, unknown>), action });
+  } catch (err) {
+    log.error('ops-chat confirm: stored proposal failed validation', { err, proposalId: input.proposalId, kind: stored.kind });
+    return Response.json({ error: 'This proposal can no longer be confirmed.' }, { status: 400 });
+  }
+
+  // 4. PRECHECK (before the CAS): tenant/current-access + admin, so a membership failure
+  //    never strands a card in `confirming`.
+  let ctx: TenantContext;
   try {
     ctx = await requireTenant(body.projectKey);
   } catch (err) {
@@ -167,6 +351,11 @@ export async function POST(req: Request): Promise<Response> {
       { status: err instanceof AppError && err.code === 'unauthenticated' ? 401 : 403 },
     );
   }
+  try {
+    requireAdmin(ctx.projectRole);
+  } catch (err) {
+    return Response.json({ error: toPublicMessage(err) }, { status: 403 });
+  }
 
   // Bounded anti-abuse guard on the write boundary (not a role/budget substitute).
   try {
@@ -174,161 +363,46 @@ export async function POST(req: Request): Promise<Response> {
       consumeRateLimit(tx, `ops-chat-confirm:user:${ctx.userId}`, serverEnv().RATE_LIMIT_RUNS_PER_MINUTE),
     );
   } catch (err) {
-    if (err instanceof RateLimitedError) {
-      return Response.json({ error: toPublicMessage(err) }, { status: 429 });
-    }
+    if (err instanceof RateLimitedError) return Response.json({ error: toPublicMessage(err) }, { status: 429 });
     log.error('ops-chat confirm rate-limit check failed', { err });
     return Response.json({ error: 'Something went wrong.' }, { status: 500 });
   }
 
+  // 5. CAS pending→confirming — immediately before execution. Only one tab/device wins.
+  const lock = await withUser({ userId: user.id }, (tx) =>
+    transitionProposal(tx, user.id, { proposalId: input.proposalId, from: 'pending', to: 'confirming' }),
+  );
+  if (!lock) return Response.json({ error: 'This proposal is already being confirmed or is no longer pending.', state: stored.state }, { status: 409 });
+
+  // 6. Execute, then CAS to the terminal state. The ACTION may be externally real (a PR
+  //    merged, a deploy shipped), so we must never report a terminal state we did not persist:
+  //    if the terminal CAS does not land, surface it as `unrecorded` rather than pretending.
   try {
-    switch (body.action) {
-      case 'answer_question': {
-        requireAdmin(ctx.projectRole);
-        await withTenant(ctx, (tx) => answerOwnerQuestion(tx, ctx, body.questionId, body.answer));
-        return Response.json({ ok: true });
-      }
-      case 'decide_approval': {
-        requireAdmin(ctx.projectRole);
-        await withTenant(ctx, (tx) => decideApproval(tx, ctx, body.approvalId, body.decision, body.note));
-        let executed: { outcome: string | null; message: string | null } | null = null;
-        if (body.decision === 'approved') {
-          try {
-            const outcome = await executeApprovedIfEligible(ctx, body.approvalId);
-            executed = { outcome: outcome.outcome, message: outcome.message };
-          } catch (err) {
-            log.error('ops-chat executeApprovedIfEligible failed', { err, approvalId: body.approvalId });
-            executed = { outcome: 'failed', message: 'Execution failed; the approval itself is recorded.' };
-          }
-        }
-        return Response.json({ ok: true, executed });
-      }
-      case 'dispatch_task': {
-        requireAdmin(ctx.projectRole);
-        const agent = (await withTenant(ctx, (tx) => listAgents(tx, ctx))).find((a) => a.id === body.agentId && a.enabled);
-        if (!agent) throw new AppError('not_found', 'That agent is not available in this workspace.');
-        const taskId = await withTenant(ctx, async (tx) => {
-          const id = await createTask(tx, ctx, {
-            title: body.title,
-            input: body.instructions,
-            providerSelection: agent.provider,
-            reviewEnabled: false,
-            modelTier: 'standard',
-            flagshipCategory: null,
-            objectiveId: null,
-            scheduleId: null,
-            primaryAgentId: agent.id,
-            reviewerAgentId: null,
-          });
-          await enqueueRun(tx, ctx, id);
-          return id;
-        });
-        return Response.json({ ok: true, taskId });
-      }
-      case 'rerun_task': {
-        requireAdmin(ctx.projectRole);
-        await withTenant(ctx, async (tx) => {
-          await getTask(tx, ctx, body.taskId); // throws NotFound if outside tenant
-          await enqueueRun(tx, ctx, body.taskId);
-        });
-        return Response.json({ ok: true });
-      }
-      case 'execute_github_pr': {
-        // Admin-gated here (defense-in-depth); the governed path re-verifies admin, payload integrity,
-        // executor enablement, a fresh payload-bound confirmation, and idempotency before any GitHub write.
-        requireAdmin(ctx.projectRole);
-        const executed = await executeGitHubPrFromOpsChat(ctx, {
-          repo: body.repo,
-          branch: body.branch,
-          baseBranch: body.baseBranch,
-          title: body.title,
-          body: body.body ?? '',
-          files: body.files,
-        });
-        return Response.json({ ok: true, executed });
-      }
-      case 'execute_github_merge': {
-        // Same governed path as create-PR: admin here (defense-in-depth), then payload integrity, executor
-        // enablement, a fresh payload-bound confirmation, and idempotency before any GitHub write.
-        requireAdmin(ctx.projectRole);
-        const executed = await executeGitHubMergeFromOpsChat(ctx, {
-          repo: body.repo,
-          prNumber: body.prNumber,
-          expectedHeadSha: body.expectedHeadSha,
-          expectedBaseBranch: body.expectedBaseBranch,
-          mergeMethod: body.mergeMethod,
-        });
-        return Response.json({ ok: true, executed });
-      }
-      case 'execute_github_rerun': {
-        requireAdmin(ctx.projectRole);
-        const executed = await executeGitHubRerunFromOpsChat(ctx, {
-          repo: body.repo,
-          runId: body.runId,
-          expectedHeadSha: body.expectedHeadSha,
-          expectedRunAttempt: body.expectedRunAttempt,
-        });
-        return Response.json({ ok: true, executed });
-      }
-      case 'execute_github_revert': {
-        // Same governed path as the other GitHub operations: admin here (defense-in-depth), then payload integrity,
-        // executor enablement, a fresh payload-bound confirmation, and idempotency before any GitHub write. The
-        // executor never writes the default branch — it opens a revert PR from a new work branch.
-        requireAdmin(ctx.projectRole);
-        const executed = await executeGitHubRevertFromOpsChat(ctx, {
-          repo: body.repo,
-          targetSha: body.targetSha,
-          expectedBaseBranch: body.expectedBaseBranch,
-          expectedBaseHeadSha: body.expectedBaseHeadSha,
-          revertBranch: body.revertBranch,
-        });
-        return Response.json({ ok: true, executed });
-      }
-      case 'execute_supabase_deploy': {
-        // Same governed path as the GitHub bridge: admin here (defense-in-depth), then the dispatch choke point
-        // re-verifies admin, payload integrity, executor enablement, a fresh payload-bound confirmation, and
-        // idempotency before the one Supabase deploy. The source bytes are read from the linked repo at the SHA.
-        requireAdmin(ctx.projectRole);
-        const executed = await executeSupabaseDeployFromOpsChat(ctx, {
-          projectRef: body.projectRef,
-          functionSlug: body.functionSlug,
-          sourceRepo: body.sourceRepo,
-          sourceSha: body.sourceSha,
-          sourcePath: body.sourcePath,
-          entrypointPath: body.entrypointPath,
-          importMapPath: body.importMapPath,
-          verifyJwt: body.verifyJwt,
-        });
-        return Response.json({ ok: true, executed });
-      }
-      case 'execute_vercel_mutation': {
-        // Same governed path as the GitHub/Supabase bridges: admin here (defense-in-depth), then the dispatch
-        // choke point re-verifies admin, payload integrity, executor enablement, a fresh payload-bound
-        // confirmation, and idempotency before the one Vercel mutation.
-        requireAdmin(ctx.projectRole);
-        let input: OpsChatVercelMutationInput;
-        if (body.operation === 'redeploy') {
-          if (!body.sourceDeploymentId || !body.expectedSourceSha) throw new AppError('validation', 'redeploy requires sourceDeploymentId + expectedSourceSha.');
-          input = { operation: 'redeploy', vercelProjectId: body.vercelProjectId, sourceDeploymentId: body.sourceDeploymentId, expectedSourceSha: body.expectedSourceSha };
-        } else {
-          if (!body.targetDeploymentId || !body.expectedTargetSha || !body.expectedCurrentProductionDeploymentId) {
-            throw new AppError('validation', `${body.operation} requires targetDeploymentId + expectedTargetSha + expectedCurrentProductionDeploymentId.`);
-          }
-          input = {
-            operation: body.operation,
-            vercelProjectId: body.vercelProjectId,
-            targetDeploymentId: body.targetDeploymentId,
-            expectedTargetSha: body.expectedTargetSha,
-            expectedCurrentProductionDeploymentId: body.expectedCurrentProductionDeploymentId,
-            ...(body.description ? { description: body.description } : {}),
-          };
-        }
-        const executed = await executeVercelMutationFromOpsChat(ctx, input);
-        return Response.json({ ok: true, executed });
-      }
+    const executed = await runAction(body, ctx);
+    const done = await withUser({ userId: user.id }, (tx) =>
+      transitionProposal(tx, user.id, { proposalId: input.proposalId, from: 'confirming', to: 'done', result: executed ?? null }),
+    ).catch(() => null);
+    if (!done) {
+      log.error('ops-chat confirm: executed but failed to persist done state', { proposalId: input.proposalId, action: body.action });
+      return Response.json({ ok: true, executed, state: 'unrecorded', warning: 'The action executed, but its card state could not be recorded — reload to see the true state.' });
     }
+    return Response.json({ ok: true, executed, state: 'done' });
   } catch (err) {
-    if (!(err instanceof AppError)) log.error('ops-chat confirm failed', { err, action: body.action });
-    return Response.json({ error: toPublicMessage(err) }, { status: statusFor(err) });
+    const to = isStaleFailure(err) ? 'stale' : 'error';
+    if (!(err instanceof AppError)) log.error('ops-chat confirm execution failed', { err, action: body.action });
+    const recorded = await withUser({ userId: user.id }, (tx) =>
+      transitionProposal(tx, user.id, { proposalId: input.proposalId, from: 'confirming', to, error: toPublicMessage(err) }),
+    ).catch((e) => {
+      log.error('ops-chat confirm: failed to record terminal proposal state', { e, proposalId: input.proposalId });
+      return null;
+    });
+    return Response.json(
+      {
+        error: toPublicMessage(err),
+        state: recorded ? to : 'unrecorded',
+        ...(recorded ? {} : { warning: 'The card state could not be recorded — reload to see the true state.' }),
+      },
+      { status: statusFor(err) },
+    );
   }
 }

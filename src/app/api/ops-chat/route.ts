@@ -4,48 +4,92 @@ import { log } from '@/lib/log';
 import { requireUser, listMyProjectsWithOrgRoles } from '@/domain/auth/guard';
 import { getProvider } from '@/providers/registry';
 import { getDb } from '@/db/client';
+import { withUser } from '@/db/tenant';
 import { consumeRateLimit } from '@/domain/usage/rate-limit';
 import { serverEnv } from '@/lib/env.server';
 import { buildPulse, pulseContext } from '@/domain/opschat/pulse';
-import { createOpsChatToolset } from '@/domain/opschat/tools';
+import { createOpsChatToolset, proposalKey, type OpsChatProposal } from '@/domain/opschat/tools';
+import {
+  addProposal,
+  appendAssistantMessage,
+  appendOwnerMessage,
+  conversationExists,
+  createConversation,
+  earliestUnansweredOwnerId,
+  loadPromptTurns,
+  loadReplyForOwnerMessage,
+  type OpsChatMessageStatus,
+} from '@/domain/opschat/conversations';
+import { tryClaimConversation, tryClaimTurn, type TurnClaim } from '@/domain/opschat/turn-claim';
 import { type ToolLoopEvent } from '@/types/provider';
-import { OPS_CHAT_SERVER_DEADLINE_MS, OPS_CHAT_TIMEOUT_MESSAGE } from '@/domain/opschat/limits';
+import {
+  OPS_CHAT_CONVERSATION_BUSY_MESSAGE,
+  OPS_CHAT_EARLIER_TURN_PENDING_MESSAGE,
+  OPS_CHAT_INTERRUPTED_REPLAY_MESSAGE,
+  OPS_CHAT_MAX_PROMPT_TURNS,
+  OPS_CHAT_PERSIST_FAILED_MESSAGE,
+  OPS_CHAT_SERVER_DEADLINE_MS,
+  OPS_CHAT_TIMEOUT_MESSAGE,
+  OPS_CHAT_TURN_IN_PROGRESS_MESSAGE,
+} from '@/domain/opschat/limits';
 
 /**
- * POST — Ops Chat (chat-first front door). v2: the model can call READ tools to
- * fetch deeper detail on demand (objective criteria + blockers, run failures,
- * tasks, open questions, pending approvals, agents) and can PROPOSE an action —
- * answer an owner-question, decide an approval, or dispatch/re-run work. It
- * NEVER writes: a proposal is a data object surfaced for the owner to confirm.
- * The single write path is POST /api/ops-chat/confirm, which re-validates and
- * re-enters tenant context (the model cannot call the write functions).
+ * POST — Ops Chat (chat-first front door). The model can call READ tools to fetch deeper
+ * detail on demand and can PROPOSE an action — it NEVER writes: a proposal is a data object
+ * surfaced for the owner to confirm. The single write path is POST /api/ops-chat/confirm.
  *
- * PROVIDER-SPEND BOUNDARY (preserved from v1, and more important in v2):
- *   - The landing page opens with a DETERMINISTIC pulse — no provider call, $0.
- *   - THIS endpoint is the only chat-provider boundary. v2 can cost MORE than
- *     v1 (a multi-turn tool loop: several model round-trips per Send), so the
- *     v1 owner-scoped per-user rate limit is KEPT here, unchanged, as the spend
- *     bound. Sending a question incurs Anthropic usage; the UI says so.
- *   - Confirming a dispatch/re-run can START real, spend-producing work — that
- *     spend is governed by the existing task/run budget + rate machinery on the
- *     execution path, not here.
+ * PERSISTENCE (PR 2): a conversation survives refresh / reopen / redeploy and resumes across
+ * devices, because every turn is written to the user-scoped store, never kept only in client
+ * React state. The turn protocol is built around TWO stable, client-minted ids — a `conversationId`
+ * (minted even for a brand-new conversation) and a `turnId` — so the EXACT same request can be
+ * replayed after a total network failure with the same `(conversationId, turnId, content)`:
+ *
+ *   1. OWNER-FIRST — the conversation is created idempotently by its client id and the owner
+ *      message is committed (idempotently on `turnId`) BEFORE any provider work. A retry re-sends
+ *      the same ids; both inserts are no-ops and the route does NOT run the model twice. (Because
+ *      the conversation id is client-stable, a first-turn retry can never fork a second conversation.)
+ *   2. CLAIM (two scopes, both released in `finally`) — a per-TURN advisory lock keyed on the owner
+ *      message id stops duplicate execution of the SAME send; a per-CONVERSATION advisory lock then
+ *      stops two DIFFERENT owner messages in the same conversation (two tabs/devices) from executing
+ *      at once and racing on prompt history. If the conversation is busy, the owner row stays
+ *      persisted and the turn simply runs later.
+ *   3. REPLAY (before any spend) — an already-persisted reply is AUTHORITATIVE and is replayed
+ *      WITHOUT consuming provider budget or building a pulse: a complete reply replays text +
+ *      proposals + `done`; an INTERRUPTED reply replays its partial text + `saved(interrupted,
+ *      proposals:[])` + an `error` (never `done`, never actionable cards). The reply check sits
+ *      AFTER the claim is acquired, so a reply that appeared around the claim race is still caught
+ *      and the provider is never started on top of it.
+ *   4. SPEND ONLY IN THE RUN BRANCH — rate limit and pulse build happen ONLY once we hold the
+ *      claim and there is no reply to replay, so a persisted reply can never be made unreplayable
+ *      by a rate limit or a transient pulse failure.
+ *   5. COMMIT-THEN-SAVED — on a COMPLETE turn the assistant message AND its proposals commit in
+ *      ONE transaction; only then does `saved` deliver the {correlationKey → proposalId} map. A
+ *      streamed proposal carries only a correlationKey and is NOT actionable until `saved` supplies
+ *      its id. If the transaction fails, NO `saved` is emitted and the cards stay disabled.
+ *   6. INTERRUPTED NEVER ACTIONS — a timeout / provider error persists only the partial assistant
+ *      TEXT (never any proposals: durable, actionable proposals exist only at a successful
+ *      finalize), emits `saved(interrupted, proposals:[])`, and ends in `error`, never `done`.
  *
  * Events (SSE):
- *   delta     { text }                  model output as produced
- *   tool      { name, phase, ok? }      a tool call started / finished (for UI)
- *   proposal  { ...OpsChatProposal }    an action prepared for owner confirmation
- *   done      { }                       reply complete
- *   error     { message }
+ *   delta     { text }                              model output as produced (or full/partial reply on replay)
+ *   tool      { name, phase, ok? }                  a tool call started / finished (for UI)
+ *   proposal  { ...OpsChatProposal, correlationKey } an action prepared for owner confirmation (complete turns only)
+ *   saved     { conversationId, messageId, status, proposals: [{correlationKey, proposalId}] }
+ *   done      { }                                   COMPLETE reply finished
+ *   error     { message }                           timeout / failure / interrupted-reply replay
  */
 
 const OPS_CHAT_MODEL = 'claude-sonnet-5';
 
 const Body = z.object({
   message: z.string().trim().min(1).max(4000),
-  history: z
-    .array(z.object({ role: z.enum(['user', 'assistant']), content: z.string().max(8000) }))
-    .max(20)
-    .optional(),
+  /** The conversation to append to. REQUIRED and client-minted — even a brand-new conversation is
+   *  created idempotently by this id, so a first-turn retry can never fork a second conversation. */
+  conversationId: z.string().uuid(),
+  /** REQUIRED, client-minted, stable idempotency id for THIS send (the owner message id). A retry
+   *  re-sends the same id so the turn is never duplicated and the model never re-runs. (An optional
+   *  id would weaken the guarantee to a convention, so it is mandatory at the route boundary.) */
+  turnId: z.string().uuid(),
 });
 
 const SYSTEM_PROMPT = `You are the Ops Chat for the King AI Ops Hub — the owner's conversational front door to their multi-workspace AI operation. You speak to the owner directly.
@@ -97,39 +141,36 @@ export async function POST(req: Request): Promise<Response> {
     return Response.json({ error: 'Invalid request.' }, { status: 400 });
   }
 
-  // Provider-spend gate (preserved from v1): this request is about to make one
-  // or more paid Anthropic calls (tool loop), so bound it with the existing
-  // per-user rate limiter BEFORE any provider work. Fail-closed: an unexpected
-  // limiter error is a 500, not a silent pass to the model.
+  // 1. OWNER-FIRST — commit the owner message BEFORE any provider work (and before the spend gate),
+  //    idempotently on the client-minted ids. The conversation is created idempotently by its
+  //    client id (onConflictDoNothing) so a first-turn retry can NEVER fork a second conversation;
+  //    then ownership is verified (an id that belongs to another user → clean 404); then the owner
+  //    message is appended idempotently on turnId. A retry re-sends the same ids → both inserts are
+  //    no-ops and the model never re-runs. NOTE: the spend gate (rate limit) and pulse build happen
+  //    later, only in the "we really will run the provider" branch — see the stream below — so a
+  //    persisted reply can never be made unreplayable by a rate limit or a transient pulse failure.
+  const userId = auth.user.id;
+  const conversationId = body.conversationId;
+  let ownerMessageId: string;
   try {
-    await getDb().transaction((tx) =>
-      consumeRateLimit(tx, `ops-chat:user:${auth.user.id}`, serverEnv().RATE_LIMIT_RUNS_PER_MINUTE),
-    );
+    ownerMessageId = await withUser({ userId }, async (tx) => {
+      await createConversation(tx, userId, { id: conversationId }); // idempotent create by client id
+      if (!(await conversationExists(tx, userId, conversationId))) {
+        // The id exists but is not this user's (or the create was a no-op into another user's row).
+        throw new AppError('not_found', 'That conversation was not found.');
+      }
+      const owner = await appendOwnerMessage(tx, userId, { conversationId, content: body.message, id: body.turnId });
+      return owner.id;
+    });
   } catch (err) {
-    if (err instanceof RateLimitedError) {
-      return Response.json({ error: toPublicMessage(err) }, { status: 429 });
+    if (err instanceof AppError && err.code === 'not_found') {
+      return Response.json({ error: toPublicMessage(err) }, { status: 404 });
     }
-    log.error('ops-chat rate-limit check failed', { err });
-    return Response.json({ error: 'Something went wrong.' }, { status: 500 });
+    if (!(err instanceof AppError)) log.error('ops-chat owner-message persist failed', { err });
+    return Response.json({ error: toPublicMessage(err) }, { status: err instanceof AppError && err.code === 'conflict' ? 409 : 500 });
   }
 
-  // Build the live pulse up front so an assembly failure is a clean error, not
-  // a half-open stream.
-  let system: string;
-  try {
-    const pulse = await buildPulse();
-    system = `${SYSTEM_PROMPT}\n\n=== LIVE HUB SNAPSHOT (${new Date().toISOString()}) ===\n${pulseContext(pulse)}`;
-  } catch (err) {
-    if (!(err instanceof AppError)) log.error('ops-chat pulse build failed', { err });
-    return Response.json({ error: toPublicMessage(err) }, { status: 500 });
-  }
-
-  const turns = [
-    ...(body.history ?? []).map((t) => ({ role: t.role, content: t.content })),
-    { role: 'user' as const, content: body.message },
-  ];
-
-  const toolset = createOpsChatToolset({ userId: auth.user.id, projects: auth.projects, orgRoles: auth.orgRoles });
+  const toolset = createOpsChatToolset({ userId, projects: auth.projects, orgRoles: auth.orgRoles });
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -144,30 +185,6 @@ export async function POST(req: Request): Promise<Response> {
         }
       };
 
-      // Overall end-to-end deadline for the WHOLE request — every provider
-      // iteration AND every tool call — independent of the per-call provider
-      // timeout and of how many tool-loop iterations run. Racing each iterator
-      // step against this deadline means a stalled tool (runTool is not itself
-      // cancellable) still yields a clean, retryable timeout rather than an
-      // open-forever stream. Aborting also cancels any in-flight Anthropic call.
-      // The browser watchdog is the backstop.
-      const ac = new AbortController();
-      const onReqAbort = (): void => ac.abort();
-      if (req.signal) {
-        if (req.signal.aborted) ac.abort();
-        else req.signal.addEventListener('abort', onReqAbort, { once: true });
-      }
-      let timedOut = false;
-      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-      const TIMEOUT = Symbol('ops-chat-deadline');
-      const deadline = new Promise<typeof TIMEOUT>((resolve) => {
-        deadlineTimer = setTimeout(() => {
-          timedOut = true;
-          ac.abort();
-          resolve(TIMEOUT);
-        }, OPS_CHAT_SERVER_DEADLINE_MS);
-      });
-
       // The client clears "Thinking…" on a `done` or `error` event. Track whether a terminal event has been
       // emitted so the `finally` can GUARANTEE one (while the client is still connected) even if the loop ever
       // exits a future way without emitting one — the UI must never be left pending.
@@ -177,17 +194,196 @@ export async function POST(req: Request): Promise<Response> {
         send(event, data);
       };
 
-      const finalize = (): void => {
-        for (const proposal of toolset.getProposals()) send('proposal', proposal);
-        sendTerminal('done', {});
+      // Commit the assistant reply (+ its proposals, for a COMPLETE turn only) in ONE transaction,
+      // then return the {correlationKey → proposalId} mapping.
+      //
+      // GOVERNANCE INVARIANT: durable, actionable proposals exist ONLY at a successful finalize.
+      // An INTERRUPTED turn persists its partial TEXT for history but persists ZERO proposals —
+      // an incomplete model turn must never create pending confirmation cards for governed writes.
+      // (Enforced here regardless of what the caller passes.) An interrupted turn with no text at
+      // all persists no row — an empty bubble is noise and the owner message alone lets a retry
+      // re-run. The DB's one-reply-per-owner-turn unique index means a second persist for the same
+      // turn fails closed (→ 'failed'), so a duplicate reply can never be created even if two code
+      // paths raced here.
+      type Saved = { kind: 'saved'; messageId: string; status: OpsChatMessageStatus; proposals: Array<{ correlationKey: string; proposalId: string }> } | { kind: 'skipped' } | { kind: 'failed' };
+      const persistReply = async (status: OpsChatMessageStatus, content: string, props: readonly OpsChatProposal[]): Promise<Saved> => {
+        const effectiveProps = status === 'complete' ? props : [];
+        if (status === 'interrupted' && content.trim() === '') return { kind: 'skipped' };
+        try {
+          return await withUser({ userId }, async (tx) => {
+            const msg = await appendAssistantMessage(tx, userId, {
+              conversationId,
+              content,
+              replyToMessageId: ownerMessageId,
+              question: body.message,
+              status,
+            });
+            const mapped: Array<{ correlationKey: string; proposalId: string }> = [];
+            for (const p of effectiveProps) {
+              const row = await addProposal(tx, userId, { conversationId, messageId: msg.id, kind: p.kind, proposal: p });
+              mapped.push({ correlationKey: proposalKey(p), proposalId: row.id });
+            }
+            return { kind: 'saved' as const, messageId: msg.id, status, proposals: mapped };
+          });
+        } catch (err) {
+          log.error('ops-chat assistant persist failed', { err, ownerMessageId, status });
+          return { kind: 'failed' };
+        }
+      };
+      // Emit the proposal cards (each with its correlationKey) THEN the saved mapping. Order is
+      // deliberate: a card is shown as the model proposed it, but only the saved mapping makes it
+      // actionable (supplies the persisted proposalId). No saved ⇒ the client keeps cards disabled.
+      const emitSaved = (saved: Extract<Saved, { kind: 'saved' }>, props: readonly OpsChatProposal[]): void => {
+        for (const p of props) send('proposal', { ...p, correlationKey: proposalKey(p) });
+        send('saved', { conversationId, messageId: saved.messageId, status: saved.status, proposals: saved.proposals });
       };
 
+      let claim: TurnClaim | undefined;
+      let convClaim: TurnClaim | undefined;
+      let ac: AbortController | undefined;
+      let onReqAbort: (() => void) | undefined;
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      let timedOut = false;
       let iterator: AsyncIterator<ToolLoopEvent> | undefined;
+      let assistantText = '';
+
       try {
+        // 2. CLAIM the turn (serializes model execution per owner message).
+        claim = await tryClaimTurn(ownerMessageId);
+
+        // 3. REPLAY (before any spend) — an already-persisted reply is AUTHORITATIVE and is
+        //    replayed WITHOUT consuming provider budget or building a pulse. Checking AFTER the
+        //    claim is the double-check: a reply that landed around the claim race is still caught,
+        //    so the provider is never started on top of an existing reply. A COMPLETE reply replays
+        //    text + proposals + `done`; an INTERRUPTED reply replays its partial text +
+        //    `saved(interrupted, proposals:[])` + `error` — it must NEVER masquerade as complete,
+        //    so no `done` and no actionable cards.
+        const existing = await withUser({ userId }, (tx) => loadReplyForOwnerMessage(tx, userId, ownerMessageId));
+        if (existing) {
+          if (existing.content) send('delta', { text: existing.content });
+          if (existing.status === 'interrupted') {
+            // Interrupted turns never persist proposals; replay an empty mapping regardless.
+            send('saved', { conversationId: existing.conversationId, messageId: existing.messageId, status: 'interrupted', proposals: [] });
+            sendTerminal('error', { message: OPS_CHAT_INTERRUPTED_REPLAY_MESSAGE });
+          } else {
+            const mapped: Array<{ correlationKey: string; proposalId: string }> = [];
+            for (const p of existing.proposals) {
+              const stored = p.proposal as OpsChatProposal;
+              const key = proposalKey(stored);
+              send('proposal', { ...stored, correlationKey: key });
+              mapped.push({ correlationKey: key, proposalId: p.id });
+            }
+            send('saved', { conversationId: existing.conversationId, messageId: existing.messageId, status: existing.status, proposals: mapped });
+            sendTerminal('done', {});
+          }
+          return;
+        }
+
+        // No reply yet, and we did NOT win the TURN claim ⇒ another request is actively running
+        // this turn. Never launch a duplicate provider turn; tell the client to reload shortly.
+        if (!claim.claimed) {
+          sendTerminal('error', { message: OPS_CHAT_TURN_IN_PROGRESS_MESSAGE });
+          return;
+        }
+
+        // 3b. CONVERSATION CLAIM — before the spend gate/provider loop, serialize execution across
+        //     the whole conversation so two different owner messages (two tabs/devices) can't run at
+        //     once and race on prompt history. If busy, the owner row stays persisted and the turn
+        //     runs later on retry; we never start the provider.
+        convClaim = await tryClaimConversation(conversationId);
+        if (!convClaim.claimed) {
+          sendTerminal('error', { message: OPS_CHAT_CONVERSATION_BUSY_MESSAGE });
+          return;
+        }
+
+        // 3c. FIFO ORDER GATE — the conversation lock serializes execution but NOT order: if B and
+        //     C both queued behind a running A and C retries first, C would otherwise execute before
+        //     B. Owner turns must execute in persisted owner-message order, so run this turn ONLY if
+        //     it is the earliest owner message without a terminal reply. If an earlier unanswered
+        //     owner exists, release (in finally) and return a retry; the earlier turn goes first.
+        const nextToAnswer = await withUser({ userId }, (tx) => earliestUnansweredOwnerId(tx, userId, conversationId));
+        if (nextToAnswer !== null && nextToAnswer !== ownerMessageId) {
+          sendTerminal('error', { message: OPS_CHAT_EARLIER_TURN_PENDING_MESSAGE });
+          return;
+        }
+
+        // 4. SPEND GATE (only now that we hold both claims, this is the next turn in order, and
+        //    there is no reply to replay). The tool loop makes one or more paid Anthropic calls;
+        //    bound it with the per-user rate limiter. A persisted reply would have replayed above,
+        //    so a rate limit can never make
+        //    an already-saved reply unreplayable. Fail-closed on an unexpected limiter error.
+        try {
+          await getDb().transaction((tx) =>
+            consumeRateLimit(tx, `ops-chat:user:${userId}`, serverEnv().RATE_LIMIT_RUNS_PER_MINUTE),
+          );
+        } catch (err) {
+          if (err instanceof RateLimitedError) {
+            sendTerminal('error', { message: toPublicMessage(err) });
+            return;
+          }
+          log.error('ops-chat rate-limit check failed', { err });
+          sendTerminal('error', { message: 'Something went wrong.' });
+          return;
+        }
+
+        // 5. Build the live pulse (also only in the run branch — a transient pulse failure must
+        //    not make a persisted reply unreplayable; it just fails THIS run, retryably).
+        let system: string;
+        try {
+          const pulse = await buildPulse();
+          system = `${SYSTEM_PROMPT}\n\n=== LIVE HUB SNAPSHOT (${new Date().toISOString()}) ===\n${pulseContext(pulse)}`;
+        } catch (err) {
+          if (!(err instanceof AppError)) log.error('ops-chat pulse build failed', { err });
+          sendTerminal('error', { message: toPublicMessage(err) });
+          return;
+        }
+
+        // 6. RUN the model. We hold the claim, there is no persisted reply, spend is gated.
+        //    Overall end-to-end deadline for the WHOLE request — every provider iteration AND
+        //    every tool call. Racing each iterator step against this deadline means a stalled tool
+        //    (runTool is not itself cancellable) still yields a clean, retryable timeout. Aborting
+        //    also cancels any in-flight Anthropic call. The browser watchdog is the backstop.
+        ac = new AbortController();
+        const signal = ac.signal;
+        onReqAbort = (): void => ac!.abort();
+        if (req.signal) {
+          if (req.signal.aborted) ac.abort();
+          else req.signal.addEventListener('abort', onReqAbort, { once: true });
+        }
+        const TIMEOUT = Symbol('ops-chat-deadline');
+        const deadline = new Promise<typeof TIMEOUT>((resolve) => {
+          deadlineTimer = setTimeout(() => {
+            timedOut = true;
+            ac!.abort();
+            resolve(TIMEOUT);
+          }, OPS_CHAT_SERVER_DEADLINE_MS);
+        });
+
+        // Turn-aware prompt history from the persisted store: owner turns in order, each followed by
+        // its COMPLETE linked assistant reply, ending with the owner message we just committed.
+        // Reconstructed by the owner→reply link (not raw seq), so an interleaved reply with a higher
+        // seq than a later owner message is still attached to the right turn; interrupted output is
+        // excluded. The client never supplies conversation context.
+        const turns = await withUser({ userId }, (tx) => loadPromptTurns(tx, userId, conversationId, ownerMessageId, { maxOwnerTurns: OPS_CHAT_MAX_PROMPT_TURNS }));
+
+        // A completed model turn: commit the reply + proposals, then emit saved+done. A failed
+        // transaction emits NO saved (client keeps cards disabled) and a retryable error; the
+        // owner message stands, so a retry re-runs.
+        const finishComplete = async (): Promise<void> => {
+          const props = toolset.getProposals();
+          const saved = await persistReply('complete', assistantText, props);
+          if (saved.kind === 'saved') {
+            emitSaved(saved, props);
+            sendTerminal('done', {});
+          } else {
+            sendTerminal('error', { message: OPS_CHAT_PERSIST_FAILED_MESSAGE });
+          }
+        };
+
         const provider = getProvider('anthropic');
         if (!provider.streamWithTools) throw new Error('Tool-use is not available on this provider.');
         iterator = provider.streamWithTools(
-          { model: OPS_CHAT_MODEL, system, turns, temperature: 0.3, maxOutputTokens: 1500, timeoutMs: 90_000, signal: ac.signal },
+          { model: OPS_CHAT_MODEL, system, turns, temperature: 0.3, maxOutputTokens: 1500, timeoutMs: 90_000, signal },
           toolset.tools,
           toolset.runTool,
         )[Symbol.asyncIterator]();
@@ -195,47 +391,76 @@ export async function POST(req: Request): Promise<Response> {
         for (;;) {
           const step = await Promise.race([iterator.next(), deadline]);
           if (step === TIMEOUT) {
+            // Persist ONLY the partial assistant TEXT as an INTERRUPTED reply (no proposals —
+            // an incomplete turn never produces actionable cards), then surface the retryable
+            // timeout. saved carries proposals:[] and emits no proposal events.
+            const saved = await persistReply('interrupted', assistantText, []);
+            if (saved.kind === 'saved') emitSaved(saved, []);
             sendTerminal('error', { message: OPS_CHAT_TIMEOUT_MESSAGE });
             break;
           }
           if (step.done) {
-            finalize();
+            await finishComplete();
             break;
           }
           const ev = step.value;
-          if (ev.kind === 'delta') send('delta', { text: ev.text });
-          else if (ev.kind === 'tool_start') send('tool', { name: ev.name, phase: 'start' });
+          if (ev.kind === 'delta') {
+            assistantText += ev.text;
+            send('delta', { text: ev.text });
+          } else if (ev.kind === 'tool_start') send('tool', { name: ev.name, phase: 'start' });
           else if (ev.kind === 'tool_end') send('tool', { name: ev.name, phase: 'end', ok: ev.ok });
           else if (ev.kind === 'done') {
-            finalize();
+            await finishComplete();
             break;
           }
         }
       } catch (err) {
+        // The model loop threw. Preserve ONLY the partial assistant TEXT as an interrupted reply
+        // (never proposals — an incomplete turn must not create actionable cards).
         if (timedOut) {
+          const saved = await persistReply('interrupted', assistantText, []);
+          if (saved.kind === 'saved') emitSaved(saved, []);
           sendTerminal('error', { message: OPS_CHAT_TIMEOUT_MESSAGE });
-        } else if (ac.signal.aborted) {
-          // Client disconnected before the deadline — nothing to deliver.
+        } else if (ac?.signal.aborted) {
+          // Client disconnected before the deadline — nothing to deliver, but still persist the
+          // partial text (best-effort) so a reconnect/reload replays it rather than losing the turn.
+          await persistReply('interrupted', assistantText, []).catch(() => {});
         } else {
           if (!(err instanceof AppError)) log.error('ops-chat stream failed', { err });
+          const saved = await persistReply('interrupted', assistantText, []);
+          if (saved.kind === 'saved') emitSaved(saved, []);
           sendTerminal('error', { message: toPublicMessage(err) });
         }
       } finally {
         if (deadlineTimer) clearTimeout(deadlineTimer);
-        req.signal?.removeEventListener('abort', onReqAbort);
+        if (onReqAbort) req.signal?.removeEventListener('abort', onReqAbort);
         // GUARANTEE a terminal event: if the loop somehow exited without emitting one and the client is still
         // connected (not disconnected/aborted), emit a retryable error before closing so the UI never hangs.
-        if (!sentTerminal && !ac.signal.aborted) send('error', { message: OPS_CHAT_TIMEOUT_MESSAGE });
+        if (!sentTerminal && !ac?.signal.aborted) send('error', { message: OPS_CHAT_TIMEOUT_MESSAGE });
         closed = true;
         try {
           controller.close();
         } catch {
           /* already closed */
         }
-        // Best-effort unwind of the provider generator (fire-and-forget; a
-        // generator stalled inside a tool call is orphaned — it holds no write
-        // and is GC'd). Never awaited, so a stuck tool cannot block closing.
+        // Best-effort unwind of the provider generator (fire-and-forget; a generator stalled
+        // inside a tool call is orphaned — it holds no write and is GC'd). Never awaited.
         void iterator?.return?.(undefined)?.catch(() => {});
+        // Release BOTH execution claims LAST, in finally, so success / timeout / provider / tool
+        // failure all free them (and their reserved connections). Each is a NOOP when never claimed.
+        // The two are separate reserved sessions, so the releases must be FAILURE-INDEPENDENT: if
+        // one release throws (e.g. the reserved connection errors during pg_advisory_unlock), the
+        // other must still run or its lock/session would be stranded. Guard each on its own.
+        try {
+          await convClaim?.release();
+        } catch (err) {
+          log.error('ops-chat conversation claim release failed', { err });
+        }
+        try {
+          await claim?.release();
+        } catch (err) {
+          log.error('ops-chat turn claim release failed', { err });
+        }
       }
     },
   });
