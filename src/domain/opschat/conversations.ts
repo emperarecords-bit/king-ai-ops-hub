@@ -448,7 +448,7 @@ export async function loadConversation(
   userId: string,
   conversationId: string,
   opts: { limit?: number } = {},
-): Promise<{ conversation: { id: string; title: string | null; createdAt: Date; updatedAt: Date }; messages: LoadedMessage[] } | null> {
+): Promise<{ conversation: { id: string; title: string | null; createdAt: Date; updatedAt: Date }; messages: LoadedMessage[]; hasEarlier: boolean } | null> {
   const limit = Math.max(1, Math.min(opts.limit ?? 200, 1000));
   const conv = await tx
     .select({ id: opsChatConversations.id, title: opsChatConversations.title, createdAt: opsChatConversations.createdAt, updatedAt: opsChatConversations.updatedAt })
@@ -472,7 +472,9 @@ export async function loadConversation(
     .from(opsChatMessages)
     .where(and(eq(opsChatMessages.conversationId, conversationId), eq(opsChatMessages.userId, userId)))
     .orderBy(desc(opsChatMessages.seq))
-    .limit(limit);
+    .limit(limit + 1);
+  const hasEarlier = recent.length > limit;
+  if (hasEarlier) recent.pop(); // drop the one older sentinel row; keep exactly the requested display window
   recent.reverse();
 
   // Bound the proposal load to the message WINDOW — not every card ever created in the
@@ -511,6 +513,7 @@ export async function loadConversation(
 
   return {
     conversation: conv[0],
+    hasEarlier,
     messages: recent.map((m) => ({
       id: m.id,
       seq: m.seq,
