@@ -274,6 +274,11 @@ describe('conversations domain — ordering, title, CAS, immutability, bounds', 
     });
     const loaded = await withUser({ userId: userA }, (tx) => loadConversation(tx, userA, convId, { limit: 3 }));
     expect(loaded!.messages.map((m) => m.content)).toEqual(['m5', 'm6', 'm7']); // last 3, in order
+    expect(loaded!.hasEarlier).toBe(true);
+
+    const full = await withUser({ userId: userA }, (tx) => loadConversation(tx, userA, convId, { limit: 8 }));
+    expect(full!.messages.map((m) => m.content)).toEqual(['m0', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7']);
+    expect(full!.hasEarlier).toBe(false);
   });
 });
 
