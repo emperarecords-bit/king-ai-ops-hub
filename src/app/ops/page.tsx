@@ -40,6 +40,8 @@ export default async function OpsChatPage({
   const one = (v: string | string[] | undefined): string => (Array.isArray(v) ? (v[0] ?? '') : (v ?? '')).trim();
   const requested = one(sp.c);
   const startNew = one(sp.new) === '1';
+  const parsedHistory = Number.parseInt(one(sp.history), 10);
+  const historyLimit = Number.isFinite(parsedHistory) ? Math.max(200, Math.min(parsedHistory, 1000)) : 200;
 
   const [pulse, stored] = await Promise.all([
     buildPulse(),
@@ -47,7 +49,7 @@ export default async function OpsChatPage({
       const conversations = await listConversations(tx, user.id, { limit: 20 });
       const id = startNew ? null : UUID_RE.test(requested) ? requested : await mostRecentConversationId(tx, user.id);
       // RLS + the explicit user filter scope this load: another user's id simply loads nothing.
-      const loaded = id ? await loadConversation(tx, user.id, id) : null;
+      const loaded = id ? await loadConversation(tx, user.id, id, { limit: historyLimit }) : null;
       const pending = loaded ? await earliestUnansweredOwnerTurn(tx, user.id, loaded.conversation.id) : null;
       return { conversations, loaded, pending };
     }),
@@ -118,6 +120,17 @@ export default async function OpsChatPage({
         pendingTurn={pendingTurn}
         conversations={stored.conversations.map((c) => ({ id: c.id, title: c.title }))}
       />
+
+      {stored.loaded?.hasEarlier ? (
+        <div className="mt-3 flex justify-center">
+          <Link
+            href={`/ops?c=${encodeURIComponent(stored.loaded.conversation.id)}&history=${Math.min(historyLimit + 200, 1000)}`}
+            className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--muted)] hover:text-[var(--foreground)]"
+          >
+            Load earlier messages
+          </Link>
+        </div>
+      ) : null}
 
       <p className="mt-3 text-center text-xs text-[var(--muted)]">
         Signed in as {user.email}. Ops Chat can read your Hub and prepare governed actions. Nothing
