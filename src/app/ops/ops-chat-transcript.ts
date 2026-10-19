@@ -43,11 +43,30 @@ export interface TranscriptCard {
   fromHistory?: boolean;
 }
 
+/** A file attached to an owner message (display metadata only — never its contents). */
+export interface AttachmentChip {
+  id: string;
+  filename: string;
+  kind: string;
+  sizeBytes: number;
+  /** ready | failed | unsupported */
+  status: string;
+  error?: string | null;
+}
+
+/** The owner text for an attachment-only send — MUST match the server's derivation exactly so an
+ *  idempotent retry/resume re-sends identical content. */
+export function attachmentOnlyContent(filenames: readonly string[]): string {
+  return `(attached: ${filenames.join(', ')})`;
+}
+
 export interface TranscriptMsg {
   /** Owner rows: the owner message id, which IS the client-minted turnId. Assistant rows: message id or a local id. */
   id: string;
   role: 'owner' | 'assistant';
   content: string;
+  /** Owner only: the files sent with this message. */
+  attachments?: AttachmentChip[];
   /** Owner only: no terminal (complete/interrupted) reply exists for this turn. */
   awaitingReply?: boolean;
   /** Assistant only. */
@@ -68,6 +87,8 @@ export interface PersistedMessage {
   question: string | null;
   replyToMessageId: string | null;
   proposals: Array<{ id: string; proposal: unknown; state: string; result: unknown; error: string | null }>;
+  /** Owner rows: files sent with the message. */
+  attachments?: AttachmentChip[];
 }
 
 export interface PendingTurn {
@@ -117,7 +138,13 @@ export function buildTranscript(persisted: readonly PersistedMessage[]): Transcr
   const out: TranscriptMsg[] = orphans.map(toAssistant);
   for (const o of owners) {
     const reply = replyFor.get(o.id);
-    out.push({ id: o.id, role: 'owner', content: o.content, awaitingReply: !reply });
+    out.push({
+      id: o.id,
+      role: 'owner',
+      content: o.content,
+      awaitingReply: !reply,
+      ...(o.attachments && o.attachments.length > 0 ? { attachments: o.attachments } : {}),
+    });
     if (reply) out.push(toAssistant(reply));
   }
   return out;

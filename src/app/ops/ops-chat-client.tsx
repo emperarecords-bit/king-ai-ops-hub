@@ -9,8 +9,17 @@ import {
 } from '@/domain/opschat/limits';
 import type { ApprovalContentView } from '@/domain/opschat/approval-content';
 import { createDeadlineWatchdog } from './ops-chat-watchdog';
+import { ATTACHMENT_ACCEPT, ATTACHMENT_LIMITS } from '@/domain/opschat/attachment-limits';
+import {
+  ComposerAttachmentChips,
+  precheckFile,
+  SentAttachmentChips,
+  uploadAttachment,
+  type ComposerFile,
+} from './ops-chat-attachments';
 import {
   applySavedMapping,
+  attachmentOnlyContent,
   buildTranscript,
   confirmOutcome,
   isActionable,
@@ -220,6 +229,7 @@ const TOOL_LABEL: Record<string, string> = {
   list_open_questions: 'finding open questions',
   list_pending_approvals: 'finding pending approvals',
   get_approval_detail: 'reading the approval',
+  read_attachment: 'reading your attachment',
   list_agents: 'listing the agents',
   propose_answer_question: 'preparing the answer',
   propose_decide_approval: 'preparing the decision',
@@ -567,6 +577,9 @@ export function OpsChatClient({
   // fork a second conversation.
   const [currentId, setCurrentId] = useState<string | null>(initialConversationId);
   const [input, setInput] = useState('');
+  // Files uploaded into this conversation for the NEXT send (uploaded immediately, sent with the message).
+  const [composerFiles, setComposerFiles] = useState<ComposerFile[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [streaming, setStreaming] = useState(false);
   const [toolActivity, setToolActivity] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -663,19 +676,59 @@ export function OpsChatClient({
     window.location.assign(id ? `/ops?c=${encodeURIComponent(id)}` : '/ops?new=1');
   }
 
-  async function send(text: string) {
-    const trimmed = text.trim();
-    // A pending turn pauses new sends: the server answers owner turns strictly in order.
-    if (!trimmed || streaming || pending) return;
-    setError(null);
-    setInput('');
+  /** The conversation id, minted once (on the first send OR the first upload) and then stable. */
+  function ensureConversationId(): string {
     const conversationId = currentId ?? crypto.randomUUID();
     if (!currentId) setCurrentId(conversationId);
     // Keep the URL on this conversation so a refresh (or the same link on another device) resumes it.
     window.history.replaceState(null, '', `/ops?c=${conversationId}`);
+    return conversationId;
+  }
+
+  const uploading = composerFiles.some((f) => f.state === 'uploading');
+  const readyFiles = composerFiles.filter((f) => f.state === 'ready' && f.chip);
+
+  /** Upload picked files into this conversation, one at a time. Nothing is sent until the owner sends. */
+  async function addFiles(list: FileList | null) {
+    if (!list || list.length === 0 || streaming || pending) return;
+    setError(null);
+    const room = ATTACHMENT_LIMITS.maxPerMessage - composerFiles.filter((f) => f.state !== 'error').length;
+    const picked = Array.from(list).slice(0, Math.max(0, room));
+    if (list.length > picked.length) setError(`A message can carry at most ${ATTACHMENT_LIMITS.maxPerMessage} attachments.`);
+    if (picked.length === 0) return;
+    const conversationId = ensureConversationId();
+    for (const file of picked) {
+      const localId = nextId();
+      const refusal = precheckFile(file);
+      if (refusal) {
+        setComposerFiles((prev) => [...prev, { localId, filename: file.name, sizeBytes: file.size, state: 'error', error: refusal }]);
+        continue;
+      }
+      setComposerFiles((prev) => [...prev, { localId, filename: file.name, sizeBytes: file.size, state: 'uploading' }]);
+      const r = await uploadAttachment(file, conversationId);
+      setComposerFiles((prev) =>
+        prev.map((f) => (f.localId !== localId ? f : r.ok ? { ...f, state: 'ready', chip: r.chip } : { ...f, state: 'error', error: r.error })),
+      );
+    }
+  }
+
+  async function send(text: string) {
+    const trimmed = text.trim();
+    const files = readyFiles.map((f) => f.chip!);
+    // A pending turn pauses new sends: the server answers owner turns strictly in order.
+    if ((!trimmed && files.length === 0) || streaming || pending || uploading) return;
+    setError(null);
+    setInput('');
+    setComposerFiles([]);
+    const conversationId = ensureConversationId();
     const turnId = crypto.randomUUID();
-    setMessages((prev) => [...prev, { id: turnId, role: 'owner', content: trimmed, awaitingReply: true }]);
-    await runTurn({ conversationId, turnId, content: trimmed, fresh: true });
+    // Attachment-only: the same deterministic text the server derives (so a resume re-sends it exactly).
+    const content = trimmed || attachmentOnlyContent(files.map((f) => f.filename));
+    setMessages((prev) => [
+      ...prev,
+      { id: turnId, role: 'owner', content, awaitingReply: true, ...(files.length > 0 ? { attachments: files } : {}) },
+    ]);
+    await runTurn({ conversationId, turnId, content, fresh: true, attachmentIds: files.map((f) => f.id) });
   }
 
   /** Explicit, owner-clicked recovery: re-send the EXACT pending turn (same ids, same content). The
@@ -688,7 +741,7 @@ export function OpsChatClient({
     await runTurn({ conversationId, turnId: turn.turnId, content: turn.content, fresh: false });
   }
 
-  async function runTurn(t: { conversationId: string; turnId: string; content: string; fresh: boolean }) {
+  async function runTurn(t: { conversationId: string; turnId: string; content: string; fresh: boolean; attachmentIds?: string[] }) {
     setToolActivity(null);
     const replyId = nextId();
     // The reply sits directly after its own owner turn (turn-aware), or at the end when that turn is
@@ -733,7 +786,8 @@ export function OpsChatClient({
       const res = await fetch('/api/ops-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: t.content, conversationId: t.conversationId, turnId: t.turnId }),
+        // A resume re-sends no attachment ids: the files were linked when the turn was first persisted.
+        body: JSON.stringify({ message: t.content, conversationId: t.conversationId, turnId: t.turnId, attachmentIds: t.attachmentIds ?? [] }),
         signal: controller.signal,
       });
       if (!res.ok || !res.body) {
@@ -855,6 +909,7 @@ export function OpsChatClient({
               ) : m.role === 'assistant' && !m.cards ? (
                 <span className="opacity-60">{toolActivity ? `🔍 ${toolActivity}…` : 'Thinking…'}</span>
               ) : null}
+              {m.role === 'owner' && m.attachments ? <SentAttachmentChips chips={m.attachments} /> : null}
               {m.role === 'assistant' && m.status === 'interrupted' ? (
                 <p className="mt-1 text-[11px] text-[var(--muted)]">Interrupted — partial reply, kept for history only.</p>
               ) : null}
@@ -1170,6 +1225,11 @@ export function OpsChatClient({
         }}
         className="flex flex-col gap-2"
       >
+        <ComposerAttachmentChips
+          files={composerFiles}
+          disabled={streaming}
+          onRemove={(localId) => setComposerFiles((prev) => prev.filter((f) => f.localId !== localId))}
+        />
         <textarea
           ref={taRef}
           value={input}
@@ -1186,10 +1246,33 @@ export function OpsChatClient({
           }}
         />
         <div className="flex items-center justify-between gap-2">
-          <span className="text-xs opacity-50">Enter to send · Shift+Enter for a new line</span>
+          <div className="flex items-center gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept={ATTACHMENT_ACCEPT}
+              className="hidden"
+              onChange={(e) => {
+                void addFiles(e.target.files);
+                e.target.value = '';
+              }}
+            />
+            <button
+              type="button"
+              aria-label="Attach files"
+              title="Attach PDF, Word, Excel, CSV, text, Markdown, or an image"
+              disabled={streaming || !!pending || uploading}
+              onClick={() => fileInputRef.current?.click()}
+              className="rounded border border-[var(--border)] px-2 py-1 text-sm hover:opacity-80 disabled:opacity-40"
+            >
+              📎
+            </button>
+            <span className="text-xs opacity-50">Enter to send · Shift+Enter for a new line</span>
+          </div>
           <button
             type="submit"
-            disabled={streaming || !!pending || input.trim().length === 0}
+            disabled={streaming || !!pending || uploading || (input.trim().length === 0 && readyFiles.length === 0)}
             className="rounded border border-[var(--border)] px-4 py-1.5 text-sm hover:opacity-80 disabled:opacity-40"
           >
             {streaming ? 'Answering…' : 'Send'}

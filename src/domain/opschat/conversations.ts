@@ -24,6 +24,13 @@ export type OpsChatMessageRole = 'user' | 'assistant';
 export type OpsChatMessageStatus = 'complete' | 'interrupted';
 export type OpsChatProposalState = 'pending' | 'confirming' | 'done' | 'error' | 'cancelled' | 'stale';
 
+/** One prompt turn. Owner turns carry their message id so the route can attach that turn's files. */
+export interface PromptTurn {
+  role: OpsChatMessageRole;
+  content: string;
+  ownerMessageId?: string;
+}
+
 /** The allowed proposal state machine. Terminal states have no outgoing edges — a
  *  stale/errored/cancelled proposal requires a NEW proposal, never a re-transition. */
 const ALLOWED_TRANSITIONS: Record<OpsChatProposalState, readonly OpsChatProposalState[]> = {
@@ -103,7 +110,7 @@ export async function loadPromptTurns(
   conversationId: string,
   ownerMessageId: string,
   opts: { maxOwnerTurns?: number } = {},
-): Promise<Array<{ role: OpsChatMessageRole; content: string }>> {
+): Promise<PromptTurn[]> {
   const maxTurns = Math.max(1, Math.min(opts.maxOwnerTurns ?? 8, 50));
 
   // The current owner message fixes the upper bound (its seq). It is always persisted first.
@@ -143,9 +150,9 @@ export async function loadPromptTurns(
   const replyByOwner = new Map<string, string>();
   for (const r of replies) if (r.replyTo) replyByOwner.set(r.replyTo, r.content);
 
-  const turns: Array<{ role: OpsChatMessageRole; content: string }> = [];
+  const turns: PromptTurn[] = [];
   for (const o of owners) {
-    turns.push({ role: 'user', content: o.content });
+    turns.push({ role: 'user', content: o.content, ownerMessageId: o.id });
     // The current owner message is the turn we are answering now — never attach a trailing reply.
     if (o.id !== ownerMessageId) {
       const reply = replyByOwner.get(o.id);

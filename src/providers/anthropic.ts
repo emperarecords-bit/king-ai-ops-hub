@@ -11,8 +11,21 @@ import {
   type ToolSpec,
   type ToolRunner,
   type ToolLoopEvent,
+  type Turn,
 } from '@/types/provider';
 import { costForUsage, modelsForProvider } from './pricing';
+
+/** A Turn → Anthropic message. A USER turn with images becomes image blocks followed by its text;
+ *  everything else stays plain string content (unchanged for every existing caller). */
+export function toMessageParam(t: Turn): Anthropic.MessageParam {
+  if (t.role !== 'user' || !t.images || t.images.length === 0) return { role: t.role, content: t.content };
+  const blocks: Anthropic.ContentBlockParam[] = t.images.map((img) => ({
+    type: 'image',
+    source: { type: 'base64', media_type: img.mediaType, data: img.dataBase64 },
+  }));
+  blocks.push({ type: 'text', text: t.content.length > 0 ? t.content : '(image attached)' });
+  return { role: 'user', content: blocks };
+}
 
 /** Parse a streamed tool-input JSON string; empty/partial → {} (never throws). */
 function parseToolInput(json: string): unknown {
@@ -75,7 +88,7 @@ export class AnthropicProvider implements AIProvider {
     return {
       model: request.model,
       system: request.system,
-      messages: request.turns.map((t) => ({ role: t.role, content: t.content })),
+      messages: request.turns.map(toMessageParam),
       ...(withTemperature ? { temperature: request.temperature } : {}),
       max_tokens: request.maxOutputTokens,
     };
@@ -197,10 +210,7 @@ export class AnthropicProvider implements AIProvider {
         description: t.description,
         input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
       }));
-      const messages: Anthropic.MessageParam[] = request.turns.map((t) => ({
-        role: t.role,
-        content: t.content,
-      }));
+      const messages: Anthropic.MessageParam[] = request.turns.map(toMessageParam);
 
       let inputTokens = 0;
       let outputTokens = 0;

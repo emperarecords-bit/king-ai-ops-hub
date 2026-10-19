@@ -55,11 +55,14 @@ describe('Ops Chat client wiring — recovery is explicit and exact', () => {
 
   it('a new message is refused while a turn is pending (the server answers turns in order)', () => {
     const send = body(CLIENT, 'async function send(', 'async function resume()');
-    expect(send).toMatch(/if \(!trimmed \|\| streaming \|\| pending\) return;/);
+    // Also refused with nothing to send (no text and no ready attachment) or while a file is uploading.
+    expect(send).toMatch(/if \(\(!trimmed && files\.length === 0\) \|\| streaming \|\| pending \|\| uploading\) return;/);
   });
 
-  it('the send body is exactly the persisted turn identity — no client-supplied history', () => {
-    expect(CLIENT).toContain('JSON.stringify({ message: t.content, conversationId: t.conversationId, turnId: t.turnId })');
+  it('the send body is exactly the persisted turn identity (+ attachment ids) — no client-supplied history', () => {
+    expect(CLIENT).toContain(
+      'JSON.stringify({ message: t.content, conversationId: t.conversationId, turnId: t.turnId, attachmentIds: t.attachmentIds ?? [] })',
+    );
     // (window.history.replaceState is URL handling, not a prompt-history payload.)
     expect(CLIENT).not.toMatch(/\bhistory\s*[,}:]/);
   });

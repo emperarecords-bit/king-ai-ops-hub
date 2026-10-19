@@ -30,8 +30,18 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: false,
   },
 
-  // Keep the pg driver out of the bundler's dependency graph analysis.
-  serverExternalPackages: ['postgres'],
+  // Keep the pg driver out of the bundler's dependency graph analysis. The Ops Chat attachment
+  // extractors (pdf.js via unpdf, mammoth, exceljs) also load as plain Node packages at runtime —
+  // exactly the code path the extraction tests exercise — rather than being re-bundled.
+  serverExternalPackages: ['postgres', 'unpdf', 'mammoth', 'exceljs'],
+
+  // File tracing misses the `require.mjs` conditional-export files deep in exceljs's dependency
+  // chain (async-function, generator-function — the only two packages that ship one), which breaks
+  // `require('exceljs')` in the standalone image. Include them whole for the upload route (verified by
+  // loading exceljs from .next/standalone).
+  outputFileTracingIncludes: {
+    '/api/ops-chat/attachments': ['./node_modules/generator-function/**/*', './node_modules/async-function/**/*'],
+  },
 
   async headers() {
     return [{ source: '/:path*', headers: securityHeaders }];

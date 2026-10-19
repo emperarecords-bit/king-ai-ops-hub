@@ -2613,3 +2613,60 @@ export const opsChatProposals = pgTable(
     ),
   ],
 );
+
+/**
+ * Ops Chat file attachments — owner-private, user-scoped like the rest of the Ops Chat store.
+ * METADATA ONLY: the file body lives in the shared object store (`object_key`), never in a row.
+ * `extracted_text` is the bounded, server-extracted text (capped by the domain + a CHECK), used as
+ * UNTRUSTED context for the turn it was sent with. An attachment is uploaded into a conversation
+ * first (message_id null) and linked once to the owner message that sends it; it is otherwise
+ * immutable. It is NOT a workspace `documents` row: it never enters a workspace library or run
+ * retrieval. `project_id` is an optional owner-chosen association, validated with tenant authority.
+ */
+export const opsChatAttachments = pgTable(
+  'ops_chat_attachments',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id').notNull(),
+    conversationId: uuid('conversation_id').notNull(),
+    // Null until the owner message that sends it is committed; set exactly once.
+    messageId: uuid('message_id'),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
+    filename: text('filename').notNull(),
+    mimeType: text('mime_type').notNull(),
+    kind: text('kind').notNull(), // pdf | docx | xlsx | csv | text | markdown | image
+    sizeBytes: integer('size_bytes').notNull(),
+    sha256: text('sha256').notNull(),
+    objectKey: text('object_key').notNull(),
+    // ready | failed | unsupported — extraction runs synchronously before the row is written.
+    status: text('status').notNull(),
+    error: text('error'),
+    extractedText: text('extracted_text'),
+    // Bounded, non-content facts about the extraction (pages, sheets, truncated, chars).
+    meta: jsonb('meta').notNull().default(sql`'{}'::jsonb`),
+    ...timestamps,
+  },
+  (t) => [
+    // The conversation belongs to the SAME user — DB-enforced.
+    foreignKey({
+      columns: [t.conversationId, t.userId],
+      foreignColumns: [opsChatConversations.id, opsChatConversations.userId],
+      name: 'ops_chat_attachments_conversation_user_fk',
+    }).onDelete('restrict'),
+    // The sending message is IN THE SAME conversation — DB-enforced.
+    foreignKey({
+      columns: [t.messageId, t.conversationId],
+      foreignColumns: [opsChatMessages.id, opsChatMessages.conversationId],
+      name: 'ops_chat_attachments_message_conversation_fk',
+    }).onDelete('restrict'),
+    index('ops_chat_attachments_conversation_created_idx').on(t.conversationId, t.createdAt),
+    index('ops_chat_attachments_message_idx').on(t.messageId),
+    check('ops_chat_attachments_status_chk', sql`status in ('ready', 'failed', 'unsupported')`),
+    check(
+      'ops_chat_attachments_kind_chk',
+      sql`kind in ('pdf', 'docx', 'xlsx', 'csv', 'text', 'markdown', 'image')`,
+    ),
+    check('ops_chat_attachments_size_chk', sql`size_bytes > 0 and size_bytes <= 10485760`),
+    check('ops_chat_attachments_text_cap_chk', sql`extracted_text is null or char_length(extracted_text) <= 100000`),
+  ],
+);

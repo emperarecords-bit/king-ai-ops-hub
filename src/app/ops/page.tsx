@@ -10,6 +10,7 @@ import {
   loadConversation,
   mostRecentConversationId,
 } from '@/domain/opschat/conversations';
+import { attachmentsForMessages, type AttachmentSummary } from '@/domain/opschat/attachments';
 import { OpsChatClient } from './ops-chat-client';
 import { type PersistedMessage, type PendingTurn } from './ops-chat-transcript';
 
@@ -51,7 +52,11 @@ export default async function OpsChatPage({
       // RLS + the explicit user filter scope this load: another user's id simply loads nothing.
       const loaded = id ? await loadConversation(tx, user.id, id, { limit: historyLimit }) : null;
       const pending = loaded ? await earliestUnansweredOwnerTurn(tx, user.id, loaded.conversation.id) : null;
-      return { conversations, loaded, pending };
+      // Attachment chips for the owner messages in the display window (metadata only).
+      const attachments = loaded
+        ? await attachmentsForMessages(tx, user.id, loaded.conversation.id, loaded.messages.filter((m) => m.role === 'user').map((m) => m.id))
+        : new Map<string, AttachmentSummary[]>();
+      return { conversations, loaded, pending, attachments };
     }),
   ]);
   const opening = openingMessage(pulse);
@@ -69,6 +74,14 @@ export default async function OpsChatPage({
     question: m.question,
     replyToMessageId: m.replyToMessageId,
     proposals: m.proposals.map((p) => ({ id: p.id, proposal: p.proposal, state: p.state, result: p.result, error: p.error })),
+    attachments: (stored.attachments.get(m.id) ?? []).map((a) => ({
+      id: a.id,
+      filename: a.filename,
+      kind: a.kind,
+      sizeBytes: a.sizeBytes,
+      status: a.status,
+      error: a.error,
+    })),
   }));
   const pendingTurn: PendingTurn | null = stored.pending ? { turnId: stored.pending.id, content: stored.pending.content } : null;
   const notFound = requested !== '' && !startNew && !stored.loaded;

@@ -21,9 +21,18 @@ export interface ModelDescriptor {
 
 export type TurnRole = 'user' | 'assistant';
 
+/** An image the owner attached to a user turn (Ops Chat). Raster types only — never SVG. */
+export interface TurnImage {
+  readonly mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+  readonly dataBase64: string;
+}
+
 export interface Turn {
   readonly role: TurnRole;
   readonly content: string;
+  /** Optional images for a USER turn. Only adapters that support image input map them (Anthropic);
+   *  `content` stays the authoritative text, so run hashing and text-only adapters are unaffected. */
+  readonly images?: readonly TurnImage[];
 }
 
 export interface AgentRequest {
