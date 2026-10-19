@@ -21,6 +21,7 @@ import {
 } from '@/domain/opschat/github-action';
 import { executeSupabaseDeployFromOpsChat } from '@/domain/opschat/supabase-action';
 import { executeVercelMutationFromOpsChat, type OpsChatVercelMutationInput } from '@/domain/opschat/vercel-action';
+import { executeAccurateBidsFromOpsChat } from '@/domain/opschat/accuratebids-action';
 import { loadProposal, transitionProposal } from '@/domain/opschat/conversations';
 
 /**
@@ -148,6 +149,14 @@ const ActionBody = z.discriminatedUnion('action', [
     expectedCurrentProductionDeploymentId: z.string().trim().regex(/^dpl_[A-Za-z0-9]{8,64}$/).optional(),
     description: z.string().trim().max(500).optional(),
   }),
+  z.object({
+    action: z.literal('execute_accuratebids'),
+    // The stored proposal kind — must match the payload's own kind (checked in runAction).
+    kind: z.enum(['accuratebids_quote', 'accuratebids_invoice', 'accuratebids_send']),
+    projectKey: z.string().min(1),
+    // The exact executor payload the owner saw; re-validated per kind by the bridge.
+    payload: z.record(z.string(), z.unknown()),
+  }),
 ]);
 
 /** The stored proposal `kind` → the confirm `action`. */
@@ -162,6 +171,9 @@ const KIND_TO_ACTION: Record<string, z.infer<typeof ActionBody>['action']> = {
   github_revert: 'execute_github_revert',
   supabase_deploy: 'execute_supabase_deploy',
   vercel_mutation: 'execute_vercel_mutation',
+  accuratebids_quote: 'execute_accuratebids',
+  accuratebids_invoice: 'execute_accuratebids',
+  accuratebids_send: 'execute_accuratebids',
 };
 
 function statusFor(err: unknown): number {
@@ -298,6 +310,10 @@ async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext): 
         };
       }
       return executeVercelMutationFromOpsChat(ctx, input);
+    }
+    case 'execute_accuratebids': {
+      if (body.payload.kind !== body.kind) throw new AppError('validation', 'The AccurateBids card does not match its payload.');
+      return executeAccurateBidsFromOpsChat(ctx, body.projectKey, body.payload);
     }
   }
 }
