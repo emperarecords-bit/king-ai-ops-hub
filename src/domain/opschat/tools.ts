@@ -7,6 +7,7 @@ import { listObjectives } from '@/domain/objectives/objectives';
 import { assessWorkspaceHealth } from '@/domain/health/health';
 import { listTasks, getTask, listRuns, listRunSteps } from '@/domain/tasks/tasks';
 import { openQuestionsForOwner, type OpenOwnerQuestion } from '@/domain/questions/questions';
+import { groupOpenQuestions } from '@/domain/questions/grouping';
 import { listApprovalsForQueue, getApprovalDetail, type QueueApprovalRow } from '@/domain/approvals/approvals';
 import { listAgents } from '@/domain/agents/agents';
 import { renderApprovalContent, type ApprovalContentView } from '@/domain/opschat/approval-content';
@@ -882,8 +883,14 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
               return p ? q.projectKey === p.key : false;
             })
           : all;
+        const groups = groupOpenQuestions(filtered);
         return JSON.stringify({
           count: filtered.length,
+          distinctCount: groups.length,
+          // Same-workspace questions with identical normalized text; answer each id via propose_answer_question.
+          duplicateGroups: groups
+            .filter((g) => g.count > 1)
+            .map((g) => ({ workspace: g.workspaceName, question: g.question, count: g.count, questionIds: g.questions.map((q) => q.questionId) })),
           questions: filtered.map((q) => ({
             questionId: q.questionId,
             workspace: q.workspaceName,

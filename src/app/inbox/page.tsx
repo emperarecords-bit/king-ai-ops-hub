@@ -2,10 +2,12 @@ import Link from 'next/link';
 import { listMyProjectsWithOrgRoles } from '@/domain/auth/guard';
 import { ownerInbox } from '@/domain/inbox/inbox';
 import { openQuestionsForOwner } from '@/domain/questions/questions';
+import { groupOpenQuestions } from '@/domain/questions/grouping';
 import { notificationsForOwner } from '@/domain/notifications/history';
 import { Card, EmptyState, PageHeader } from '@/components/ui';
 import { InboxDecisionForm } from './inbox-decision-form';
 import { QuestionAnswerForm } from './question-answer-form';
+import { GroupAnswerForm } from './group-answer-form';
 import { NotificationReadForm } from './notification-read-form';
 
 const SEVERITY_LABEL: Record<string, string> = {
@@ -26,6 +28,10 @@ const DELIVERY_LABEL: Record<string, string> = {
   canceled: 'Canceled',
 };
 
+function utc(d: Date): string {
+  return d.toISOString().slice(0, 16).replace('T', ' ');
+}
+
 /**
  * The Owner Inbox (EV-011 follow-up): every pending approval, every business,
  * one stack, oldest first. The owner's day as "things to okay". Each card is
@@ -36,6 +42,8 @@ export default async function InboxPage() {
   const { user, projects, orgRoles } = await listMyProjectsWithOrgRoles();
   const inbox = await ownerInbox(user.id, projects, orgRoles);
   const questions = await openQuestionsForOwner(user.id, projects, orgRoles);
+  // Display-only: identical (normalized) questions in one workspace collapse into one row.
+  const questionGroups = groupOpenQuestions(questions);
   const notifications = await notificationsForOwner(user.id, projects, orgRoles);
   const unreadCount = notifications.filter((n) => !n.read).length;
 
@@ -46,7 +54,7 @@ export default async function InboxPage() {
         subtitle={
           inbox.items.length === 0 && questions.length === 0
             ? `Nothing needs you — checked ${inbox.workspacesChecked} businesses.`
-            : `${inbox.items.length} decision${inbox.items.length === 1 ? '' : 's'} · ${questions.length} question${questions.length === 1 ? '' : 's'} for you.`
+            : `${inbox.items.length} decision${inbox.items.length === 1 ? '' : 's'} · ${questions.length} question${questions.length === 1 ? '' : 's'}${questionGroups.length < questions.length ? ` (${questionGroups.length} distinct)` : ''} for you.`
         }
       />
       <div className="text-sm">
@@ -60,21 +68,57 @@ export default async function InboxPage() {
           <h2 className="text-sm font-semibold uppercase tracking-wide text-[var(--muted)]">
             Questions for you — your answer becomes that business&apos;s knowledge
           </h2>
-          {questions.map((q) => (
-            <Card key={q.questionId}>
-              <div className="flex flex-col gap-2">
-                <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
-                  <span className="rounded bg-[var(--surface-raised)] px-2 py-0.5 text-[var(--foreground)]">
-                    {q.workspaceName}
-                  </span>
-                  {q.askedBy ? <span>asked by {q.askedBy}</span> : null}
-                  <span>· {q.createdAt.toISOString().slice(0, 16).replace('T', ' ')} UTC</span>
+          {questionGroups.map((g) =>
+            g.count === 1 ? (
+              <Card key={g.groupKey}>
+                <div className="flex flex-col gap-2">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
+                    <span className="rounded bg-[var(--surface-raised)] px-2 py-0.5 text-[var(--foreground)]">
+                      {g.workspaceName}
+                    </span>
+                    {g.askedBy[0] ? <span>asked by {g.askedBy[0]}</span> : null}
+                    <span>· {utc(g.oldestAt)} UTC</span>
+                  </div>
+                  <p className="text-sm font-semibold">{g.question}</p>
+                  <QuestionAnswerForm projectKey={g.projectKey} questionId={g.questions[0]!.questionId} />
                 </div>
-                <p className="text-sm font-semibold">{q.question}</p>
-                <QuestionAnswerForm projectKey={q.projectKey} questionId={q.questionId} />
-              </div>
-            </Card>
-          ))}
+              </Card>
+            ) : (
+              <Card key={g.groupKey}>
+                <div className="flex flex-col gap-2">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
+                    <span className="rounded bg-[var(--surface-raised)] px-2 py-0.5 text-[var(--foreground)]">
+                      {g.workspaceName}
+                    </span>
+                    <span className="rounded border border-[var(--border)] px-2 py-0.5">asked {g.count}×</span>
+                    {g.askedBy.length > 0 ? <span>by {g.askedBy.join(', ')}</span> : null}
+                    <span>
+                      · first {utc(g.oldestAt)} · latest {utc(g.newestAt)} UTC
+                    </span>
+                  </div>
+                  <p className="text-sm font-semibold">{g.question}</p>
+                  <GroupAnswerForm projectKey={g.projectKey} questionIds={g.questions.map((q) => q.questionId)} />
+                  <details className="text-sm">
+                    <summary className="cursor-pointer text-xs text-[var(--muted)]">
+                      Show the {g.count} individual questions — answer or dismiss each on its own
+                    </summary>
+                    <div className="mt-2 space-y-3 border-l border-[var(--border)] pl-3">
+                      {g.questions.map((q) => (
+                        <div key={q.questionId} className="space-y-1.5">
+                          <div className="text-xs text-[var(--muted)]">
+                            {q.askedBy ? `asked by ${q.askedBy} · ` : ''}
+                            {utc(q.createdAt)} UTC
+                          </div>
+                          <p className="text-sm">{q.question}</p>
+                          <QuestionAnswerForm projectKey={q.projectKey} questionId={q.questionId} />
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                </div>
+              </Card>
+            ),
+          )}
         </section>
       ) : null}
 
