@@ -7,6 +7,7 @@ import {
   OPS_CHAT_EARLIER_TURN_PENDING_MESSAGE,
   OPS_CHAT_TIMEOUT_MESSAGE,
 } from '@/domain/opschat/limits';
+import type { ApprovalContentView } from '@/domain/opschat/approval-content';
 import { createDeadlineWatchdog } from './ops-chat-watchdog';
 import {
   applySavedMapping,
@@ -32,6 +33,8 @@ type Proposal =
       summary: string;
       decision: 'approved' | 'rejected';
       note: string;
+      /** Server-rendered from the stored approval payload; absent on cards saved before it existed. */
+      content?: ApprovalContentView;
     }
   | {
       kind: 'dispatch_task';
@@ -257,6 +260,39 @@ function Rich({ text }: { text: string }) {
     <span className="whitespace-pre-wrap">
       {parts.map((p, i) => (i % 2 === 1 ? <strong key={i}>{p}</strong> : <span key={i}>{p}</span>))}
     </span>
+  );
+}
+
+/** The proposed content of an approval (rendered + redacted server-side) — what the owner is deciding. */
+function ApprovalContentBlock({ content }: { content: ApprovalContentView }) {
+  return (
+    <div className="mt-2 rounded-md border border-[var(--border)] p-2">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--muted)]">{content.title}</p>
+      {content.fields.length ? (
+        <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-xs">
+          {content.fields.map((f, i) => (
+            <div key={i} className="contents">
+              <dt className="text-[var(--muted)]">{f.label}</dt>
+              <dd className="break-all">{f.value}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
+      {content.body ? (
+        <pre
+          className={`mt-1 max-h-80 overflow-auto whitespace-pre-wrap break-words text-sm ${content.format === 'json' || content.format === 'http' ? 'font-mono text-xs' : 'font-sans'}`}
+        >
+          {content.body}
+        </pre>
+      ) : null}
+      {content.truncated || content.redacted ? (
+        <p className="mt-1 text-[11px] text-[var(--muted)]">
+          {[content.truncated ? 'Long content was shortened.' : null, content.redacted ? 'Credentials were hidden.' : null]
+            .filter(Boolean)
+            .join(' ')}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -939,6 +975,7 @@ export function OpsChatClient({
                         ) : p.kind === 'decide_approval' ? (
                           <>
                             <p className="mt-1 whitespace-pre-wrap text-sm">{p.summary}</p>
+                            {p.content ? <ApprovalContentBlock content={p.content} /> : null}
                             {p.note ? <p className="mt-1 text-xs text-[var(--muted)]">Note: {p.note}</p> : null}
                             {p.decision === 'rejected' && !p.note ? (
                               <p className="mt-1 text-xs text-[var(--danger,#c37474)]">

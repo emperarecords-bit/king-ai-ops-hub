@@ -187,6 +187,17 @@ describe('confirm — writes happen only after a valid confirm (from the stored 
     expect(h.executeApprovedIfEligible).toHaveBeenCalledTimes(1);
   });
 
+  it('decide_approval with a display `content` view → same governed decision; content never reaches the write', async () => {
+    const content = { format: 'email', title: 'Email to send', fields: [], body: 'Hi there', truncated: false, redacted: false };
+    h.loadProposal.mockResolvedValue(storedProposal('decide_approval', { decision: 'approved', content }));
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
+    expect(res.status).toBe(200);
+    expect(h.decideApproval).toHaveBeenCalledTimes(1);
+    // decideApproval(tx, ctx, approvalId, decision, note) — the display content is not an input.
+    expect(h.decideApproval.mock.calls[0]!.slice(2)).toEqual([UUID, 'approved', undefined]);
+    expect(h.executeApprovedIfEligible).toHaveBeenCalledTimes(1);
+  });
+
   it('decide_approval rejected → decideApproval only, no execution', async () => {
     h.loadProposal.mockResolvedValue(storedProposal('decide_approval', { decision: 'rejected', note: 'no' }));
     const res = await call({ proposalId: PROP, intent: 'confirm' });
