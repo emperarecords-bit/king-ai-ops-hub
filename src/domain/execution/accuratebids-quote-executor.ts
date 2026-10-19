@@ -129,6 +129,9 @@ export type AccurateBidsInvoicePayload = z.infer<typeof accurateBidsInvoicePaylo
  * real "View & Pay" / "View & Approve" emails). The idempotency key is the approval id, and
  * hub-send records it, so a retried approval can never email the customer twice.
  */
+/** Same rule as AccurateBids hub-send: one @, a dotted domain, no spaces/<>/quotes/commas/semicolons. */
+export const ACCURATEBIDS_EMAIL_RE = /^[^\s@<>"',;]+@[^\s@<>"',;]+\.[A-Za-z]{2,}$/;
+
 export const accurateBidsSendPayloadSchema = z
   .object({
     kind: z.literal('accuratebids_send'),
@@ -137,10 +140,23 @@ export const accurateBidsSendPayloadSchema = z
     quote_id: z.string().uuid().optional(),
     /** Display only (what the owner confirmed) — the endpoint re-reads the record itself. */
     label: z.string().max(200).optional(),
+    /**
+     * Invoice sends only: the address the OWNER gave for an invoice with no email on file.
+     * hub-send saves it only while the invoice has none (never overwriting one), then emails it.
+     */
+    customer_email: z
+      .string()
+      .trim()
+      .max(200)
+      .regex(ACCURATEBIDS_EMAIL_RE, 'must be one plain email address')
+      .optional(),
   })
   .strict()
   .refine((p) => (p.send === 'quote' ? Boolean(p.quote_id) && !p.invoice_id : Boolean(p.invoice_id) && !p.quote_id), {
     message: 'A quote send needs quote_id only; an invoice send needs invoice_id only.',
+  })
+  .refine((p) => p.send !== 'quote' || p.customer_email === undefined, {
+    message: 'customer_email is only for invoice sends.',
   });
 
 export type AccurateBidsSendPayload = z.infer<typeof accurateBidsSendPayloadSchema>;
@@ -425,7 +441,16 @@ export class AccurateBidsQuoteExecutor implements Executor {
     const p = parsed.data;
     const what = p.send === 'quote' ? 'quote' : p.send === 'invoice_reminder' ? 'payment reminder' : 'invoice';
     const idempotencyKey = accurateBidsSendKey(action.approvalId);
-    const plan = { kind: p.kind, send: p.send, invoiceId: p.invoice_id ?? null, quoteId: p.quote_id ?? null, label: p.label ?? null, idempotencyKey };
+    // The plan (audit) records only THAT an owner-given address came with the send, never the address.
+    const plan = {
+      kind: p.kind,
+      send: p.send,
+      invoiceId: p.invoice_id ?? null,
+      quoteId: p.quote_id ?? null,
+      label: p.label ?? null,
+      idempotencyKey,
+      withOwnerEmail: p.customer_email !== undefined,
+    };
     if (action.mode === 'dry_run') {
       return result('not_executed', `Dry run only. Would email the ${what} to the customer.`, { ...plan, wouldExecute: true });
     }
@@ -437,6 +462,7 @@ export class AccurateBidsQuoteExecutor implements Executor {
         body: JSON.stringify({
           kind: p.send,
           ...(p.send === 'quote' ? { quote_id: p.quote_id } : { invoice_id: p.invoice_id }),
+          ...(p.customer_email !== undefined ? { customer_email: p.customer_email } : {}),
           idempotency_key: idempotencyKey,
         }),
         signal: AbortSignal.timeout(25_000),
@@ -454,8 +480,8 @@ export class AccurateBidsQuoteExecutor implements Executor {
         const label = typeof body.label === 'string' ? body.label : p.label ?? what;
         return result(
           'succeeded',
-          `${what[0]!.toUpperCase()}${what.slice(1)} ${label} emailed to the customer${sentTo ? ` (${sentTo})` : ''}${body.replayed === true ? ' — already sent earlier; not emailed again' : ''}.`,
-          { ...plan, sentTo, replayed: body.replayed === true, invoiceNumber: body.invoice_number ?? null },
+          `${what[0]!.toUpperCase()}${what.slice(1)} ${label} emailed to the customer${sentTo ? ` (${sentTo})` : ''}${body.email_saved === true ? '; that email is now saved on the invoice' : ''}${body.replayed === true ? ' — already sent earlier; not emailed again' : ''}.`,
+          { ...plan, sentTo, replayed: body.replayed === true, emailSaved: body.email_saved === true, invoiceNumber: body.invoice_number ?? null },
         );
       }
       if (body.ambiguous === true || res.status >= 500) {

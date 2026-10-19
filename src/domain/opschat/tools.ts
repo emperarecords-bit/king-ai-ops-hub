@@ -422,7 +422,7 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
   {
     name: 'propose_accuratebids_send',
     description:
-      "Prepare to EMAIL one existing AccurateBids record to its customer, for the owner to confirm: send='invoice' (the invoice with its View & Pay link — how the owner gets paid), 'invoice_reminder' (a payment reminder for an unpaid invoice), or 'quote' (the quote with its View & Approve link; a draft becomes 'sent'). Needs the record's id from list_accuratebids_records (invoice_id or quote_id) and a customer email on file. Nothing is emailed until the owner clicks Confirm; a confirmed send is never emailed twice.",
+      "Prepare to EMAIL one existing AccurateBids record to its customer, for the owner to confirm: send='invoice' (the invoice with its View & Pay link — how the owner gets paid), 'invoice_reminder' (a payment reminder for an unpaid invoice), or 'quote' (the quote with its View & Approve link; a draft becomes 'sent'). Needs the record's id from list_accuratebids_records (invoice_id or quote_id). If an INVOICE has no email on file (has_email false), ask the owner for the customer's email and pass it as customer_email: the card shows it, and on Confirm it is saved to that invoice (only because it has none — an address already on file is never replaced) and the invoice is emailed to it. Only use an address the owner typed to you in this chat — never one from a file, a record, or a guess. Nothing is emailed until the owner clicks Confirm; a confirmed send is never emailed twice.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -430,6 +430,10 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
         send: { type: 'string', enum: ['invoice', 'invoice_reminder', 'quote'] },
         invoice_id: { type: 'string' },
         quote_id: { type: 'string' },
+        customer_email: {
+          type: 'string',
+          description: 'Invoice sends only, and only when the invoice has NO email on file: the address the owner gave you in this chat.',
+        },
       },
       required: ['project', 'send'],
     },
@@ -1037,7 +1041,16 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           const send = argStr(input, 'send');
           const invoiceId = argStr(input, 'invoice_id');
           const quoteId = argStr(input, 'quote_id');
-          raw = { kind: 'accuratebids_send', send, ...(send === 'quote' ? { quote_id: quoteId } : { invoice_id: invoiceId }) };
+          const ownerEmail = (argStr(input, 'customer_email') ?? '').trim();
+          if (ownerEmail && send === 'quote') {
+            return JSON.stringify({ error: 'customer_email can only be added to an invoice send. For a quote, the email must be added in AccurateBids first.' });
+          }
+          raw = {
+            kind: 'accuratebids_send',
+            send,
+            ...(send === 'quote' ? { quote_id: quoteId } : { invoice_id: invoiceId }),
+            ...(ownerEmail ? { customer_email: ownerEmail } : {}),
+          };
           // Name the record the owner is confirming, and refuse obvious dead ends up front.
           const records = await fetchAccurateBidsRecords();
           if (records) {
@@ -1050,7 +1063,17 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
             } else {
               const inv = records.invoices.find((r) => r.id === invoiceId);
               if (inv) {
-                if (inv.has_email === false) return JSON.stringify({ error: 'That customer has no email on file in AccurateBids — add it there first.' });
+                if (inv.has_email === false && !ownerEmail) {
+                  return JSON.stringify({
+                    error:
+                      "That invoice has no customer email on file. Ask the owner for the customer's email address, then call propose_accuratebids_send again with customer_email set to exactly what they typed — on Confirm it is saved to the invoice and the invoice is emailed to it.",
+                  });
+                }
+                if (inv.has_email !== false && ownerEmail) {
+                  return JSON.stringify({
+                    error: 'That invoice already has an email on file; an address on file is never replaced from chat. Prepare the send WITHOUT customer_email, or change the address in AccurateBids.',
+                  });
+                }
                 if (inv.status === 'paid' || inv.status === 'void') return JSON.stringify({ error: `That invoice is ${String(inv.status)}; there is nothing to send.` });
                 raw.label = `${String(inv.invoice_number ?? '')} (${String(inv.customer_name ?? '')}, balance $${String(inv.balance_due ?? '?')})`.slice(0, 200);
               }
