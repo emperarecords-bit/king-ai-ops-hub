@@ -1,7 +1,8 @@
 # Ops Chat Approval Content — Production Release Evidence (v82)
 
-**Status:** ✅ Deployed to production 2026-10-19 (release **v82**). Infrastructure acceptance passed (§7).
-Feature acceptance (§8) is **PENDING**: it needs the owner signed in to `/ops` with a legitimate pending approval.
+**Status:** ✅ Deployed to production 2026-10-19 (release **v82**). Infrastructure acceptance passed (§7). Feature
+acceptance (§8) passed for draft visibility on the real `effcc035` record. The confirm-card check is explicitly
+**deferred**: no pending approval existed, and none was fabricated.
 **Scope:** Ships #158. Ops Chat shows the owner the actual stored content of a pending approval (`get_approval_detail`,
 admin-only) and on the `decide_approval` confirm card. The content is bounded and credential-redacted, and it is
 rendered from the stored approval row. The release also adds the system-prompt rule that approval, customer and
@@ -132,13 +133,16 @@ command on the throwaway machine `894dd6b6665378`:
 
 ## 8. Feature acceptance (#158, production, owner signed in)
 
+Run 2026-10-19 in a new conversation (`52c00463-0f56-43d2-b93e-b96a86572e6a`), with the owner signed in to `/ops`.
+
 | Check | Result |
 |---|---|
-| Open a legitimate pending approval; ask Ops Chat what it actually says | **PENDING** |
-| The real stored draft is visible in the reply (`get_approval_detail` → `content`) | **PENDING** |
-| The same content appears on the `decide_approval` confirm card | **PENDING** |
-| Credentials/secrets redacted, if any exist in the payload | **PENDING** |
-| The approval is not executed unless the owner actually decides to | **PENDING** |
+| Legitimate pending approval available | **None.** Ops Chat (`list_pending_approvals`) reported 0 pending approvals across all workspaces. The original acceptance case `effcc035` had already been **rejected** by the owner on v80. No synthetic approval was created (production safety policy, as in v79). |
+| Ask Ops Chat what the approval actually says | **PASS** on the real record `effcc035-695c-4a78-ba66-3b299c267d70` (`email_send`, "Reply to ONEAL regarding billing/subscription access", status Rejected). `get_approval_detail` reads decided approvals too. |
+| The real stored draft is visible in the reply | **PASS.** Ops Chat returned the stored draft body verbatim, plus the `Inquiry: e4c08c7c-409d-4b90-b1ea-46b8d5f78244` line. That line is the renderer's labelled `request_id` field, so the content came from the stored payload and not from model text. On v80 the same request got "I don't have access to the literal draft email body". |
+| The same content appears on the `decide_approval` confirm card | **DEFERRED.** A confirm card can only be prepared for a *pending* approval, and none exists. Validate on the next legitimate owner-generated pending approval. Covered pre-release by `tests/unit/ops-chat-approval-content.test.ts`: the card content is rendered from the stored row and ignores model input. |
+| Credentials/secrets redacted, if any exist | **N/A** in production: the `effcc035` payload (`reply_text`, `request_id`) holds no credential. Covered by unit tests. |
+| Nothing executed or decided | **PASS.** Both turns were read-only; Ops Chat proposed nothing (0 cards) and changed nothing. |
 
 ## 9. Rollback
 
