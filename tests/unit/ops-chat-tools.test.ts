@@ -78,6 +78,23 @@ describe('tool layer — reads are tenant-scoped to the caller', () => {
   });
 });
 
+describe('tool layer — list_open_questions duplicate groups', () => {
+  it('reports every question plus same-workspace duplicate groups whose ids match the individual questions', async () => {
+    const at = new Date('2026-10-01T00:00:00Z');
+    h.openQuestionsForOwner.mockResolvedValue([
+      { questionId: 'q1', projectKey: 'empera', workspaceName: 'Empera', askedBy: 'Bookkeeper', question: 'Which bank?', createdAt: at },
+      { questionId: 'q2', projectKey: 'empera', workspaceName: 'Empera', askedBy: 'Bookkeeper', question: 'which  bank', createdAt: at },
+      { questionId: 'q3', projectKey: 'accuratebids', workspaceName: 'AccurateBids', askedBy: null, question: 'Which bank?', createdAt: at },
+    ]);
+    const ts = createOpsChatToolset(AUTH);
+    const out = JSON.parse(await ts.runTool({ name: 'list_open_questions', input: {} }));
+    expect(out.count).toBe(3);
+    expect(out.questions).toHaveLength(3);
+    expect(out.distinctCount).toBe(2);
+    expect(out.duplicateGroups).toEqual([{ workspace: 'Empera', question: 'which  bank', count: 2, questionIds: ['q1', 'q2'] }]);
+  });
+});
+
 describe('tool layer — propose tools record data only, never mutate', () => {
   it('propose_answer_question records a proposal for a question the owner can see', async () => {
     h.openQuestionsForOwner.mockResolvedValue([

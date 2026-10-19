@@ -129,6 +129,15 @@ describe('Ops Chat pulse — deterministic opening (no model call)', () => {
     const p = pulse({ totals: { ...pulse().totals, pendingApprovals: 0 }, openQuestions: [q('AccurateBids', 'x'), q('AccurateBids', 'y')] });
     expect(openingMessage(p)).toContain('Needs you');
     expect(openingMessage(p)).toContain('2 questions');
+    expect(openingMessage(p)).not.toContain('distinct');
+  });
+
+  it('keeps the true question count and notes how many are distinct when duplicates exist', () => {
+    const p = pulse({
+      openQuestions: [q('Empera', 'Which bank?'), q('Empera', 'which bank'), q('Empera', 'Which bank?'), q('AccurateBids', 'Which bank?')],
+    });
+    expect(openingMessage(p)).toContain('4 questions (2 distinct)');
+    expect(needsYouCount(p)).toBe(4);
   });
 
   it('reassures calmly when nothing needs the owner', () => {

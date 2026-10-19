@@ -2,6 +2,7 @@ import 'server-only';
 import { listMyProjectsWithOrgRoles } from '@/domain/auth/guard';
 import { morningBriefing, type MorningBriefing, type WorkspaceBriefing } from '@/domain/briefing/briefing';
 import { openQuestionsForOwner, type OpenOwnerQuestion } from '@/domain/questions/questions';
+import { groupOpenQuestions } from '@/domain/questions/grouping';
 import { overallLabel, type OverallHealthState } from '@/domain/health/health';
 
 /**
@@ -93,7 +94,11 @@ function needsYouLine(pulse: OpsPulse): string {
     bits.push(`${pulse.totals.pendingApprovals} approval${pulse.totals.pendingApprovals === 1 ? '' : 's'}`);
   }
   if (pulse.openQuestions.length > 0) {
-    bits.push(`${pulse.openQuestions.length} question${pulse.openQuestions.length === 1 ? '' : 's'}`);
+    const distinct = groupOpenQuestions(pulse.openQuestions).length;
+    bits.push(
+      `${pulse.openQuestions.length} question${pulse.openQuestions.length === 1 ? '' : 's'}` +
+        (distinct < pulse.openQuestions.length ? ` (${distinct} distinct)` : ''),
+    );
   }
   if (bits.length === 0) return '✅ Nothing needs you right now.';
   return `⚠️ Needs you: ${bits.join(' · ')}`;
