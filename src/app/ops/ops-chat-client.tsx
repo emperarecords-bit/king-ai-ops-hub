@@ -114,6 +114,14 @@ type Proposal =
       riskClass: string;
     }
   | {
+      kind: 'accuratebids_quote' | 'accuratebids_invoice' | 'accuratebids_send';
+      projectKey: string;
+      workspaceName: string;
+      summary: string;
+      payload: Record<string, unknown>;
+      content?: ApprovalContentView;
+    }
+  | {
       kind: 'vercel_mutation';
       projectKey: string;
       workspaceName: string;
@@ -230,6 +238,10 @@ const TOOL_LABEL: Record<string, string> = {
   list_pending_approvals: 'finding pending approvals',
   get_approval_detail: 'reading the approval',
   read_attachment: 'reading your attachment',
+  list_accuratebids_records: 'checking AccurateBids',
+  propose_accuratebids_quote: 'preparing the quote',
+  propose_accuratebids_invoice: 'preparing the invoice',
+  propose_accuratebids_send: 'preparing the email',
   list_agents: 'listing the agents',
   propose_answer_question: 'preparing the answer',
   propose_decide_approval: 'preparing the decision',
@@ -328,6 +340,12 @@ function doneLabel(p: Proposal): string {
       return `✓ Deploy requested for "${p.functionSlug}" in project ${p.projectRef}.`;
     case 'vercel_mutation':
       return `✓ ${p.operation} requested for ${p.vercelProjectId}.`;
+    case 'accuratebids_quote':
+      return '✓ Draft quote created in AccurateBids.';
+    case 'accuratebids_invoice':
+      return '✓ Invoice created in AccurateBids.';
+    case 'accuratebids_send':
+      return `✓ ${abSendWhat(p)[0]!.toUpperCase()}${abSendWhat(p).slice(1)} emailed to the customer.`;
   }
 }
 function headerLabel(p: Proposal): string {
@@ -354,6 +372,12 @@ function headerLabel(p: Proposal): string {
       return p.operation === 'redeploy'
         ? `Confirm — redeploy in ${p.vercelProjectId} (no traffic change)`
         : `Confirm — ${p.operation} PRODUCTION in ${p.vercelProjectId}`;
+    case 'accuratebids_quote':
+      return 'Confirm — draft a quote in AccurateBids (not sent to the customer)';
+    case 'accuratebids_invoice':
+      return 'Confirm — create a real unpaid invoice in AccurateBids (not sent yet)';
+    case 'accuratebids_send':
+      return `Confirm — EMAIL the ${abSendWhat(p)} to the customer`;
   }
 }
 function confirmLabel(p: Proposal): string {
@@ -378,7 +402,19 @@ function confirmLabel(p: Proposal): string {
       return 'Confirm & deploy';
     case 'vercel_mutation':
       return p.operation === 'redeploy' ? 'Confirm & redeploy' : p.operation === 'promote' ? 'Confirm & promote' : 'Confirm & roll back';
+    case 'accuratebids_quote':
+      return 'Confirm & create draft';
+    case 'accuratebids_invoice':
+      return 'Confirm & create invoice';
+    case 'accuratebids_send':
+      return 'Confirm & email customer';
   }
+}
+
+/** What an AccurateBids send emails, in the owner's words. */
+function abSendWhat(p: { payload: Record<string, unknown> }): string {
+  const s = p.payload.send;
+  return s === 'quote' ? 'quote' : s === 'invoice_reminder' ? 'payment reminder' : 'invoice';
 }
 
 const CONFIDENCE_STYLE: Record<Confidence, string> = {
@@ -924,7 +960,19 @@ export function OpsChatClient({
                     key={i}
                     className="mt-3 rounded-md border border-[var(--accent)] bg-[var(--surface-raised,rgba(120,160,255,0.06))] p-3"
                   >
-                    {card.state === 'done' ? (
+                    {card.state === 'done' && (p.kind === 'accuratebids_quote' || p.kind === 'accuratebids_invoice' || p.kind === 'accuratebids_send') ? (
+                      // AccurateBids: show the executor's REAL outcome — never a green ✓ for a blocked / failed / unconfirmed send.
+                      <div className="flex flex-col gap-1">
+                        {result?.outcome === 'succeeded' ? (
+                          <p className="text-sm text-[var(--success,#6bbf73)]">{doneLabel(p)}</p>
+                        ) : (
+                          <p className="text-sm text-[var(--danger,#c37474)]">
+                            {result?.outcome === 'ambiguous' ? '⚠ Outcome unconfirmed — check AccurateBids before retrying.' : '✗ Not completed.'}
+                          </p>
+                        )}
+                        {result?.message ? <p className="text-xs text-[var(--muted)]">{result.message}</p> : null}
+                      </div>
+                    ) : card.state === 'done' ? (
                       <div className="flex flex-col gap-1">
                         <p className="text-sm text-[var(--success,#6bbf73)]">{doneLabel(p)}</p>
                         {p.kind === 'github_pr' && result?.prUrl ? (
@@ -1107,7 +1155,19 @@ export function OpsChatClient({
                               Risk: {p.riskClass.replace(/_/g, ' ')} · Side effect: deploys the function&apos;s exact bytes at that commit SHA to the live project (refused unless the project + repo are linked, the source path has files, and the entrypoint is present). Rollback: redeploy the prior source SHA. Recovery: a server error mid-deploy is marked ambiguous for reconciliation, never auto-retried.
                             </p>
                           </div>
-                        ) : (
+                        ) : p.kind === 'accuratebids_quote' || p.kind === 'accuratebids_invoice' || p.kind === 'accuratebids_send' ? (
+                          <div className="mt-1 flex flex-col gap-0.5 text-sm">
+                            <p className="whitespace-pre-wrap">{p.summary}</p>
+                            {p.content ? <ApprovalContentBlock content={p.content} /> : null}
+                            <p className="mt-1 text-xs text-[var(--muted)]">
+                              {p.kind === 'accuratebids_send'
+                                ? 'Emails the customer through AccurateBids (its own email with the pay / approve link). Sent at most once — a retry never emails twice.'
+                                : p.kind === 'accuratebids_invoice'
+                                  ? 'Creates a real unpaid invoice in your AccurateBids account. It is NOT emailed to the customer until you confirm a send. A quote can only be invoiced once.'
+                                  : 'Creates a DRAFT quote in your AccurateBids account. Nothing goes to the customer until you send it.'}
+                            </p>
+                          </div>
+                        ) : p.kind === 'vercel_mutation' ? (
                           <div className="mt-1 flex flex-col gap-0.5 text-sm">
                             <p className="font-semibold">
                               Vercel {p.operation} — {p.vercelProjectId}
@@ -1129,7 +1189,7 @@ export function OpsChatClient({
                               Recovery: a server error mid-operation is marked ambiguous for reconciliation, never auto-retried.
                             </p>
                           </div>
-                        )}
+                        ) : null}
 
                         {card.error ? (
                           <p className="mt-2 text-xs text-[var(--danger,#c37474)]">{card.error}</p>

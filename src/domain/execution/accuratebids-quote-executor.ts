@@ -122,6 +122,34 @@ export const accurateBidsInvoicePayloadSchema = z
 
 export type AccurateBidsInvoicePayload = z.infer<typeof accurateBidsInvoicePayloadSchema>;
 
+/**
+ * The SEND side of the tap-in (owner directive 2026-10-19: "send out the invoice … to get paid").
+ * An owner-confirmed send of ONE existing record to its customer, through AccurateBids' own
+ * customer emails (hub-send → send-email: invoice_sent / invoice_reminder / quote_sent — the
+ * real "View & Pay" / "View & Approve" emails). The idempotency key is the approval id, and
+ * hub-send records it, so a retried approval can never email the customer twice.
+ */
+export const accurateBidsSendPayloadSchema = z
+  .object({
+    kind: z.literal('accuratebids_send'),
+    send: z.enum(['invoice', 'invoice_reminder', 'quote']),
+    invoice_id: z.string().uuid().optional(),
+    quote_id: z.string().uuid().optional(),
+    /** Display only (what the owner confirmed) — the endpoint re-reads the record itself. */
+    label: z.string().max(200).optional(),
+  })
+  .strict()
+  .refine((p) => (p.send === 'quote' ? Boolean(p.quote_id) && !p.invoice_id : Boolean(p.invoice_id) && !p.quote_id), {
+    message: 'A quote send needs quote_id only; an invoice send needs invoice_id only.',
+  });
+
+export type AccurateBidsSendPayload = z.infer<typeof accurateBidsSendPayloadSchema>;
+
+/** The hub-send idempotency key for an approval: one approval = at most one email. */
+export function accurateBidsSendKey(approvalId: string): string {
+  return `hub:${approvalId}`;
+}
+
 export interface AccurateBidsQuoteExecutorDeps {
   /** The hub-quote edge-function URL. Unset means quote drafting is unconfigured and blocks. */
   readonly endpointUrl: string | undefined;
@@ -129,6 +157,8 @@ export interface AccurateBidsQuoteExecutorDeps {
   readonly replyUrl?: string | undefined;
   /** The hub-invoice edge-function URL. Unset means invoicing is unconfigured and blocks. */
   readonly invoiceUrl?: string | undefined;
+  /** The hub-send edge-function URL. Unset means customer sends are unconfigured and block. */
+  readonly sendUrl?: string | undefined;
   /** The machine service token AccurateBids minted for the hub. Never a human login. */
   readonly serviceToken: string | undefined;
   readonly fetcher?: typeof fetch;
@@ -140,6 +170,7 @@ export function accurateBidsDepsFromEnv(env: Record<string, string | undefined> 
     endpointUrl: env.ACCURATEBIDS_QUOTE_URL,
     replyUrl: env.ACCURATEBIDS_REPLY_URL,
     invoiceUrl: env.ACCURATEBIDS_INVOICE_URL,
+    sendUrl: env.ACCURATEBIDS_SEND_URL,
     serviceToken: env.ACCURATEBIDS_SERVICE_TOKEN,
   };
 }
@@ -185,6 +216,11 @@ export class AccurateBidsQuoteExecutor implements Executor {
 
     // Email Desk: an approved support-inquiry reply routes to its own endpoint.
     const kindPeek = (action.payload as Record<string, unknown>).kind;
+
+    // Customer send (invoice / reminder / quote) — routes to hub-send, keyed by the approval.
+    if (kindPeek === 'accuratebids_send') {
+      return this.executeSend(action, result);
+    }
     if (kindPeek === 'accuratebids_reply') {
       const replyParsed = accurateBidsReplyPayloadSchema.safeParse(action.payload);
       if (!replyParsed.success) {
@@ -283,7 +319,7 @@ export class AccurateBidsQuoteExecutor implements Executor {
         const amount = parsedBody.amount;
         return result(
           'succeeded',
-          `Invoice ${invoiceNumber ?? ''}${amount != null ? ` ($${amount})` : ''} created in AccurateBids. Review and send it there.`,
+          `Invoice ${invoiceNumber ?? ''}${amount != null ? ` ($${amount})` : ''} created in AccurateBids (not yet sent to the customer — ask Ops Chat to send it, or send it from the app).`,
           { ...invPlan, invoiceId: parsedBody.invoice_id ?? null, invoiceNumber, amount: amount ?? null },
         );
       } catch (err) {
@@ -353,13 +389,85 @@ export class AccurateBidsQuoteExecutor implements Executor {
       const grandTotal = parsedBody.grand_total;
       return result(
         'succeeded',
-        `Draft quote "${payload.job_name}" created in AccurateBids${grandTotal != null ? ` ($${grandTotal})` : ''}. Review and send it there.`,
+        `Draft quote "${payload.job_name}" created in AccurateBids${grandTotal != null ? ` ($${grandTotal})` : ''} (not yet sent to the customer — review it, then ask Ops Chat to send it or send it from the app).`,
         { ...plan, quoteId, quoteUrl: url, grandTotal: grandTotal ?? null },
       );
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'unknown error';
       // Timeouts and network failures are indeterminate: the request may have landed.
       return result('ambiguous', `Could not confirm the AccurateBids draft (${detail}). Check the Quotes list before retrying.`, plan, { reconciliation: 'required' });
+    }
+  }
+
+  /**
+   * Send ONE record to its customer through hub-send. Outcome mapping is deliberately honest:
+   * a refusal before sending (no email, not found, paid/void) is `blocked`/`failed`; a provider
+   * refusal is `failed` (retry allowed — hub-send lets the same key retry a failed send); and
+   * anything that could have reached the customer without confirmation is `ambiguous`.
+   */
+  private async executeSend(
+    action: ExecutorAction,
+    result: (
+      outcome: ExecutorResult['outcome'],
+      message: string,
+      preview: Record<string, unknown> | null,
+      opts?: { reconciliation?: ExecutorResult['reconciliation']; retryAllowed?: boolean },
+    ) => ExecutorResult,
+  ): Promise<ExecutorResult> {
+    const parsed = accurateBidsSendPayloadSchema.safeParse(action.payload);
+    if (!parsed.success) {
+      const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+      return result('blocked', `accuratebids_send payload is not executable: ${issues}`, null);
+    }
+    if (!this.deps.sendUrl || !this.deps.serviceToken) {
+      return result('blocked', 'Sending to customers through AccurateBids is not configured on this server.', null);
+    }
+    const p = parsed.data;
+    const what = p.send === 'quote' ? 'quote' : p.send === 'invoice_reminder' ? 'payment reminder' : 'invoice';
+    const idempotencyKey = accurateBidsSendKey(action.approvalId);
+    const plan = { kind: p.kind, send: p.send, invoiceId: p.invoice_id ?? null, quoteId: p.quote_id ?? null, label: p.label ?? null, idempotencyKey };
+    if (action.mode === 'dry_run') {
+      return result('not_executed', `Dry run only. Would email the ${what} to the customer.`, { ...plan, wouldExecute: true });
+    }
+    try {
+      const fetcher = this.deps.fetcher ?? fetch;
+      const res = await fetcher(this.deps.sendUrl, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${this.deps.serviceToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind: p.send,
+          ...(p.send === 'quote' ? { quote_id: p.quote_id } : { invoice_id: p.invoice_id }),
+          idempotency_key: idempotencyKey,
+        }),
+        signal: AbortSignal.timeout(25_000),
+      });
+      const text = await res.text();
+      let body: Record<string, unknown> = {};
+      try {
+        body = JSON.parse(text) as Record<string, unknown>;
+      } catch {
+        // Non-JSON body; the status carries the verdict.
+      }
+      const detail = typeof body.error === 'string' ? body.error : `HTTP ${res.status}`;
+      if (res.ok && body.success === true) {
+        const sentTo = typeof body.sent_to === 'string' ? body.sent_to : null;
+        const label = typeof body.label === 'string' ? body.label : p.label ?? what;
+        return result(
+          'succeeded',
+          `${what[0]!.toUpperCase()}${what.slice(1)} ${label} emailed to the customer${sentTo ? ` (${sentTo})` : ''}${body.replayed === true ? ' — already sent earlier; not emailed again' : ''}.`,
+          { ...plan, sentTo, replayed: body.replayed === true, invoiceNumber: body.invoice_number ?? null },
+        );
+      }
+      if (body.ambiguous === true || res.status >= 500) {
+        return result('ambiguous', `Could not confirm whether the ${what} was emailed (${detail}). Check the customer's email log in AccurateBids before retrying.`, plan, { reconciliation: 'required' });
+      }
+      if (res.status === 400 || res.status === 404 || res.status === 409) {
+        return result('blocked', `The ${what} was not sent: ${detail}`, plan);
+      }
+      return result('failed', `The ${what} was not sent: ${detail}`, plan, { retryAllowed: true });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unknown error';
+      return result('ambiguous', `Could not confirm whether the ${what} was emailed (${detail}). Check the customer's email log in AccurateBids before retrying.`, plan, { reconciliation: 'required' });
     }
   }
 

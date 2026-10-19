@@ -219,6 +219,21 @@ function renderQuoteOrInvoice(p: Record<string, unknown>, kind: 'quote' | 'invoi
   );
 }
 
+function renderSend(p: Record<string, unknown>): ApprovalContentView {
+  const b = new Builder();
+  const send = firstStr(p, ['send']);
+  const what = send === 'quote' ? 'quote' : send === 'invoice_reminder' ? 'payment reminder for invoice' : 'invoice';
+  b.field('Sends', what)
+    .field('Record', firstStr(p, ['label']))
+    .field('Invoice id', firstStr(p, ['invoice_id']))
+    .field('Quote id', firstStr(p, ['quote_id']));
+  return b.build(
+    'email',
+    `Email the ${what} to the customer through AccurateBids (its own "View & ${send === 'quote' ? 'Approve' : 'Pay'}" email)`,
+    null,
+  );
+}
+
 function renderHttp(p: Record<string, unknown>): ApprovalContentView {
   const b = new Builder();
   b.field('Method', (firstStr(p, ['method']) ?? 'unspecified').toUpperCase()).field(
@@ -272,6 +287,7 @@ export function renderApprovalContent(actionType: string, payload: unknown): App
     }
     if (p.kind === 'accuratebids_quote') return withPre(renderQuoteOrInvoice(p, 'quote'));
     if (p.kind === 'accuratebids_invoice') return withPre(renderQuoteOrInvoice(p, 'invoice'));
+    if (p.kind === 'accuratebids_send') return withPre(renderSend(p));
     return withPre(renderHttp(p));
   }
   return withPre(renderJson(p, actionType));
