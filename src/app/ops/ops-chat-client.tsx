@@ -318,7 +318,7 @@ function ApprovalContentBlock({ content }: { content: ApprovalContentView }) {
   );
 }
 
-function doneLabel(p: Proposal): string {
+function doneLabel(p: Proposal, result?: CardResult): string {
   switch (p.kind) {
     case 'answer_question':
       return `✓ Recorded — saved and added to ${p.workspaceName}'s knowledge.`;
@@ -327,7 +327,10 @@ function doneLabel(p: Proposal): string {
     case 'dispatch_task':
       return `✓ Started — task queued in ${p.workspaceName}.`;
     case 'rerun_task':
-      return `✓ Re-run queued for "${p.taskTitle}".`;
+      // The server's real outcome (new attempt vs already queued) — never a fixed "queued" claim.
+      if (result?.outcome === 'already_queued') return `ⓘ "${p.taskTitle}": ${result.message ?? 'already queued — nothing new was queued.'}`;
+      if (result?.outcome === 'started') return `✓ "${p.taskTitle}": ${result.message ?? 're-run started as a new attempt.'}`;
+      return `✓ Re-run requested for "${p.taskTitle}".`;
     case 'github_pr':
       return `✓ Pull request requested in ${p.repo}.`;
     case 'github_merge':
@@ -974,7 +977,7 @@ export function OpsChatClient({
                       </div>
                     ) : card.state === 'done' ? (
                       <div className="flex flex-col gap-1">
-                        <p className="text-sm text-[var(--success,#6bbf73)]">{doneLabel(p)}</p>
+                        <p className="text-sm text-[var(--success,#6bbf73)]">{doneLabel(p, result)}</p>
                         {p.kind === 'github_pr' && result?.prUrl ? (
                           <a
                             href={result.prUrl}

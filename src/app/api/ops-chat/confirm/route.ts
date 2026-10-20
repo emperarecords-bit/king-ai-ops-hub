@@ -10,8 +10,8 @@ import { serverEnv } from '@/lib/env.server';
 import { answerOwnerQuestion } from '@/domain/questions/questions';
 import { decideApproval } from '@/domain/approvals/approvals';
 import { executeApprovedIfEligible } from '@/domain/execution/execute-on-approval';
-import { createTask, getTask } from '@/domain/tasks/tasks';
-import { enqueueRun } from '@/domain/jobs/jobs';
+import { createTask } from '@/domain/tasks/tasks';
+import { enqueueRun, requestRerun, RerunRefusedError } from '@/domain/jobs/jobs';
 import { listAgents } from '@/domain/agents/agents';
 import {
   executeGitHubPrFromOpsChat,
@@ -242,11 +242,31 @@ async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext): 
       return { taskId };
     }
     case 'rerun_task': {
-      await withTenant(ctx, async (tx) => {
-        await getTask(tx, ctx, body.taskId); // throws NotFound if outside tenant
-        await enqueueRun(tx, ctx, body.taskId);
-      });
-      return null;
+      // A re-run is a real NEW attempt or an explicit refusal — never a job drained with no run while the card
+      // says "re-run queued" (server-cooling evidence, 2026-10-19 17:19). See requestRerun.
+      let r: Awaited<ReturnType<typeof requestRerun>>;
+      try {
+        r = await withTenant(ctx, (tx) => requestRerun(tx, ctx, body.taskId));
+      } catch (err) {
+        if (err instanceof RerunRefusedError) {
+          throw new AppError(err.reason === 'not_found' ? 'not_found' : 'conflict', err.message);
+        }
+        throw err;
+      }
+      return r.status === 'started'
+        ? {
+            outcome: 'started',
+            message: `Re-run started as a new attempt${r.previousStatus === 'completed' || r.previousStatus === 'failed' ? ` (the previous ${r.previousStatus} run and its result are kept)` : ''}.`,
+            taskId: r.taskId,
+            jobId: r.jobId,
+            previousRunId: r.previousRunId,
+          }
+        : {
+            outcome: 'already_queued',
+            message: 'Already queued or running — nothing new was queued.',
+            taskId: r.taskId,
+            jobId: r.jobId,
+          };
     }
     case 'execute_github_pr':
       return executeGitHubPrFromOpsChat(ctx, {
