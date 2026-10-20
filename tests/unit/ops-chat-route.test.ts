@@ -28,12 +28,17 @@ const h = vi.hoisted(() => ({
   tryClaimConversation: vi.fn(),
   release: vi.fn(),
   convRelease: vi.fn(),
+  listRunStartingCards: vi.fn(),
+  loadLinkedRunViews: vi.fn(),
+  tenantForUser: vi.fn(),
 }));
 
 vi.mock('@/domain/auth/guard', () => ({
   requireUser: h.requireUser,
   listMyProjectsWithOrgRoles: h.listMyProjectsWithOrgRoles,
+  tenantForUser: h.tenantForUser,
 }));
+vi.mock('@/domain/opschat/linked-runs', () => ({ loadLinkedRunViews: h.loadLinkedRunViews }));
 vi.mock('@/domain/opschat/pulse', () => ({ buildPulse: h.buildPulse, pulseContext: () => 'CTX' }));
 vi.mock('@/domain/opschat/tools', () => ({
   createOpsChatToolset: () => ({ tools: [], runTool: vi.fn(), getProposals: h.getProposals }),
@@ -44,6 +49,7 @@ vi.mock('@/domain/usage/rate-limit', () => ({ consumeRateLimit: h.consumeRateLim
 vi.mock('@/db/client', () => ({ getDb: () => ({ transaction: (fn: (tx: unknown) => unknown) => fn({}) }) }));
 vi.mock('@/db/tenant', () => ({ withUser: (_s: unknown, fn: (tx: unknown) => unknown) => fn({}) }));
 vi.mock('@/domain/opschat/conversations', () => ({
+  listRunStartingCards: h.listRunStartingCards,
   appendOwnerMessage: h.appendOwnerMessage,
   appendAssistantMessage: h.appendAssistantMessage,
   addProposal: h.addProposal,
@@ -92,6 +98,8 @@ beforeEach(() => {
   h.convRelease.mockResolvedValue(undefined);
   h.tryClaimTurn.mockResolvedValue({ claimed: true, release: h.release });
   h.tryClaimConversation.mockResolvedValue({ claimed: true, release: h.convRelease });
+  h.listRunStartingCards.mockResolvedValue([]);
+  h.loadLinkedRunViews.mockResolvedValue(new Map());
   h.streamWithTools.mockImplementation(async function* () {
     yield { kind: 'delta', text: 'Hello' };
     yield { kind: 'tool_start', name: 'list_tasks' };
@@ -128,6 +136,33 @@ describe('POST /api/ops-chat (v2) — input validation', () => {
     const res = await call('nonsense');
     expect(res.status).toBe(400);
     expect(h.streamWithTools).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/ops-chat — P5a linked runs in the prompt (best-effort)', () => {
+  it('the linked-run views for the conversation confirmed cards reach loadPromptTurns', async () => {
+    const cards = [{ id: 'card1', kind: 'dispatch_task', state: 'done', proposal: { projectKey: 'hvac' } }];
+    const views = new Map([['card1', { taskId: 't1', runId: 'r1', state: 'ready', finishedAt: '2026-10-20T10:42:00.000Z', text: 'Finished.' }]]);
+    h.listRunStartingCards.mockResolvedValue(cards);
+    h.loadLinkedRunViews.mockResolvedValue(views);
+    const text = await (await call({ message: 'what needs me', conversationId: CONV, turnId: TURN })).text();
+    expect(text).toContain('event: done');
+    expect(h.listRunStartingCards).toHaveBeenCalledWith(expect.anything(), 'u1', CONV);
+    expect(h.loadLinkedRunViews).toHaveBeenCalledWith(cards, expect.any(Function));
+    expect(h.loadPromptTurns).toHaveBeenCalledWith(expect.anything(), 'u1', CONV, 'owner1', expect.objectContaining({ linkedRuns: views }));
+  });
+
+  it('a lookup failure (sync or async) never fails the turn — the prompt just has no run lines', async () => {
+    for (const fail of [() => h.listRunStartingCards.mockImplementation(() => { throw new Error('sync boom'); }), () => h.loadLinkedRunViews.mockRejectedValue(new Error('db down'))]) {
+      vi.clearAllMocks();
+      h.listRunStartingCards.mockResolvedValue([]);
+      fail();
+      const text = await (await call({ message: 'what needs me', conversationId: CONV, turnId: TURN })).text();
+      expect(text).toContain('event: done');
+      expect(text).not.toContain('event: error');
+      const opts = h.loadPromptTurns.mock.calls.at(-1)![4] as { linkedRuns: Map<string, unknown> };
+      expect(opts.linkedRuns.size).toBe(0);
+    }
   });
 });
 

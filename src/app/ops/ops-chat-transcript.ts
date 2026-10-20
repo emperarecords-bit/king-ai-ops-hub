@@ -22,6 +22,8 @@
  *    reload — a card is never auto-confirmed again.
  */
 
+import { type LinkedRunView } from '@/domain/opschat/linked-run-view';
+
 export type MessageStatus = 'complete' | 'interrupted';
 
 /** Server-side proposal states plus two client-only "we can't prove the state" outcomes. */
@@ -41,6 +43,8 @@ export interface TranscriptCard {
   /** Loaded from the store (a card proposed in an earlier session / on another device), as opposed
    *  to one generated in the current stream. Display only — actionability never depends on it. */
   fromHistory?: boolean;
+  /** P5a: what the run this card started actually did (server-derived from the P4 links). */
+  linkedRun?: LinkedRunView;
 }
 
 /** A file attached to an owner message (display metadata only — never its contents). */
@@ -86,7 +90,7 @@ export interface PersistedMessage {
   content: string;
   question: string | null;
   replyToMessageId: string | null;
-  proposals: Array<{ id: string; proposal: unknown; state: string; result: unknown; error: string | null }>;
+  proposals: Array<{ id: string; proposal: unknown; state: string; result: unknown; error: string | null; linkedRun?: LinkedRunView | null }>;
   /** Owner rows: files sent with the message. */
   attachments?: AttachmentChip[];
 }
@@ -132,6 +136,7 @@ export function buildTranscript(persisted: readonly PersistedMessage[]): Transcr
             error: p.error ?? undefined,
             executed: asRecord(p.result),
             fromHistory: true,
+            ...(p.linkedRun ? { linkedRun: p.linkedRun } : {}),
           }))
         : undefined,
   });

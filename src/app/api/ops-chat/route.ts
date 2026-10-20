@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { AppError, RateLimitedError, toPublicMessage } from '@/lib/errors';
 import { log } from '@/lib/log';
-import { requireUser, listMyProjectsWithOrgRoles } from '@/domain/auth/guard';
+import { requireUser, listMyProjectsWithOrgRoles, tenantForUser } from '@/domain/auth/guard';
 import { getProvider } from '@/providers/registry';
 import { getDb } from '@/db/client';
 import { withUser } from '@/db/tenant';
@@ -17,10 +17,13 @@ import {
   conversationExists,
   createConversation,
   earliestUnansweredOwnerId,
+  listRunStartingCards,
   loadPromptTurns,
   loadReplyForOwnerMessage,
   type OpsChatMessageStatus,
 } from '@/domain/opschat/conversations';
+import { loadLinkedRunViews } from '@/domain/opschat/linked-runs';
+import { type LinkedRunView } from '@/domain/opschat/linked-run-view';
 import { tryClaimConversation, tryClaimTurn, type TurnClaim } from '@/domain/opschat/turn-claim';
 import { type ToolLoopEvent, type Turn, type TurnImage } from '@/types/provider';
 import { ATTACHMENT_LIMITS } from '@/domain/opschat/attachment-limits';
@@ -427,7 +430,19 @@ export async function POST(req: Request): Promise<Response> {
         // Reconstructed by the owner→reply link (not raw seq), so an interleaved reply with a higher
         // seq than a later owner message is still attached to the right turn; interrupted output is
         // excluded. The client never supplies conversation context.
-        const turns = await withUser({ userId }, (tx) => loadPromptTurns(tx, userId, conversationId, ownerMessageId, { maxOwnerTurns: OPS_CHAT_MAX_PROMPT_TURNS }));
+        // P5a: each confirmed dispatch/re-run card carries the outcome of the run it started (P4 links), read
+        // from the run rows. Best-effort: a lookup failure leaves today's card lines and never fails the turn.
+        let linkedRuns: Map<string, LinkedRunView>;
+        try {
+          const cards = await withUser({ userId }, (tx) => listRunStartingCards(tx, userId, conversationId));
+          linkedRuns = await loadLinkedRunViews(cards, (key) => tenantForUser(userId, key));
+        } catch (err) {
+          log.warn('ops-chat linked-run lookup failed (prompt keeps card lines only)', { errorClass: err instanceof Error ? err.name : 'unknown' });
+          linkedRuns = new Map<string, LinkedRunView>();
+        }
+        const turns = await withUser({ userId }, (tx) =>
+          loadPromptTurns(tx, userId, conversationId, ownerMessageId, { maxOwnerTurns: OPS_CHAT_MAX_PROMPT_TURNS, linkedRuns }),
+        );
         const promptTurns = await buildAttachmentAwareTurns(userId, conversationId, ownerMessageId, turns);
 
         // A completed model turn: commit the reply + proposals, then emit saved+done. A failed
