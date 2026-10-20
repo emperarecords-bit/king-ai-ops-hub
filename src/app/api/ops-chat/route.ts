@@ -8,6 +8,7 @@ import { withUser } from '@/db/tenant';
 import { consumeRateLimit } from '@/domain/usage/rate-limit';
 import { serverEnv } from '@/lib/env.server';
 import { buildPulse, pulseContext } from '@/domain/opschat/pulse';
+import { accurateBidsCapabilityContext } from '@/domain/opschat/accuratebids-capabilities';
 import { createOpsChatToolset, proposalKey, type OpsChatProposal } from '@/domain/opschat/tools';
 import {
   addProposal,
@@ -388,7 +389,10 @@ export async function POST(req: Request): Promise<Response> {
         let system: string;
         try {
           const pulse = await buildPulse();
-          system = `${SYSTEM_PROMPT}\n\n=== LIVE HUB SNAPSHOT (${new Date().toISOString()}) ===\n${pulseContext(pulse)}`;
+          // Current AccurateBids capabilities go in at turn start, so an older reply in this
+          // conversation ("can't do that") is never treated as still true after a release.
+          const abCapabilities = accurateBidsCapabilityContext();
+          system = `${SYSTEM_PROMPT}${abCapabilities ? `\n\n${abCapabilities}` : ''}\n\n=== LIVE HUB SNAPSHOT (${new Date().toISOString()}) ===\n${pulseContext(pulse)}`;
         } catch (err) {
           if (!(err instanceof AppError)) log.error('ops-chat pulse build failed', { err });
           sendTerminal('error', { message: toPublicMessage(err) });
