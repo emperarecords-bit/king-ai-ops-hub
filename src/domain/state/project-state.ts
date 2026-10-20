@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import {
   type ContextManifestEntry,
   type DataClassification,
@@ -7,6 +7,7 @@ import {
   type TenantContext,
 } from '@/types/domain';
 import { TenantViolationError } from '@/lib/errors';
+import { type RunContextScope } from '@/domain/tasks/run-context-scope';
 import { log } from '@/lib/log';
 import { type DbTx } from '@/db/client';
 import { agents, approvals, objectives, runs, tasks } from '@/db/schema';
@@ -316,10 +317,30 @@ export interface PendingReview {
   when: Date;
 }
 
+/**
+ * Which pending approvals a RUN may see. Omitted → every pending approval in the workspace (display callers,
+ * unchanged). For a run: only approvals raised by tasks in the run's own objective or standing schedule; a
+ * focused ad-hoc task (neither) sees none — another task's pending action is not this task's business, and
+ * seeing it is exactly how an HVAC task re-proposed the ONEAL support reply (run-context-scope.ts).
+ */
+export interface PendingReviewScope {
+  objectiveId: string | null;
+  scheduleId: string | null;
+  excludeTaskId: string | null;
+}
+
 export async function selectPendingReviews(
   tx: DbTx,
   ctx: TenantContext,
+  scope?: PendingReviewScope,
 ): Promise<PendingReview[]> {
+  if (scope && !scope.objectiveId && !scope.scheduleId) return [];
+  const related = scope
+    ? or(
+        scope.objectiveId ? eq(tasks.objectiveId, scope.objectiveId) : undefined,
+        scope.scheduleId ? eq(tasks.scheduleId, scope.scheduleId) : undefined,
+      )
+    : undefined;
   const rows = await tx
     .select({
       actionType: approvals.actionType,
@@ -329,11 +350,14 @@ export async function selectPendingReviews(
       projectId: approvals.projectId,
     })
     .from(approvals)
+    .leftJoin(tasks, eq(tasks.id, approvals.taskId))
     .where(
       and(
         eq(approvals.projectId, ctx.projectId),
         eq(approvals.orgId, ctx.orgId),
         eq(approvals.status, 'pending'),
+        related,
+        scope?.excludeTaskId ? sql`${approvals.taskId} is distinct from ${scope.excludeTaskId}` : undefined,
       ),
     )
     .orderBy(desc(approvals.createdAt))
@@ -364,13 +388,25 @@ export async function assembleProjectState(
   ctx: TenantContext,
   objectiveId: string | null,
   excludeTaskId: string | null,
+  /** A run passes its scope (run-context-scope.ts); omitted = the unscoped workspace view (unchanged). */
+  runScope?: { scheduleId: string | null; scope: RunContextScope },
 ): Promise<ProjectStatePackage> {
   const nowIso = new Date().toISOString();
-  const [progress, related, pending] = await Promise.all([
+  const [progress, relatedAll, pending] = await Promise.all([
     selectObjectiveProgress(tx, ctx, objectiveId),
     selectRelatedTasks(tx, ctx, objectiveId, excludeTaskId),
-    selectPendingReviews(tx, ctx),
+    selectPendingReviews(
+      tx,
+      ctx,
+      runScope ? { objectiveId, scheduleId: runScope.scheduleId, excludeTaskId } : undefined,
+    ),
   ]);
+  // A focused run never sees another task's awaiting-approval action as a "blocker" either — it is still
+  // somebody else's pending action. Failed blockers stay (informational, not actionable).
+  const related =
+    runScope?.scope === 'focused'
+      ? { ...relatedAll, blockers: relatedAll.blockers.filter((b) => b.status !== 'awaiting_approval') }
+      : relatedAll;
 
   const manifest: ContextManifestEntry[] = [];
 
