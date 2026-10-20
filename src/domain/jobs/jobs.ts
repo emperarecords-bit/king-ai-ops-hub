@@ -148,10 +148,12 @@ export async function enqueueRun(
   ctx: TenantContext,
   taskId: string,
   dispatchKind: DispatchKind = 'interactive',
+  /** P4 provenance: the Ops Chat card (dispatch or re-run) queuing THIS attempt; copied onto the run it creates. */
+  opts: { opsChatProposalId?: string | null } = {},
 ): Promise<EnqueueResult> {
   const insertedRows = await tx
     .insert(runJobs)
-    .values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId, status: 'queued', dispatchKind })
+    .values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId, status: 'queued', dispatchKind, opsChatProposalId: opts.opsChatProposalId ?? null })
     .onConflictDoNothing()
     .returning({ id: runJobs.id });
   if (insertedRows[0]) {
@@ -159,7 +161,7 @@ export async function enqueueRun(
       action: 'run_job.enqueued',
       entityType: 'task',
       entityId: taskId,
-      detail: { dispatchKind, jobId: insertedRows[0].id },
+      detail: { dispatchKind, jobId: insertedRows[0].id, ...(opts.opsChatProposalId ? { opsChatProposalId: opts.opsChatProposalId } : {}) },
     });
     return { inserted: true, jobId: insertedRows[0].id };
   }
@@ -210,7 +212,13 @@ export class RerunRefusedError extends Error {
   }
 }
 
-export async function requestRerun(tx: DbTx, ctx: TenantContext, taskId: string): Promise<RerunResult> {
+export async function requestRerun(
+  tx: DbTx,
+  ctx: TenantContext,
+  taskId: string,
+  /** P4: the re-run card. Linked on the NEW job (and so its run) — never written to tasks.ops_chat_proposal_id. */
+  opts: { opsChatProposalId?: string | null } = {},
+): Promise<RerunResult> {
   const task = (
     await tx
       .select({ id: tasks.id, status: tasks.status, title: tasks.title })
@@ -252,10 +260,10 @@ export async function requestRerun(tx: DbTx, ctx: TenantContext, taskId: string)
       action: 'task.rerun_requested',
       entityType: 'task',
       entityId: taskId,
-      detail: { fromStatus: task.status, previousRunId },
+      detail: { fromStatus: task.status, previousRunId, ...(opts.opsChatProposalId ? { opsChatProposalId: opts.opsChatProposalId } : {}) },
     });
   }
-  const enq = await enqueueRun(tx, ctx, taskId);
+  const enq = await enqueueRun(tx, ctx, taskId, 'interactive', { opsChatProposalId: opts.opsChatProposalId ?? null });
   if (!enq.inserted) return { status: 'already_queued', taskId, jobId: enq.jobId, previousStatus: task.status };
   return { status: 'started', taskId, jobId: enq.jobId, previousStatus: task.status, previousRunId };
 }

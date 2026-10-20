@@ -586,12 +586,19 @@ export async function startRun(
 
     const assembled = await assembleRunContext(tx, ctx, task, primaryRow, reviewerRow, nowIso);
 
+    // P4 provenance: the run inherits the Ops Chat card (dispatch or re-run) of the job that started it, so each
+    // result can be traced to the exact card behind it — independent of the task's originating card.
+    const opsChatProposalId = jobCtx
+      ? ((await tx.select({ p: runJobs.opsChatProposalId }).from(runJobs).where(eq(runJobs.id, jobCtx.jobId)).limit(1))[0]?.p ?? null)
+      : null;
+
     const runInserted = await tx
       .insert(runs)
       .values({
         orgId: ctx.orgId,
         projectId: ctx.projectId,
         taskId,
+        opsChatProposalId,
         status: 'running',
         primaryAgentId: primaryRow.id,
         reviewerAgentId: reviewerRow?.id ?? null,

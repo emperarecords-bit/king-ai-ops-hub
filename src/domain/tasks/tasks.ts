@@ -72,6 +72,9 @@ export const createTaskSchema = z
     scheduleId: z.string().uuid().nullable().default(null),
     /** Employee Chat (EV-004): set only by the chat domain; links the task into its thread. */
     conversationId: z.string().uuid().nullable().default(null),
+    /** P4 provenance: set ONLY by the Ops Chat confirm route for a dispatch card — the card that created this
+     *  task. Never set by re-runs (they link on run_jobs/runs). Immutable after insert (trigger, 0087). */
+    opsChatProposalId: z.string().uuid().nullable().default(null),
     /** P1a agent pinning — the EXACT employees this task runs. `primaryAgentId` is required (a task is
      *  always pinned to a specific enabled primary). `reviewerAgentId` is required IFF reviewEnabled, and
      *  must be absent otherwise; it can never equal the primary. Validated against the workspace in
@@ -160,6 +163,7 @@ async function prepareTaskInsert(
       orgId: ctx.orgId,
       projectId: ctx.projectId,
       conversationId: parsed.data.conversationId,
+      opsChatProposalId: parsed.data.opsChatProposalId,
       title: parsed.data.title,
       input: parsed.data.input,
       providerSelection,
@@ -180,6 +184,7 @@ async function prepareTaskInsert(
       modelTier: parsed.data.modelTier,
       flagshipCategory: parsed.data.flagshipCategory,
       objectiveId: parsed.data.objectiveId,
+      ...(parsed.data.opsChatProposalId ? { opsChatProposalId: parsed.data.opsChatProposalId } : {}),
     },
     // P1a — the exact pinning decision (identity only: ids / names / provider / model). NO systemPrompt,
     // NO secrets. The durable "who was pinned, and to what execution profile" record.
