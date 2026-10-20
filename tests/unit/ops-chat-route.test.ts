@@ -500,3 +500,47 @@ describe('POST /api/ops-chat — a completed turn never ends silently after a to
     expect(text).not.toContain('nothing happens until you click Confirm');
   });
 });
+
+describe('POST /api/ops-chat — current AccurateBids capabilities are stated at turn start', () => {
+  const systemOfLastCall = (): string => {
+    const req = h.streamWithTools.mock.calls.at(-1)?.[0] as { system?: string } | undefined;
+    return req?.system ?? '';
+  };
+  const ENV_KEYS = ['ACCURATEBIDS_SIGHT_PROJECT_KEYS', 'ACCURATEBIDS_SERVICE_TOKEN', 'ACCURATEBIDS_SEND_URL', 'ACCURATEBIDS_INVOICE_URL', 'ACCURATEBIDS_QUOTE_URL'] as const;
+
+  it('a connected, send-configured release tells the model on the FIRST turn that an owner-given email is supported', async () => {
+    const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+    Object.assign(process.env, {
+      ACCURATEBIDS_SIGHT_PROJECT_KEYS: 'empera',
+      ACCURATEBIDS_SERVICE_TOKEN: 't',
+      ACCURATEBIDS_SEND_URL: 'https://x/functions/v1/hub-send',
+      ACCURATEBIDS_INVOICE_URL: 'https://x/functions/v1/hub-invoice',
+      ACCURATEBIDS_QUOTE_URL: 'https://x/functions/v1/hub-quote',
+    });
+    try {
+      await (await call({ message: 'email INV-1 to joe@example.com', conversationId: CONV, turnId: TURN })).text();
+      const system = systemOfLastCall();
+      expect(system).toContain('=== ACCURATEBIDS CAPABILITIES');
+      expect(system).toMatch(/Invoice with NO email on file \(has_email false\): SUPPORTED/);
+      expect(system).toMatch(/out of date/);
+      // Stated before the live snapshot, alongside the standing rules.
+      expect(system.indexOf('=== ACCURATEBIDS CAPABILITIES')).toBeLessThan(system.indexOf('=== LIVE HUB SNAPSHOT'));
+    } finally {
+      for (const k of ENV_KEYS) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    }
+  });
+
+  it('no AccurateBids workspace configured → no capabilities block', async () => {
+    const saved = process.env.ACCURATEBIDS_SIGHT_PROJECT_KEYS;
+    delete process.env.ACCURATEBIDS_SIGHT_PROJECT_KEYS;
+    try {
+      await (await call({ message: 'hi', conversationId: CONV, turnId: TURN })).text();
+      expect(systemOfLastCall()).not.toContain('ACCURATEBIDS CAPABILITIES');
+    } finally {
+      if (saved !== undefined) process.env.ACCURATEBIDS_SIGHT_PROJECT_KEYS = saved;
+    }
+  });
+});
