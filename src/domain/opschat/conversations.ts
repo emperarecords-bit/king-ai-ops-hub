@@ -4,6 +4,8 @@ import { AppError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { opsChatConversations, opsChatMessages, opsChatProposals } from '@/db/schema';
 import { cardStateLines, type StoredCard } from '@/domain/opschat/card-state';
+import { type LinkedRunView } from '@/domain/opschat/linked-run-view';
+import { RUN_STARTING_KINDS, type LinkableCard } from '@/domain/opschat/linked-runs';
 
 /**
  * Ops Chat persistence — owner-private, USER-scoped conversation store.
@@ -110,7 +112,11 @@ export async function loadPromptTurns(
   userId: string,
   conversationId: string,
   ownerMessageId: string,
-  opts: { maxOwnerTurns?: number } = {},
+  opts: {
+    maxOwnerTurns?: number;
+    /** P5a: each confirmed dispatch/re-run card's linked run (from loadLinkedRunViews), keyed by card id. */
+    linkedRuns?: ReadonlyMap<string, LinkedRunView>;
+  } = {},
 ): Promise<PromptTurn[]> {
   const maxTurns = Math.max(1, Math.min(opts.maxOwnerTurns ?? 8, 50));
 
@@ -170,7 +176,16 @@ export async function loadPromptTurns(
   const cardsByMessage = new Map<string, StoredCard[]>();
   for (const c of cards) {
     const list = cardsByMessage.get(c.messageId) ?? [];
-    list.push({ id: c.id, kind: c.kind, state: c.state, proposal: (c.proposal ?? {}) as Record<string, unknown>, result: c.result, error: c.error, updatedAt: c.updatedAt });
+    list.push({
+      id: c.id,
+      kind: c.kind,
+      state: c.state,
+      proposal: (c.proposal ?? {}) as Record<string, unknown>,
+      result: c.result,
+      error: c.error,
+      updatedAt: c.updatedAt,
+      linkedRun: opts.linkedRuns?.get(c.id) ?? null,
+    });
     cardsByMessage.set(c.messageId, list);
   }
   const replyByOwner = new Map<string, string>();
@@ -559,6 +574,27 @@ export async function loadConversation(
       proposals: byMessage.get(m.id) ?? [],
     })),
   };
+}
+
+/**
+ * P5a: the conversation's newest CONFIRMED run-starting cards (dispatch / re-run), for loadLinkedRunViews before
+ * a prompt is built. Bounded; owner-private (RLS + explicit user filter).
+ */
+export async function listRunStartingCards(tx: DbTx, userId: string, conversationId: string, opts: { limit?: number } = {}): Promise<LinkableCard[]> {
+  const limit = Math.max(1, Math.min(opts.limit ?? 50, 200));
+  return tx
+    .select({ id: opsChatProposals.id, kind: opsChatProposals.kind, state: opsChatProposals.state, proposal: opsChatProposals.proposal })
+    .from(opsChatProposals)
+    .where(
+      and(
+        eq(opsChatProposals.userId, userId),
+        eq(opsChatProposals.conversationId, conversationId),
+        eq(opsChatProposals.state, 'done'),
+        inArray(opsChatProposals.kind, [...RUN_STARTING_KINDS]),
+      ),
+    )
+    .orderBy(desc(opsChatProposals.seq))
+    .limit(limit);
 }
 
 /** A user's conversations, most-recently-updated first (the history list). */

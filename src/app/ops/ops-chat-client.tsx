@@ -8,6 +8,7 @@ import {
   OPS_CHAT_TIMEOUT_MESSAGE,
 } from '@/domain/opschat/limits';
 import type { ApprovalContentView } from '@/domain/opschat/approval-content';
+import type { CompletedSinceItem, LinkedRunView } from '@/domain/opschat/linked-run-view';
 import { createDeadlineWatchdog } from './ops-chat-watchdog';
 import { ATTACHMENT_ACCEPT, ATTACHMENT_LIMITS } from '@/domain/opschat/attachment-limits';
 import {
@@ -31,6 +32,28 @@ import {
   type TranscriptCard,
   type TranscriptMsg,
 } from './ops-chat-transcript';
+
+/** P5a: tone for a linked run's outcome line. */
+function linkedRunTone(v: LinkedRunView): string {
+  if (v.state === 'ready') return 'text-[var(--success,#6bbf73)]';
+  if (v.state === 'failed') return 'text-[var(--danger,#c37474)]';
+  if (v.state === 'draft' || v.state === 'needs_approval') return 'text-[var(--warning,#d9a441)]';
+  return 'text-[var(--muted)]';
+}
+
+/** What the run a confirmed dispatch / re-run card started actually did — server-derived, never inferred. */
+function LinkedRunLine({ view, projectKey }: { view: LinkedRunView; projectKey: string | null }) {
+  return (
+    <div data-testid="linked-run" className="mt-1 flex flex-col gap-0.5 text-xs">
+      <p className={linkedRunTone(view)}>{view.text}</p>
+      {projectKey ? (
+        <a href={`/p/${encodeURIComponent(projectKey)}/tasks/${encodeURIComponent(view.taskId)}`} className="self-start text-[var(--accent)] underline underline-offset-2">
+          Open the task{view.runId ? ' and its result' : ''}
+        </a>
+      ) : null}
+    </div>
+  );
+}
 
 type Proposal =
   | { kind: 'answer_question'; questionId: string; projectKey: string; workspaceName: string; question: string; answer: string }
@@ -597,12 +620,15 @@ export function OpsChatClient({
   persisted,
   pendingTurn: serverPending,
   conversations,
+  finishedSince = [],
 }: {
   opening: string;
   conversationId: string | null;
   persisted: PersistedMessage[];
   pendingTurn: PendingTurn | null;
   conversations: Array<{ id: string; title: string | null }>;
+  /** P5a: runs started by this conversation's cards that finished after its newest message (server-derived). */
+  finishedSince?: CompletedSinceItem[];
 }) {
   const [initialTranscript] = useState(() => buildTranscript(persisted));
   const [messages, setMessages] = useState<Msg[]>(() => [
@@ -1049,6 +1075,9 @@ export function OpsChatClient({
                             ) : null}
                           </div>
                         ) : null}
+                        {card.linkedRun ? (
+                          <LinkedRunLine view={card.linkedRun} projectKey={typeof card.proposal.projectKey === 'string' ? card.proposal.projectKey : null} />
+                        ) : null}
                       </div>
                     ) : card.state === 'cancelled' ? (
                       <p className="text-sm text-[var(--muted)]">Cancelled — nothing was changed.</p>
@@ -1249,6 +1278,22 @@ export function OpsChatClient({
             </div>
           </div>
         ))}
+        {/* Shown only until the owner adds to this conversation: "since your last message" stops being true then. */}
+        {finishedSince.length > 0 && messages.length === initialTranscript.length + 1 ? (
+          <div data-testid="finished-since" className="flex justify-start">
+            <div className="max-w-[85%] rounded-2xl rounded-bl-sm border border-[var(--accent)] bg-[var(--surface)] px-4 py-3 text-sm">
+              <div className="mb-1 text-xs opacity-50">Server record · finished since your last message</div>
+              <ul className="flex flex-col gap-2">
+                {finishedSince.map((f) => (
+                  <li key={f.proposalId}>
+                    <p className="font-semibold">{f.label}</p>
+                    <p className={'text-xs ' + linkedRunTone(f.view)}>{f.view.text}</p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        ) : null}
         <div ref={bottomRef} />
       </div>
 

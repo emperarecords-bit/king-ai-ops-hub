@@ -10,6 +10,8 @@
  * Pure (no DB) so the exact wording is unit-testable; conversations.ts feeds it the stored rows.
  */
 
+import { linkedRunLine, type LinkedRunView } from '@/domain/opschat/linked-run-view';
+
 export interface StoredCard {
   /** The card's id — shown (short) so it can be matched to a task's createdByCard / latestRunCard. */
   id?: string;
@@ -19,6 +21,8 @@ export interface StoredCard {
   result: unknown;
   error: string | null;
   updatedAt: Date;
+  /** P5a: the run this card started, read from the P4 link (runs/run_jobs.ops_chat_proposal_id). */
+  linkedRun?: LinkedRunView | null;
 }
 
 const STATE_TEXT: Record<string, string> = {
@@ -35,8 +39,13 @@ function str(v: unknown, max = 90): string | null {
 }
 
 function cardLabel(c: StoredCard): string {
-  const p = c.proposal;
-  switch (c.kind) {
+  return cardLabelOf(c.kind, c.proposal);
+}
+
+/** A short human label for a card (shared by prompt history and the transcript's completed-since block). */
+export function cardLabelOf(kind: string, proposal: Record<string, unknown>): string {
+  const p = proposal;
+  switch (kind) {
     case 'decide_approval':
       return `${str(p.decision) ?? 'decide'} approval ${str(p.approvalId, 36) ?? ''}`.trim();
     case 'rerun_task':
@@ -46,7 +55,7 @@ function cardLabel(c: StoredCard): string {
     case 'answer_question':
       return `answer question ${str(p.questionId, 36) ?? ''}`.trim();
     default:
-      return str(p.title) ?? str(p.summary) ?? c.kind;
+      return str(p.title) ?? str(p.summary) ?? kind;
   }
 }
 
@@ -70,6 +79,8 @@ function resultIds(result: unknown): string {
  * points at the task's current state instead.
  */
 function doneText(c: StoredCard): string {
+  // P5a: a linked attempt IS the execution record — the run line appended below says what actually happened.
+  if (c.linkedRun) return 'CONFIRMED by the owner and executed';
   const r = c.result && typeof c.result === 'object' ? (c.result as Record<string, unknown>) : {};
   if (c.kind === 'decide_approval') {
     const decision = str(c.proposal.decision);
@@ -91,7 +102,8 @@ export function cardStateLines(cards: readonly StoredCard[]): string {
     const when = c.updatedAt.toISOString().slice(0, 16).replace('T', ' ');
     const state = c.state === 'done' ? doneText(c) : (STATE_TEXT[c.state] ?? c.state);
     const err = c.error && (c.state === 'stale' || c.state === 'error') ? `: ${c.error.slice(0, 160)}` : '';
-    return `- [card ${c.kind}${c.id ? ` ${c.id.slice(0, 8)}` : ''}] ${cardLabel(c)} — ${state}${err} — as of ${when} UTC${resultIds(c.result)}`;
+    const run = c.state === 'done' && c.linkedRun ? ` — ${linkedRunLine(c.linkedRun)}` : '';
+    return `- [card ${c.kind}${c.id ? ` ${c.id.slice(0, 8)}` : ''}] ${cardLabel(c)} — ${state}${err} — as of ${when} UTC${resultIds(c.result)}${run}`;
   });
   return `\n\n[SERVER RECORD — current state of the cards in this reply; authoritative over anything said above]\n${lines.join('\n')}`;
 }

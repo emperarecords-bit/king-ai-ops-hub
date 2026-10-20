@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
-import { currentUser } from '@/domain/auth/guard';
+import { currentUser, tenantForUser } from '@/domain/auth/guard';
 import { signOut } from '@/app/login/actions';
 import { withUser } from '@/db/tenant';
 import { buildPulse, needsYouCount, openingMessage } from '@/domain/opschat/pulse';
@@ -11,6 +11,10 @@ import {
   mostRecentConversationId,
 } from '@/domain/opschat/conversations';
 import { attachmentsForMessages, type AttachmentSummary } from '@/domain/opschat/attachments';
+import { cardLabelOf } from '@/domain/opschat/card-state';
+import { loadLinkedRunViews } from '@/domain/opschat/linked-runs';
+import { completedSince, newestOwnerMessageAt, type CompletedSinceItem, type LinkedRunView } from '@/domain/opschat/linked-run-view';
+import { log } from '@/lib/log';
 import { OpsChatClient } from './ops-chat-client';
 import { type PersistedMessage, type PendingTurn } from './ops-chat-transcript';
 
@@ -59,6 +63,26 @@ export default async function OpsChatPage({
       return { conversations, loaded, pending, attachments };
     }),
   ]);
+  // P5a: what each confirmed dispatch / re-run card's run actually did, read from the P4 links (never chat text).
+  // Read per project under that project's tenant RLS, AFTER the owner-private load (no nested transactions).
+  // Best-effort: a failure shows the cards exactly as before.
+  const allCards = (stored.loaded?.messages ?? []).flatMap((m) => m.proposals);
+  const linkedRuns: Map<string, LinkedRunView> = await loadLinkedRunViews(allCards, (key) => tenantForUser(user.id, key)).catch((err: unknown) => {
+    log.warn('ops page linked-run lookup failed (cards shown without run outcome)', { errorClass: err instanceof Error ? err.name : 'unknown' });
+    return new Map<string, LinkedRunView>();
+  });
+  // "Since your last message" = the newest OWNER message, not an assistant reply (a run that finished between
+  // the owner's message and Ops Chat's later reply must still be listed).
+  const ownerBoundaryAt = newestOwnerMessageAt(stored.loaded?.messages ?? []);
+  const finishedSince: CompletedSinceItem[] = completedSince(
+    allCards.map((c) => ({
+      proposalId: c.id,
+      kind: c.kind,
+      label: cardLabelOf(c.kind, c.proposal && typeof c.proposal === 'object' ? (c.proposal as Record<string, unknown>) : {}),
+      view: linkedRuns.get(c.id),
+    })),
+    ownerBoundaryAt,
+  );
   const opening = openingMessage(pulse);
   // Combined needs-you count (approvals + open questions) — the Inbox surfaces
   // both, so this never shows a misleading approvals-only "0" when only
@@ -73,7 +97,7 @@ export default async function OpsChatPage({
     content: m.content,
     question: m.question,
     replyToMessageId: m.replyToMessageId,
-    proposals: m.proposals.map((p) => ({ id: p.id, proposal: p.proposal, state: p.state, result: p.result, error: p.error })),
+    proposals: m.proposals.map((p) => ({ id: p.id, proposal: p.proposal, state: p.state, result: p.result, error: p.error, linkedRun: linkedRuns.get(p.id) ?? null })),
     attachments: (stored.attachments.get(m.id) ?? []).map((a) => ({
       id: a.id,
       filename: a.filename,
@@ -132,6 +156,7 @@ export default async function OpsChatPage({
         persisted={persisted}
         pendingTurn={pendingTurn}
         conversations={stored.conversations.map((c) => ({ id: c.id, title: c.title }))}
+        finishedSince={finishedSince}
       />
 
       {stored.loaded?.hasEarlier ? (

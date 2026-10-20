@@ -45,6 +45,8 @@ vi.mock('@/domain/usage/rate-limit', () => ({ consumeRateLimit: h.consumeRateLim
 vi.mock('@/db/client', () => ({ getDb: () => ({ transaction: (fn: (tx: unknown) => unknown) => fn({}) }) }));
 vi.mock('@/db/tenant', () => ({ withUser: (_s: unknown, fn: (tx: unknown) => unknown) => fn({}) }));
 vi.mock('@/domain/opschat/conversations', () => ({
+  // P5a: the prompt's linked-run lookup (best-effort) — no confirmed run-starting cards here.
+  listRunStartingCards: async () => [],
   appendOwnerMessage: h.appendOwnerMessage,
   appendAssistantMessage: h.appendAssistantMessage,
   addProposal: h.addProposal,
