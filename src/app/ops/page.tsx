@@ -13,7 +13,7 @@ import {
 import { attachmentsForMessages, type AttachmentSummary } from '@/domain/opschat/attachments';
 import { cardLabelOf } from '@/domain/opschat/card-state';
 import { loadLinkedRunViews } from '@/domain/opschat/linked-runs';
-import { completedSince, type CompletedSinceItem, type LinkedRunView } from '@/domain/opschat/linked-run-view';
+import { completedSince, newestOwnerMessageAt, type CompletedSinceItem, type LinkedRunView } from '@/domain/opschat/linked-run-view';
 import { log } from '@/lib/log';
 import { OpsChatClient } from './ops-chat-client';
 import { type PersistedMessage, type PendingTurn } from './ops-chat-transcript';
@@ -71,7 +71,9 @@ export default async function OpsChatPage({
     log.warn('ops page linked-run lookup failed (cards shown without run outcome)', { errorClass: err instanceof Error ? err.name : 'unknown' });
     return new Map<string, LinkedRunView>();
   });
-  const newestMessageAt = stored.loaded?.messages.at(-1)?.createdAt ?? null;
+  // "Since your last message" = the newest OWNER message, not an assistant reply (a run that finished between
+  // the owner's message and Ops Chat's later reply must still be listed).
+  const ownerBoundaryAt = newestOwnerMessageAt(stored.loaded?.messages ?? []);
   const finishedSince: CompletedSinceItem[] = completedSince(
     allCards.map((c) => ({
       proposalId: c.id,
@@ -79,7 +81,7 @@ export default async function OpsChatPage({
       label: cardLabelOf(c.kind, c.proposal && typeof c.proposal === 'object' ? (c.proposal as Record<string, unknown>) : {}),
       view: linkedRuns.get(c.id),
     })),
-    newestMessageAt,
+    ownerBoundaryAt,
   );
   const opening = openingMessage(pulse);
   // Combined needs-you count (approvals + open questions) — the Inbox surfaces

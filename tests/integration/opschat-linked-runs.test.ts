@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type postgres from 'postgres';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fixtureKey } from '@tests/support/fixture-key';
@@ -8,17 +8,20 @@ import { appSql, rlsAvailable } from '@tests/support/db';
 import { type TenantContext } from '@/types/domain';
 import { type DbTx, getSetupDb } from '@/db/client';
 import { withUser } from '@/db/tenant';
-import { agents, approvals, memberships, organizations, profiles, projectMembers, projects, runJobs, runs, tasks } from '@/db/schema';
+import { agents, approvals, memberships, opsChatMessages, organizations, profiles, projectMembers, projects, runJobs, runs, tasks } from '@/db/schema';
 import {
   addProposal,
   appendAssistantMessage,
   appendOwnerMessage,
   createConversation,
   listRunStartingCards,
+  loadConversation,
   loadPromptTurns,
   transitionProposal,
 } from '@/domain/opschat/conversations';
 import { loadLinkedRunFacts, loadLinkedRunViews } from '@/domain/opschat/linked-runs';
+import { completedSince, newestOwnerMessageAt } from '@/domain/opschat/linked-run-view';
+import { cardLabelOf } from '@/domain/opschat/card-state';
 import { tenantForUser } from '@/domain/auth/guard';
 
 /**
@@ -194,5 +197,27 @@ describe.skipIf(!available)('P5a — linked run outcomes from the P4 links', () 
     // Without the lookup, the prompt is exactly as before P5a (no run lines).
     const plain = await withUser({ userId: owner.userId }, (tx) => loadPromptTurns(tx, owner.userId, ids.conv, ids.ownerMsg2));
     expect(plain.find((t) => t.role === 'assistant')!.content).not.toMatch(/linked run/);
+  });
+
+  it('review fix — "finished since your last message" uses the newest OWNER message: owner T1 < run finishes T2 < assistant reply T3 → still listed', async () => {
+    // Owner message ownerMsg2 = T1 (setup); the re-run's run finishes at now + 1 min = T2; Ops Chat's reply lands at T3 > T2.
+    const reply = await withUser({ userId: owner.userId }, (tx) =>
+      appendAssistantMessage(tx, owner.userId, { conversationId: ids.conv, replyToMessageId: ids.ownerMsg2, content: 'Here is where things stand.' }),
+    );
+    await db.update(opsChatMessages).set({ createdAt: new Date(Date.now() + 2 * 60_000) }).where(eq(opsChatMessages.id, reply.id));
+
+    const loaded = (await withUser({ userId: owner.userId }, (tx) => loadConversation(tx, owner.userId, ids.conv)))!;
+    expect(loaded.messages.at(-1)!.role).toBe('assistant'); // the newest message is the assistant's T3 reply
+    const allCards = loaded.messages.flatMap((m) => m.proposals);
+    const views = await loadLinkedRunViews(allCards, resolver(owner.userId));
+    const items = allCards.map((c) => ({ proposalId: c.id, kind: c.kind, label: cardLabelOf(c.kind, c.proposal as Record<string, unknown>), view: views.get(c.id) }));
+
+    const boundary = newestOwnerMessageAt(loaded.messages);
+    expect(boundary!.getTime()).toBe(loaded.messages.find((m) => m.id === ids.ownerMsg2)!.createdAt.getTime());
+    const listed = completedSince(items, boundary);
+    expect(listed.map((i) => i.proposalId)).toEqual([ids.rerun]); // T2 run listed; the dispatch run finished before T1
+    expect(listed[0]!.view.state).toBe('failed');
+    // The pre-fix boundary (newest message of either role = T3) would have hidden it.
+    expect(completedSince(items, loaded.messages.at(-1)!.createdAt)).toEqual([]);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { completedSince, describeLinkedRun, linkedRunLine, type LinkedRunFacts } from '@/domain/opschat/linked-run-view';
+import { completedSince, describeLinkedRun, linkedRunLine, newestOwnerMessageAt, type LinkedRunFacts } from '@/domain/opschat/linked-run-view';
 import { cardStateLines, type StoredCard } from '@/domain/opschat/card-state';
 import { buildTranscript } from '@/app/ops/ops-chat-transcript';
 
@@ -94,6 +94,29 @@ describe('completedSince — finished after the newest message, newest last', ()
       newest,
     );
     expect(out.map((o) => o.proposalId)).toEqual(['a', 'b']);
+  });
+
+  it('review fix — the boundary is the newest OWNER message: a run that finished between the owner message (T1) and a later assistant reply (T3) is still listed', () => {
+    const T1 = new Date('2026-10-20T10:00:00Z');
+    const T2 = '2026-10-20T10:05:00.000Z';
+    const T3 = new Date('2026-10-20T10:10:00Z');
+    const messages = [
+      { role: 'user', createdAt: new Date('2026-10-20T09:00:00Z') },
+      { role: 'assistant', createdAt: new Date('2026-10-20T09:01:00Z') },
+      { role: 'user', createdAt: T1 },
+      { role: 'assistant', createdAt: T3 },
+    ];
+    const cards = [{ proposalId: 'a', kind: 'dispatch_task', label: 'dispatch "A"', view: at(T2) }];
+    expect(newestOwnerMessageAt(messages)).toEqual(T1);
+    expect(completedSince(cards, newestOwnerMessageAt(messages)).map((o) => o.proposalId)).toEqual(['a']);
+    // The old boundary (newest message of either role) would have hidden it.
+    expect(completedSince(cards, T3)).toEqual([]);
+    // Unchanged: once the owner sends again (after T2), it is no longer "since your last message".
+    expect(completedSince(cards, newestOwnerMessageAt([...messages, { role: 'user', createdAt: new Date('2026-10-20T10:11:00Z') }]))).toEqual([]);
+  });
+
+  it('no owner message yet → no boundary', () => {
+    expect(newestOwnerMessageAt([{ role: 'assistant', createdAt: new Date() }])).toBeNull();
   });
 
   it('a conversation with no messages yet treats every finished run as new', () => {

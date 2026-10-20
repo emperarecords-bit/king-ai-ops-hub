@@ -92,20 +92,32 @@ export interface CompletedSinceItem {
 }
 
 /**
- * Runs that FINISHED (ready / draft / needs approval / failed) after the newest message in the conversation —
+ * The "since your last message" boundary: the newest OWNER message — never an assistant reply. A run that
+ * finished after the owner spoke but before Ops Chat's later reply has still not been reported by the server
+ * record, so it must stay in the block.
+ */
+export function newestOwnerMessageAt(messages: ReadonlyArray<{ role: string; createdAt: Date }>): Date | null {
+  let newest: Date | null = null;
+  for (const m of messages) if (m.role === 'user' && (!newest || m.createdAt > newest)) newest = m.createdAt;
+  return newest;
+}
+
+/**
+ * Runs that FINISHED (ready / draft / needs approval / failed) after the owner's newest message (see
+ * newestOwnerMessageAt) —
  * the work the owner has not been told about in this thread yet. Newest last. Derived on every load, so it is
  * never stale and needs no "delivered" bookkeeping: once the owner sends another message it moves out.
  */
 export function completedSince(
   cards: ReadonlyArray<{ proposalId: string; kind: string; label: string; view: LinkedRunView | null | undefined }>,
-  newestMessageAt: Date | null,
+  ownerBoundaryAt: Date | null,
 ): CompletedSinceItem[] {
   const out: CompletedSinceItem[] = [];
   for (const c of cards) {
     const v = c.view;
     if (!v || !v.finishedAt) continue;
     if (v.state === 'queued' || v.state === 'running' || v.state === 'no_run') continue;
-    if (newestMessageAt && Date.parse(v.finishedAt) <= newestMessageAt.getTime()) continue;
+    if (ownerBoundaryAt && Date.parse(v.finishedAt) <= ownerBoundaryAt.getTime()) continue;
     out.push({ proposalId: c.proposalId, kind: c.kind, label: c.label, view: v });
   }
   return out.sort((a, b) => Date.parse(a.view.finishedAt!) - Date.parse(b.view.finishedAt!));
