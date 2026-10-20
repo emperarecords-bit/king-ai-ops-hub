@@ -126,7 +126,7 @@ describe('tool layer — propose tools record data only, never mutate', () => {
   });
 
   it('propose_dispatch_task on an admin workspace records a proposal (and enqueues nothing)', async () => {
-    h.listAgents.mockResolvedValue([{ id: 'a-1', name: 'Scout', role: 'researcher', enabled: true, provider: 'anthropic' }]);
+    h.listAgents.mockResolvedValue([{ id: 'a-1', name: 'Scout', role: 'primary', enabled: true, provider: 'anthropic' }]);
     const ts = createOpsChatToolset(AUTH);
     const out = JSON.parse(
       await ts.runTool({ name: 'propose_dispatch_task', input: { project: 'AccurateBids', title: 'Research', instructions: 'go' } }),
@@ -135,5 +135,63 @@ describe('tool layer — propose tools record data only, never mutate', () => {
     const proposals = ts.getProposals();
     expect(proposals).toHaveLength(1);
     expect(proposals[0]).toMatchObject({ kind: 'dispatch_task', projectKey: 'accuratebids', agentId: 'a-1' });
+  });
+});
+
+describe('agent truth — server-cooling regression (said "Research Analyst" at 11:31, card dispatched Marketing Lead at 11:41)', () => {
+  const TWO = [
+    { id: 'ml', name: 'Marketing Lead (Empera Air Conditioning and Heating)', role: 'primary', enabled: true, provider: 'google' },
+    { id: 'ra', name: 'Research Analyst (Empera Air Conditioning and Heating)', role: 'primary', enabled: true, provider: 'anthropic' },
+    { id: 'rv', name: 'Reviewer (Empera)', role: 'reviewer', enabled: true, provider: 'anthropic' },
+  ];
+  const dispatch = async (agent?: string) => {
+    h.listAgents.mockResolvedValue(TWO);
+    const ts = createOpsChatToolset(AUTH);
+    const out = JSON.parse(
+      await ts.runTool({ name: 'propose_dispatch_task', input: { project: 'AccurateBids', title: 'Punch list', instructions: 'go', ...(agent ? { agent } : {}) } }),
+    );
+    return { out, proposals: ts.getProposals() };
+  };
+
+  it('with several agents and none named, NOTHING is prepared — the old silent "first agent" default is gone', async () => {
+    const { out, proposals } = await dispatch();
+    expect(out.error).toMatch(/several agents — name the one/);
+    expect(out.agents).toEqual(expect.arrayContaining([TWO[0]!.name, TWO[1]!.name]));
+    expect(proposals).toHaveLength(0);
+  });
+
+  it('naming "Research Analyst" puts Research Analyst on the card — id AND name — and the result tells the model to use exactly that name', async () => {
+    const { out, proposals } = await dispatch('Research Analyst');
+    expect(proposals[0]).toMatchObject({ kind: 'dispatch_task', agentId: 'ra', agentName: TWO[1]!.name });
+    expect(out.agent).toBe(TWO[1]!.name);
+    expect(out.note).toContain(`name exactly "${TWO[1]!.name}"`);
+  });
+
+  it('a reviewer in the workspace is assigned on the card; reviewers can never own the task', async () => {
+    const { proposals } = await dispatch('Research Analyst');
+    expect(proposals[0]).toMatchObject({ reviewerAgentId: 'rv', reviewerName: 'Reviewer (Empera)' });
+    expect((await dispatch('Reviewer')).out.error).toMatch(/No enabled primary agent named/);
+  });
+
+  it('no reviewer in the workspace → the card and the note say UNREVIEWED DRAFT (not final)', async () => {
+    h.listAgents.mockResolvedValue([TWO[1]]);
+    const ts = createOpsChatToolset(AUTH);
+    const out = JSON.parse(await ts.runTool({ name: 'propose_dispatch_task', input: { project: 'AccurateBids', title: 'x', instructions: 'y' } }));
+    expect(ts.getProposals()[0]).toMatchObject({ agentId: 'ra', reviewerAgentId: null });
+    expect(out.note).toMatch(/UNREVIEWED DRAFT \(intermediate, not final\)/);
+  });
+});
+
+describe('get_task_detail — near-duplicate titles are never guessed', () => {
+  it('two tasks with the same title → ambiguous with both candidates, no detail read', async () => {
+    h.listTasks.mockResolvedValue([
+      { id: 't1', title: 'Server Cabinet Cooling — Dual FUSION-TEC Punch List', status: 'completed', createdAt: new Date('2026-10-19T11:41:34Z') },
+      { id: 't2', title: 'Server Cabinet Cooling — Dual FUSION-TEC Punch List', status: 'completed', createdAt: new Date('2026-10-19T12:33:58Z') },
+    ]);
+    const ts = createOpsChatToolset(AUTH);
+    const out = JSON.parse(await ts.runTool({ name: 'get_task_detail', input: { project: 'AccurateBids', task: 'Server Cabinet Cooling' } }));
+    expect(out.ambiguous).toBe(true);
+    expect(out.candidates.map((c: { id: string }) => c.id)).toEqual(['t1', 't2']);
+    expect(h.getTask).not.toHaveBeenCalled();
   });
 });

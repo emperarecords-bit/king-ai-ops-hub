@@ -128,7 +128,7 @@ beforeEach(() => {
   h.getTask.mockResolvedValue({ id: UUID, title: 'T', status: 'completed' });
   h.enqueueRun.mockResolvedValue({ inserted: true, jobId: 'job-1' });
   h.requestRerun.mockResolvedValue({ status: 'started', taskId: UUID, jobId: 'job-2', previousStatus: 'completed', previousRunId: 'run-1' });
-  h.listAgents.mockResolvedValue([{ id: UUID, name: 'Scout', role: 'researcher', enabled: true, provider: 'anthropic' }]);
+  h.listAgents.mockResolvedValue([{ id: UUID, name: 'Scout', role: 'primary', enabled: true, provider: 'anthropic' }]);
 });
 
 describe('confirm — auth & validation gates (zero writes on rejection)', () => {
@@ -224,6 +224,35 @@ describe('confirm — writes happen only after a valid confirm (from the stored 
     expect(await res.json()).toMatchObject({ ok: true, executed: { taskId: 'task-123' }, state: 'done' });
     expect(h.createTask).toHaveBeenCalledTimes(1);
     expect(h.enqueueRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('dispatch_task: the agent on the card is the agent that runs; a changed/disabled agent fails stale with a reason', async () => {
+    h.loadProposal.mockResolvedValue(storedProposal('dispatch_task'));
+    h.listAgents.mockResolvedValue([{ id: UUID, name: 'Scout', role: 'primary', enabled: false, provider: 'anthropic' }]);
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.state).toBe('stale');
+    expect(body.error).toMatch(/agent on this card is no longer available — ask Ops Chat for a new card. Nothing was started/);
+    expect(h.createTask).not.toHaveBeenCalled();
+  });
+
+  it('dispatch_task with a reviewer on the card → the task is created REVIEWED by exactly that reviewer', async () => {
+    const REV = '99999999-9999-4999-8999-999999999999';
+    h.loadProposal.mockResolvedValue(storedProposal('dispatch_task', { reviewerAgentId: REV }));
+    h.listAgents.mockResolvedValue([
+      { id: UUID, name: 'Scout', role: 'primary', enabled: true, provider: 'anthropic' },
+      { id: REV, name: 'Checker', role: 'reviewer', enabled: true, provider: 'openai' },
+    ]);
+    const body = await (await call({ proposalId: PROP, intent: 'confirm' })).json();
+    expect(body.executed).toMatchObject({ taskId: 'task-123', agentName: 'Scout', reviewerName: 'Checker' });
+    expect(h.createTask.mock.calls[0]![2]).toMatchObject({ primaryAgentId: UUID, reviewEnabled: true, reviewerAgentId: REV });
+  });
+
+  it('dispatch_task card from before reviewer assignment (no reviewer field) → unreviewed, exactly as the card said', async () => {
+    h.loadProposal.mockResolvedValue(storedProposal('dispatch_task'));
+    await call({ proposalId: PROP, intent: 'confirm' });
+    expect(h.createTask.mock.calls[0]![2]).toMatchObject({ reviewEnabled: false, reviewerAgentId: null });
   });
 
   it('dispatch_task with an unavailable agent → 409 (stale), no writes', async () => {
