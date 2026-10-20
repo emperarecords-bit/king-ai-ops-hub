@@ -84,6 +84,29 @@ describe.skipIf(!available)('Ops Chat reports stored state, never stale chat tex
     expect(state!.latestRun).toMatchObject({ id: runId, hasResult: true });
   });
 
+  it('17:19 rerun card stored with NO result (pre-#168) reaches the prompt as "no execution record", never "executed"', async () => {
+    const uid = ctx.userId;
+    const ids = await withUser({ userId: uid }, async (tx) => {
+      const conv = await createConversation(tx, uid);
+      const o1 = await appendOwnerMessage(tx, uid, { conversationId: conv.id, content: 'Yes, reject and rerun' });
+      const a1 = await appendAssistantMessage(tx, uid, { conversationId: conv.id, replyToMessageId: o1.id, content: 'Cards below.' });
+      const rerun = await addProposal(tx, uid, {
+        conversationId: conv.id,
+        messageId: a1.id,
+        kind: 'rerun_task',
+        proposal: { kind: 'rerun_task', taskId: '0a72c3bc-50cb-46f6-b0d6-5ce077f3e48e', taskTitle: 'Duct CFM calc' },
+      });
+      await transitionProposal(tx, uid, { proposalId: rerun.id, from: 'pending', to: 'confirming' });
+      await transitionProposal(tx, uid, { proposalId: rerun.id, from: 'confirming', to: 'done', result: null });
+      const o2 = await appendOwnerMessage(tx, uid, { conversationId: conv.id, content: 'did the rerun produce the result?' });
+      return { conv: conv.id, o2: o2.id };
+    });
+    const turns = await withUser({ userId: uid }, (tx) => loadPromptTurns(tx, uid, ids.conv, ids.o2));
+    const reply = turns.find((t) => t.role === 'assistant')!.content;
+    expect(reply).toMatch(/\[card rerun_task\] re-run "Duct CFM calc" — CONFIRMED by the owner — no execution record .*do not assume it ran/);
+    expect(reply).not.toMatch(/rerun_task.*and executed/);
+  });
+
   it('22:36 — the next prompt carries each earlier card’s CURRENT state (both CONFIRMED), so the model never asks to confirm them again', async () => {
     const uid = ctx.userId;
     const ids = await withUser({ userId: uid }, async (tx) => {
@@ -107,7 +130,7 @@ describe.skipIf(!available)('Ops Chat reports stored state, never stale chat tex
     const turns = await withUser({ userId: uid }, (tx) => loadPromptTurns(tx, uid, ids.conv, ids.o2));
     const earlierReply = turns.find((t) => t.role === 'assistant')!.content;
     expect(earlierReply).toContain('SERVER RECORD — current state of the cards in this reply');
-    expect(earlierReply).toMatch(/\[card decide_approval\] rejected approval edb61199-1141-4f32-8aff-8b6237053597 — CONFIRMED by the owner and executed/);
+    expect(earlierReply).toMatch(/\[card decide_approval\] rejected approval edb61199-1141-4f32-8aff-8b6237053597 — CONFIRMED by the owner — rejection recorded/);
     expect(earlierReply).toMatch(/\[card rerun_task\] re-run "Duct CFM calc" — CONFIRMED by the owner and executed .* \(taskId 0a72c3bc-50cb-46f6-b0d6-5ce077f3e48e, jobId job-2, outcome started\)/);
     // The current owner turn stays last and unannotated.
     expect(turns.at(-1)).toMatchObject({ role: 'user', content: 'where will i get answers' });

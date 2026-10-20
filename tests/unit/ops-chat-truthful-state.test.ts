@@ -57,8 +57,28 @@ describe('cardStateLines — 22:36 case', () => {
       card({ proposal: { taskTitle: 'Duct CFM calc' }, result: { outcome: 'started', taskId: '0a72c3bc', jobId: 'job-2' } }),
     ]);
     expect(t).toContain('[SERVER RECORD — current state of the cards in this reply; authoritative over anything said above]');
-    expect(t).toContain('- [card decide_approval] rejected approval edb61199 — CONFIRMED by the owner and executed — as of 2026-10-19 17:19 UTC');
+    expect(t).toContain('- [card decide_approval] rejected approval edb61199 — CONFIRMED by the owner — rejection recorded — as of 2026-10-19 17:19 UTC');
     expect(t).toContain('- [card rerun_task] re-run "Duct CFM calc" — CONFIRMED by the owner and executed — as of 2026-10-19 17:19 UTC (taskId 0a72c3bc, jobId job-2, outcome started)');
+  });
+
+  it('17:19 regression — a CONFIRMED re-run card with NO stored result is never called "executed"', () => {
+    // Exact production shape: proposal 7cc10bc8 (rerun_task 0a72c3bc) is 'done' with result NULL — before #168 its
+    // job drained with no run. v89 acceptance: Ops Chat called it "the same completed-but-unreviewed run".
+    const t = cardStateLines([card({ proposal: { taskId: '0a72c3bc-50cb-46f6-b0d6-5ce077f3e48e', taskTitle: 'Duct CFM calc' }, result: null })]);
+    expect(t).toContain(
+      `- [card rerun_task] re-run "Duct CFM calc" — CONFIRMED by the owner — no execution record (it did not record what it did; read the task's current state, do not assume it ran) — as of 2026-10-19 17:19 UTC`,
+    );
+    expect(t).not.toMatch(/and executed/);
+  });
+
+  it(`"executed" only with evidence: an outcome or job id, or a dispatch's created task id`, () => {
+    expect(cardStateLines([card({ result: { outcome: 'already_queued', jobId: 'j' } })])).toMatch(/CONFIRMED by the owner and executed/);
+    expect(cardStateLines([card({ kind: 'dispatch_task', proposal: { title: 'X' }, result: { taskId: 't1' } })])).toMatch(/CONFIRMED by the owner and executed/);
+    expect(cardStateLines([card({ kind: 'dispatch_task', proposal: { title: 'X' }, result: null })])).toMatch(/no execution record/);
+    expect(cardStateLines([card({ kind: 'decide_approval', proposal: { approvalId: 'a', decision: 'approved' }, result: { message: null, outcome: null } })])).toMatch(
+      /approval recorded; no execution record/,
+    );
+    expect(cardStateLines([card({ kind: 'answer_question', proposal: { questionId: 'q' }, result: null })])).toMatch(/answer recorded/);
   });
 
   it('pending / cancelled / stale (with reason) are each stated plainly; no cards → nothing appended', () => {

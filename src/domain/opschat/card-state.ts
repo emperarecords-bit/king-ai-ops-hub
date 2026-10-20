@@ -22,7 +22,7 @@ export interface StoredCard {
 const STATE_TEXT: Record<string, string> = {
   pending: 'NOT confirmed — still waiting for the owner',
   confirming: 'being confirmed right now',
-  done: 'CONFIRMED by the owner and executed',
+  done: 'CONFIRMED by the owner', // refined per card by doneText()
   cancelled: 'CANCELLED by the owner — nothing was done',
   stale: 'STALE — not executed',
   error: 'FAILED when confirmed',
@@ -59,12 +59,35 @@ function resultIds(result: unknown): string {
   return parts.length ? ` (${parts.join(', ')})` : '';
 }
 
+/**
+ * What a CONFIRMED card may claim. "Executed" only when the stored result proves it (an `outcome`, a `jobId`,
+ * or — for a dispatch — the created `taskId`). Evidence (v89 acceptance, 2026-10-20): the 17:19 re-run card
+ * (7cc10bc8) is `done` with a NULL result — before #168 a re-run of a completed task queued a job that drained
+ * with no run — yet the line said "CONFIRMED … and executed", and Ops Chat told the owner that re-run "is the
+ * same completed-but-unreviewed run". A confirmed card without an execution record now says exactly that, and
+ * points at the task's current state instead.
+ */
+function doneText(c: StoredCard): string {
+  const r = c.result && typeof c.result === 'object' ? (c.result as Record<string, unknown>) : {};
+  if (c.kind === 'decide_approval') {
+    const decision = str(c.proposal.decision);
+    if (decision === 'rejected') return 'CONFIRMED by the owner — rejection recorded';
+    if (!str(r.outcome)) return 'CONFIRMED by the owner — approval recorded; no execution record';
+    return 'CONFIRMED by the owner and executed';
+  }
+  if (c.kind === 'answer_question') return 'CONFIRMED by the owner — answer recorded';
+  const executed = Boolean(str(r.outcome) || str(r.jobId) || (c.kind === 'dispatch_task' && str(r.taskId)));
+  return executed
+    ? 'CONFIRMED by the owner and executed'
+    : "CONFIRMED by the owner — no execution record (it did not record what it did; read the task's current state, do not assume it ran)";
+}
+
 /** The lines appended to one assistant reply, or '' when it had no cards. */
 export function cardStateLines(cards: readonly StoredCard[]): string {
   if (cards.length === 0) return '';
   const lines = cards.map((c) => {
     const when = c.updatedAt.toISOString().slice(0, 16).replace('T', ' ');
-    const state = STATE_TEXT[c.state] ?? c.state;
+    const state = c.state === 'done' ? doneText(c) : (STATE_TEXT[c.state] ?? c.state);
     const err = c.error && (c.state === 'stale' || c.state === 'error') ? `: ${c.error.slice(0, 160)}` : '';
     return `- [card ${c.kind}] ${cardLabel(c)} — ${state}${err} — as of ${when} UTC${resultIds(c.result)}`;
   });
