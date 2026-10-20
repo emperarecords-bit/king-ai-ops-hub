@@ -103,7 +103,7 @@ describe.skipIf(!available)('Ops Chat reports stored state, never stale chat tex
     });
     const turns = await withUser({ userId: uid }, (tx) => loadPromptTurns(tx, uid, ids.conv, ids.o2));
     const reply = turns.find((t) => t.role === 'assistant')!.content;
-    expect(reply).toMatch(/\[card rerun_task\] re-run "Duct CFM calc" — CONFIRMED by the owner — no execution record .*do not assume it ran/);
+    expect(reply).toMatch(/\[card rerun_task [0-9a-f]{8}\] re-run "Duct CFM calc" — CONFIRMED by the owner — no execution record .*do not assume it ran/);
     expect(reply).not.toMatch(/rerun_task.*and executed/);
   });
 
@@ -130,8 +130,8 @@ describe.skipIf(!available)('Ops Chat reports stored state, never stale chat tex
     const turns = await withUser({ userId: uid }, (tx) => loadPromptTurns(tx, uid, ids.conv, ids.o2));
     const earlierReply = turns.find((t) => t.role === 'assistant')!.content;
     expect(earlierReply).toContain('SERVER RECORD — current state of the cards in this reply');
-    expect(earlierReply).toMatch(/\[card decide_approval\] rejected approval edb61199-1141-4f32-8aff-8b6237053597 — CONFIRMED by the owner — rejection recorded/);
-    expect(earlierReply).toMatch(/\[card rerun_task\] re-run "Duct CFM calc" — CONFIRMED by the owner and executed .* \(taskId 0a72c3bc-50cb-46f6-b0d6-5ce077f3e48e, jobId job-2, outcome started\)/);
+    expect(earlierReply).toMatch(/\[card decide_approval [0-9a-f]{8}\] rejected approval edb61199-1141-4f32-8aff-8b6237053597 — CONFIRMED by the owner — rejection recorded/);
+    expect(earlierReply).toMatch(/\[card rerun_task [0-9a-f]{8}\] re-run "Duct CFM calc" — CONFIRMED by the owner and executed .* \(taskId 0a72c3bc-50cb-46f6-b0d6-5ce077f3e48e, jobId job-2, outcome started\)/);
     // The current owner turn stays last and unannotated.
     expect(turns.at(-1)).toMatchObject({ role: 'user', content: 'where will i get answers' });
   });

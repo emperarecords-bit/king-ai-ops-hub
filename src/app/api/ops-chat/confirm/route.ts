@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AppError, RateLimitedError, toPublicMessage } from '@/lib/errors';
 import { log } from '@/lib/log';
+import { writeAudit } from '@/domain/audit/audit';
 import { requireTenant, requireUser } from '@/domain/auth/guard';
 import { withTenant, withUser } from '@/db/tenant';
 import { getDb } from '@/db/client';
@@ -199,7 +200,43 @@ function requireAdmin(projectRole: string): void {
 
 /** Run the governed action with server-stored fields. Returns the `executed` result (or null
  *  for actions that produce none). Throws on failure — the caller maps that to stale/error. */
-async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext): Promise<unknown> {
+/**
+ * P4 — structured proposal lifecycle audit: ops_chat.proposal.{confirmed,cancelled,stale,error} with every id the
+ * outcome knows (conversation, message, task, job, approval). Best-effort: the card's state is already recorded,
+ * so a failed audit is logged, never surfaced as a failed action.
+ */
+async function auditProposalLifecycle(
+  ctx: TenantContext,
+  stored: { id: string; conversationId: string; messageId: string; kind: string; proposal: unknown },
+  state: 'confirmed' | 'cancelled' | 'stale' | 'error',
+  executed: unknown,
+  error?: string,
+): Promise<void> {
+  const p = (stored.proposal ?? {}) as Record<string, unknown>;
+  const r = executed && typeof executed === 'object' ? (executed as Record<string, unknown>) : {};
+  const id = (v: unknown) => (typeof v === 'string' && v.length > 0 ? v : null);
+  const detail: Record<string, unknown> = {
+    proposalId: stored.id,
+    conversationId: stored.conversationId,
+    messageId: stored.messageId,
+    kind: stored.kind,
+    taskId: id(r.taskId) ?? id(p.taskId),
+    jobId: id(r.jobId),
+    approvalId: id(p.approvalId) ?? id(r.approvalId),
+    outcome: id(r.outcome),
+    ...(error ? { error: error.slice(0, 300) } : {}),
+  };
+  for (const k of Object.keys(detail)) if (detail[k] === null) delete detail[k];
+  try {
+    await withTenant(ctx, (tx) =>
+      writeAudit(tx, ctx, { action: `ops_chat.proposal.${state}`, entityType: 'ops_chat_proposal', entityId: stored.id, detail }),
+    );
+  } catch (err) {
+    log.warn('ops-chat proposal lifecycle audit failed', { errorClass: err instanceof Error ? err.name : 'unknown', state });
+  }
+}
+
+async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext, proposalId: string): Promise<unknown> {
   switch (body.action) {
     case 'answer_question': {
       await withTenant(ctx, (tx) => answerOwnerQuestion(tx, ctx, body.questionId, body.answer));
@@ -235,7 +272,7 @@ async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext): 
       if (body.reviewerAgentId && !reviewer) {
         throw new AppError('conflict', 'The reviewer on this card is no longer available — ask Ops Chat for a new card. Nothing was started.');
       }
-      const taskId = await withTenant(ctx, async (tx) => {
+      const created = await withTenant(ctx, async (tx) => {
         const id = await createTask(tx, ctx, {
           title: body.title,
           input: body.instructions,
@@ -249,18 +286,22 @@ async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext): 
           scheduleId: null,
           primaryAgentId: agent.id,
           reviewerAgentId: reviewer?.id ?? null,
+          // P4: this card CREATED the task (set once; a later re-run never overwrites it).
+          opsChatProposalId: proposalId,
         });
-        await enqueueRun(tx, ctx, id);
-        return id;
+        // …and queued its first attempt, so the first run is traceable to this card too.
+        const enq = await enqueueRun(tx, ctx, id, 'interactive', { opsChatProposalId: proposalId });
+        return { id, jobId: enq.jobId };
       });
-      return { taskId, agentName: agent.name, reviewerName: reviewer?.name ?? null };
+      return { taskId: created.id, jobId: created.jobId, agentName: agent.name, reviewerName: reviewer?.name ?? null };
     }
     case 'rerun_task': {
       // A re-run is a real NEW attempt or an explicit refusal — never a job drained with no run while the card
       // says "re-run queued" (server-cooling evidence, 2026-10-19 17:19). See requestRerun.
       let r: Awaited<ReturnType<typeof requestRerun>>;
       try {
-        r = await withTenant(ctx, (tx) => requestRerun(tx, ctx, body.taskId));
+        // P4: this re-run card is linked on the NEW job (and the run it creates) — not on the task.
+        r = await withTenant(ctx, (tx) => requestRerun(tx, ctx, body.taskId, { opsChatProposalId: proposalId }));
       } catch (err) {
         if (err instanceof RerunRefusedError) {
           throw new AppError(err.reason === 'not_found' ? 'not_found' : 'conflict', err.message);
@@ -376,6 +417,9 @@ export async function POST(req: Request): Promise<Response> {
       transitionProposal(tx, user.id, { proposalId: input.proposalId, from: 'pending', to: 'cancelled' }),
     );
     if (!cancelled) return Response.json({ error: 'This proposal is no longer pending.', state: stored.state }, { status: 409 });
+    // The cancel path has no tenant context yet: resolve the card's own workspace for the audit (best-effort).
+    const cancelCtx = await requireTenant(String((stored.proposal as Record<string, unknown>).projectKey ?? '')).catch(() => null);
+    if (cancelCtx) await auditProposalLifecycle(cancelCtx, stored, 'cancelled', null);
     return Response.json({ ok: true, state: 'cancelled' });
   }
 
@@ -428,7 +472,7 @@ export async function POST(req: Request): Promise<Response> {
   //    merged, a deploy shipped), so we must never report a terminal state we did not persist:
   //    if the terminal CAS does not land, surface it as `unrecorded` rather than pretending.
   try {
-    const executed = await runAction(body, ctx);
+    const executed = await runAction(body, ctx, input.proposalId);
     const done = await withUser({ userId: user.id }, (tx) =>
       transitionProposal(tx, user.id, { proposalId: input.proposalId, from: 'confirming', to: 'done', result: executed ?? null }),
     ).catch(() => null);
@@ -436,9 +480,11 @@ export async function POST(req: Request): Promise<Response> {
       log.error('ops-chat confirm: executed but failed to persist done state', { proposalId: input.proposalId, action: body.action });
       return Response.json({ ok: true, executed, state: 'unrecorded', warning: 'The action executed, but its card state could not be recorded — reload to see the true state.' });
     }
+    await auditProposalLifecycle(ctx, stored, 'confirmed', executed);
     return Response.json({ ok: true, executed, state: 'done' });
   } catch (err) {
     const to = isStaleFailure(err) ? 'stale' : 'error';
+    await auditProposalLifecycle(ctx, stored, to, null, toPublicMessage(err));
     if (!(err instanceof AppError)) log.error('ops-chat confirm execution failed', { err, action: body.action });
     const recorded = await withUser({ userId: user.id }, (tx) =>
       transitionProposal(tx, user.id, { proposalId: input.proposalId, from: 'confirming', to, error: toPublicMessage(err) }),

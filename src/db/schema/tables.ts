@@ -1354,6 +1354,10 @@ export const tasks = pgTable(
       .references(() => projects.id, { onDelete: 'cascade' }),
     /** Employee Chat: set when this task is one exchange of a conversation thread. */
     conversationId: uuid('conversation_id').references(() => conversations.id, { onDelete: 'set null' }),
+    /** P4 provenance — the Ops Chat dispatch card that CREATED this task (null for every other origin and for
+     *  rows that predate 0087). Set once at insert; a re-run never overwrites it (re-runs are linked on
+     *  run_jobs/runs). Immutable except for the FK's own ON DELETE SET NULL (trigger, 0087). */
+    opsChatProposalId: uuid('ops_chat_proposal_id').references((): AnyPgColumn => opsChatProposals.id, { onDelete: 'set null' }),
     title: text('title').notNull(),
     /** The user's brief, verbatim. Injection surface — handled per SECURITY.md T2. */
     input: text('input').notNull(),
@@ -1402,6 +1406,7 @@ export const tasks = pgTable(
   },
   (t) => [
     unique('tasks_tenant_id_uq').on(t.orgId, t.projectId, t.id),
+    index('tasks_ops_chat_proposal_idx').on(t.opsChatProposalId),
     index('tasks_org_project_idx').on(t.orgId, t.projectId),
     index('tasks_project_status_idx').on(t.projectId, t.status),
     index('tasks_project_created_idx').on(t.projectId, t.createdAt),
@@ -1643,9 +1648,13 @@ export const runJobs = pgTable(
      *  never affects claim eligibility. Null for legacy rows enqueued before the column existed. */
     dispatchKind: text('dispatch_kind').$type<DispatchKind>(),
     lastError: text('last_error'),
+    /** P4 provenance — the Ops Chat card (dispatch or re-run) that queued THIS attempt; null otherwise. Set once
+     *  at insert, immutable except for ON DELETE SET NULL (trigger, 0087). */
+    opsChatProposalId: uuid('ops_chat_proposal_id').references((): AnyPgColumn => opsChatProposals.id, { onDelete: 'set null' }),
     ...timestamps,
   },
   (t) => [
+    index('run_jobs_ops_chat_proposal_idx').on(t.opsChatProposalId),
     // One live job per task: prevents a duplicate enqueue from double-running.
     uniqueIndex('run_jobs_active_task_uq')
       .on(t.taskId)
@@ -1747,10 +1756,14 @@ export const runs = pgTable(
     errorMessage: text('error_message'),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp('finished_at', { withTimezone: true }),
+    /** P4 provenance — the Ops Chat card whose job produced THIS run/result (copied from run_jobs at run
+     *  creation); null for non-Ops-Chat runs and pre-0087 rows. Immutable except for ON DELETE SET NULL. */
+    opsChatProposalId: uuid('ops_chat_proposal_id').references((): AnyPgColumn => opsChatProposals.id, { onDelete: 'set null' }),
     ...timestamps,
   },
   (t) => [
     unique('runs_tenant_id_uq').on(t.orgId, t.projectId, t.id),
+    index('runs_ops_chat_proposal_idx').on(t.opsChatProposalId),
     index('runs_org_project_idx').on(t.orgId, t.projectId),
     index('runs_task_idx').on(t.taskId),
     // P1a agent pinning — composite FKs on the immutable requested-agent evidence. Same MATCH SIMPLE /

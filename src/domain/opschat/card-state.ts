@@ -11,6 +11,8 @@
  */
 
 export interface StoredCard {
+  /** The card's id — shown (short) so it can be matched to a task's createdByCard / latestRunCard. */
+  id?: string;
   kind: string;
   state: string;
   proposal: Record<string, unknown>;
@@ -89,7 +91,7 @@ export function cardStateLines(cards: readonly StoredCard[]): string {
     const when = c.updatedAt.toISOString().slice(0, 16).replace('T', ' ');
     const state = c.state === 'done' ? doneText(c) : (STATE_TEXT[c.state] ?? c.state);
     const err = c.error && (c.state === 'stale' || c.state === 'error') ? `: ${c.error.slice(0, 160)}` : '';
-    return `- [card ${c.kind}] ${cardLabel(c)} — ${state}${err} — as of ${when} UTC${resultIds(c.result)}`;
+    return `- [card ${c.kind}${c.id ? ` ${c.id.slice(0, 8)}` : ''}] ${cardLabel(c)} — ${state}${err} — as of ${when} UTC${resultIds(c.result)}`;
   });
   return `\n\n[SERVER RECORD — current state of the cards in this reply; authoritative over anything said above]\n${lines.join('\n')}`;
 }

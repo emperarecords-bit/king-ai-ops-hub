@@ -154,6 +154,7 @@ export async function loadPromptTurns(
   const cards = replyIds.length
     ? await tx
         .select({
+          id: opsChatProposals.id,
           messageId: opsChatProposals.messageId,
           kind: opsChatProposals.kind,
           state: opsChatProposals.state,
@@ -169,7 +170,7 @@ export async function loadPromptTurns(
   const cardsByMessage = new Map<string, StoredCard[]>();
   for (const c of cards) {
     const list = cardsByMessage.get(c.messageId) ?? [];
-    list.push({ kind: c.kind, state: c.state, proposal: (c.proposal ?? {}) as Record<string, unknown>, result: c.result, error: c.error, updatedAt: c.updatedAt });
+    list.push({ id: c.id, kind: c.kind, state: c.state, proposal: (c.proposal ?? {}) as Record<string, unknown>, result: c.result, error: c.error, updatedAt: c.updatedAt });
     cardsByMessage.set(c.messageId, list);
   }
   const replyByOwner = new Map<string, string>();
