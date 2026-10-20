@@ -55,6 +55,8 @@ import { loadObjectiveForRun } from '@/domain/objectives/objectives';
 import { assembleDocumentSources } from '@/domain/documents/retrieval-mode';
 import { writeRunVersionEvidence } from '@/domain/documents/references';
 import { assembleProjectState } from '@/domain/state/project-state';
+import { includesEmailDesk, runContextScope } from '@/domain/tasks/run-context-scope';
+import { approvalSubjectKey, decideSubject, loadSubjectHistory, type ProposingTask } from '@/domain/approvals/subject';
 import { assembleTaskGraph } from '@/domain/dependencies/graph-context';
 import { assembleDecisionMemory, logDecisionInjections, objectiveTaskIds } from '@/domain/decisions/decisions';
 import {
@@ -274,7 +276,10 @@ async function assembleRunContext(
   const coreRefs = docSources.coreRefs;
   const productionStatus = docSources.productionStatus;
 
-  const projectState = await assembleProjectState(tx, ctx, task.objectiveId, task.id);
+  const projectState = await assembleProjectState(tx, ctx, task.objectiveId, task.id, {
+    scheduleId: task.scheduleId,
+    scope: runContextScope(task),
+  });
   const taskGraph = await assembleTaskGraph(tx, ctx, task.id);
   const objTaskIds = await objectiveTaskIds(tx, ctx, task.objectiveId);
   const decisionMemory = await assembleDecisionMemory(tx, ctx, {
@@ -1289,7 +1294,10 @@ async function executeAndFinalize(
         tx.select({ key: projects.key }).from(projects).where(eq(projects.id, ctx.projectId)).limit(1),
       );
       if (projRows[0] && sightKeys.includes(projRows[0].key)) {
-        accurateBidsSight = await assembleAccurateBidsSight();
+        // A focused owner task never sees the actionable Email Desk (see run-context-scope.ts).
+        accurateBidsSight = await assembleAccurateBidsSight(undefined, {
+          includeEmailDesk: includesEmailDesk(runContextScope(task)),
+        });
       }
     }
   } catch (err) {
@@ -1486,7 +1494,33 @@ async function finalizeCompleted(
   // resume redoes it cleanly (no duplicates — nothing committed).
   const outcome = await withTenant(ctx, async (tx) => {
     let authorizationsRequested = 0;
+    let proposingTask: ProposingTask | null = null;
     for (const action of result.proposedActions) {
+      // Persistent rejection / supersession (approvals/subject.ts): a subject the owner rejected is not
+      // re-proposed from stale context, and a subject already awaiting a decision is not proposed twice —
+      // whatever the wording or action type. Suppressed actions never park the task behind an approval.
+      const subjectKey = approvalSubjectKey(action.payload);
+      if (subjectKey) {
+        proposingTask ??= (
+          await tx
+            .select({ scheduleId: tasks.scheduleId, createdAt: tasks.createdAt, input: tasks.input })
+            .from(tasks)
+            .where(eq(tasks.id, taskId))
+            .limit(1)
+        )[0] ?? null;
+        const decision = proposingTask
+          ? decideSubject(subjectKey, await loadSubjectHistory(tx, ctx, subjectKey), proposingTask)
+          : ({ allow: true } as const);
+        if (!decision.allow) {
+          await writeAudit(tx, ctx, {
+            action: decision.reason === 'rejected_subject' ? 'approval.rejected_subject_suppressed' : 'approval.duplicate_subject_suppressed',
+            entityType: 'task',
+            entityId: taskId,
+            detail: { actionType: action.type, summary: action.summary, subjectKey, priorApprovalId: decision.approvalId, runId },
+          });
+          continue;
+        }
+      }
       if (await pendingDuplicateExists(tx, ctx, action.type, action.payloadSha256)) {
         await writeAudit(tx, ctx, {
           action: 'approval.duplicate_suppressed',
