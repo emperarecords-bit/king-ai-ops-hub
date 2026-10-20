@@ -3,6 +3,7 @@ import { alias } from 'drizzle-orm/pg-core';
 import { AppError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { opsChatConversations, opsChatMessages, opsChatProposals } from '@/db/schema';
+import { cardStateLines, type StoredCard } from '@/domain/opschat/card-state';
 
 /**
  * Ops Chat persistence — owner-private, USER-scoped conversation store.
@@ -135,7 +136,7 @@ export async function loadPromptTurns(
   const ownerIds = owners.map((o) => o.id);
   const replies = ownerIds.length
     ? await tx
-        .select({ replyTo: opsChatMessages.replyToMessageId, content: opsChatMessages.content })
+        .select({ id: opsChatMessages.id, replyTo: opsChatMessages.replyToMessageId, content: opsChatMessages.content })
         .from(opsChatMessages)
         .where(
           and(
@@ -147,8 +148,32 @@ export async function loadPromptTurns(
           ),
         )
     : [];
+  // Each reply's cards, with their CURRENT stored state (card-state.ts): history text never overrides
+  // what actually happened to a card after it was shown.
+  const replyIds = replies.map((r) => r.id);
+  const cards = replyIds.length
+    ? await tx
+        .select({
+          messageId: opsChatProposals.messageId,
+          kind: opsChatProposals.kind,
+          state: opsChatProposals.state,
+          proposal: opsChatProposals.proposal,
+          result: opsChatProposals.result,
+          error: opsChatProposals.error,
+          updatedAt: opsChatProposals.updatedAt,
+        })
+        .from(opsChatProposals)
+        .where(and(eq(opsChatProposals.userId, userId), eq(opsChatProposals.conversationId, conversationId), inArray(opsChatProposals.messageId, replyIds)))
+        .orderBy(asc(opsChatProposals.createdAt))
+    : [];
+  const cardsByMessage = new Map<string, StoredCard[]>();
+  for (const c of cards) {
+    const list = cardsByMessage.get(c.messageId) ?? [];
+    list.push({ kind: c.kind, state: c.state, proposal: (c.proposal ?? {}) as Record<string, unknown>, result: c.result, error: c.error, updatedAt: c.updatedAt });
+    cardsByMessage.set(c.messageId, list);
+  }
   const replyByOwner = new Map<string, string>();
-  for (const r of replies) if (r.replyTo) replyByOwner.set(r.replyTo, r.content);
+  for (const r of replies) if (r.replyTo) replyByOwner.set(r.replyTo, r.content + cardStateLines(cardsByMessage.get(r.id) ?? []));
 
   const turns: PromptTurn[] = [];
   for (const o of owners) {

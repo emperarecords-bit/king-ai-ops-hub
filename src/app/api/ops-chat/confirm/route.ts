@@ -80,6 +80,8 @@ const ActionBody = z.discriminatedUnion('action', [
     title: z.string().trim().min(1).max(200),
     instructions: z.string().trim().min(1).max(32_000),
     agentId: z.string().uuid(),
+    /** Absent on cards stored before reviewer assignment existed → no reviewer (unchanged behavior). */
+    reviewerAgentId: z.string().uuid().nullish(),
   }),
   z.object({
     action: z.literal('rerun_task'),
@@ -221,25 +223,37 @@ async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext): 
       return executed;
     }
     case 'dispatch_task': {
-      const agent = (await withTenant(ctx, (tx) => listAgents(tx, ctx))).find((a) => a.id === body.agentId && a.enabled);
-      if (!agent) throw new AppError('not_found', 'That agent is not available in this workspace.');
+      // Agent truth: the card's agent (and reviewer) must still be exactly what runs. If routing changed since
+      // the card was shown (agent disabled / removed / no longer primary), refuse — the owner gets a new card
+      // naming the new agent rather than a run by someone they were not told about. Nothing is started.
+      const ags = await withTenant(ctx, (tx) => listAgents(tx, ctx));
+      const agent = ags.find((a) => a.id === body.agentId && a.enabled && a.role === 'primary');
+      if (!agent) {
+        throw new AppError('conflict', 'The agent on this card is no longer available — ask Ops Chat for a new card. Nothing was started.');
+      }
+      const reviewer = body.reviewerAgentId ? ags.find((a) => a.id === body.reviewerAgentId && a.enabled && a.role === 'reviewer') : null;
+      if (body.reviewerAgentId && !reviewer) {
+        throw new AppError('conflict', 'The reviewer on this card is no longer available — ask Ops Chat for a new card. Nothing was started.');
+      }
       const taskId = await withTenant(ctx, async (tx) => {
         const id = await createTask(tx, ctx, {
           title: body.title,
           input: body.instructions,
           providerSelection: agent.provider,
-          reviewEnabled: false,
+          // Review policy: with a reviewer on the card the run is reviewed; without one the card already told
+          // the owner the result is an UNREVIEWED DRAFT (the run records review_outcome=required_unmet).
+          reviewEnabled: Boolean(reviewer),
           modelTier: 'standard',
           flagshipCategory: null,
           objectiveId: null,
           scheduleId: null,
           primaryAgentId: agent.id,
-          reviewerAgentId: null,
+          reviewerAgentId: reviewer?.id ?? null,
         });
         await enqueueRun(tx, ctx, id);
         return id;
       });
-      return { taskId };
+      return { taskId, agentName: agent.name, reviewerName: reviewer?.name ?? null };
     }
     case 'rerun_task': {
       // A re-run is a real NEW attempt or an explicit refusal — never a job drained with no run while the card

@@ -22,6 +22,8 @@ import { groupOpenQuestions } from '@/domain/questions/grouping';
 import { listApprovalsForQueue, getApprovalDetail, type QueueApprovalRow } from '@/domain/approvals/approvals';
 import { listAgents } from '@/domain/agents/agents';
 import { renderApprovalContent, type ApprovalContentView } from '@/domain/opschat/approval-content';
+import { loadTaskStates } from '@/domain/opschat/task-state';
+import { pickDispatchReviewer, resolveDispatchAgent, UNREVIEWED_DRAFT_NOTE } from '@/domain/opschat/dispatch-agent';
 import { listRepoLinks } from '@/domain/github/links';
 import { getGitHubClient } from '@/domain/github/client';
 import {
@@ -108,6 +110,9 @@ export type OpsChatProposal =
       readonly instructions: string;
       readonly agentId: string;
       readonly agentName: string;
+      /** The reviewer the card assigns, or null → the card says the result will be an UNREVIEWED DRAFT. */
+      readonly reviewerAgentId?: string | null;
+      readonly reviewerName?: string | null;
     }
   | {
       readonly kind: 'rerun_task';
@@ -257,6 +262,10 @@ interface AuthScope {
 }
 
 const MET = new Set(['met', 'waived']);
+
+/** Attached to every task-state tool result: the stored state is the truth, not earlier chat text. */
+const STATE_NOTE =
+  'Authoritative stored state, read just now. Report `state` as given — it overrides anything said earlier in this conversation. A task in awaiting_approval has ALREADY RUN and is waiting on the listed approval decision; it is not an unconfirmed card.';
 
 function argStr(input: unknown, key: string): string {
   if (input && typeof input === 'object' && key in input) {
@@ -503,14 +512,14 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
   {
     name: 'propose_dispatch_task',
     description:
-      'Prepare to START NEW WORK in a workspace — create a task and queue an AI run FOR THE OWNER TO CONFIRM. This SPENDS money (an AI run uses tokens) and runs NOTHING until the owner confirms. Give a short title and clear instructions. Optionally name which agent owns it (use list_agents); otherwise the first available agent is used.',
+      'Prepare to START NEW WORK in a workspace — create a task and queue an AI run FOR THE OWNER TO CONFIRM. This SPENDS money (an AI run uses tokens) and runs NOTHING until the owner confirms. Give a short title and clear instructions. Name the agent that owns it with its exact name from list_agents — required when the workspace has more than one agent (there is no default). The tool result names the agent and reviewer on the card; describe the dispatch with exactly those names.',
     inputSchema: {
       type: 'object',
       properties: {
         project: { type: 'string', description: 'Workspace name or key.' },
         title: { type: 'string', description: 'Short task title.' },
         instructions: { type: 'string', description: 'What the agent should do.' },
-        agent: { type: 'string', description: 'Optional agent name to own the task.' },
+        agent: { type: 'string', description: 'Exact agent name (from list_agents) that owns the task. Required when the workspace has more than one agent.' },
       },
       required: ['project', 'title', 'instructions'],
     },
@@ -936,10 +945,17 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           const rows = await listTasks(tx, ctx, 100);
           const open = new Set(['pending', 'running', 'awaiting_approval']);
           const filtered = openOnly ? rows.filter((r) => open.has(r.status)) : rows;
+          const shown = filtered.slice(0, 40);
+          // Authoritative state for every listed task (task + job + run + its approvals), read now.
+          const states = new Map((await loadTaskStates(tx, ctx, shown.map((r) => r.id))).map((s) => [s.taskId, s]));
           return JSON.stringify({
             workspace: p.name,
             count: filtered.length,
-            tasks: filtered.slice(0, 40).map((r) => ({ id: r.id, title: r.title, status: r.status })),
+            note: STATE_NOTE,
+            tasks: shown.map((r) => {
+              const s = states.get(r.id);
+              return { id: r.id, title: r.title, status: r.status, state: s?.ownerFacing ?? null, pendingApprovals: s?.pendingApprovals ?? [] };
+            }),
           });
         });
       }
@@ -950,9 +966,24 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
         const ctx = ctxFor(auth, p);
         return withTenant(ctx, async (tx) => {
           const tasks = await listTasks(tx, ctx, 100);
-          const t = tasks.find((x) => x.id === taskRef || x.title.toLowerCase().includes(taskRef.toLowerCase()));
-          if (!t) return JSON.stringify({ workspace: p.name, note: 'No matching task.' });
+          // Exact id, then exact title; a title that matches several tasks is AMBIGUOUS — never pick the first
+          // (near-duplicate titles, e.g. two "Server Cabinet Cooling …" tasks, were reported on interchangeably).
+          const ref = taskRef.toLowerCase();
+          const byId = tasks.find((x) => x.id === taskRef);
+          const exact = byId ? [byId] : tasks.filter((x) => x.title.toLowerCase() === ref);
+          const matches = exact.length > 0 ? exact : tasks.filter((x) => x.title.toLowerCase().includes(ref));
+          if (matches.length === 0) return JSON.stringify({ workspace: p.name, note: 'No matching task.' });
+          if (matches.length > 1) {
+            return JSON.stringify({
+              workspace: p.name,
+              ambiguous: true,
+              note: 'Several tasks match — ask the owner which one, or call again with the task id. Do not guess.',
+              candidates: matches.slice(0, 10).map((x) => ({ id: x.id, title: x.title, status: x.status, createdAt: x.createdAt })),
+            });
+          }
+          const t = matches[0]!;
           const detail = await getTask(tx, ctx, t.id);
+          const state = (await loadTaskStates(tx, ctx, [t.id]))[0] ?? null;
           const runs = [...(await listRuns(tx, ctx, t.id))].sort(
             (a, b) => (b.startedAt?.getTime() ?? 0) - (a.startedAt?.getTime() ?? 0),
           );
@@ -966,8 +997,14 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           }
           return JSON.stringify({
             workspace: p.name,
-            task: { title: detail.title, status: detail.status, objective: detail.objectiveTitle },
-            latestRun: latest ? { status: latest.status, error: latest.errorMessage, finishedAt: latest.finishedAt } : null,
+            note: STATE_NOTE,
+            task: { id: t.id, title: detail.title, status: detail.status, objective: detail.objectiveTitle },
+            state: state?.ownerFacing ?? null,
+            job: state?.job ?? null,
+            latestRun: latest
+              ? { status: latest.status, error: latest.errorMessage, finishedAt: latest.finishedAt, reviewOutcome: state?.latestRun?.reviewOutcome ?? null }
+              : null,
+            pendingApprovals: state?.pendingApprovals ?? [],
             failingSteps,
           });
         });
@@ -1233,12 +1270,14 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
         if (instructions.length > 32_000) return JSON.stringify({ error: 'Instructions too long (max 32000 chars).' });
         const agentRef = argStr(input, 'agent');
         const ctx = ctxFor(auth, p);
-        const agent = await withTenant(ctx, async (tx) => {
-          const ags = (await listAgents(tx, ctx)).filter((a) => a.enabled);
-          if (agentRef) return ags.find((a) => a.id === agentRef || a.name.toLowerCase().includes(agentRef.toLowerCase())) ?? null;
-          return ags[0] ?? null;
+        // Agent truth (dispatch-agent.ts): no silent default, no ambiguous substring pick. The card stores the
+        // resolved id AND name — the agent the owner is told about is the agent that runs.
+        const { resolution, reviewer } = await withTenant(ctx, async (tx) => {
+          const ags = await listAgents(tx, ctx);
+          return { resolution: resolveDispatchAgent(ags, agentRef), reviewer: pickDispatchReviewer(ags) };
         });
-        if (!agent) return JSON.stringify({ error: 'No available agent to own the task in that workspace — call list_agents.' });
+        if (!resolution.ok) return JSON.stringify({ error: resolution.error, agents: resolution.candidates });
+        const agent = resolution.agent;
         addProposal({
           kind: 'dispatch_task',
           projectKey: p.key,
@@ -1247,10 +1286,18 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           instructions,
           agentId: agent.id,
           agentName: agent.name,
+          reviewerAgentId: reviewer?.id ?? null,
+          reviewerName: reviewer?.name ?? null,
         });
         return JSON.stringify({
           prepared: true,
-          note: `Prepared for the owner to confirm: a new task "${title}" in ${p.name}, run by ${agent.name}. This will START an AI run (uses tokens) only after the owner confirms. Do NOT claim it is running yet.`,
+          agent: agent.name,
+          reviewer: reviewer?.name ?? null,
+          note:
+            `Prepared for the owner to confirm: a new task "${title}" in ${p.name}, run by ${agent.name}` +
+            (reviewer ? `, reviewed by ${reviewer.name}` : ` — ${UNREVIEWED_DRAFT_NOTE}`) +
+            `. When you describe it, name exactly "${agent.name}" — that is the agent on the card and the one that will run. ` +
+            'This will START an AI run (uses tokens) only after the owner confirms. Do NOT claim it is running yet.',
         });
       }
       case 'propose_rerun_task': {

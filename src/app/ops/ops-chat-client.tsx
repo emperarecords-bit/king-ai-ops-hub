@@ -53,6 +53,8 @@ type Proposal =
       instructions: string;
       agentId: string;
       agentName: string;
+      reviewerAgentId?: string | null;
+      reviewerName?: string | null;
     }
   | { kind: 'rerun_task'; projectKey: string; workspaceName: string; taskId: string; taskTitle: string }
   | {
@@ -1094,8 +1096,14 @@ export function OpsChatClient({
                             <p className="mt-1 text-sm font-semibold">{p.title}</p>
                             <p className="mt-1 whitespace-pre-wrap text-sm text-[var(--muted)]">{p.instructions}</p>
                             <p className="mt-1 text-xs text-[var(--muted)]">
-                              Run by {p.agentName}. Starts an AI run and uses tokens.
+                              Run by {p.agentName}
+                              {p.reviewerName ? `, reviewed by ${p.reviewerName}` : ''}. Starts an AI run and uses tokens.
                             </p>
+                            {p.reviewerAgentId === null ? (
+                              <p className="mt-1 text-xs text-[var(--warning,#d9a441)]">
+                                No reviewer in this workspace — the result will be an UNREVIEWED DRAFT (not final).
+                              </p>
+                            ) : null}
                           </>
                         ) : p.kind === 'rerun_task' ? (
                           <p className="mt-1 text-sm">
