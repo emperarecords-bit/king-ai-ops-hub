@@ -194,7 +194,9 @@ export class AnthropicProvider implements AIProvider {
   /**
    * Tool-use conversation loop (Ops Chat v2). The model may call the supplied
    * tools; `runTool` executes each and its string result is fed back until the
-   * model returns a final text answer or `maxIterations` is reached. All
+   * model returns a final text answer or `maxIterations` is reached. If tools ran
+   * and the turn would otherwise end with no words (round cap, or an empty final
+   * answer), one extra tools-disabled "wrap-up" call makes the model reply. All
    * Anthropic-specific message shapes (tool_use / tool_result blocks) stay
    * inside this file. Yields text deltas + tool-activity events, then one 'done'.
    */
@@ -215,8 +217,26 @@ export class AnthropicProvider implements AIProvider {
       let inputTokens = 0;
       let outputTokens = 0;
       let stopReason = 'unknown';
+      // A turn must never end on a tool result with nothing said after it (the owner sees the
+      // conversation just stop). After tools have run, if the model hits the round cap or answers
+      // with no text, make ONE more call with tools disabled and a nudge, so it replies in words.
+      let usedTools = false;
+      let wrapUp = false;
+      const nudge = (why: string) => {
+        const last = messages[messages.length - 1];
+        const text = `[${why}] Reply to the owner now in plain words, without calling any tools: say what you did, what was refused or failed and why (from the tool results above), and what you need from them next. Do not claim anything was created or sent unless a tool result says so.`;
+        if (last && last.role === 'user' && Array.isArray(last.content)) last.content.push({ type: 'text', text });
+        else messages.push({ role: 'user', content: text });
+      };
 
-      for (let iter = 0; iter < maxIterations; iter++) {
+      for (let iter = 0; iter <= maxIterations; iter++) {
+        if (iter === maxIterations && !wrapUp) {
+          // Round cap reached right after a tool round: wrap up instead of ending silently.
+          // (If an empty-answer wrap-up is already pending, this iteration IS that call.)
+          if (!usedTools) break;
+          wrapUp = true;
+          nudge('Tool-round limit reached');
+        }
         const open = (withTemperature: boolean) =>
           this.client.messages.create(
             {
@@ -225,6 +245,7 @@ export class AnthropicProvider implements AIProvider {
               messages,
               max_tokens: request.maxOutputTokens,
               tools: anthropicTools,
+              ...(wrapUp ? { tool_choice: { type: 'none' as const } } : {}),
               ...(withTemperature ? { temperature: request.temperature } : {}),
               stream: true,
             },
@@ -282,8 +303,20 @@ export class AnthropicProvider implements AIProvider {
           (b): b is { type: 'tool_use'; id: string; name: string; json: string } => b.type === 'tool_use',
         );
 
-        // Final answer produced (no tool calls) — stop.
-        if (curStop !== 'tool_use' || toolUses.length === 0) break;
+        // Final answer produced (no tool calls) — stop. But an EMPTY answer right after tools ran
+        // is not an answer: ask once more (tools off) so the owner gets a reply.
+        if (curStop !== 'tool_use' || toolUses.length === 0) {
+          const said = present.some((b) => b.type === 'text' && b.text.trim().length > 0);
+          if (!said && usedTools && !wrapUp) {
+            wrapUp = true;
+            nudge('Your last reply was empty');
+            continue;
+          }
+          break;
+        }
+        // Tools are disabled on the wrap-up call; never run another round after it.
+        if (wrapUp) break;
+        usedTools = true;
 
         // Record the assistant's turn (text + tool_use), then run each tool and
         // feed the results back as a user turn.

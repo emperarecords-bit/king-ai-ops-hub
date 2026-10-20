@@ -76,6 +76,9 @@ export function summarizeAccurateBidsPayload(p: AccurateBidsOpsChatPayload): str
     return `Create an AccurateBids invoice "${p.job_name}" for ${p.customer_name} — ${money(total)} before tax (a real unpaid invoice; not sent to the customer).`;
   }
   const what = p.send === 'quote' ? 'quote' : p.send === 'invoice_reminder' ? 'payment reminder for invoice' : 'invoice';
+  if (p.customer_email) {
+    return `Save ${p.customer_email} as the customer's email on invoice${p.label ? ` ${p.label}` : ''} (it has none on file), then email the ${what} to it through AccurateBids.`;
+  }
   return `Email the ${what}${p.label ? ` ${p.label}` : ''} to the customer through AccurateBids.`;
 }
 

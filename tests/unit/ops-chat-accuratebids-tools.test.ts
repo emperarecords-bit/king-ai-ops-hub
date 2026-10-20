@@ -82,7 +82,45 @@ describe('AccurateBids tools — prepare only, never execute', () => {
 
   it('refuses dead-end sends up front (paid invoice, no customer email)', async () => {
     expect((await run('propose_accuratebids_send', { project: 'empera', send: 'invoice', invoice_id: INV_PAID })).out.error).toMatch(/paid/);
-    expect((await run('propose_accuratebids_send', { project: 'empera', send: 'invoice_reminder', invoice_id: INV_NOMAIL })).out.error).toMatch(/no email/);
+    // No email on file and none given: the refusal tells the model exactly how to proceed.
+    const noMail = (await run('propose_accuratebids_send', { project: 'empera', send: 'invoice_reminder', invoice_id: INV_NOMAIL })).out.error;
+    expect(noMail).toMatch(/no customer email on file/);
+    expect(noMail).toMatch(/Ask the owner/);
+    expect(noMail).toMatch(/customer_email/);
+  });
+
+  it('an invoice with NO email on file + the owner-given address → a card that shows it, saves it and sends', async () => {
+    const { out, proposals } = await run('propose_accuratebids_send', {
+      project: 'empera',
+      send: 'invoice',
+      invoice_id: INV_NOMAIL,
+      customer_email: '  joeyo2228@gmail.com ',
+    });
+    expect(out.prepared).toBe(true);
+    const p = proposals[0]! as AbProposal;
+    expect(p.payload).toEqual({
+      kind: 'accuratebids_send',
+      send: 'invoice',
+      invoice_id: INV_NOMAIL,
+      customer_email: 'joeyo2228@gmail.com',
+      label: 'INV-333333 (Sam, balance $300)',
+    });
+    expect(p.summary).toMatch(/Save joeyo2228@gmail.com as the customer's email on invoice INV-333333/);
+    expect(JSON.stringify(p.content)).toContain('joeyo2228@gmail.com');
+    expect(h.executeAccurateBidsFromOpsChat).not.toHaveBeenCalled();
+  });
+
+  it('never replaces an address on file, never adds one to a quote, and rejects a malformed address', async () => {
+    expect((await run('propose_accuratebids_send', { project: 'empera', send: 'invoice', invoice_id: INV, customer_email: 'other@x.com' })).out.error).toMatch(
+      /already has an email on file/,
+    );
+    expect((await run('propose_accuratebids_send', { project: 'empera', send: 'quote', quote_id: QUOTE, customer_email: 'a@b.com' })).out.error).toMatch(
+      /only be added to an invoice/,
+    );
+    for (const bad of ['not-an-email', 'a@b.com, c@d.com', 'Joe <a@b.com>']) {
+      expect((await run('propose_accuratebids_send', { project: 'empera', send: 'invoice', invoice_id: INV_NOMAIL, customer_email: bad })).out.error).toMatch(/Invalid|email/);
+    }
+    expect(h.executeAccurateBidsFromOpsChat).not.toHaveBeenCalled();
   });
 
   it('propose_accuratebids_quote validates with the executor schema and records a draft card', async () => {

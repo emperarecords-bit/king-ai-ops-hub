@@ -226,10 +226,13 @@ function renderSend(p: Record<string, unknown>): ApprovalContentView {
   b.field('Sends', what)
     .field('Record', firstStr(p, ['label']))
     .field('Invoice id', firstStr(p, ['invoice_id']))
-    .field('Quote id', firstStr(p, ['quote_id']));
+    .field('Quote id', firstStr(p, ['quote_id']))
+    // Shown in full: this is the address the owner is confirming will be saved and emailed.
+    .field('Save + email to', firstStr(p, ['customer_email']));
+  const saving = Boolean(firstStr(p, ['customer_email']));
   return b.build(
     'email',
-    `Email the ${what} to the customer through AccurateBids (its own "View & ${send === 'quote' ? 'Approve' : 'Pay'}" email)`,
+    `${saving ? 'Save this email on the invoice (it has none on file), then email' : 'Email'} the ${what} to the customer through AccurateBids (its own "View & ${send === 'quote' ? 'Approve' : 'Pay'}" email)`,
     null,
   );
 }

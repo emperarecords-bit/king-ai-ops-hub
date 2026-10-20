@@ -457,3 +457,46 @@ describe('POST /api/ops-chat — persistence turn protocol (PR 2)', () => {
     expect(h.release).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('POST /api/ops-chat — a completed turn never ends silently after a tool', () => {
+  const persistedText = (): string => {
+    const args = h.appendAssistantMessage.mock.calls.at(-1) ?? [];
+    return JSON.stringify(args);
+  };
+
+  it('"let me try…" + a tool + nothing after → an honest closing line is streamed AND persisted', async () => {
+    h.getProposals.mockReturnValue([]);
+    h.streamWithTools.mockImplementation(async function* () {
+      yield { kind: 'delta', text: 'Let me try preparing the send card anyway.' };
+      yield { kind: 'tool_start', name: 'propose_accuratebids_send' };
+      yield { kind: 'tool_end', name: 'propose_accuratebids_send', ok: true };
+      yield { kind: 'done', usage: { inputTokens: 1, outputTokens: 1 }, stopReason: 'end_turn' };
+    });
+    const text = await (await call({ message: 'send it', conversationId: CONV, turnId: TURN })).text();
+    expect(text).toContain("I couldn't finish that step, and nothing was created or sent.");
+    expect(text).toContain('event: done');
+    expect(persistedText()).toContain("I couldn't finish that step");
+  });
+
+  it('when the turn DID prepare a card, the closing line points at it instead', async () => {
+    h.streamWithTools.mockImplementation(async function* () {
+      yield { kind: 'tool_start', name: 'propose_accuratebids_send' };
+      yield { kind: 'tool_end', name: 'propose_accuratebids_send', ok: true };
+      yield { kind: 'done', usage: { inputTokens: 1, outputTokens: 1 }, stopReason: 'end_turn' };
+    });
+    const text = await (await call({ message: 'send it', conversationId: CONV, turnId: TURN })).text();
+    expect(text).toContain('nothing happens until you click Confirm');
+  });
+
+  it('words after the last tool → no closing line is added', async () => {
+    h.streamWithTools.mockImplementation(async function* () {
+      yield { kind: 'tool_start', name: 'list_tasks' };
+      yield { kind: 'tool_end', name: 'list_tasks', ok: true };
+      yield { kind: 'delta', text: 'You have 3 open tasks.' };
+      yield { kind: 'done', usage: { inputTokens: 1, outputTokens: 1 }, stopReason: 'end_turn' };
+    });
+    const text = await (await call({ message: 'what needs me', conversationId: CONV, turnId: TURN })).text();
+    expect(text).not.toContain("couldn't finish that step");
+    expect(text).not.toContain('nothing happens until you click Confirm');
+  });
+});

@@ -60,6 +60,17 @@ export const OPS_CHAT_CONVERSATION_BUSY_MESSAGE = 'Another message in this conve
  *  the earlier turn reaches a terminal reply. */
 export const OPS_CHAT_EARLIER_TURN_PENDING_MESSAGE = 'An earlier message in this conversation is still waiting to be answered. Try again in a moment.';
 
+/**
+ * Appended (streamed + persisted) when a COMPLETED turn would otherwise end with no words after its
+ * last tool — e.g. the model said "let me try…", a tool refused, and nothing followed. Honest and
+ * neutral: it never claims anything happened, and points at any card the turn did prepare.
+ */
+export function opsChatClosingLine(proposalCount: number): string {
+  return proposalCount > 0
+    ? "That's prepared above — nothing happens until you click Confirm. Tell me if anything on it should change."
+    : "I couldn't finish that step, and nothing was created or sent. Tell me how you'd like to continue, or ask me what got in the way.";
+}
+
 /** Shown when replaying a persisted INTERRUPTED reply. An interrupted turn is kept for history but
  *  must never masquerade as a completed answer, so its replay ends in `error`, not `done`. */
 export const OPS_CHAT_INTERRUPTED_REPLAY_MESSAGE = 'This reply was interrupted. Send a new message to continue.';

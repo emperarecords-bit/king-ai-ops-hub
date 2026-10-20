@@ -155,4 +155,35 @@ describe('accuratebids_send', () => {
     expect(accurateBidsSendKey('a1')).toBe('hub:a1');
     expect(accurateBidsSendKey('a1')).not.toBe(accurateBidsSendKey('a2'));
   });
+
+  it('an owner-given email for an invoice with none on file is passed to hub-send, and the audit plan never stores it', async () => {
+    const { ex, calls } = executor(() =>
+      ok({ success: true, label: 'INV-679786', sent_to: 'j***@gmail.com', invoice_number: 'INV-679786', email_saved: true }),
+    );
+    const a = action({ ...SEND_INVOICE, customer_email: 'joeyo2228@gmail.com' });
+    const r = await ex.execute(a);
+    expect(r.outcome).toBe('succeeded');
+    expect(calls[0]!.body).toEqual({ kind: 'invoice', invoice_id: INV, customer_email: 'joeyo2228@gmail.com', idempotency_key: accurateBidsSendKey(a.approvalId) });
+    expect(r.message).toMatch(/emailed to the customer \(j\*\*\*@gmail\.com\); that email is now saved on the invoice/);
+    expect(r.preview).toMatchObject({ withOwnerEmail: true, emailSaved: true });
+    expect(JSON.stringify(r.preview)).not.toContain('joeyo2228');
+  });
+
+  it("hub-send refusing to overwrite a different address on file is reported as blocked, not sent", async () => {
+    const { ex } = executor(() => ok({ error: 'Invoice INV-1 already has a different email on file; nothing was changed or sent.' }, 409));
+    const r = await ex.execute(action({ ...SEND_INVOICE, customer_email: 'joeyo2228@gmail.com' }));
+    expect(r.outcome).toBe('blocked');
+    expect(r.message).toMatch(/not sent: .*different email on file/);
+  });
+
+  it.each([
+    [{ kind: 'accuratebids_send', send: 'quote', quote_id: QUOTE, customer_email: 'a@b.com' }],
+    [{ ...SEND_INVOICE, customer_email: 'a@b.com, c@d.com' }],
+    [{ ...SEND_INVOICE, customer_email: 'Joe <a@b.com>' }],
+    [{ ...SEND_INVOICE, customer_email: 'nope' }],
+  ])('rejects an email the schema does not allow %j without calling out', async (payload) => {
+    const { ex, calls } = executor(() => ok({ success: true }));
+    expect((await ex.execute(action(payload))).outcome).toBe('blocked');
+    expect(calls).toHaveLength(0);
+  });
 });
