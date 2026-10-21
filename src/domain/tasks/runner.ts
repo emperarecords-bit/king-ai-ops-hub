@@ -33,6 +33,7 @@ import { assemblePortfolioBriefing } from '@/domain/portfolio/portfolio';
 import { assembleAccurateBidsSight, sightEnabledKeys } from '@/domain/integrations/accuratebids-sight';
 import { createOwnerQuestions } from '@/domain/questions/questions';
 import { enqueueNotificationSafe } from '@/domain/notifications/enqueue';
+import { buildOpsChatRunNoticeSafe } from '@/domain/opschat/run-notice';
 import { createHqQuestions, deliverHqAnswer } from '@/domain/questions/hq-questions';
 import { HQ_QUESTION_RULES, extractHqQuestions } from '@/orchestration/questions-block';
 import { resolveModelForTier } from '@/orchestration/routing';
@@ -1784,13 +1785,24 @@ async function finalizeCompleted(
     // A clean completion is an in-app notification (success → in_app_only). When finalStatus is
     // 'awaiting_approval' the approval_pending notifications above already carry the attention signal.
     if (finalStatus === 'completed') {
-      await enqueueNotificationSafe(tx, ctx, {
-        eventType: 'run_completed',
-        entityType: 'run',
-        entityId: runId,
-        title: 'A run completed',
-        body: `A run completed with ${result.steps.length} step(s).`,
+      // P5b-1: a run started from an Ops Chat card is emailed (immediate) with the card's outcome line and a link
+      // back to it; any other run keeps the in-app-only notice. No result text goes into the notification.
+      const notice = await buildOpsChatRunNoticeSafe(tx, {
+        runId,
+        taskId,
+        outcome: 'completed',
+        reviewOutcome: result.reviewOutcome,
+        resultChars: result.consolidated?.length ?? 0,
+        errorMessage: null,
+        finishedAt: new Date(),
       });
+      await enqueueNotificationSafe(
+        tx,
+        ctx,
+        notice
+          ? { eventType: 'run_completed', entityType: 'run', entityId: runId, title: notice.title, body: notice.body, opsChat: notice.opsChat }
+          : { eventType: 'run_completed', entityType: 'run', entityId: runId, title: 'A run completed', body: `A run completed with ${result.steps.length} step(s).` },
+      );
     }
 
     return { runId, status: finalStatus, failureReason: null as string | null };
@@ -1819,13 +1831,15 @@ async function finalizeFailed(
       .where(eq(runs.id, runId));
     await tx.update(tasks).set({ status: 'failed', updatedAt: new Date() }).where(eq(tasks.id, taskId));
     await writeAudit(tx, ctx, { action: 'run.failed', entityType: 'run', entityId: runId, detail: { reason } });
-    await enqueueNotificationSafe(tx, ctx, {
-      eventType: 'run_failed',
-      entityType: 'run',
-      entityId: runId,
-      title: 'A run failed',
-      body: `A run failed and may need your attention. Reason: ${reason}`,
-    });
+    // P5b-1: an Ops Chat-started run's failure (already critical + immediate) names the task and links back.
+    const notice = await buildOpsChatRunNoticeSafe(tx, { runId, taskId, outcome: 'failed', reviewOutcome: null, resultChars: 0, errorMessage: reason, finishedAt: new Date() });
+    await enqueueNotificationSafe(
+      tx,
+      ctx,
+      notice
+        ? { eventType: 'run_failed', entityType: 'run', entityId: runId, title: notice.title, body: notice.body, opsChat: notice.opsChat }
+        : { eventType: 'run_failed', entityType: 'run', entityId: runId, title: 'A run failed', body: `A run failed and may need your attention. Reason: ${reason}` },
+    );
     log.warn('Run failed', { runId, failureClass: reason.split(/[\s(:]/, 1)[0] || 'unknown', recoverable: true });
     return { runId, status: 'failed', failureReason: reason };
   });

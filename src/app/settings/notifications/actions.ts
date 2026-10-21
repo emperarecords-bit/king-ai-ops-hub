@@ -15,6 +15,7 @@ export interface PrefsFormState {
 
 const schema = z.object({
   emailEnabled: z.boolean(),
+  opsChatRunEmails: z.boolean().optional(),
   emailOverride: z.string().max(200),
   timezone: z.string().min(1).max(64),
   quietHoursStartLocal: z.string().max(5),
@@ -26,6 +27,11 @@ const schema = z.object({
 export async function saveNotificationPrefs(_prev: PrefsFormState, formData: FormData): Promise<PrefsFormState> {
   const parsed = schema.safeParse({
     emailEnabled: formData.get('emailEnabled') === 'on' || formData.get('emailEnabled') === 'true',
+    // Only when the form rendered the toggle (marker present); otherwise leave the stored choice untouched.
+    opsChatRunEmails:
+      formData.get('opsChatRunEmailsPresent') === '1'
+        ? formData.get('opsChatRunEmails') === 'on' || formData.get('opsChatRunEmails') === 'true'
+        : undefined,
     emailOverride: formData.get('emailOverride') ?? '',
     timezone: formData.get('timezone') ?? 'UTC',
     quietHoursStartLocal: formData.get('quietHoursStartLocal') ?? '',
@@ -45,6 +51,7 @@ export async function saveNotificationPrefs(_prev: PrefsFormState, formData: For
     await withUser({ userId: user.id }, (tx) =>
       updatePreferences(tx, user.id, {
         emailEnabled: d.emailEnabled,
+        opsChatRunEmails: d.opsChatRunEmails,
         emailOverride: d.emailOverride.trim() === '' ? null : d.emailOverride.trim(),
         timezone: d.timezone.trim(),
         quietHoursStartLocal: startLocal,

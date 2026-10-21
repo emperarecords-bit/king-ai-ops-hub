@@ -16,9 +16,14 @@ export interface EffectiveNotificationPrefs {
   readonly quietHoursStartLocal: string | null;
   readonly quietHoursEndLocal: string | null;
   readonly digestTimesLocal: readonly string[];
+  /** P5b-1: email when a run started from an Ops Chat card finishes. Default ON; stored as routing_overrides.ops_chat_run. */
+  readonly opsChatRunEmails: boolean;
   readonly lastDigestAt: Date | null;
   readonly nextDigestAt: Date | null;
 }
+
+/** routing_overrides key for the Ops Chat run-completion email ('in_app_only' = off; absent = on). */
+export const OPS_CHAT_RUN_OVERRIDE_KEY = 'ops_chat_run';
 
 export async function getOrDefaultPreferences(tx: DbTx, userId: string): Promise<EffectiveNotificationPrefs> {
   const prof = (await tx.select({ email: profiles.email }).from(profiles).where(eq(profiles.id, userId)).limit(1))[0];
@@ -33,6 +38,7 @@ export async function getOrDefaultPreferences(tx: DbTx, userId: string): Promise
     quietHoursStartLocal: row?.quietHoursStartLocal ?? null,
     quietHoursEndLocal: row?.quietHoursEndLocal ?? null,
     digestTimesLocal: row?.digestTimesLocal ?? [],
+    opsChatRunEmails: (row?.routingOverrides as Record<string, unknown> | undefined)?.[OPS_CHAT_RUN_OVERRIDE_KEY] !== 'in_app_only',
     lastDigestAt: row?.lastDigestAt ?? null,
     nextDigestAt: row?.nextDigestAt ?? null,
   };
@@ -45,6 +51,7 @@ export interface NotificationPrefsPatch {
   readonly quietHoursStartLocal?: string | null;
   readonly quietHoursEndLocal?: string | null;
   readonly digestTimesLocal?: readonly string[];
+  readonly opsChatRunEmails?: boolean;
 }
 
 function assertTimezone(tz: string): void {
@@ -92,6 +99,10 @@ export async function updatePreferences(
   }
 
   const computedNextDigest = nextDigestAt(now, timezone, digestTimesLocal);
+  const existingOverrides = ((await tx.select({ o: notificationPreferences.routingOverrides }).from(notificationPreferences).where(eq(notificationPreferences.userId, userId)).limit(1))[0]?.o ?? {}) as Record<string, unknown>;
+  const routingOverrides: Record<string, unknown> = { ...existingOverrides };
+  if (patch.opsChatRunEmails === false) routingOverrides[OPS_CHAT_RUN_OVERRIDE_KEY] = 'in_app_only';
+  else if (patch.opsChatRunEmails === true) delete routingOverrides[OPS_CHAT_RUN_OVERRIDE_KEY];
 
   await tx
     .insert(notificationPreferences)
@@ -103,6 +114,7 @@ export async function updatePreferences(
       quietHoursStartLocal: startLocal,
       quietHoursEndLocal: endLocal,
       digestTimesLocal,
+      routingOverrides,
       nextDigestAt: computedNextDigest,
       updatedAt: now,
     })
@@ -115,6 +127,7 @@ export async function updatePreferences(
         quietHoursStartLocal: startLocal,
         quietHoursEndLocal: endLocal,
         digestTimesLocal,
+        routingOverrides,
         nextDigestAt: computedNextDigest,
         updatedAt: now,
       },

@@ -7,13 +7,15 @@ import { gateChannel } from './registry';
 import { EMAIL_CHANNEL_ID } from './channels/email-resend';
 import { getOrDefaultPreferences } from './preferences';
 import { inQuietHours } from './schedule';
+import { isOpsChatRunCompletion } from './severity';
 import { finalizeMessage, insertMessageWithLinks, outcomeToStatus, resultRows } from './deliver';
 
 /**
  * Deliver due IMMEDIATE notifications (critical / action_required). Fail-closed by default: if the email channel
  * is not live (kill switch, not enabled, no key, no sender) OR the owner disabled email OR no address is on file,
- * the message is recorded `suppressed` and NOTHING is sent. Quiet hours defer ONLY action_required (critical
- * bypasses) by leaving the event pending — it is re-evaluated each tick and sends once the window ends.
+ * the message is recorded `suppressed` and NOTHING is sent. Quiet hours defer every NON-critical event (critical
+ * bypasses) by leaving the event pending — it is re-evaluated each tick and sends once the window ends. The Ops Chat
+ * run-completion email (P5b-1, success + immediate) also honours the owner's per-user opt-out.
  *
  * Concurrency + at-most-once: a 'sending' message keyed (recipient, "email:<eventId>") is the claim token, so two
  * workers racing the same event send at most once. The send runs OUTSIDE the DB transaction (no tx held across a
@@ -72,7 +74,11 @@ export async function routeDueNotifications(deps: RouterDeps = {}): Promise<Rout
           await insertMessageWithLinks(tx, { ...common, status: 'suppressed', attemptCount: 0, lastAttemptAt: null, resultCode: 'email_disabled', resultDetail: { detail: 'owner disabled email notifications' }, sentAt: null });
           return { kind: 'suppressed' as const };
         }
-        if (ev.severity === 'action_required' && inQuietHours(now, prefs.timezone, prefs.quietHoursStartLocal, prefs.quietHoursEndLocal)) {
+        if (isOpsChatRunCompletion(ev) && !prefs.opsChatRunEmails) {
+          await insertMessageWithLinks(tx, { ...common, status: 'suppressed', attemptCount: 0, lastAttemptAt: null, resultCode: 'owner_opted_out', resultDetail: { detail: 'owner turned off Ops Chat run-completion emails' }, sentAt: null });
+          return { kind: 'suppressed' as const };
+        }
+        if (ev.severity !== 'critical' && inQuietHours(now, prefs.timezone, prefs.quietHoursStartLocal, prefs.quietHoursEndLocal)) {
           return { kind: 'deferred' as const }; // leave pending; re-evaluated next tick (critical would NOT defer)
         }
         const gate = gateChannel(EMAIL_CHANNEL_ID, env, fetcher);
