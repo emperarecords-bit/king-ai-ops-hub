@@ -15,10 +15,12 @@ const h = vi.hoisted(() => ({
   listRuns: vi.fn(),
   listRunSteps: vi.fn(),
   loadTaskResultRun: vi.fn(),
+  loadTaskStates: vi.fn(),
 }));
 
 vi.mock('@/db/tenant', () => ({ withTenant: h.withTenant }));
 vi.mock('@/domain/tasks/tasks', () => ({ listTasks: h.listTasks, getTask: h.getTask, listRuns: h.listRuns, listRunSteps: h.listRunSteps }));
+vi.mock('@/domain/opschat/task-state', () => ({ loadTaskStates: h.loadTaskStates }));
 vi.mock('@/domain/opschat/task-result', async (orig) => ({ ...(await orig<typeof taskResult>()), loadTaskResultRun: h.loadTaskResultRun }));
 
 import { createOpsChatToolset } from '@/domain/opschat/tools';
@@ -45,6 +47,7 @@ beforeEach(() => {
   h.withTenant.mockImplementation((_ctx: unknown, fn: (tx: unknown) => unknown) => fn({}));
   h.listTasks.mockResolvedValue([TASK]);
   h.loadTaskResultRun.mockResolvedValue({ run: run(), lastCompletedRunId: null });
+  h.loadTaskStates.mockResolvedValue([{ stale: null }]);
 });
 
 describe('resultLabel — only from stored facts', () => {
@@ -149,6 +152,18 @@ describe('get_task_result tool', () => {
     vi.clearAllMocks();
     expect((await call({ project: 'kodisnap', task: 'x' })).error).toMatch(/No workspace matched/);
     expect(h.withTenant).not.toHaveBeenCalled();
+  });
+
+  it('P5c-2: a result that predates the owner later decisions is still shown, but flagged STALE with the update-card nudge', async () => {
+    const stale = { runId: RUN_ID, runStartedAt: '2026-10-19T14:50:03.000Z', decisions: [{ kind: 'question_answered', id: 'q1', at: '2026-10-19T17:00:00.000Z', summary: 'Supply air temp?' }] };
+    h.loadTaskStates.mockResolvedValue([{ stale }]);
+    const out = await call({ project: 'AccurateBids', task: 'Duct' });
+    expect(out).toMatchObject({ label: 'FINAL', stale });
+    expect(out.staleNote).toMatch(/PREDATES 1 owner decision.*propose_update_task.*never present it as current/);
+    expect(out.result).toContain('CFM');
+    // A stale flag about a DIFFERENT (newer) run never attaches to an older run being read.
+    h.loadTaskStates.mockResolvedValue([{ stale: { ...stale, runId: 'other-run' } }]);
+    expect((await call({ project: 'AccurateBids', task: 'Duct' })).stale).toBeUndefined();
   });
 
   it('no run yet → NO RESULT, nothing invented', async () => {

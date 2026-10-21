@@ -597,6 +597,28 @@ export async function listRunStartingCards(tx: DbTx, userId: string, conversatio
     .limit(limit);
 }
 
+/**
+ * P5c-2: the id of a still-PENDING update card for `taskId` in this conversation (a dispatch_task card whose payload
+ * carries updateOf.taskId), or null. Lets propose_update_task offer ONE card per task, not one per turn.
+ */
+export async function pendingUpdateCardFor(tx: DbTx, userId: string, conversationId: string, taskId: string): Promise<string | null> {
+  const rows = await tx
+    .select({ id: opsChatProposals.id })
+    .from(opsChatProposals)
+    .where(
+      and(
+        eq(opsChatProposals.userId, userId),
+        eq(opsChatProposals.conversationId, conversationId),
+        eq(opsChatProposals.kind, 'dispatch_task'),
+        eq(opsChatProposals.state, 'pending'),
+        sql`${opsChatProposals.proposal} -> 'updateOf' ->> 'taskId' = ${taskId}`,
+      ),
+    )
+    .orderBy(desc(opsChatProposals.seq))
+    .limit(1);
+  return rows[0]?.id ?? null;
+}
+
 /** A user's conversations, most-recently-updated first (the history list). */
 export async function listConversations(
   tx: DbTx,
