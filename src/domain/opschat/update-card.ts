@@ -1,7 +1,9 @@
-import { and, desc, eq, isNotNull } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, sql } from 'drizzle-orm';
 import { type DbTx } from '@/db/client';
 import { approvals, ownerQuestions, runs, tasks } from '@/db/schema';
-import { decisionsAfterRun } from '@/domain/opschat/task-state';
+import { AppError } from '@/lib/errors';
+import { type TenantContext } from '@/types/domain';
+import { decisionsAfterRun, loadTaskStates } from '@/domain/opschat/task-state';
 
 /**
  * P5c-2 — ONE consolidated "update this job" card when the owner's decisions changed after a task's latest run.
@@ -72,6 +74,45 @@ export async function loadUpdateBasis(tx: DbTx, taskId: string): Promise<UpdateB
     run,
     decisions: all.filter((d) => keep.has(d.id)).sort((a, b) => a.at.getTime() - b.at.getTime()),
   };
+}
+
+/** What an update card froze when it was prepared — re-checked at confirm (see assertUpdateCardCurrent). */
+export interface UpdateOf {
+  taskId: string;
+  taskTitle: string;
+  runId: string;
+  decisions: number;
+  /** The exact decisions written into the card's instructions. Absent only on cards prepared before this field. */
+  decisionIds?: string[];
+}
+
+export const UPDATE_CARD_NOT_CURRENT =
+  'This update card is no longer current because the job changed after the card was prepared. Ask Ops Chat for a fresh update card. Nothing was started.';
+
+/**
+ * CONFIRM-TIME freshness (review of #175): an update card freezes the original task's state when it is prepared; if the
+ * job changed before the owner confirms, starting it would run stale frozen instructions — the very drift P5c-2 fixes.
+ * Confirm only when, re-read NOW in the confirming transaction:
+ *   - the original task still exists and still has its latest run = the card's run (no re-run since);
+ *   - its post-run decisions are EXACTLY the card's (no answer/rejection added since; none disappeared);
+ *   - no other update task has already superseded it.
+ * Serialized per original task with a transaction-scoped advisory lock, so two update cards confirmed at the same
+ * moment cannot both pass. Throws AppError('conflict') → the card becomes `stale` with the plain reason; nothing starts.
+ */
+export async function assertUpdateCardCurrent(tx: DbTx, ctx: TenantContext, u: UpdateOf): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`ops_chat_update_card:${u.taskId}`}))`);
+  const fail = (why: string): never => {
+    throw new AppError('conflict', `${UPDATE_CARD_NOT_CURRENT} (${why})`);
+  };
+  const basis = await loadUpdateBasis(tx, u.taskId);
+  if (!basis) fail('the original task or its run is no longer available');
+  if (basis!.run.id !== u.runId) fail('the original task was run again after the card was prepared');
+  const now = basis!.decisions.map((d) => d.id).sort();
+  const frozen = u.decisionIds ? [...u.decisionIds].sort() : null;
+  const same = frozen ? frozen.length === now.length && frozen.every((id, i) => id === now[i]) : now.length === u.decisions;
+  if (!same) fail('the owner made decisions after the card was prepared');
+  const st = (await loadTaskStates(tx, ctx, [u.taskId]))[0];
+  if (st?.supersededBy) fail(`it was already updated by task "${st.supersededBy.title}"`);
 }
 
 const iso = (d: Date | null) => (d ? `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC` : 'unknown time');

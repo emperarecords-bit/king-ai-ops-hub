@@ -117,7 +117,7 @@ export type OpsChatProposal =
       readonly reviewerAgentId?: string | null;
       readonly reviewerName?: string | null;
       /** P5c-2: set on an "update this job" card — the task it updates and how many owner decisions it applies. */
-      readonly updateOf?: { readonly taskId: string; readonly taskTitle: string; readonly runId: string; readonly decisions: number };
+      readonly updateOf?: { readonly taskId: string; readonly taskTitle: string; readonly runId: string; readonly decisions: number; readonly decisionIds: readonly string[] };
     }
   | {
       readonly kind: 'rerun_task';
@@ -1477,7 +1477,8 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           agentName: resolution.agent.name,
           reviewerAgentId: reviewer?.id ?? null,
           reviewerName: reviewer?.name ?? null,
-          updateOf: { taskId: task.id, taskTitle: task.title, runId: basis.run.id, decisions: basis.decisions.length },
+          // Frozen basis — re-checked at confirm (assertUpdateCardCurrent): same run, exactly these decisions.
+          updateOf: { taskId: task.id, taskTitle: task.title, runId: basis.run.id, decisions: basis.decisions.length, decisionIds: basis.decisions.map((d) => d.id) },
         });
         return JSON.stringify({
           prepared: true,
