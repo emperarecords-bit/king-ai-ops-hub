@@ -106,6 +106,12 @@ function asRecord(v: unknown): Record<string, unknown> | null {
   return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 }
 
+/** P5b-1: the card id in a `#card-<uuid>` hash (a notification's deep link), or null for anything else. */
+export function cardIdFromHash(hash: string): string | null {
+  const m = /^#card-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(hash);
+  return m ? m[1]!.toLowerCase() : null;
+}
+
 /** Persisted messages (chronological by seq) → turn-aware display order. */
 export function buildTranscript(persisted: readonly PersistedMessage[]): TranscriptMsg[] {
   const owners = persisted.filter((m) => m.role === 'user');

@@ -22,6 +22,7 @@ import {
   applySavedMapping,
   attachmentOnlyContent,
   buildTranscript,
+  cardIdFromHash,
   confirmOutcome,
   isActionable,
   pendingOutsideWindow,
@@ -656,7 +657,21 @@ export function OpsChatClient({
 
   const pending = useMemo(() => pendingTurnOf(messages, outsidePending), [messages, outsidePending]);
 
+  // P5b-1: a notification links to `/ops?c=<conversation>#card-<proposalId>`. On the FIRST scroll after load, go to
+  // and highlight that card instead of jumping to the bottom; every later update scrolls to the bottom as before. The
+  // hash is read in the effect (never during render), so server and client markup match.
+  const initialScrollRef = useRef(true);
   useEffect(() => {
+    if (initialScrollRef.current) {
+      initialScrollRef.current = false;
+      const id = cardIdFromHash(window.location.hash);
+      const target = id ? document.getElementById(`card-${id}`) : null;
+      if (target) {
+        target.classList.add('ring-2', 'ring-[var(--accent)]');
+        target.scrollIntoView({ block: 'center' });
+        return;
+      }
+    }
     bottomRef.current?.scrollIntoView({ block: 'end' });
   }, [messages, streaming, toolActivity]);
 
@@ -989,6 +1004,7 @@ export function OpsChatClient({
                 return (
                   <div
                     key={i}
+                    id={card.proposalId ? `card-${card.proposalId}` : undefined}
                     className="mt-3 rounded-md border border-[var(--accent)] bg-[var(--surface-raised,rgba(120,160,255,0.06))] p-3"
                   >
                     {card.state === 'done' && (p.kind === 'accuratebids_quote' || p.kind === 'accuratebids_invoice' || p.kind === 'accuratebids_send') ? (

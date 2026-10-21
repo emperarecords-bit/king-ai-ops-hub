@@ -44,6 +44,7 @@ export default async function NotificationSettingsPage() {
         <NotificationPrefsForm
           initial={{
             emailEnabled: prefs.emailEnabled,
+            opsChatRunEmails: prefs.opsChatRunEmails,
             emailAddress: prefs.emailAddress,
             emailOverride: prefs.emailOverride,
             timezone: prefs.timezone,

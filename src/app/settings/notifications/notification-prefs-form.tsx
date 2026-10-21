@@ -7,6 +7,7 @@ const INITIAL: PrefsFormState = { error: null, saved: false };
 
 export interface PrefsInitial {
   emailEnabled: boolean;
+  opsChatRunEmails: boolean;
   emailAddress: string | null;
   emailOverride: string | null;
   timezone: string;
@@ -25,6 +26,12 @@ export function NotificationPrefsForm({ initial }: { initial: PrefsInitial }) {
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" name="emailEnabled" defaultChecked={initial.emailEnabled} />
         Email me notifications
+      </label>
+      <label className="flex items-center gap-2 text-sm">
+        {/* Marker: only a form that rendered this toggle may change it (an older cached form never turns it off). */}
+        <input type="hidden" name="opsChatRunEmailsPresent" value="1" />
+        <input type="checkbox" name="opsChatRunEmails" defaultChecked={initial.opsChatRunEmails} />
+        Email me when work I started from Ops Chat finishes (status and a link only — never the result itself)
       </label>
 
       <div className="space-y-1">
