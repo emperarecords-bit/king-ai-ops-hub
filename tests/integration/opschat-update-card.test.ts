@@ -183,4 +183,72 @@ describe.skipIf(!available)('P5c-2 — stale work → ONE update card (server-co
     const member = createOpsChatToolset({ userId: owner.userId, projects: [{ ...rec, projectRole: 'member' } as ProjectAccessRecord], orgRoles: new Map([[owner.orgId, 'member' as const]]) });
     expect((await run(member, 'propose_update_task', { project: rec.key, task: taskId })).error).toMatch(/admin/);
   });
+
+  describe('bounded: a card never stands for a decision it does not carry (review of #175)', () => {
+    async function taskWithDecisions(n: number): Promise<string> {
+      const start = new Date(Date.now() - 2 * 60 * 60_000);
+      const id = (
+        await db
+          .insert(tasks)
+          .values({ orgId: owner.orgId, projectId: owner.projectId, title: `Many decisions ${n}`, input: 'Original job.', providerSelection: 'openai', reviewEnabled: false, status: 'completed', createdBy: owner.userId, assignedPrimaryAgentId: agentId })
+          .returning({ id: tasks.id })
+      )[0]!.id;
+      const r = (
+        await db
+          .insert(runs)
+          .values({ classification: 'live', orgId: owner.orgId, projectId: owner.projectId, taskId: id, status: 'completed', primaryAgentId: agentId, consolidatedResult: 'x', startedAt: start, finishedAt: new Date(start.getTime() + 60_000) })
+          .returning({ id: runs.id })
+      )[0]!.id;
+      await db.insert(ownerQuestions).values(
+        Array.from({ length: n }, (_, i) => ({
+          orgId: owner.orgId,
+          projectId: owner.projectId,
+          taskId: id,
+          runId: r,
+          agentId,
+          question: `Decision question ${i}?`,
+          status: 'answered',
+          answer: `DECISION-${n}-${i}-CONTENT`,
+          answeredBy: owner.userId,
+          answeredAt: new Date(start.getTime() + (i + 2) * 60_000),
+        })),
+      );
+      return id;
+    }
+
+    it('1. exactly 10 decisions → a card prepared, every one of the 10 contents present, decisionIds = those 10', async () => {
+      const id = await taskWithDecisions(10);
+      const ts = toolset();
+      const out = await run(ts, 'propose_update_task', { project: rec.key, task: id });
+      expect(out).toMatchObject({ prepared: true, decisions: 10 });
+      expect(out.note).toContain('with ALL 10 owner decision(s) made since the last run written in full');
+      const card = ts.getProposals()[0] as unknown as { instructions: string; updateOf: { decisionIds: string[]; decisions: number } };
+      for (let i = 0; i < 10; i++) expect(card.instructions).toContain(`DECISION-10-${i}-CONTENT`);
+      expect(card.updateOf.decisions).toBe(10);
+      expect(card.updateOf.decisionIds).toHaveLength(10);
+      expect(card.instructions).not.toMatch(/more decisions recorded|\[…\]|truncated/);
+    });
+
+    it('2+3+4. 11 decisions → NO card, no updateOf / decisionIds anywhere, and never an "all written" claim', async () => {
+      const id = await taskWithDecisions(11);
+      const ts = toolset();
+      // A re-run proposed earlier this turn is NOT folded away by a refused update (nothing replaced it).
+      await run(ts, 'propose_rerun_task', { project: rec.key, task: id });
+      const raw = await ts.runTool({ name: 'propose_update_task', input: { project: rec.key, task: id } });
+      const out = JSON.parse(raw);
+      expect(out).toMatchObject({
+        prepared: false,
+        decisions: 11,
+        reason: 'too_many_decisions',
+        note: 'This job has too many post-run owner decisions to fit safely into one update card without dropping content. Nothing was prepared. Narrow the update scope or create a fresh consolidated task.',
+      });
+      expect(raw).not.toMatch(/updateOf|decisionIds|written in full|ALL 11/);
+      const cards = ts.getProposals();
+      expect(cards).toHaveLength(1);
+      expect(cards[0]).toMatchObject({ kind: 'rerun_task', taskId: id });
+      expect(cards.some((c) => 'updateOf' in (c as object))).toBe(false);
+      // …and the refused task was not marked "updated this turn": a re-run stays possible.
+      expect((await run(ts, 'propose_rerun_task', { project: rec.key, task: id })).prepared).toBe(true);
+    });
+  });
 });

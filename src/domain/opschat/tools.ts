@@ -1456,6 +1456,12 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
             });
           }
         }
+        // Every decision verbatim + the full original, or NO card: a card must never stand for a decision whose content
+        // is not in its instructions (it would later mark the old task SUPERSEDED by work that never got that decision).
+        const built = buildUpdateInstructions(basis);
+        if (!built.ok) {
+          return JSON.stringify({ prepared: false, decisions: basis.decisions.length, reason: built.reason, note: built.message });
+        }
         // The same agent that ran the task (when it can still run), else the normal no-silent-default resolution.
         const own = ags.find((a) => a.id === basis.task.primaryAgentId && a.enabled && a.role === 'primary');
         const resolution = own ? ({ ok: true as const, agent: own }) : resolveDispatchAgent(ags, undefined);
@@ -1472,7 +1478,7 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           projectKey: p.key,
           workspaceName: p.name,
           title: updateTitle(task.title),
-          instructions: buildUpdateInstructions(basis),
+          instructions: built.instructions,
           agentId: resolution.agent.id,
           agentName: resolution.agent.name,
           reviewerAgentId: reviewer?.id ?? null,
@@ -1488,7 +1494,7 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           note:
             `Prepared ONE update card for the owner to confirm: a new task "${updateTitle(task.title)}" in ${p.name}, run by ${resolution.agent.name}` +
             (reviewer ? `, reviewed by ${reviewer.name}` : ` — ${UNREVIEWED_DRAFT_NOTE}`) +
-            `, with the ${basis.decisions.length} owner decision(s) made since the last run written into its instructions. Tell the owner plainly that the old result predates their answers. ` +
+            `, with ALL ${basis.decisions.length} owner decision(s) made since the last run written in full into its instructions, together with the full original instructions. Tell the owner plainly that the old result predates their answers. ` +
             'Do NOT also propose a re-run or another dispatch for this task. This STARTS an AI run (uses tokens) only after the owner confirms — do not claim it is running.',
         });
       }

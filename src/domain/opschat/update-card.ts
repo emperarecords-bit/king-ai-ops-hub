@@ -116,46 +116,50 @@ export async function assertUpdateCardCurrent(tx: DbTx, ctx: TenantContext, u: U
 }
 
 const iso = (d: Date | null) => (d ? `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC` : 'unknown time');
-/** Each decision's text is capped so the decisions can never crowd out the limit; the rest stays readable in the Hub. */
-const MAX_DECISION_TEXT = 1_200;
-/** At most this many decisions go on one card (oldest first); more are counted, never silently dropped. */
+/** At most this many decisions go on one card. More than this → no card (see buildUpdateInstructions). */
 export const MAX_UPDATE_DECISIONS = 10;
-const oneLine = (s: string, max = MAX_DECISION_TEXT) => {
-  const t = s.replace(/\s+/g, ' ').trim();
-  return t.length > max ? `${t.slice(0, max)} […]` : t;
-};
+
+/** Text kept VERBATIM: line breaks become indented continuation lines, nothing is shortened or reflowed. */
+const verbatim = (s: string) => s.trim().replace(/\r\n?/g, '\n').replace(/\n/g, '\n    ');
 
 export function updateTitle(taskTitle: string): string {
   const suffix = ' — updated with your answers';
   return (taskTitle.slice(0, MAX_TITLE - suffix.length) + suffix).slice(0, MAX_TITLE);
 }
 
+export type UpdateInstructionsResult =
+  | { ok: true; instructions: string }
+  | { ok: false; reason: 'too_many_decisions' | 'too_large'; message: string };
+
+export const UPDATE_CARD_TOO_BIG =
+  'This job has too many post-run owner decisions to fit safely into one update card without dropping content. Nothing was prepared. Narrow the update scope or create a fresh consolidated task.';
+
 /**
- * The new task's instructions: the original instructions, then every owner decision made after the latest run started
- * (oldest first), then what to do with them. Bounded to the dispatch limit: at most MAX_UPDATE_DECISIONS decisions, each
- * question/answer capped at MAX_DECISION_TEXT, keep the decisions block under ~26k chars, so the decisions always fit
- * whole and it is the ORIGINAL instructions that are truncated (with a marker) when room runs out.
+ * The new task's instructions: the FULL original instructions, then EVERY owner decision made after the latest run
+ * started (oldest first, each verbatim), then what to do with them.
+ *
+ * Invariant (review of #175): a card never represents a decision whose content is not in its instructions, and never
+ * carries a partial copy of the job. So nothing is ever truncated or summarized: if there are more than
+ * MAX_UPDATE_DECISIONS decisions, or the complete text does not fit the dispatch limit, NO card is prepared and the
+ * caller gets a plain refusal instead.
  */
-export function buildUpdateInstructions(b: UpdateBasis): string {
+export function buildUpdateInstructions(b: UpdateBasis): UpdateInstructionsResult {
+  if (b.decisions.length > MAX_UPDATE_DECISIONS) return { ok: false, reason: 'too_many_decisions', message: UPDATE_CARD_TOO_BIG };
   const lines: string[] = [];
-  for (const d of b.decisions.slice(0, MAX_UPDATE_DECISIONS)) {
+  for (const d of b.decisions) {
     if (d.kind === 'question_answered') {
-      lines.push(`- Question (answered ${iso(d.at)}): ${oneLine(d.subject)}\n  Owner's answer: ${oneLine(d.detail ?? '(no text)')}`);
+      lines.push(`- Question (answered ${iso(d.at)}): ${verbatim(d.subject)}\n  Owner's answer: ${verbatim(d.detail ?? '(no text)')}`);
     } else {
-      lines.push(`- REJECTED (${iso(d.at)}): ${oneLine(d.subject)}${d.detail ? `\n  Owner's note: ${oneLine(d.detail)}` : ''}`);
+      lines.push(`- REJECTED (${iso(d.at)}): ${verbatim(d.subject)}${d.detail ? `\n  Owner's note: ${verbatim(d.detail)}` : ''}`);
     }
   }
-  if (b.decisions.length > MAX_UPDATE_DECISIONS) {
-    lines.push(`- … and ${b.decisions.length - MAX_UPDATE_DECISIONS} more decisions recorded in the Hub (Inbox and approvals history).`);
-  }
-  const decisionsBlock =
+  const title = b.task.title.replace(/\s+/g, ' ').trim();
+  const text =
+    `=== ORIGINAL INSTRUCTIONS ===\n${b.task.input}` +
     `\n\n=== OWNER DECISIONS SINCE THE PREVIOUS RUN (authoritative — recorded in the Hub) ===\n${lines.join('\n')}\n\n` +
-    `=== WHAT TO DO ===\nThe previous run of "${oneLine(b.task.title)}" (run ${b.run.id}, started ${iso(b.run.startedAt)}) predates the decisions above. ` +
+    `=== WHAT TO DO ===\nThe previous run of "${title}" (run ${b.run.id}, started ${iso(b.run.startedAt)}) predates the decisions above. ` +
     'Produce an updated, complete result that applies every one of them. Do not re-ask questions that are answered above; ' +
     'do not repeat a proposal the owner rejected.';
-  const head = `=== ORIGINAL INSTRUCTIONS ===\n`;
-  const room = MAX_DISPATCH_INSTRUCTIONS - head.length - decisionsBlock.length;
-  const marker = '\n[… original instructions truncated to fit — the decisions below take precedence …]';
-  const original = b.task.input.length <= room ? b.task.input : b.task.input.slice(0, Math.max(0, room - marker.length)) + marker;
-  return (head + original + decisionsBlock).slice(0, MAX_DISPATCH_INSTRUCTIONS);
+  if (text.length > MAX_DISPATCH_INSTRUCTIONS) return { ok: false, reason: 'too_large', message: UPDATE_CARD_TOO_BIG };
+  return { ok: true, instructions: text };
 }

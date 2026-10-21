@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { decisionsAfterRun, describeTaskState, type OwnerDecision, type TaskStateInput } from '@/domain/opschat/task-state';
-import { buildUpdateInstructions, MAX_DISPATCH_INSTRUCTIONS, MAX_UPDATE_DECISIONS, updateTitle, type UpdateBasis, type UpdateDecision } from '@/domain/opschat/update-card';
+import { buildUpdateInstructions, MAX_DISPATCH_INSTRUCTIONS, MAX_UPDATE_DECISIONS, UPDATE_CARD_TOO_BIG, updateTitle, type UpdateBasis, type UpdateDecision } from '@/domain/opschat/update-card';
 
 /**
  * P5c-2 — stale work: the latest run predates owner decisions made after it started; the Hub offers ONE update card
@@ -87,39 +87,55 @@ describe('buildUpdateInstructions / updateTitle', () => {
   });
   const q = (id: string, iso: string, question: string, answer: string): UpdateDecision => ({ kind: 'question_answered', id, at: at(iso), subject: question, detail: answer });
 
+  const ok = (r: ReturnType<typeof buildUpdateInstructions>): string => {
+    if (!r.ok) throw new Error(`expected a card, got refusal: ${r.reason}`);
+    return r.instructions;
+  };
+  const many = (n: number) => Array.from({ length: n }, (_, i) => q(`q${i}`, `2026-10-19T17:${String(10 + i).padStart(2, '0')}:00Z`, `Blocker ${i}: value?`, `ANSWER-${i}-CONTENT`));
+
   it('original instructions + every decision verbatim + what to do', () => {
-    const out = buildUpdateInstructions(
-      basis({}, [
-        q('q1', '2026-10-19T17:01:00Z', 'What supply-air temperature should I assume?', '55°F'),
-        q('q2', '2026-10-19T17:02:00Z', 'Is the cabinet sealed?', 'Yes, fully sealed with a rear door.'),
-        { kind: 'approval_rejected', id: 'a1', at: at('2026-10-19T17:19:00Z'), subject: 'Reply to ONEAL regarding billing', detail: 'Unrelated to this job.' },
-      ]),
+    const out = ok(
+      buildUpdateInstructions(
+        basis({}, [
+          q('q1', '2026-10-19T17:01:00Z', 'What supply-air temperature should I assume?', '55°F'),
+          q('q2', '2026-10-19T17:02:00Z', 'Is the cabinet sealed?', 'Yes, fully sealed with a rear door.'),
+          { kind: 'approval_rejected', id: 'a1', at: at('2026-10-19T17:19:00Z'), subject: 'Reply to ONEAL regarding billing', detail: 'Unrelated to this job.' },
+        ]),
+      ),
     );
     expect(out.startsWith('=== ORIGINAL INSTRUCTIONS ===\nSize the supply and return ducts for the server cabinet.')).toBe(true);
-    expect(out).toContain('- Question (answered 2026-10-19 17:01 UTC): What supply-air temperature should I assume?\n  Owner\'s answer: 55°F');
+    expect(out).toContain("- Question (answered 2026-10-19 17:01 UTC): What supply-air temperature should I assume?\n  Owner's answer: 55°F");
     expect(out).toContain("Owner's answer: Yes, fully sealed with a rear door.");
     expect(out).toContain("- REJECTED (2026-10-19 17:19 UTC): Reply to ONEAL regarding billing\n  Owner's note: Unrelated to this job.");
     expect(out).toContain('The previous run of "Server Cabinet Cooling — duct sizing" (run r1, started 2026-10-19 14:50 UTC) predates the decisions above.');
     expect(out).toMatch(/Do not re-ask questions that are answered above; do not repeat a proposal the owner rejected\.$/);
   });
 
-  it('bounded to the dispatch limit: a huge original is truncated (marked); the decisions stay whole', () => {
-    const big = 'x'.repeat(40_000);
-    const ds = [q('q1', '2026-10-19T17:01:00Z', 'Q?', 'THE-ANSWER-MUST-SURVIVE')];
-    const out = buildUpdateInstructions(basis({ task: { ...basis().task, input: big } }, ds));
-    expect(out.length).toBeLessThanOrEqual(MAX_DISPATCH_INSTRUCTIONS);
-    expect(out).toContain('[… original instructions truncated to fit — the decisions below take precedence …]');
-    expect(out).toContain('THE-ANSWER-MUST-SURVIVE');
+  it(`1. exactly ${MAX_UPDATE_DECISIONS} decisions → a card, with ALL ${MAX_UPDATE_DECISIONS} contents present`, () => {
+    const out = ok(buildUpdateInstructions(basis({}, many(MAX_UPDATE_DECISIONS))));
+    for (let i = 0; i < MAX_UPDATE_DECISIONS; i++) {
+      expect(out).toContain(`Blocker ${i}: value?`);
+      expect(out).toContain(`ANSWER-${i}-CONTENT`);
+    }
+    expect(out).not.toMatch(/more decisions|truncated|\[…\]/);
   });
 
-  it(`at most ${MAX_UPDATE_DECISIONS} decisions are written (the rest counted); each long answer is capped; worst case fits`, () => {
-    const many = Array.from({ length: MAX_UPDATE_DECISIONS + 3 }, (_, i) => q(`q${i}`, `2026-10-19T17:${String(10 + i).padStart(2, '0')}:00Z`, 'Q'.repeat(5_000), 'A'.repeat(8_000)));
-    const out = buildUpdateInstructions(basis({}, many));
-    expect(out.length).toBeLessThanOrEqual(MAX_DISPATCH_INSTRUCTIONS);
-    expect(out).toContain(`- … and 3 more decisions recorded in the Hub`);
-    expect(out.match(/- Question \(answered/g)).toHaveLength(MAX_UPDATE_DECISIONS);
-    expect(out).toContain(' […]');
-    expect(out).toMatch(/do not repeat a proposal the owner rejected\.$/); // the closing instruction is never cut
+  it(`2. ${MAX_UPDATE_DECISIONS + 1} decisions → NO card: a plain refusal, nothing summarized`, () => {
+    const r = buildUpdateInstructions(basis({}, many(MAX_UPDATE_DECISIONS + 1)));
+    expect(r).toEqual({ ok: false, reason: 'too_many_decisions', message: UPDATE_CARD_TOO_BIG });
+    expect(UPDATE_CARD_TOO_BIG).toBe(
+      'This job has too many post-run owner decisions to fit safely into one update card without dropping content. Nothing was prepared. Narrow the update scope or create a fresh consolidated task.',
+    );
+  });
+
+  it('nothing is ever shortened: long and multi-line answers are kept whole; if the COMPLETE text cannot fit the limit → no card', () => {
+    const long = 'L'.repeat(6_000);
+    const kept = ok(buildUpdateInstructions(basis({}, [q('q1', '2026-10-19T17:01:00Z', 'Table?', `row1\nrow2\n${long}`)])));
+    expect(kept).toContain(`Owner's answer: row1\n    row2\n    ${long}`); // line breaks kept (indented), not reflowed
+    expect(kept.length).toBeLessThanOrEqual(MAX_DISPATCH_INSTRUCTIONS);
+    // Too large in total (answers or original) → refused, never truncated.
+    expect(buildUpdateInstructions(basis({}, many(5).map((d) => ({ ...d, detail: 'A'.repeat(8_000) }))))).toMatchObject({ ok: false, reason: 'too_large' });
+    expect(buildUpdateInstructions(basis({ task: { ...basis().task, input: 'x'.repeat(31_900) } }, many(1)))).toMatchObject({ ok: false, reason: 'too_large' });
   });
 
   it('updateTitle stays within the 200-char dispatch title limit', () => {
