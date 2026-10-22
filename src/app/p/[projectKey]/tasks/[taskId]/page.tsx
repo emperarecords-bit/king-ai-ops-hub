@@ -26,6 +26,8 @@ import { ReviewComparison } from './review-comparison';
 import { ReviewStateBadge } from './review-state-badge';
 import { parseTaskTab, TaskTabNav, taskTabHref } from './task-tabs';
 import { summarizeReview } from '@/domain/tasks/review-summary';
+import { prettyJson, splitResult } from '@/domain/tasks/result-view';
+import { SafeMarkdown } from '@/components/safe-markdown';
 
 const ROLE_LABEL: Record<string, string> = {
   user: 'You',
@@ -135,6 +137,10 @@ export default async function TaskDetailPage({
   const supersedeCandidates = selectableTaskCandidates(allTasks, { excludeId: taskId, excludeIds: nonCancelledIds }).map((t) => ({ id: t.id, title: t.title }));
   const reviewStep = steps.find((s) => s.kind === 'review' && s.verdictDetail != null);
   const reviewSummary = summarizeReview(steps, msgs);
+  // The badge above the result states an unmet review, so the stored banner is hidden on this page only.
+  const resultView = latestRun?.consolidatedResult
+    ? splitResult(latestRun.consolidatedResult, { hideDraftBanner: latestRun.reviewOutcome === 'required_unmet' })
+    : null;
   const comparisonReviewerId = reviewStep?.verdictDetail?.provenance?.reviewerAgentId ?? null;
   const comparisonReviewerName = comparisonReviewerId
     ? (employees.find((employee) => employee.id === comparisonReviewerId)?.name ?? null)
@@ -222,20 +228,44 @@ export default async function TaskDetailPage({
 
       {tab === 'answer' ? (
         <>
-          {latestRun ? <ReviewStateBadge run={latestRun} /> : null}
-          {latestRun && reviewSummary.state !== 'none' ? (
-            <p className="mb-3 text-xs text-[var(--muted)]">
-              Review: {reviewSummary.label} ·{' '}
-              <Link href={taskTabHref(basePath, 'review')} className="text-[var(--accent)]">
-                what happened in the review
-              </Link>
-            </p>
+          {latestRun ? (
+            <ReviewStateBadge
+              run={latestRun}
+              detail={
+                reviewSummary.state !== 'none' ? (
+                  <>
+                    {latestRun.reviewOutcome === 'required_unmet' ? 'This answer has NOT been reviewed — ' : 'Review: '}
+                    {reviewSummary.label}.{' '}
+                    <Link href={taskTabHref(basePath, 'review')} className="text-[var(--accent)]">
+                      What happened in the review
+                    </Link>
+                  </>
+                ) : undefined
+              }
+            />
           ) : null}
 
-          {latestRun?.consolidatedResult ? (
-            <Card title="Result" className="mb-6 border-[var(--accent)]">
-              <ModelText content={latestRun.consolidatedResult} />
-            </Card>
+          {resultView ? (
+            <>
+              <Card title="Result" className="mb-6 border-[var(--accent)]">
+                {resultView.body ? <SafeMarkdown text={resultView.body} /> : <p className="text-sm text-[var(--muted)]">The result is the document below.</p>}
+              </Card>
+              {resultView.documents.map((d, i) => (
+                <Card key={i} title={`Document · ${d.name}`} className="mb-6">
+                  {d.kind === 'markdown' ? (
+                    <SafeMarkdown text={d.content} />
+                  ) : (
+                    <pre className="whitespace-pre-wrap break-words font-mono text-xs">{d.kind === 'json' ? prettyJson(d.content) : d.content}</pre>
+                  )}
+                </Card>
+              ))}
+              <details className="mb-6 text-sm">
+                <summary className="cursor-pointer text-xs text-[var(--muted)]">Show the result exactly as stored</summary>
+                <div className="mt-2">
+                  <ModelText content={latestRun!.consolidatedResult!} />
+                </div>
+              </details>
+            </>
           ) : null}
 
           {latestRun?.errorMessage ? (
