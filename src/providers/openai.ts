@@ -20,31 +20,63 @@ export class OpenAIProvider implements AIProvider {
   readonly id = 'openai' as const;
   readonly authoritativeNotExecuted = { support: 'unsupported' } as const;
   private readonly client: OpenAI;
+  /**
+   * Models that rejected a non-default `temperature` (OpenAI's reasoning models, e.g. the GPT-5 family accept only
+   * the default). Learned adaptively, exactly like the Anthropic adapter: the first request retries once without
+   * it, later requests skip it up front. A 400 is a provably-not-executed rejection, so the retry never double-bills.
+   * Process-lifetime cache only — cheap and self-healing. (Added 2026-10-22 when the Council moved to gpt-5.4.)
+   */
+  private readonly noTemperatureModels = new Set<string>();
 
   constructor(apiKey: string) {
     // maxRetries: 0 — retry policy belongs to the engine, once, uniformly.
     this.client = new OpenAI({ apiKey, maxRetries: 0 });
   }
 
+  private isTemperatureUnsupported(err: unknown): boolean {
+    return (
+      err instanceof APIError &&
+      err.status === 400 &&
+      /temperature/i.test(err.message) &&
+      /unsupported|not supported|does not support|only the default/i.test(err.message)
+    );
+  }
+
+  /** Sends with `temperature` unless the model is known to reject it; on that rejection, retries once without. */
+  private async withTemperatureFallback<T>(model: string, send: (withTemperature: boolean) => Promise<T>): Promise<T> {
+    if (this.noTemperatureModels.has(model)) return send(false);
+    try {
+      return await send(true);
+    } catch (err) {
+      if (this.isTemperatureUnsupported(err)) {
+        this.noTemperatureModels.add(model);
+        return send(false);
+      }
+      throw err;
+    }
+  }
+
   async execute(request: AgentRequest): Promise<AgentResponse> {
     const startedAt = Date.now();
     try {
-      const completion = await this.client.chat.completions.create(
-        {
-          model: request.model,
-          messages: [
-            { role: 'system', content: request.system },
-            ...request.turns.map((t) => ({ role: t.role, content: t.content })),
-          ],
-          temperature: request.temperature,
-          max_completion_tokens: request.maxOutputTokens,
-          n: 1,
-          stream: false,
-        },
-        {
-          timeout: request.timeoutMs,
-          signal: request.signal,
-        },
+      const completion = await this.withTemperatureFallback(request.model, (withTemperature) =>
+        this.client.chat.completions.create(
+          {
+            model: request.model,
+            messages: [
+              { role: 'system', content: request.system },
+              ...request.turns.map((t) => ({ role: t.role, content: t.content })),
+            ],
+            ...(withTemperature ? { temperature: request.temperature } : {}),
+            max_completion_tokens: request.maxOutputTokens,
+            n: 1,
+            stream: false,
+          },
+          {
+            timeout: request.timeoutMs,
+            signal: request.signal,
+          },
+        ),
       );
 
       const choice = completion.choices[0];
@@ -76,23 +108,25 @@ export class OpenAIProvider implements AIProvider {
   async *stream(request: AgentRequest): AsyncIterable<AgentEvent> {
     const startedAt = Date.now();
     try {
-      const stream = await this.client.chat.completions.create(
-        {
-          model: request.model,
-          messages: [
-            { role: 'system', content: request.system },
-            ...request.turns.map((t) => ({ role: t.role, content: t.content })),
-          ],
-          temperature: request.temperature,
-          max_completion_tokens: request.maxOutputTokens,
-          n: 1,
-          stream: true,
-          stream_options: { include_usage: true },
-        },
-        {
-          timeout: request.timeoutMs,
-          signal: request.signal,
-        },
+      const stream = await this.withTemperatureFallback(request.model, (withTemperature) =>
+        this.client.chat.completions.create(
+          {
+            model: request.model,
+            messages: [
+              { role: 'system', content: request.system },
+              ...request.turns.map((t) => ({ role: t.role, content: t.content })),
+            ],
+            ...(withTemperature ? { temperature: request.temperature } : {}),
+            max_completion_tokens: request.maxOutputTokens,
+            n: 1,
+            stream: true,
+            stream_options: { include_usage: true },
+          },
+          {
+            timeout: request.timeoutMs,
+            signal: request.signal,
+          },
+        ),
       );
 
       let text = '';

@@ -870,8 +870,10 @@ export function OpsChatClient({
         const j = await res.json().catch(() => ({}));
         throw new Error(j.error || 'Council is unavailable right now.');
       }
-      const result = (await res.json()) as CouncilResult;
-      setCouncil(msgId, { status: 'done', result });
+      // A Council run streams whitespace heartbeats, then ONE JSON body: the result, or { error } (safe message).
+      const body = (await res.json()) as CouncilResult | { error?: string };
+      if ('error' in body && body.error) throw new Error(body.error);
+      setCouncil(msgId, { status: 'done', result: body as CouncilResult });
     } catch (e) {
       setCouncil(msgId, { status: 'error', error: e instanceof Error ? e.message : 'Council is unavailable right now.' });
     }
