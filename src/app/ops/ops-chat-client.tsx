@@ -8,7 +8,8 @@ import {
   OPS_CHAT_TIMEOUT_MESSAGE,
 } from '@/domain/opschat/limits';
 import type { ApprovalContentView } from '@/domain/opschat/approval-content';
-import type { CompletedSinceItem, LinkedRunView } from '@/domain/opschat/linked-run-view';
+import type { LinkedRunView } from '@/domain/opschat/linked-run-view';
+import type { CompletionEntry, CompletionLabel } from '@/domain/opschat/conversation-continuity';
 import { createDeadlineWatchdog } from './ops-chat-watchdog';
 import { ATTACHMENT_ACCEPT, ATTACHMENT_LIMITS } from '@/domain/opschat/attachment-limits';
 import {
@@ -19,12 +20,14 @@ import {
   type ComposerFile,
 } from './ops-chat-attachments';
 import {
+  applyLiveRunUpdate,
   applySavedMapping,
   attachmentOnlyContent,
   buildTranscript,
   cardIdFromHash,
   confirmOutcome,
   isActionable,
+  needsRunPolling,
   pendingOutsideWindow,
   pendingTurnOf,
   RELOAD_TO_SEE_STATE,
@@ -33,6 +36,37 @@ import {
   type TranscriptCard,
   type TranscriptMsg,
 } from './ops-chat-transcript';
+
+/** P5c-3: how often an open conversation re-reads the runs it started (only while visible + something can change). */
+const RUN_POLL_MS = 15_000;
+const RUN_POLL_MAX_MS = 120_000;
+
+const COMPLETION_TONE: Record<CompletionLabel, string> = {
+  FINAL: 'text-[var(--success,#6bbf73)]',
+  'UNREVIEWED DRAFT': 'text-[var(--warning,#d9a441)]',
+  'APPROVAL NEEDED': 'text-[var(--warning,#d9a441)]',
+  FAILED: 'text-[var(--danger,#c37474)]',
+};
+
+/** P5c-3: a finished run reported back into the conversation that started it (server record — not a model reply). */
+function CompletionRow({ e }: { e: CompletionEntry }) {
+  return (
+    <div data-testid="completion-entry" className="flex justify-start">
+      <div className="max-w-[85%] rounded-2xl rounded-bl-sm border border-[var(--accent)] bg-[var(--surface)] px-3.5 py-2.5 text-sm shadow-sm">
+        <div className="mb-1 text-xs opacity-50">Server record · work finished</div>
+        <p className="font-semibold">
+          {e.label} — <span className={COMPLETION_TONE[e.resultLabel]}>{e.resultLabel}</span>
+        </p>
+        <p className="mt-0.5 text-xs text-[var(--muted)]">{e.text}</p>
+        {e.taskPath ? (
+          <a href={e.taskPath} className="mt-1 inline-block text-xs text-[var(--accent)] underline underline-offset-2">
+            Open the result
+          </a>
+        ) : null}
+      </div>
+    </div>
+  );
+}
 
 /** P5a: tone for a linked run's outcome line. */
 function linkedRunTone(v: LinkedRunView): string {
@@ -623,17 +657,17 @@ export function OpsChatClient({
   persisted,
   pendingTurn: serverPending,
   conversations,
-  finishedSince = [],
+  leadingCompletions = [],
 }: {
   opening: string;
   conversationId: string | null;
   persisted: PersistedMessage[];
   pendingTurn: PendingTurn | null;
   conversations: Array<{ id: string; title: string | null }>;
-  /** P5a: runs started by this conversation's cards that finished after its newest message (server-derived). */
-  finishedSince?: CompletedSinceItem[];
+  /** P5c-3: completion entries older than every loaded message (shown first). */
+  leadingCompletions?: CompletionEntry[];
 }) {
-  const [initialTranscript] = useState(() => buildTranscript(persisted));
+  const [initialTranscript] = useState(() => buildTranscript(persisted, leadingCompletions));
   const [messages, setMessages] = useState<Msg[]>(() => [
     { id: 'opening', role: 'assistant', content: opening },
     ...initialTranscript,
@@ -647,6 +681,42 @@ export function OpsChatClient({
   // fork a second conversation.
   const [currentId, setCurrentId] = useState<string | null>(initialConversationId);
   const [input, setInput] = useState('');
+
+  // P5c-3 live refresh: while something this conversation started can still change (a dispatch / re-run card being
+  // confirmed, or its run queued / running), re-read the linked runs every RUN_POLL_MS — only while the tab is
+  // visible, backing off on errors, and stopping by itself once everything has finished. A run that finishes while
+  // the owner is looking then shows its outcome on the card and a completion entry in the chat without anyone asking.
+  // No model call, nothing written.
+  const needsPoll = useMemo(() => Boolean(currentId) && needsRunPolling(messages), [currentId, messages]);
+  useEffect(() => {
+    if (!needsPoll || !currentId) return;
+    let stopped = false;
+    let delay = RUN_POLL_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async (): Promise<void> => {
+      if (stopped) return;
+      if (document.visibilityState === 'visible') {
+        try {
+          const res = await fetch(`/api/ops-chat/linked-runs?conversationId=${encodeURIComponent(currentId)}`, { cache: 'no-store' });
+          if (res.ok) {
+            const j = (await res.json()) as { views?: Record<string, LinkedRunView>; entries?: CompletionEntry[] };
+            if (!stopped) setMessages((prev) => applyLiveRunUpdate(prev, j.views ?? {}, j.entries ?? []));
+            delay = RUN_POLL_MS;
+          } else {
+            delay = Math.min(delay * 2, RUN_POLL_MAX_MS);
+          }
+        } catch {
+          delay = Math.min(delay * 2, RUN_POLL_MAX_MS);
+        }
+      }
+      if (!stopped) timer = setTimeout(() => void tick(), delay);
+    };
+    timer = setTimeout(() => void tick(), RUN_POLL_MS);
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [needsPoll, currentId]);
   // Files uploaded into this conversation for the NEXT send (uploaded immediately, sent with the message).
   const [composerFiles, setComposerFiles] = useState<ComposerFile[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -975,7 +1045,10 @@ export function OpsChatClient({
       </div>
 
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto pr-1">
-        {messages.map((m) => (
+        {messages.map((m) =>
+          m.role === 'server' && m.completion ? (
+            <CompletionRow key={m.id} e={m.completion} />
+          ) : (
           <div key={m.id} className={m.role === 'owner' ? 'flex justify-end' : 'flex justify-start'}>
             <div
               className={
@@ -1301,23 +1374,8 @@ export function OpsChatClient({
               ) : null}
             </div>
           </div>
-        ))}
-        {/* Shown only until the owner adds to this conversation: "since your last message" stops being true then. */}
-        {finishedSince.length > 0 && messages.length === initialTranscript.length + 1 ? (
-          <div data-testid="finished-since" className="flex justify-start">
-            <div className="max-w-[85%] rounded-2xl rounded-bl-sm border border-[var(--accent)] bg-[var(--surface)] px-4 py-3 text-sm">
-              <div className="mb-1 text-xs opacity-50">Server record · finished since your last message</div>
-              <ul className="flex flex-col gap-2">
-                {finishedSince.map((f) => (
-                  <li key={f.proposalId}>
-                    <p className="font-semibold">{f.label}</p>
-                    <p className={'text-xs ' + linkedRunTone(f.view)}>{f.view.text}</p>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        ) : null}
+          ),
+        )}
         <div ref={bottomRef} />
       </div>
 

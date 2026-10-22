@@ -23,6 +23,7 @@
  */
 
 import { type LinkedRunView } from '@/domain/opschat/linked-run-view';
+import { type CompletionEntry } from '@/domain/opschat/conversation-continuity';
 
 export type MessageStatus = 'complete' | 'interrupted';
 
@@ -67,7 +68,10 @@ export function attachmentOnlyContent(filenames: readonly string[]): string {
 export interface TranscriptMsg {
   /** Owner rows: the owner message id, which IS the client-minted turnId. Assistant rows: message id or a local id. */
   id: string;
-  role: 'owner' | 'assistant';
+  /** 'server' = a P5c-3 completion entry (derived from the run rows; never sent to the model as a turn). */
+  role: 'owner' | 'assistant' | 'server';
+  /** Server rows only: the finished run this entry reports. */
+  completion?: CompletionEntry;
   content: string;
   /** Owner only: the files sent with this message. */
   attachments?: AttachmentChip[];
@@ -93,6 +97,8 @@ export interface PersistedMessage {
   proposals: Array<{ id: string; proposal: unknown; state: string; result: unknown; error: string | null; linkedRun?: LinkedRunView | null }>;
   /** Owner rows: files sent with the message. */
   attachments?: AttachmentChip[];
+  /** P5c-3: completion entries placed right after this message (runs that finished after it). */
+  completionsAfter?: CompletionEntry[];
 }
 
 export interface PendingTurn {
@@ -112,8 +118,59 @@ export function cardIdFromHash(hash: string): string | null {
   return m ? m[1]!.toLowerCase() : null;
 }
 
-/** Persisted messages (chronological by seq) → turn-aware display order. */
-export function buildTranscript(persisted: readonly PersistedMessage[]): TranscriptMsg[] {
+/** P5c-3: a completion entry as a transcript row (stable id → never shown twice). */
+export function completionRow(e: CompletionEntry): TranscriptMsg {
+  return { id: `completion-${e.proposalId}`, role: 'server', content: e.text, completion: e };
+}
+
+/**
+ * P5c-3 live refresh: patch the cards' linked runs and append a completion row for every finished run not shown yet.
+ * Pure + idempotent (a repeated poll changes nothing).
+ */
+export function applyLiveRunUpdate(
+  messages: readonly TranscriptMsg[],
+  views: Readonly<Record<string, LinkedRunView>>,
+  entries: readonly CompletionEntry[],
+): TranscriptMsg[] {
+  let changed = false;
+  const next = messages.map((m) => {
+    if (!m.cards) return m;
+    let touched = false;
+    const cards = m.cards.map((c) => {
+      const v = c.proposalId ? views[c.proposalId] : undefined;
+      if (!v || JSON.stringify(v) === JSON.stringify(c.linkedRun ?? null)) return c;
+      touched = true;
+      return { ...c, linkedRun: v };
+    });
+    if (!touched) return m;
+    changed = true;
+    return { ...m, cards };
+  });
+  const shown = new Set(next.filter((m) => m.role === 'server').map((m) => m.id));
+  const added = entries.filter((e) => !shown.has(`completion-${e.proposalId}`)).map(completionRow);
+  if (!changed && added.length === 0) return messages as TranscriptMsg[];
+  return [...next, ...added];
+}
+
+const RUN_STARTING = new Set(['dispatch_task', 'rerun_task']);
+
+/**
+ * P5c-3: keep polling only while some run started from this conversation can still change: a dispatch / re-run card
+ * that is being confirmed, or confirmed with its linked run unknown, queued or running. Everything finished → stop.
+ */
+export function needsRunPolling(messages: readonly TranscriptMsg[]): boolean {
+  for (const m of messages) {
+    for (const c of m.cards ?? []) {
+      if (!RUN_STARTING.has(String(c.proposal.kind)) || !c.proposalId) continue;
+      if (c.state === 'confirming') return true;
+      if (c.state === 'done' && (!c.linkedRun || c.linkedRun.state === 'queued' || c.linkedRun.state === 'running')) return true;
+    }
+  }
+  return false;
+}
+
+/** Persisted messages (chronological by seq) → turn-aware display order, with completion entries at their place. */
+export function buildTranscript(persisted: readonly PersistedMessage[], leading: readonly CompletionEntry[] = []): TranscriptMsg[] {
   const owners = persisted.filter((m) => m.role === 'user');
   const ownerIds = new Set(owners.map((m) => m.id));
   const replyFor = new Map<string, PersistedMessage>();
@@ -146,7 +203,9 @@ export function buildTranscript(persisted: readonly PersistedMessage[]): Transcr
           }))
         : undefined,
   });
-  const out: TranscriptMsg[] = orphans.map(toAssistant);
+  const after = (m: PersistedMessage): TranscriptMsg[] => (m.completionsAfter ?? []).map(completionRow);
+  const out: TranscriptMsg[] = leading.map(completionRow);
+  for (const m of orphans) out.push(toAssistant(m), ...after(m));
   for (const o of owners) {
     const reply = replyFor.get(o.id);
     out.push({
@@ -156,7 +215,8 @@ export function buildTranscript(persisted: readonly PersistedMessage[]): Transcr
       awaitingReply: !reply,
       ...(o.attachments && o.attachments.length > 0 ? { attachments: o.attachments } : {}),
     });
-    if (reply) out.push(toAssistant(reply));
+    out.push(...after(o));
+    if (reply) out.push(toAssistant(reply), ...after(reply));
   }
   return out;
 }
