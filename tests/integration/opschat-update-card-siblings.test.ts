@@ -6,7 +6,7 @@ import { rlsAvailable } from '@tests/support/db';
 import { type TenantContext } from '@/types/domain';
 import { getSetupDb } from '@/db/client';
 import { type ProjectAccessRecord } from '@/db/system';
-import { agents, memberships, organizations, ownerQuestions, profiles, projectMembers, projects, runs, spendLimits, tasks } from '@/db/schema';
+import { agents, approvals, memberships, organizations, ownerQuestions, profiles, projectMembers, projects, runs, spendLimits, tasks } from '@/db/schema';
 
 /**
  * P5c-2b — ONE job dispatched twice. The shape found in Hub prod (read-only check 2026-10-21): two tasks titled
@@ -177,5 +177,47 @@ describe.skipIf(!available)('P5c-2b — one job dispatched twice (the production
     const r = await confirm(stored.cardId);
     expect(r.state).toBe('stale');
     expect(r.error).toMatch(/decisions after the card was prepared/);
+  });
+
+  // Regression (Hub prod, 2026-10-22): the update card carried the REJECTED 1,400 lb draft but not the APPROVED
+  // shared-plenum draft eaeb0dd7, and the update run's punch list then said "1,400 lb combined load".
+  const draft = (taskId: string, runId: string, status: 'approved' | 'rejected', content: string, note: string | null, minutesAgo: number) => ({
+    orgId: owner.orgId,
+    projectId: owner.projectId,
+    taskId,
+    runId,
+    actionType: 'file_write' as const,
+    payload: { path: 'punch_list.md', content },
+    payloadSha256: 'x'.repeat(64),
+    summary: 'Save punch list to workspace',
+    status,
+    decidedBy: owner.userId,
+    decidedAt: new Date(Date.now() - minutesAgo * 60_000),
+    decisionNote: note,
+    expiresAt: new Date(Date.now() + 86_400_000),
+  });
+
+  it('the APPROVED draft is carried verbatim as the chosen version; the rejected one is marked NOT chosen; both re-checked at confirm', async () => {
+    const job = await seedJob('t4');
+    await db.insert(approvals).values([
+      draft(job.B.id, job.B.run, 'approved', 'SHARED 36x18 PLENUM MANIFOLD. STRUCTURAL RATING 2,500 LB.', null, 30),
+      draft(job.A.id, job.A.run, 'rejected', 'Independent per-unit ducting, 1,400 lb.', 'Owner chose the shared-duct version instead.', 29),
+    ]);
+    const ts = toolset();
+    const out = JSON.parse(await ts.runTool({ name: 'propose_update_task', input: { project: rec.key, task: job.B.id } }));
+    expect(out).toMatchObject({ prepared: true, decisions: 5, approvedResults: 1 }); // the approval is context, not a 6th decision
+    const card = ts.getProposals()[0] as unknown as { instructions: string; updateOf: { approvedIds: string[] } };
+    expect(card.instructions).toContain("=== RESULTS THE OWNER APPROVED (the owner's chosen version — build on these) ===");
+    expect(card.instructions).toContain('Approved content:\n    File punch_list.md:\n    SHARED 36x18 PLENUM MANIFOLD. STRUCTURAL RATING 2,500 LB.');
+    expect(card.instructions).toContain('— NOT chosen; do not use it or any figure or specification it describes: Save punch list to workspace');
+    expect(card.updateOf.approvedIds).toHaveLength(1);
+
+    // Another result approved after the card was prepared → the card is stale, nothing starts.
+    const stored = await storeCard(card);
+    await db.insert(approvals).values(draft(job.A.id, job.A.run, 'approved', 'Late approval.', null, 0));
+    const r = await confirm(stored.cardId);
+    expect(r.state).toBe('stale');
+    expect(r.error).toMatch(/approved a result of this job after the card was prepared/);
+    expect(await db.select({ id: tasks.id }).from(tasks).where(eq(tasks.opsChatProposalId, stored.cardId))).toHaveLength(0);
   });
 });

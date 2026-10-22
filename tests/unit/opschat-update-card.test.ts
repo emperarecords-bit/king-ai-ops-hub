@@ -1,7 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { decisionsAfterRun, describeTaskState, type OwnerDecision, type TaskStateInput } from '@/domain/opschat/task-state';
 import { PREPARE_UPDATE_CARD } from '@/domain/opschat/stale-wording';
-import { buildUpdateInstructions, MAX_DISPATCH_INSTRUCTIONS, MAX_UPDATE_DECISIONS, normalizeJobTitle, UPDATE_CARD_TOO_BIG, updateTitle, type UpdateBasis, type UpdateDecision } from '@/domain/opschat/update-card';
+import {
+  APPROVED_DELIVERABLE_TYPES,
+  approvedContent,
+  buildUpdateInstructions,
+  MAX_DISPATCH_INSTRUCTIONS,
+  MAX_UPDATE_APPROVED,
+  MAX_UPDATE_DECISIONS,
+  normalizeJobTitle,
+  UPDATE_CARD_TOO_BIG,
+  updateTitle,
+  type ApprovedChoice,
+  type UpdateBasis,
+  type UpdateDecision,
+} from '@/domain/opschat/update-card';
 
 /**
  * P5c-2 — stale work: the latest run predates owner decisions made after it started; the Hub offers ONE update card
@@ -108,7 +121,12 @@ describe('buildUpdateInstructions / updateTitle', () => {
     expect(out.startsWith('=== ORIGINAL INSTRUCTIONS ===\nSize the supply and return ducts for the server cabinet.')).toBe(true);
     expect(out).toContain("- Question (answered 2026-10-19 17:01 UTC): What supply-air temperature should I assume?\n  Owner's answer: 55°F");
     expect(out).toContain("Owner's answer: Yes, fully sealed with a rear door.");
-    expect(out).toContain("- REJECTED (2026-10-19 17:19 UTC): Reply to ONEAL regarding billing\n  Owner's note: Unrelated to this job.");
+    expect(out).toContain(
+      "- REJECTED (2026-10-19 17:19 UTC) — NOT chosen; do not use it or any figure or specification it describes: Reply to ONEAL regarding billing\n  Owner's note: Unrelated to this job.",
+    );
+    // No approved results → no approved section and no "settles it" sentence (output unchanged otherwise).
+    expect(out).not.toContain('RESULTS THE OWNER APPROVED');
+    expect(out).not.toContain('settle it');
     expect(out).toContain('The previous run of "Server Cabinet Cooling — duct sizing" (run r1, started 2026-10-19 14:50 UTC) predates the decisions above.');
     expect(out).toMatch(/Do not re-ask questions that are answered above; do not repeat a proposal the owner rejected\.$/);
   });
@@ -161,6 +179,61 @@ describe('buildUpdateInstructions / updateTitle', () => {
     expect(out).toContain("Owner's answer: Lead-Lag (alternating)");
     expect(out).toContain("Owner's answer: None needed");
     expect(ok(buildUpdateInstructions(basis({}, [q('q1', '2026-10-21T05:34:02Z', 'Q?', 'A')])))).not.toContain('dispatched');
+  });
+
+  // Regression fixture (Hub prod, server-cooling, 2026-10-22): the update card carried the REJECTED 1,400 lb draft's note
+  // but not the APPROVED shared-plenum draft eaeb0dd7, and the update run wrote "1,400 lb combined load".
+  const approvedDraft: ApprovedChoice = {
+    id: 'eaeb0dd7-05d8-4f7e-8cf0-1b01bc4173f7',
+    taskId: 't1',
+    at: at('2026-10-19T12:47:32Z'),
+    summary: 'Save punch list to workspace',
+    actionType: 'file_write',
+    content: 'File punch_list_dual_fusion_tec.md:\nShared 36x18 plenum manifold.\nStructural rating: 2,500 lb.',
+  };
+  const rejectedDraft: UpdateDecision = {
+    kind: 'approval_rejected',
+    id: '12990c66',
+    taskId: 't1',
+    at: at('2026-10-19T12:47:35Z'),
+    subject: 'Save punch list to workspace',
+    detail: 'Duplicate punch list draft using independent per-unit ducting (1,400 lb rating) — owner chose the shared-duct version instead (approval eaeb0dd7).',
+  };
+
+  it('server-cooling: the APPROVED draft is carried verbatim as the chosen version; the rejected one is marked NOT chosen', () => {
+    const out = ok(buildUpdateInstructions(basis({ approved: [approvedDraft] }, [rejectedDraft, q('q1', '2026-10-20T12:51:21Z', 'Lead-Lag or Parallel?', 'Lead-Lag (alternating)')])));
+    const approvedAt = out.indexOf("=== RESULTS THE OWNER APPROVED (the owner's chosen version — build on these) ===");
+    expect(approvedAt).toBeGreaterThan(out.indexOf('=== ORIGINAL INSTRUCTIONS ==='));
+    expect(approvedAt).toBeLessThan(out.indexOf('=== OWNER DECISIONS SINCE THE PREVIOUS RUN'));
+    expect(out).toContain(
+      '- APPROVED (2026-10-19 12:47 UTC, approval eaeb0dd7-05d8-4f7e-8cf0-1b01bc4173f7): Save punch list to workspace\n  Approved content:\n    File punch_list_dual_fusion_tec.md:\n    Shared 36x18 plenum manifold.\n    Structural rating: 2,500 lb.',
+    );
+    expect(out).toContain('- REJECTED (2026-10-19 12:47 UTC) — NOT chosen; do not use it or any figure or specification it describes: Save punch list to workspace');
+    expect(out).toContain('Where the original instructions leave a choice open, the approved results and the decisions above settle it.');
+  });
+
+  it('an approved document with no text content is named, never invented', () => {
+    const out = ok(buildUpdateInstructions(basis({ approved: [{ ...approvedDraft, content: null }] }, [rejectedDraft])));
+    expect(out).toContain("(The approval carries no text content to reproduce; it is the owner's chosen version — approval eaeb0dd7-05d8-4f7e-8cf0-1b01bc4173f7.)");
+    expect(out).not.toContain('Approved content:');
+  });
+
+  it(`more than ${MAX_UPDATE_APPROVED} approved results → NO card (plain refusal)`, () => {
+    const many5 = Array.from({ length: MAX_UPDATE_APPROVED + 1 }, (_, i) => ({ ...approvedDraft, id: `ap${i}` }));
+    expect(buildUpdateInstructions(basis({ approved: many5 }, [rejectedDraft]))).toEqual({ ok: false, reason: 'too_many_decisions', message: UPDATE_CARD_TOO_BIG });
+    expect(buildUpdateInstructions(basis({ approved: many5.slice(0, MAX_UPDATE_APPROVED) }, [rejectedDraft])).ok).toBe(true);
+  });
+
+  it('approvedContent: a saved document is verbatim and never shortened (credentials scrubbed); no text content → null', () => {
+    const body = `line 1\n${'x'.repeat(9_000)}\nkey: sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789`;
+    const file = approvedContent({ path: 'plan.md', content: body });
+    expect(file!.startsWith('File plan.md:\nline 1\n')).toBe(true);
+    expect(file!.length).toBeGreaterThan(9_000);
+    expect(file).not.toContain('sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789');
+    expect(approvedContent({ content: 'no path' })).toBe('no path');
+    expect(approvedContent({ path: 'x.bin', bytes: 12 })).toBeNull();
+    expect(approvedContent(null)).toBeNull();
+    expect(APPROVED_DELIVERABLE_TYPES).toEqual(['file_write']); // approving an email / HTTP action is not a design choice
   });
 
   it('updateTitle stays within the 200-char dispatch title limit', () => {
