@@ -4,8 +4,8 @@ import type { ReactNode } from 'react';
  * A deliberately SMALL markdown renderer for the untrusted run-result excerpt in an Ops Chat completion reply
  * (Hub prod 2026-10-22: the excerpt showed raw `###`, `**`, `*   ` and `>` — readable only to a developer).
  *
- * Safe by construction: it builds React elements from text (React escapes every string), never uses
- * dangerouslySetInnerHTML, renders NO links or images ([text](url) shows only its text — the URL is dropped, so
+ * Safe by construction: it builds React elements from text (React escapes every string), never injects raw
+ * HTML (the env-hygiene test forbids the raw-HTML prop anywhere in src), renders NO links or images ([text](url) shows only its text — the URL is dropped, so
  * untrusted output cannot plant a clickable link), and supports only headings, bullet / numbered lists, quotes,
  * fenced code, bold, italic and inline code. Anything else is shown as the plain text it is.
  */
