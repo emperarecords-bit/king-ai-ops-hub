@@ -10,6 +10,7 @@ import {
 import type { ApprovalContentView } from '@/domain/opschat/approval-content';
 import type { LinkedRunView } from '@/domain/opschat/linked-run-view';
 import type { CompletionEntry, CompletionLabel } from '@/domain/opschat/conversation-continuity';
+import { completionReplyLead } from '@/domain/opschat/conversation-continuity';
 import { createDeadlineWatchdog } from './ops-chat-watchdog';
 import { ATTACHMENT_ACCEPT, ATTACHMENT_LIMITS } from '@/domain/opschat/attachment-limits';
 import {
@@ -27,6 +28,7 @@ import {
   cardIdFromHash,
   confirmOutcome,
   isActionable,
+  isBuildSkewed,
   needsRunPolling,
   pendingOutsideWindow,
   pendingTurnOf,
@@ -36,6 +38,9 @@ import {
   type TranscriptCard,
   type TranscriptMsg,
 } from './ops-chat-transcript';
+
+/** How often a visible tab checks whether the server now runs a newer build. */
+const BUILD_CHECK_MS = 5 * 60_000;
 
 /** P5c-3: how often an open conversation re-reads the runs it started (only while visible + something can change). */
 const RUN_POLL_MS = 15_000;
@@ -52,15 +57,23 @@ const COMPLETION_TONE: Record<CompletionLabel, string> = {
 function CompletionRow({ e }: { e: CompletionEntry }) {
   return (
     <div data-testid="completion-entry" className="flex justify-start">
-      <div className="max-w-[85%] rounded-2xl rounded-bl-sm border border-[var(--accent)] bg-[var(--surface)] px-3.5 py-2.5 text-sm shadow-sm">
-        <div className="mb-1 text-xs opacity-50">Server record · work finished</div>
-        <p className="font-semibold">
-          {e.label} — <span className={COMPLETION_TONE[e.resultLabel]}>{e.resultLabel}</span>
-        </p>
-        <p className="mt-0.5 text-xs text-[var(--muted)]">{e.text}</p>
+      <div className="max-w-[85%] rounded-2xl rounded-bl-sm border border-[var(--accent)] bg-[var(--surface)] px-3.5 py-2.5 text-sm leading-relaxed shadow-sm">
+        <div className="mb-1 text-xs opacity-50">
+          Ops Chat · work finished · <span className={COMPLETION_TONE[e.resultLabel]}>{e.resultLabel}</span>
+        </div>
+        <p>{completionReplyLead(e)}</p>
+        {e.excerpt ? (
+          // Untrusted AI output: plain text only (no markdown, no links), bounded server-side.
+          <div data-testid="completion-excerpt" className="mt-2 rounded-md border border-[var(--border)] px-3 py-2">
+            <p className="mb-1 text-[11px] uppercase tracking-wide text-[var(--muted)]">From the run · {e.resultLabel}</p>
+            <p className="whitespace-pre-wrap text-xs">{e.excerpt}</p>
+            {e.excerptTruncated ? <p className="mt-1 text-[11px] text-[var(--muted)]">… continues — open the full result, or ask “what did it come back with?”</p> : null}
+          </div>
+        ) : null}
+        <p className="mt-1 text-xs text-[var(--muted)]">{e.text}</p>
         {e.taskPath ? (
           <a href={e.taskPath} className="mt-1 inline-block text-xs text-[var(--accent)] underline underline-offset-2">
-            Open the result
+            Open the full result
           </a>
         ) : null}
       </div>
@@ -658,6 +671,7 @@ export function OpsChatClient({
   pendingTurn: serverPending,
   conversations,
   leadingCompletions = [],
+  buildId = null,
 }: {
   opening: string;
   conversationId: string | null;
@@ -666,6 +680,8 @@ export function OpsChatClient({
   conversations: Array<{ id: string; title: string | null }>;
   /** P5c-3: completion entries older than every loaded message (shown first). */
   leadingCompletions?: CompletionEntry[];
+  /** The build that rendered this page — compared with the server's current build to detect a stale tab. */
+  buildId?: string | null;
 }) {
   const [initialTranscript] = useState(() => buildTranscript(persisted, leadingCompletions));
   const [messages, setMessages] = useState<Msg[]>(() => [
@@ -681,6 +697,34 @@ export function OpsChatClient({
   // fork a second conversation.
   const [currentId, setCurrentId] = useState<string | null>(initialConversationId);
   const [input, setInput] = useState('');
+
+  // Build skew: a tab left open across a deploy keeps running OLD client code (Hub prod 2026-10-22 — it never got live
+  // refresh, so finished work never appeared). Check the server's build when the tab becomes visible again and every
+  // BUILD_CHECK_MS while visible; on a mismatch show a reload banner. Never reloads by itself (an unsent draft would be lost).
+  const [buildSkewed, setBuildSkewed] = useState(false);
+  useEffect(() => {
+    if (!buildId || buildId === 'dev') return;
+    let stopped = false;
+    const check = async (): Promise<void> => {
+      if (stopped || document.visibilityState !== 'visible') return;
+      try {
+        const res = await fetch('/api/ops-chat/version', { cache: 'no-store' });
+        if (!res.ok) return;
+        const j = (await res.json()) as { buildId?: string };
+        if (!stopped && isBuildSkewed(buildId, j.buildId)) setBuildSkewed(true);
+      } catch {
+        // offline / transient — try again on the next visibility change or tick
+      }
+    };
+    const onVisible = (): void => void check();
+    document.addEventListener('visibilitychange', onVisible);
+    const timer = setInterval(() => void check(), BUILD_CHECK_MS);
+    return () => {
+      stopped = true;
+      document.removeEventListener('visibilitychange', onVisible);
+      clearInterval(timer);
+    };
+  }, [buildId]);
 
   // P5c-3 live refresh: while something this conversation started can still change (a dispatch / re-run card being
   // confirmed, or its run queued / running), re-read the linked runs every RUN_POLL_MS — only while the tab is
@@ -1044,6 +1088,18 @@ export function OpsChatClient({
         </button>
       </div>
 
+      {buildSkewed ? (
+        <div data-testid="build-skew-banner" className="mb-3 flex items-center justify-between gap-3 rounded-md border border-[var(--warning,#d9a441)] px-3 py-2 text-sm">
+          <span>Ops Chat was updated. Reload to get the latest version (an unsent message would be lost).</span>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="shrink-0 rounded-md border border-[var(--border)] px-3 py-1 text-xs hover:text-[var(--foreground)]"
+          >
+            Reload
+          </button>
+        </div>
+      ) : null}
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto pr-1">
         {messages.map((m) =>
           m.role === 'server' && m.completion ? (

@@ -23,6 +23,8 @@ export interface LinkedRunFacts {
     finishedAt: Date | null;
     resultChars: number;
     errorMessage: string | null;
+    /** The first characters of the stored result (read bounded server-side) — for the chat completion reply only. */
+    excerpt?: string | null;
   } | null;
   /** Approvals still pending that THIS run proposed. */
   pendingApprovals: number;
@@ -41,6 +43,26 @@ export interface LinkedRunView {
   text: string;
   /** P5c-3: the most recent activity of this attempt (run finished, else run started, else job queued). */
   activeAt?: string | null;
+  /**
+   * The start of what the run produced (≤ RESULT_EXCERPT_CHARS, cut at a word boundary), for the in-chat completion reply
+   * ONLY — untrusted AI output, rendered as plain text. Never put in a notification/email (those carry `text` only).
+   */
+  excerpt?: string | null;
+  /** True when the result is longer than the excerpt. */
+  excerptTruncated?: boolean;
+}
+
+/** Max characters of a run's result shown in the chat completion reply. */
+export const RESULT_EXCERPT_CHARS = 1_200;
+
+/** A bounded excerpt: whole text when short, else cut back to the last whitespace before the limit. */
+export function boundedExcerpt(text: string | null | undefined, total: number): { excerpt: string | null; truncated: boolean } {
+  const t = (text ?? '').trim();
+  if (!t) return { excerpt: null, truncated: false };
+  if (t.length <= RESULT_EXCERPT_CHARS && total <= RESULT_EXCERPT_CHARS) return { excerpt: t, truncated: false };
+  const head = t.slice(0, RESULT_EXCERPT_CHARS);
+  const cut = head.lastIndexOf(' ');
+  return { excerpt: (cut > RESULT_EXCERPT_CHARS * 0.6 ? head.slice(0, cut) : head).trimEnd(), truncated: true };
 }
 
 const t = (d: Date): string => `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
@@ -68,7 +90,8 @@ export function describeLinkedRun(f: LinkedRunFacts): LinkedRunView {
           : '';
       const draftNote = draft ? ' It is an UNREVIEWED DRAFT: review was required but did not happen, so it is not final.' : '';
       const state: LinkedRunState = f.pendingApprovals > 0 ? 'needs_approval' : draft ? 'draft' : 'ready';
-      return { ...base, state, text: `Finished${when}; ${result}.${draftNote}${approvals}` };
+      const ex = boundedExcerpt(run.excerpt, run.resultChars);
+      return { ...base, state, text: `Finished${when}; ${result}.${draftNote}${approvals}`, ...(ex.excerpt ? { excerpt: ex.excerpt, excerptTruncated: ex.truncated } : {}) };
     }
     return { ...base, state: 'no_run', text: `Its run is in an unrecognized state (${run.status}).` };
   }
