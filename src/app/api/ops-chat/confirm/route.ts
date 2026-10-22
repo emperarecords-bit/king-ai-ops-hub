@@ -92,6 +92,8 @@ const ActionBody = z.discriminatedUnion('action', [
         runId: z.string().uuid(),
         decisions: z.number().int().nonnegative(),
         decisionIds: z.array(z.string().uuid()).max(500).optional(),
+        taskIds: z.array(z.string().uuid()).max(50).optional(),
+        siblingRuns: z.array(z.object({ taskId: z.string().uuid(), runId: z.string().uuid() })).max(50).optional(),
       })
       .nullish(),
   }),

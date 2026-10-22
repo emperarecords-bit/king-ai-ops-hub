@@ -611,7 +611,7 @@ export async function pendingUpdateCardFor(tx: DbTx, userId: string, conversatio
         eq(opsChatProposals.conversationId, conversationId),
         eq(opsChatProposals.kind, 'dispatch_task'),
         eq(opsChatProposals.state, 'pending'),
-        sql`${opsChatProposals.proposal} -> 'updateOf' ->> 'taskId' = ${taskId}`,
+        sql`(${opsChatProposals.proposal} -> 'updateOf' ->> 'taskId' = ${taskId} or coalesce(${opsChatProposals.proposal} -> 'updateOf' -> 'taskIds', '[]'::jsonb) @> jsonb_build_array(${taskId}::text))`,
       ),
     )
     .orderBy(desc(opsChatProposals.seq))
