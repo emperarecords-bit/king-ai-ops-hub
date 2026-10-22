@@ -4,6 +4,7 @@ import { approvals, ownerQuestions, runs, tasks } from '@/db/schema';
 import { AppError } from '@/lib/errors';
 import { type TenantContext } from '@/types/domain';
 import { decisionsAfterRun, loadTaskStates } from '@/domain/opschat/task-state';
+import { redactText } from '@/domain/opschat/approval-content';
 
 /**
  * P5c-2 — ONE consolidated "update this job" card when the owner's decisions changed after a task's latest run.
@@ -34,6 +35,25 @@ export interface UpdateDecision {
   detail: string | null;
 }
 
+/**
+ * An approval the owner APPROVED on a task of the job — the owner's chosen version of a result.
+ *
+ * Evidence (Hub prod, server-cooling, 2026-10-22): the update card carried the owner's answers and the REJECTED draft
+ * ("independent per-unit ducting (1,400 lb rating)") but not the APPROVED draft eaeb0dd7 (shared plenum, 2,500 lb).
+ * The update run's punch list then specified "1,400 lb" — the rejected rating, read out of the rejection note. An
+ * approval is not a staleness trigger (approving a run's own output does not make that run's result outdated), so
+ * these are kept apart from `decisions` and never change the stale count; they are carried as context.
+ */
+export interface ApprovedChoice {
+  id: string;
+  taskId: string;
+  at: Date;
+  summary: string;
+  actionType: string;
+  /** The approved document, credential-scrubbed and never shortened; null when the payload has no text content. */
+  content: string | null;
+}
+
 export interface UpdateBasis {
   /** The task the card was asked for (its title, instructions and agent are used). */
   task: { id: string; title: string; input: string; primaryAgentId: string | null };
@@ -47,6 +67,8 @@ export interface UpdateBasis {
   siblings: { taskId: string; runId: string; startedAt: Date | null }[];
   /** Decisions made after the latest run of the task they belong to started — across ALL siblings, oldest first. */
   decisions: UpdateDecision[];
+  /** Every APPROVED approval across the job (oldest first). Optional: bases built before this field carry none. */
+  approved?: ApprovedChoice[];
 }
 
 /** At most this many tasks are treated as one job (more → only the oldest MAX_SIBLINGS, the requested one always). */
@@ -117,6 +139,20 @@ export async function loadUpdateBasis(tx: DbTx, taskId: string): Promise<UpdateB
     .select({ id: approvals.id, taskId: approvals.taskId, summary: approvals.summary, note: approvals.decisionNote, at: approvals.decidedAt })
     .from(approvals)
     .where(and(inArray(approvals.taskId, siblingIds), eq(approvals.status, 'rejected'), isNotNull(approvals.decidedAt)));
+  const approvedRows = await tx
+    .select({ id: approvals.id, taskId: approvals.taskId, summary: approvals.summary, actionType: approvals.actionType, payload: approvals.payload, at: approvals.decidedAt })
+    .from(approvals)
+    .where(
+      and(
+        inArray(approvals.taskId, siblingIds),
+        eq(approvals.status, 'approved'),
+        inArray(approvals.actionType, [...APPROVED_DELIVERABLE_TYPES]),
+        isNotNull(approvals.decidedAt),
+      ),
+    );
+  const approved: ApprovedChoice[] = approvedRows
+    .map((a) => ({ id: a.id, taskId: a.taskId, at: a.at!, summary: a.summary, actionType: a.actionType, content: approvedContent(a.payload) }))
+    .sort((a, b) => a.at.getTime() - b.at.getTime() || a.id.localeCompare(b.id));
   const all: UpdateDecision[] = [
     ...answered.map((q) => ({ kind: 'question_answered' as const, id: q.id, taskId: q.taskId, at: q.at!, subject: q.question, detail: q.answer })),
     ...rejected.map((a) => ({ kind: 'approval_rejected' as const, id: a.id, taskId: a.taskId!, at: a.at!, subject: a.summary, detail: a.note })),
@@ -130,8 +166,25 @@ export async function loadUpdateBasis(tx: DbTx, taskId: string): Promise<UpdateB
     run,
     siblings,
     decisions: keep.sort((a, b) => a.at.getTime() - b.at.getTime() || a.id.localeCompare(b.id)),
+    approved,
   };
 }
+
+/**
+ * The full content of an approved saved document, verbatim (credential-shaped strings scrubbed), or null when the
+ * payload carries no text content. Only a saved document is a chosen deliverable; approving an ACTION (an email, an
+ * HTTP call) does not choose a design, so those never reach the brief (see APPROVED_DELIVERABLE_TYPES).
+ */
+export function approvedContent(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const p = payload as Record<string, unknown>;
+  if (typeof p.content !== 'string') return null;
+  const path = typeof p.path === 'string' ? `File ${redactText(p.path).text}:\n` : '';
+  return path + redactText(p.content).text;
+}
+
+/** Approved approvals of these types are the owner's chosen version of a result (a saved document). */
+export const APPROVED_DELIVERABLE_TYPES = ['file_write'] as const;
 
 /** What an update card froze when it was prepared — re-checked at confirm (see assertUpdateCardCurrent). */
 export interface UpdateOf {
@@ -145,6 +198,8 @@ export interface UpdateOf {
   taskIds?: string[];
   /** P5c-2b: each task's latest run when the card was prepared — any re-run of ANY of them invalidates the card. */
   siblingRuns?: { taskId: string; runId: string }[];
+  /** The APPROVED approvals written into the card. Absent on cards prepared before this field (then not re-checked). */
+  approvedIds?: string[];
 }
 
 export const UPDATE_CARD_NOT_CURRENT =
@@ -178,6 +233,10 @@ export async function assertUpdateCardCurrent(tx: DbTx, ctx: TenantContext, u: U
   const frozen = u.decisionIds ? [...u.decisionIds].sort() : null;
   const same = frozen ? frozen.length === now.length && frozen.every((id, i) => id === now[i]) : now.length === u.decisions;
   if (!same) fail('the owner made decisions after the card was prepared');
+  if (u.approvedIds) {
+    const nowApproved = (basis!.approved ?? []).map((a) => a.id).sort().join(',');
+    if (nowApproved !== [...u.approvedIds].sort().join(',')) fail('the owner approved a result of this job after the card was prepared');
+  }
   const states = await loadTaskStates(tx, ctx, basis!.siblings.map((s) => s.taskId));
   const sup = states.find((st) => st.supersededBy)?.supersededBy;
   if (sup) fail(`it was already updated by task "${sup.title}"`);
@@ -186,6 +245,8 @@ export async function assertUpdateCardCurrent(tx: DbTx, ctx: TenantContext, u: U
 const iso = (d: Date | null) => (d ? `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC` : 'unknown time');
 /** At most this many decisions go on one card. More than this → no card (see buildUpdateInstructions). */
 export const MAX_UPDATE_DECISIONS = 10;
+/** At most this many approved results go on one card. More than this → no card, as with too many decisions. */
+export const MAX_UPDATE_APPROVED = 5;
 
 /** Text kept VERBATIM: line breaks become indented continuation lines, nothing is shortened or reflowed. */
 const verbatim = (s: string) => s.trim().replace(/\r\n?/g, '\n').replace(/\n/g, '\n    ');
@@ -212,13 +273,27 @@ export const UPDATE_CARD_TOO_BIG =
  * caller gets a plain refusal instead.
  */
 export function buildUpdateInstructions(b: UpdateBasis): UpdateInstructionsResult {
-  if (b.decisions.length > MAX_UPDATE_DECISIONS) return { ok: false, reason: 'too_many_decisions', message: UPDATE_CARD_TOO_BIG };
+  const approved = b.approved ?? [];
+  if (b.decisions.length > MAX_UPDATE_DECISIONS || approved.length > MAX_UPDATE_APPROVED) {
+    return { ok: false, reason: 'too_many_decisions', message: UPDATE_CARD_TOO_BIG };
+  }
+  const approvedLines = approved.map(
+    (a) =>
+      `- APPROVED (${iso(a.at)}, approval ${a.id}): ${verbatim(a.summary)}\n` +
+      (a.content !== null
+        ? `  Approved content:\n    ${verbatim(a.content)}`
+        : `  (The approval carries no text content to reproduce; it is the owner's chosen version — approval ${a.id}.)`),
+  );
   const lines: string[] = [];
   for (const d of b.decisions) {
     if (d.kind === 'question_answered') {
       lines.push(`- Question (answered ${iso(d.at)}): ${verbatim(d.subject)}\n  Owner's answer: ${verbatim(d.detail ?? '(no text)')}`);
     } else {
-      lines.push(`- REJECTED (${iso(d.at)}): ${verbatim(d.subject)}${d.detail ? `\n  Owner's note: ${verbatim(d.detail)}` : ''}`);
+      // The rejection note often names what was rejected ("1,400 lb rating") — say plainly that none of it is chosen.
+      lines.push(
+        `- REJECTED (${iso(d.at)}) — NOT chosen; do not use it or any figure or specification it describes: ${verbatim(d.subject)}` +
+          (d.detail ? `\n  Owner's note: ${verbatim(d.detail)}` : ''),
+      );
     }
   }
   const title = b.task.title.replace(/\s+/g, ' ').trim();
@@ -227,10 +302,18 @@ export function buildUpdateInstructions(b: UpdateBasis): UpdateInstructionsResul
     others.length > 0
       ? `This job was dispatched ${b.siblings.length} times under this title (tasks ${b.siblings.map((s) => s.taskId).join(', ')}); the decisions above were made on any of them and ALL apply. `
       : '';
+  const approvedSection =
+    approvedLines.length > 0
+      ? `\n\n=== RESULTS THE OWNER APPROVED (the owner's chosen version — build on these) ===\n${approvedLines.join('\n')}`
+      : '';
+  const settles =
+    approvedLines.length > 0 ? 'Where the original instructions leave a choice open, the approved results and the decisions above settle it. ' : '';
   const text =
     `=== ORIGINAL INSTRUCTIONS ===\n${b.task.input}` +
+    approvedSection +
     `\n\n=== OWNER DECISIONS SINCE THE PREVIOUS RUN (authoritative — recorded in the Hub) ===\n${lines.join('\n')}\n\n` +
     `=== WHAT TO DO ===\n${consolidated}The previous run of "${title}" (run ${b.run.id}, started ${iso(b.run.startedAt)}) predates the decisions above. ` +
+    settles +
     'Produce an updated, complete result that applies every one of them. Do not re-ask questions that are answered above; ' +
     'do not repeat a proposal the owner rejected.';
   if (text.length > MAX_DISPATCH_INSTRUCTIONS) return { ok: false, reason: 'too_large', message: UPDATE_CARD_TOO_BIG };

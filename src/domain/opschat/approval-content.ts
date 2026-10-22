@@ -98,6 +98,12 @@ function scrub(s: string, acc: Acc): string {
   return out;
 }
 
+/** Credential-shaped strings scrubbed from free text, nothing shortened (same patterns as the rendered view). */
+export function redactText(s: string): { text: string; redacted: boolean } {
+  const acc: Acc = { truncated: false, redacted: false };
+  return { text: scrub(s, acc), redacted: acc.redacted };
+}
+
 function cap(s: string, max: number, acc: Acc): string {
   if (s.length <= max) return s;
   acc.truncated = true;

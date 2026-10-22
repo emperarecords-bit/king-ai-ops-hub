@@ -118,7 +118,7 @@ export type OpsChatProposal =
       readonly reviewerAgentId?: string | null;
       readonly reviewerName?: string | null;
       /** P5c-2: set on an "update this job" card — the task it updates and how many owner decisions it applies. */
-      readonly updateOf?: { readonly taskId: string; readonly taskTitle: string; readonly runId: string; readonly decisions: number; readonly decisionIds: readonly string[]; readonly taskIds: readonly string[]; readonly siblingRuns: readonly { readonly taskId: string; readonly runId: string }[] };
+      readonly updateOf?: { readonly taskId: string; readonly taskTitle: string; readonly runId: string; readonly decisions: number; readonly decisionIds: readonly string[]; readonly taskIds: readonly string[]; readonly siblingRuns: readonly { readonly taskId: string; readonly runId: string }[]; readonly approvedIds?: readonly string[] };
     }
   | {
       readonly kind: 'rerun_task';
@@ -1518,17 +1518,23 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
             // P5c-2b: the whole job — every duplicate task and its latest run (all re-checked at confirm; all superseded).
             taskIds: basis.siblings.map((s) => s.taskId),
             siblingRuns: basis.siblings.map((s) => ({ taskId: s.taskId, runId: s.runId })),
+            // The owner's APPROVED results written into the card — an approval added before confirm makes it stale.
+            approvedIds: (basis.approved ?? []).map((a) => a.id),
           },
         });
+        const approvedCount = (basis.approved ?? []).length;
         return JSON.stringify({
           prepared: true,
           decisions: basis.decisions.length,
+          approvedResults: approvedCount,
           agent: resolution.agent.name,
           reviewer: reviewer?.name ?? null,
           note:
             `Prepared ONE update card for the owner to confirm: a new task "${updateTitle(task.title)}" in ${p.name}, run by ${resolution.agent.name}` +
             (reviewer ? `, reviewed by ${reviewer.name}` : ` — ${UNREVIEWED_DRAFT_NOTE}`) +
-            `, with ALL ${basis.decisions.length} owner decision(s) made since the last run written in full into its instructions, together with the full original instructions. Tell the owner plainly that the old result predates their answers. ` +
+            `, with ALL ${basis.decisions.length} owner decision(s) made since the last run written in full into its instructions` +
+            (approvedCount > 0 ? `, plus the ${approvedCount} result(s) the owner APPROVED as the chosen version` : '') +
+            `, together with the full original instructions. Tell the owner plainly that the old result predates their answers. ` +
             'Do NOT also propose a re-run or another dispatch for this task. This STARTS an AI run (uses tokens) only after the owner confirms — do not claim it is running.',
         });
       }

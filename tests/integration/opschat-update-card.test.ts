@@ -115,7 +115,8 @@ describe.skipIf(!available)('P5c-2 — stale work → ONE update card (server-co
     for (const a of ANSWERS) expect(c.instructions).toContain(a);
     expect(c.instructions).toContain("Owner's note: Unrelated to this job.");
     expect(c.instructions).not.toContain('OLD-ANSWER-KNOWN-TO-RUN');
-    expect(c.instructions).not.toContain('Post the drawing');
+    expect(c.instructions).not.toContain('Post the drawing'); // an approved ACTION is not a chosen deliverable
+    expect(c.instructions).not.toContain('RESULTS THE OWNER APPROVED');
     // Same turn: asking again adds nothing; a plain re-run is refused.
     await run(ts, 'propose_update_task', { project: rec.key, task: taskId });
     expect(ts.getProposals()).toHaveLength(1);
