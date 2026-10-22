@@ -1,5 +1,6 @@
 import { type LinkedRunState, type LinkedRunView } from '@/domain/opschat/linked-run-view';
 import { PREPARE_UPDATE_CARD } from '@/domain/opschat/stale-wording';
+import { notFoundSentence } from '@/domain/opschat/deliverables';
 
 /**
  * P5c-3 — conversational continuity, from stored facts only (pure: no DB, no React — the browser imports the types).
@@ -45,6 +46,8 @@ export interface CompletionEntry {
   /** The start of what the run produced (bounded; untrusted; plain text) — shown in the chat reply only. */
   excerpt?: string | null;
   excerptTruncated?: boolean;
+  /** Brief deliverables the result does not mention — the reply says so instead of a plain "finished". */
+  notFound?: string[];
 }
 
 const FINISHED: Partial<Record<LinkedRunState, CompletionLabel>> = {
@@ -84,6 +87,7 @@ export function completionEntries(cards: readonly ContinuityCard[]): CompletionE
       text: v.text,
       taskPath: c.projectKey ? `/p/${encodeURIComponent(c.projectKey)}/tasks/${encodeURIComponent(v.taskId)}` : null,
       ...(v.excerpt && label !== 'FAILED' ? { excerpt: v.excerpt, excerptTruncated: Boolean(v.excerptTruncated) } : {}),
+      ...(v.notFound && v.notFound.length > 0 && label !== 'FAILED' ? { notFound: v.notFound } : {}),
     });
   }
   return out.sort((a, b) => Date.parse(a.finishedAt) - Date.parse(b.finishedAt) || a.proposalId.localeCompare(b.proposalId));
@@ -173,15 +177,17 @@ export function conversationContextSection(cards: readonly ContinuityCard[], pre
  * the work finished, not a small server note). Honest about the label — a draft is never presented as final, a pending
  * approval means the work is not done, a failure produced nothing.
  */
-export function completionReplyLead(e: Pick<CompletionEntry, 'label' | 'resultLabel' | 'excerpt'>): string {
+export function completionReplyLead(e: Pick<CompletionEntry, 'label' | 'resultLabel' | 'excerpt' | 'notFound'>): string {
+  // "Finished" is not "complete" (Hub prod 2026-10-22: run 2db706f8 finished without the CFM calc or the material list).
+  const missing = e.notFound && e.notFound.length > 0 ? notFoundSentence(e.notFound) : '';
   const what = e.excerpt ? " Here's the start of what came back:" : '';
   switch (e.resultLabel) {
     case 'FINAL':
-      return `Your request ${e.label} has finished.${what}`;
+      return `Your request ${e.label} has finished.${missing}${what}`;
     case 'UNREVIEWED DRAFT':
-      return `Your request ${e.label} has finished — it is an UNREVIEWED DRAFT (review was required but did not happen), so it is not final.${what}`;
+      return `Your request ${e.label} has finished — it is an UNREVIEWED DRAFT (review was required but did not happen), so it is not final.${missing}${what}`;
     case 'APPROVAL NEEDED':
-      return `Your request ${e.label} has finished, but it proposed an action that needs your approval before the work is done.${what}`;
+      return `Your request ${e.label} has finished, but it proposed an action that needs your approval before the work is done.${missing}${what}`;
     case 'FAILED':
       return `Your request ${e.label} failed — nothing was produced.`;
   }

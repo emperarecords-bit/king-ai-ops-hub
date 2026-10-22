@@ -10,6 +10,8 @@
  * Pure (no DB, no React) so the exact wording is unit-tested and the browser can import the types.
  */
 
+import { notFoundSentence } from '@/domain/opschat/deliverables';
+
 /** The stored facts for ONE card's linked attempt (its newest job and newest run). */
 export interface LinkedRunFacts {
   proposalId: string;
@@ -27,6 +29,8 @@ export interface LinkedRunFacts {
     excerpt?: string | null;
     /** Length of the full result the excerpt was cut from (after any server-side banner strip); defaults to resultChars. */
     excerptTotalChars?: number;
+    /** Headings of the brief's numbered deliverables the result does not mention (see deliverables.ts). */
+    notFound?: string[];
   } | null;
   /** Approvals still pending that THIS run proposed. */
   pendingApprovals: number;
@@ -52,6 +56,8 @@ export interface LinkedRunView {
   excerpt?: string | null;
   /** True when the result is longer than the excerpt. */
   excerptTruncated?: boolean;
+  /** Brief deliverables (headings) the finished result does not mention — "finished" is not "complete". */
+  notFound?: string[];
 }
 
 /** Max characters of a run's result shown in the chat completion reply. */
@@ -93,7 +99,14 @@ export function describeLinkedRun(f: LinkedRunFacts): LinkedRunView {
       const draftNote = draft ? ' It is an UNREVIEWED DRAFT: review was required but did not happen, so it is not final.' : '';
       const state: LinkedRunState = f.pendingApprovals > 0 ? 'needs_approval' : draft ? 'draft' : 'ready';
       const ex = boundedExcerpt(run.excerpt, run.excerptTotalChars ?? run.resultChars);
-      return { ...base, state, text: `Finished${when}; ${result}.${draftNote}${approvals}`, ...(ex.excerpt ? { excerpt: ex.excerpt, excerptTruncated: ex.truncated } : {}) };
+      const notFound = run.resultChars > 0 ? (run.notFound ?? []) : [];
+      return {
+        ...base,
+        state,
+        text: `Finished${when}; ${result}.${draftNote}${notFoundSentence(notFound)}${approvals}`,
+        ...(ex.excerpt ? { excerpt: ex.excerpt, excerptTruncated: ex.truncated } : {}),
+        ...(notFound.length > 0 ? { notFound } : {}),
+      };
     }
     return { ...base, state: 'no_run', text: `Its run is in an unrecognized state (${run.status}).` };
   }

@@ -3,6 +3,7 @@ import { type DbTx } from '@/db/client';
 import { log } from '@/lib/log';
 import { opsChatProposals, projects, runs, tasks } from '@/db/schema';
 import { describeLinkedRun } from '@/domain/opschat/linked-run-view';
+import { deliverablesNotFound } from '@/domain/opschat/deliverables';
 import { type OpsChatRunLink } from '@/domain/notifications/ops-chat-link';
 
 /**
@@ -32,11 +33,13 @@ export interface RunFinish {
 const quoted = (s: string) => `"${s.replace(/\s+/g, ' ').trim().slice(0, 120)}"`;
 
 export async function buildOpsChatRunNotice(tx: DbTx, f: RunFinish): Promise<OpsChatRunNotice | null> {
-  const run = (await tx.select({ proposalId: runs.opsChatProposalId, startedAt: runs.startedAt }).from(runs).where(eq(runs.id, f.runId)).limit(1))[0];
+  const run = (
+    await tx.select({ proposalId: runs.opsChatProposalId, startedAt: runs.startedAt, result: runs.consolidatedResult }).from(runs).where(eq(runs.id, f.runId)).limit(1)
+  )[0];
   if (!run?.proposalId) return null;
   const task = (
     await tx
-      .select({ title: tasks.title, projectKey: projects.key })
+      .select({ title: tasks.title, input: tasks.input, projectKey: projects.key })
       .from(tasks)
       .innerJoin(projects, eq(projects.id, tasks.projectId))
       .where(eq(tasks.id, f.taskId))
@@ -63,15 +66,16 @@ export async function buildOpsChatRunNotice(tx: DbTx, f: RunFinish): Promise<Ops
       finishedAt: f.finishedAt,
       resultChars: f.resultChars,
       errorMessage: f.errorMessage,
+      // Brief headings only (never result text) — "finished" is not "complete".
+      ...(f.outcome === 'completed' ? { notFound: deliverablesNotFound(task.input, run.result) } : {}),
     },
     pendingApprovals: 0, // a run that proposed approvals ends awaiting_approval and is announced by approval_pending
   });
+  const flags = [view.notFound && view.notFound.length > 0 ? 'may be incomplete' : null, view.state === 'draft' ? 'unreviewed draft' : null].filter(Boolean);
   const title =
     f.outcome === 'failed'
       ? `Ops Chat request failed: ${quoted(task.title)}`
-      : view.state === 'draft'
-        ? `Ops Chat request finished (unreviewed draft): ${quoted(task.title)}`
-        : `Ops Chat request finished: ${quoted(task.title)}`;
+      : `Ops Chat request finished${flags.length ? ` (${flags.join(', ')})` : ''}: ${quoted(task.title)}`;
   return {
     title,
     body: `${quoted(task.title)} — ${view.text}`,
