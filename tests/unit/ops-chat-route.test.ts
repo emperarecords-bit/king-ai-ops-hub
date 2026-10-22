@@ -29,6 +29,7 @@ const h = vi.hoisted(() => ({
   release: vi.fn(),
   convRelease: vi.fn(),
   listRunStartingCards: vi.fn(),
+  previousOwnerMessageAt: vi.fn(),
   loadLinkedRunViews: vi.fn(),
   tenantForUser: vi.fn(),
 }));
@@ -50,6 +51,7 @@ vi.mock('@/db/client', () => ({ getDb: () => ({ transaction: (fn: (tx: unknown) 
 vi.mock('@/db/tenant', () => ({ withUser: (_s: unknown, fn: (tx: unknown) => unknown) => fn({}) }));
 vi.mock('@/domain/opschat/conversations', () => ({
   listRunStartingCards: h.listRunStartingCards,
+  previousOwnerMessageAt: h.previousOwnerMessageAt,
   appendOwnerMessage: h.appendOwnerMessage,
   appendAssistantMessage: h.appendAssistantMessage,
   addProposal: h.addProposal,
@@ -99,6 +101,7 @@ beforeEach(() => {
   h.tryClaimTurn.mockResolvedValue({ claimed: true, release: h.release });
   h.tryClaimConversation.mockResolvedValue({ claimed: true, release: h.convRelease });
   h.listRunStartingCards.mockResolvedValue([]);
+  h.previousOwnerMessageAt.mockResolvedValue(null);
   h.loadLinkedRunViews.mockResolvedValue(new Map());
   h.streamWithTools.mockImplementation(async function* () {
     yield { kind: 'delta', text: 'Hello' };
@@ -163,6 +166,39 @@ describe('POST /api/ops-chat — P5a linked runs in the prompt (best-effort)', (
       const opts = h.loadPromptTurns.mock.calls.at(-1)![4] as { linkedRuns: Map<string, unknown> };
       expect(opts.linkedRuns.size).toBe(0);
     }
+  });
+});
+
+describe('POST /api/ops-chat — P5c-3 "THIS CONVERSATION" section in the system prompt', () => {
+  const cards = [{ id: 'card1', kind: 'dispatch_task', state: 'done', proposal: { projectKey: 'hvac', title: 'Duct sizing' } }];
+  const views = new Map([
+    ['card1', { taskId: 't1', runId: 'r1', state: 'running', finishedAt: null, activeAt: '2026-10-20T10:42:00.000Z', text: 'Running now (started 2026-10-20 10:42 UTC).' }],
+  ]);
+
+  it('names the ACTIVE JOB and the follow-up rule, so "any response?" resolves to it', async () => {
+    h.listRunStartingCards.mockResolvedValue(cards);
+    h.loadLinkedRunViews.mockResolvedValue(views);
+    const text = await (await call({ message: 'any response?', conversationId: CONV, turnId: TURN })).text();
+    expect(text).toContain('event: done');
+    const system = (h.streamWithTools.mock.calls[0]![0] as { system: string }).system;
+    expect(system).toContain('=== THIS CONVERSATION');
+    expect(system).toContain('ACTIVE JOB: dispatch "Duct sizing" — task t1 in workspace hvac');
+    expect(system).toContain('RULE: a short follow-up that names no task');
+  });
+
+  it('a failure building the section never removes the card lines and never fails the turn', async () => {
+    h.listRunStartingCards.mockResolvedValue(cards);
+    h.loadLinkedRunViews.mockResolvedValue(views);
+    h.previousOwnerMessageAt.mockRejectedValue(new Error('db down'));
+    const text = await (await call({ message: 'any response?', conversationId: CONV, turnId: TURN })).text();
+    expect(text).toContain('event: done');
+    expect((h.streamWithTools.mock.calls[0]![0] as { system: string }).system).not.toContain('THIS CONVERSATION');
+    expect(h.loadPromptTurns).toHaveBeenCalledWith(expect.anything(), 'u1', CONV, 'owner1', expect.objectContaining({ linkedRuns: views }));
+  });
+
+  it('no job started from this conversation → no section at all', async () => {
+    await (await call({ message: 'hello', conversationId: CONV, turnId: TURN })).text();
+    expect((h.streamWithTools.mock.calls[0]![0] as { system: string }).system).not.toContain('THIS CONVERSATION');
   });
 });
 

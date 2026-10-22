@@ -619,6 +619,33 @@ export async function pendingUpdateCardFor(tx: DbTx, userId: string, conversatio
   return rows[0]?.id ?? null;
 }
 
+/**
+ * P5c-3: when the owner's PREVIOUS message (before `ownerMessageId`) was created, or null for the first turn — the
+ * boundary for "finished since the owner's previous message" in the per-turn conversation section.
+ */
+export async function previousOwnerMessageAt(tx: DbTx, userId: string, conversationId: string, ownerMessageId: string): Promise<Date | null> {
+  const cur = await tx
+    .select({ seq: opsChatMessages.seq })
+    .from(opsChatMessages)
+    .where(and(eq(opsChatMessages.id, ownerMessageId), eq(opsChatMessages.userId, userId), eq(opsChatMessages.conversationId, conversationId)))
+    .limit(1);
+  if (!cur[0]) return null;
+  const prev = await tx
+    .select({ createdAt: opsChatMessages.createdAt })
+    .from(opsChatMessages)
+    .where(
+      and(
+        eq(opsChatMessages.conversationId, conversationId),
+        eq(opsChatMessages.userId, userId),
+        eq(opsChatMessages.role, 'user'),
+        sql`${opsChatMessages.seq} < ${cur[0].seq}`,
+      ),
+    )
+    .orderBy(desc(opsChatMessages.seq))
+    .limit(1);
+  return prev[0]?.createdAt ?? null;
+}
+
 /** A user's conversations, most-recently-updated first (the history list). */
 export async function listConversations(
   tx: DbTx,

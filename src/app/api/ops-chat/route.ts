@@ -19,10 +19,13 @@ import {
   earliestUnansweredOwnerId,
   listRunStartingCards,
   loadPromptTurns,
+  previousOwnerMessageAt,
   loadReplyForOwnerMessage,
   type OpsChatMessageStatus,
 } from '@/domain/opschat/conversations';
 import { loadLinkedRunViews } from '@/domain/opschat/linked-runs';
+import { loadContinuityCards } from '@/domain/opschat/continuity';
+import { conversationContextSection } from '@/domain/opschat/conversation-continuity';
 import { type LinkedRunView } from '@/domain/opschat/linked-run-view';
 import { tryClaimConversation, tryClaimTurn, type TurnClaim } from '@/domain/opschat/turn-claim';
 import { type ToolLoopEvent, type Turn, type TurnImage } from '@/types/provider';
@@ -435,12 +438,29 @@ export async function POST(req: Request): Promise<Response> {
         // P5a: each confirmed dispatch/re-run card carries the outcome of the run it started (P4 links), read
         // from the run rows. Best-effort: a lookup failure leaves today's card lines and never fails the turn.
         let linkedRuns: Map<string, LinkedRunView>;
+        let runCards: Awaited<ReturnType<typeof listRunStartingCards>> = [];
+        const resolveTenant = (key: string) => tenantForUser(userId, key);
         try {
-          const cards = await withUser({ userId }, (tx) => listRunStartingCards(tx, userId, conversationId));
-          linkedRuns = await loadLinkedRunViews(cards, (key) => tenantForUser(userId, key));
+          runCards = await withUser({ userId }, (tx) => listRunStartingCards(tx, userId, conversationId));
+          linkedRuns = await loadLinkedRunViews(runCards, resolveTenant);
         } catch (err) {
           log.warn('ops-chat linked-run lookup failed (prompt keeps card lines only)', { errorClass: err instanceof Error ? err.name : 'unknown' });
           linkedRuns = new Map<string, LinkedRunView>();
+        }
+        // P5c-3: "THIS CONVERSATION" server record — the active job (stale / superseded), the other jobs, and what
+        // finished since the owner's previous message — so short follow-ups resolve to the job they mean. Its own
+        // best-effort block: a failure here never removes the card lines above and never fails the turn.
+        if (runCards.length > 0) {
+          try {
+            const [continuity, prevOwnerAt] = await Promise.all([
+              loadContinuityCards(runCards, resolveTenant, linkedRuns),
+              withUser({ userId }, (tx) => previousOwnerMessageAt(tx, userId, conversationId, ownerMessageId)),
+            ]);
+            const section = conversationContextSection(continuity, prevOwnerAt);
+            if (section) system += `\n\n${section}`;
+          } catch (err) {
+            log.warn('ops-chat conversation context failed (turn continues without it)', { errorClass: err instanceof Error ? err.name : 'unknown' });
+          }
         }
         const turns = await withUser({ userId }, (tx) =>
           loadPromptTurns(tx, userId, conversationId, ownerMessageId, { maxOwnerTurns: OPS_CHAT_MAX_PROMPT_TURNS, linkedRuns }),

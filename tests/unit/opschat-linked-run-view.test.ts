@@ -27,7 +27,7 @@ const facts = (over: Partial<LinkedRunFacts> = {}, run: Partial<NonNullable<Link
 describe('describeLinkedRun — one sentence, only from the linked rows', () => {
   it('completed + reviewed → ready, with the finish time', () => {
     const v = describeLinkedRun(facts());
-    expect(v).toEqual({ taskId: TASK, runId: RUN, state: 'ready', finishedAt: fin.toISOString(), text: 'Finished 2026-10-20 10:42 UTC; its result is ready to read.' });
+    expect(v).toEqual({ taskId: TASK, runId: RUN, state: 'ready', finishedAt: fin.toISOString(), activeAt: fin.toISOString(), text: 'Finished 2026-10-20 10:42 UTC; its result is ready to read.' });
   });
 
   it('review required but unmet → UNREVIEWED DRAFT, never final', () => {

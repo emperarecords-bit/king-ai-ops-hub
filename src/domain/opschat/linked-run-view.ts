@@ -39,13 +39,16 @@ export interface LinkedRunView {
   finishedAt: string | null;
   /** One sentence for the owner, built only from the stored facts. */
   text: string;
+  /** P5c-3: the most recent activity of this attempt (run finished, else run started, else job queued). */
+  activeAt?: string | null;
 }
 
 const t = (d: Date): string => `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
 const short = (id: string) => id.slice(0, 8);
 
 export function describeLinkedRun(f: LinkedRunFacts): LinkedRunView {
-  const base = { taskId: f.taskId, runId: f.run?.id ?? null, finishedAt: f.run?.finishedAt?.toISOString() ?? null };
+  const active = f.run?.finishedAt ?? f.run?.startedAt ?? f.job?.updatedAt ?? f.job?.createdAt ?? null;
+  const base = { taskId: f.taskId, runId: f.run?.id ?? null, finishedAt: f.run?.finishedAt?.toISOString() ?? null, activeAt: active?.toISOString() ?? null };
   const run = f.run;
   if (run) {
     if (run.status === 'running') {
