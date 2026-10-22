@@ -20,7 +20,7 @@ import { type ProviderId } from '@/types/provider';
  * OpenAI flagship moved to gpt-5.4 ($2.50/$15, verified). gpt-5.2 remains
  * callable via per-agent configuration; it is simply not a platform default.
  */
-const FLAGSHIP_MODELS: Readonly<Record<ProviderId, string>> = {
+export const FLAGSHIP_MODELS: Readonly<Record<ProviderId, string>> = {
   openai: 'gpt-5.4',
   anthropic: 'claude-opus-4-8',
   google: 'gemini-3.1-pro-preview',
