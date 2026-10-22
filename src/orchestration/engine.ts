@@ -57,6 +57,35 @@ export function isEmptyReply(r: AgentResponse): boolean {
   return r.text.trim() === '';
 }
 
+/** Audit reason when the reviewer's first reply was cut off at its output limit and the review was retried once. */
+export const CUT_OFF_REVIEW_RETRIED = 'reviewer reply was cut off at its output limit; retried once with more room';
+/** The failed review step's message when the reviewer's reply was still cut off after the retry. */
+export const CUT_OFF_REVIEW_MESSAGE =
+  "The reviewer's reply was cut off at its output limit twice (retried once with more room) — no review was produced.";
+/** Prefix when the reviewer's first reply was cut off and the retry then failed. */
+export const CUT_OFF_REVIEW_RETRY_FAILED = "The reviewer's reply was cut off at its output limit; the retry failed:";
+/**
+ * Output budget for the ONE review retry: double the reviewer's own cap, at least 16,384, at most 32,768. Reasoning
+ * models spend output tokens thinking (Hub prod 2026-10-22, run 4afba522: 4,096 tokens used, 737 visible characters,
+ * the JSON never closed), so the retry needs room, not just another try.
+ */
+export function reviewRetryOutputTokens(configured: number): number {
+  return Math.min(32_768, Math.max(16_384, configured * 2));
+}
+
+const COMPLETE_REVIEW_BLOCK = /```review-result\s*\n[\s\S]*?\n?```/;
+
+/**
+ * True when a review reply stopped before its result block closed: the provider reports it hit the output limit
+ * (Anthropic 'max_tokens', OpenAI-style 'length') with no complete block, or — when the stop reason is not known,
+ * e.g. a checkpoint replay or a historical run — the block was opened and never closed.
+ */
+export function isCutOffReview(r: AgentResponse): boolean {
+  if (COMPLETE_REVIEW_BLOCK.test(r.text)) return false;
+  if (/^(max_tokens|length)$/.test(r.stopReason)) return true;
+  return r.text.includes('```review-result');
+}
+
 /** Two calls of ONE step, billed as one recorded response: the second call's text, the summed usage + latency. */
 export function combineResponses(first: AgentResponse, second: AgentResponse): AgentResponse {
   return {
@@ -568,24 +597,30 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
       // parsed as a malformed "reject" with no findings) is retried ONCE inside this same step. Both calls are
       // billed: the step's recorded usage is the sum of the two (same agent + model), and if the retry itself
       // fails cleanly, the failed step still carries the first call's response so it is billed.
-      let firstEmpty: AgentResponse | null = null;
+      // A reply CUT OFF at its output limit (prod run 4afba522, 2026-10-22: a real "revise" verdict lost mid-JSON) is
+      // retried the same way, and BOTH retries get more output room — reasoning models think before they answer.
+      let firstUnusable: AgentResponse | null = null;
+      let firstWasCutOff = false;
       try {
         if (input.resume) await input.resume.guardDispatch(reviewStepNo, 'review');
         const reviewer = input.reviewer;
-        const callReviewer = () =>
+        const callReviewer = (agent: EngineAgent) =>
           callWithRetry(
-            reviewer,
+            agent,
             reviewTurns,
             reviewSystem,
             input.perCallTimeoutMs,
             input.runDeadline,
             sink.onDelta && ((text) => sink.onDelta!('review', text)),
           );
-        reviewResponse = await callReviewer();
-        if (isEmptyReply(reviewResponse)) {
-          firstEmpty = reviewResponse;
-          await sink.onMalformedOutput(reviewStepNo, [EMPTY_REVIEW_RETRIED]);
-          reviewResponse = combineResponses(firstEmpty, await callReviewer());
+        reviewResponse = await callReviewer(reviewer);
+        const empty = isEmptyReply(reviewResponse);
+        if (empty || isCutOffReview(reviewResponse)) {
+          firstUnusable = reviewResponse;
+          firstWasCutOff = !empty;
+          await sink.onMalformedOutput(reviewStepNo, [empty ? EMPTY_REVIEW_RETRIED : CUT_OFF_REVIEW_RETRIED]);
+          const roomier: EngineAgent = { ...reviewer, maxOutputTokens: reviewRetryOutputTokens(reviewer.maxOutputTokens) };
+          reviewResponse = combineResponses(firstUnusable, await callReviewer(roomier));
         }
       } catch (err) {
         // AMBIGUOUS reviewer outcome → escalate to reconciliation (the reviewer may have executed + charged);
@@ -601,20 +636,22 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
         await record({
           kind: 'review',
           agentId: input.reviewer.agentId,
-          response: firstEmpty,
+          response: firstUnusable,
           verdict: null,
           verdictDetail: null,
           succeeded: false,
-          errorMessage: firstEmpty ? `${EMPTY_REVIEW_RETRY_FAILED} ${message}` : message,
+          errorMessage: firstUnusable
+            ? `${firstWasCutOff ? CUT_OFF_REVIEW_RETRY_FAILED : EMPTY_REVIEW_RETRY_FAILED} ${message}`
+            : message,
           effectivePromptHash: reviewStepHash,
         });
         reviewResponse = null;
         verdict = null;
       }
     }
-    // Still empty after the retry (or an empty reply replayed from a checkpoint): there is NO review. Record it
+    // Still empty or cut off after the retry (or replayed that way from a checkpoint): there is NO review. Record it
     // as a failed review step — never a "reject" verdict — so the run is an honest UNREVIEWED DRAFT.
-    if (reviewResponse && isEmptyReply(reviewResponse)) {
+    if (reviewResponse && (isEmptyReply(reviewResponse) || isCutOffReview(reviewResponse))) {
       await record({
         kind: 'review',
         agentId: input.reviewer.agentId,
@@ -622,7 +659,7 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
         verdict: null,
         verdictDetail: null,
         succeeded: false,
-        errorMessage: EMPTY_REVIEW_MESSAGE,
+        errorMessage: isEmptyReply(reviewResponse) ? EMPTY_REVIEW_MESSAGE : CUT_OFF_REVIEW_MESSAGE,
         effectivePromptHash: reviewStepHash,
       });
       reviewResponse = null;
