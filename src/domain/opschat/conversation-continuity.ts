@@ -58,6 +58,15 @@ export function completionLabelOf(state: LinkedRunState): CompletionLabel | null
   return FINISHED[state] ?? null;
 }
 
+/**
+ * True when this card's run is reported in the conversation as a completion entry (the same test completionEntries
+ * applies). The card then shows only a short pointer to that reply, so "finished" is said ONCE (Hub prod 2026-10-22:
+ * the card line, the reply and a trailing line all repeated it).
+ */
+export function isReportedAsCompletion(v: Pick<LinkedRunView, 'state' | 'runId' | 'finishedAt'> | null | undefined): boolean {
+  return Boolean(v && completionLabelOf(v.state) && v.runId && v.finishedAt);
+}
+
 /** One entry per card whose linked run has finished; oldest finish first. */
 export function completionEntries(cards: readonly ContinuityCard[]): CompletionEntry[] {
   const out: CompletionEntry[] = [];

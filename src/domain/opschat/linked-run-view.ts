@@ -25,6 +25,8 @@ export interface LinkedRunFacts {
     errorMessage: string | null;
     /** The first characters of the stored result (read bounded server-side) — for the chat completion reply only. */
     excerpt?: string | null;
+    /** Length of the full result the excerpt was cut from (after any server-side banner strip); defaults to resultChars. */
+    excerptTotalChars?: number;
   } | null;
   /** Approvals still pending that THIS run proposed. */
   pendingApprovals: number;
@@ -90,7 +92,7 @@ export function describeLinkedRun(f: LinkedRunFacts): LinkedRunView {
           : '';
       const draftNote = draft ? ' It is an UNREVIEWED DRAFT: review was required but did not happen, so it is not final.' : '';
       const state: LinkedRunState = f.pendingApprovals > 0 ? 'needs_approval' : draft ? 'draft' : 'ready';
-      const ex = boundedExcerpt(run.excerpt, run.resultChars);
+      const ex = boundedExcerpt(run.excerpt, run.excerptTotalChars ?? run.resultChars);
       return { ...base, state, text: `Finished${when}; ${result}.${draftNote}${approvals}`, ...(ex.excerpt ? { excerpt: ex.excerpt, excerptTruncated: ex.truncated } : {}) };
     }
     return { ...base, state: 'no_run', text: `Its run is in an unrecognized state (${run.status}).` };

@@ -4,6 +4,7 @@ import { withTenant } from '@/db/tenant';
 import { approvals, runJobs, runs } from '@/db/schema';
 import { type TenantContext } from '@/types/domain';
 import { describeLinkedRun, RESULT_EXCERPT_CHARS, type LinkedRunFacts, type LinkedRunView } from '@/domain/opschat/linked-run-view';
+import { UNREVIEWED_DRAFT_BANNER } from '@/orchestration/engine';
 
 /**
  * P5a loader: each confirmed dispatch / re-run card → the newest job and run that carry its id
@@ -15,6 +16,20 @@ import { describeLinkedRun, RESULT_EXCERPT_CHARS, type LinkedRunFacts, type Link
  * project is read in its OWN withTenant transaction — never a cross-tenant query, never a nested transaction.
  * A project the owner can no longer access simply yields no link.
  */
+
+/**
+ * The stored result of an unreviewed draft STARTS with the engine's draft banner (it must travel with the answer).
+ * In the chat completion reply the label already says UNREVIEWED DRAFT, so the banner only ate the excerpt
+ * (Hub prod 2026-10-22: ~300 of the 1,200 characters). Strip it here, server-side, before bounding.
+ */
+const EXCERPT_READ_CHARS = RESULT_EXCERPT_CHARS + UNREVIEWED_DRAFT_BANNER.length + 3;
+
+export function stripDraftBanner(text: string | null, totalChars: number): { text: string | null; totalChars: number } {
+  if (!text || !text.startsWith(UNREVIEWED_DRAFT_BANNER)) return { text, totalChars };
+  const rest = text.slice(UNREVIEWED_DRAFT_BANNER.length);
+  const trimmed = rest.replace(/^\s+/, '');
+  return { text: trimmed, totalChars: Math.max(0, totalChars - UNREVIEWED_DRAFT_BANNER.length - (rest.length - trimmed.length)) };
+}
 
 /** Card kinds whose confirmation starts a run. */
 export const RUN_STARTING_KINDS: ReadonlySet<string> = new Set(['dispatch_task', 'rerun_task']);
@@ -49,7 +64,7 @@ export async function loadLinkedRunFacts(tx: DbTx, proposalIds: readonly string[
       errorMessage: runs.errorMessage,
       resultChars: sql<number>`coalesce(length(${runs.consolidatedResult}), 0)::int`,
       // Bounded in SQL — the whole result never leaves the database for this view.
-      excerpt: sql<string | null>`left(${runs.consolidatedResult}, ${RESULT_EXCERPT_CHARS + 1})`,
+      excerpt: sql<string | null>`left(${runs.consolidatedResult}, ${EXCERPT_READ_CHARS})`,
     })
     .from(runs)
     .where(inArray(runs.opsChatProposalId, ids))
@@ -88,7 +103,10 @@ export async function loadLinkedRunFacts(tx: DbTx, proposalIds: readonly string[
             finishedAt: run.finishedAt,
             resultChars: Number(run.resultChars),
             errorMessage: run.errorMessage,
-            excerpt: run.excerpt,
+            ...(() => {
+              const s = stripDraftBanner(run.excerpt, Number(run.resultChars));
+              return { excerpt: s.text, excerptTotalChars: s.totalChars };
+            })(),
           }
         : null,
       pendingApprovals: run ? (pendingByRun.get(run.id) ?? 0) : 0,
