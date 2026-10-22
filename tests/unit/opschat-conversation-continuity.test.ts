@@ -8,6 +8,7 @@ import {
   type ContinuityCard,
 } from '@/domain/opschat/conversation-continuity';
 import { type LinkedRunState, type LinkedRunView } from '@/domain/opschat/linked-run-view';
+import { PREPARE_UPDATE_CARD } from '@/domain/opschat/stale-wording';
 import { applyLiveRunUpdate, buildTranscript, needsRunPolling, type PersistedMessage, type TranscriptMsg } from '@/app/ops/ops-chat-transcript';
 
 /**
@@ -97,7 +98,7 @@ describe('conversationContextSection — per-turn server record', () => {
       new Date('2026-10-20T11:00:00Z'),
     );
     expect(s).toContain('=== THIS CONVERSATION');
-    expect(s).toContain('ACTIVE JOB: dispatch "upd" — task t1 in workspace hvac (card upd): UNREVIEWED DRAFT. text draft STALE: its result PREDATES 2 owner decision(s) — offer ONE update card (propose_update_task).');
+    expect(s).toContain('ACTIVE JOB: dispatch "upd" — task t1 in workspace hvac (card upd): UNREVIEWED DRAFT. text draft STALE: its result PREDATES 2 owner decision(s) — ' + PREPARE_UPDATE_CARD);
     expect(s).toContain('Other jobs started here:\n- dispatch "old"');
     expect(s).toContain("Finished since the owner's previous message (tell the owner — they have not been told in this chat):\n- dispatch \"upd\" (task t1): UNREVIEWED DRAFT — text draft");
     expect(s).not.toMatch(/- dispatch "old" \(task t1\): FINAL/); // finished before the previous owner message

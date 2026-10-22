@@ -200,6 +200,15 @@ describe('POST /api/ops-chat — P5c-3 "THIS CONVERSATION" section in the system
     await (await call({ message: 'hello', conversationId: CONV, turnId: TURN })).text();
     expect((h.streamWithTools.mock.calls[0]![0] as { system: string }).system).not.toContain('THIS CONVERSATION');
   });
+
+  it('regression (prod 2026-10-22): the system prompt says PREPARE the update card in the same reply — never ask first, never a plain dispatch/re-run', async () => {
+    await (await call({ message: 'server cooling?', conversationId: CONV, turnId: TURN })).text();
+    const system = (h.streamWithTools.mock.calls[0]![0] as { system: string }).system;
+    expect(system).toContain('in the SAME reply call propose_update_task to PREPARE ONE update card');
+    expect(system).toContain('never ask "want me to dispatch / prepare a fresh run?" first');
+    expect(system).toContain('Never redo stale work with propose_dispatch_task or propose_rerun_task.');
+    expect(system).not.toContain('offer ONE update card');
+  });
 });
 
 describe('POST /api/ops-chat (v2) — spend boundary preserved', () => {
