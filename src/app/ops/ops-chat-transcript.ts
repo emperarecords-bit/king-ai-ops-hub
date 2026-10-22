@@ -118,6 +118,15 @@ export function cardIdFromHash(hash: string): string | null {
   return m ? m[1]!.toLowerCase() : null;
 }
 
+/**
+ * Build skew: the page was rendered by build `rendered` but the server now runs `current` → this tab runs OLD client
+ * code (Hub prod 2026-10-22: a tab open across the v92 deploy never got live refresh). 'dev' / empty never counts.
+ */
+export function isBuildSkewed(rendered: string | null | undefined, current: string | null | undefined): boolean {
+  if (!rendered || !current || rendered === 'dev' || current === 'dev') return false;
+  return rendered !== current;
+}
+
 /** P5c-3: a completion entry as a transcript row (stable id → never shown twice). */
 export function completionRow(e: CompletionEntry): TranscriptMsg {
   return { id: `completion-${e.proposalId}`, role: 'server', content: e.text, completion: e };

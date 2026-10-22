@@ -42,6 +42,9 @@ export interface CompletionEntry {
   text: string;
   /** `/p/<key>/tasks/<id>` when the workspace key is known. */
   taskPath: string | null;
+  /** The start of what the run produced (bounded; untrusted; plain text) — shown in the chat reply only. */
+  excerpt?: string | null;
+  excerptTruncated?: boolean;
 }
 
 const FINISHED: Partial<Record<LinkedRunState, CompletionLabel>> = {
@@ -71,6 +74,7 @@ export function completionEntries(cards: readonly ContinuityCard[]): CompletionE
       finishedAt: v.finishedAt,
       text: v.text,
       taskPath: c.projectKey ? `/p/${encodeURIComponent(c.projectKey)}/tasks/${encodeURIComponent(v.taskId)}` : null,
+      ...(v.excerpt && label !== 'FAILED' ? { excerpt: v.excerpt, excerptTruncated: Boolean(v.excerptTruncated) } : {}),
     });
   }
   return out.sort((a, b) => Date.parse(a.finishedAt) - Date.parse(b.finishedAt) || a.proposalId.localeCompare(b.proposalId));
@@ -153,4 +157,23 @@ export function conversationContextSection(cards: readonly ContinuityCard[], pre
       'Only when this record says AMBIGUOUS, or the owner names something else, ask which job they mean.',
   );
   return lines.join('\n');
+}
+
+/**
+ * The opening line of the in-chat completion REPLY (Hub prod 2026-10-22: the owner expected Ops Chat to answer them when
+ * the work finished, not a small server note). Honest about the label — a draft is never presented as final, a pending
+ * approval means the work is not done, a failure produced nothing.
+ */
+export function completionReplyLead(e: Pick<CompletionEntry, 'label' | 'resultLabel' | 'excerpt'>): string {
+  const what = e.excerpt ? " Here's the start of what came back:" : '';
+  switch (e.resultLabel) {
+    case 'FINAL':
+      return `Your request ${e.label} has finished.${what}`;
+    case 'UNREVIEWED DRAFT':
+      return `Your request ${e.label} has finished — it is an UNREVIEWED DRAFT (review was required but did not happen), so it is not final.${what}`;
+    case 'APPROVAL NEEDED':
+      return `Your request ${e.label} has finished, but it proposed an action that needs your approval before the work is done.${what}`;
+    case 'FAILED':
+      return `Your request ${e.label} failed — nothing was produced.`;
+  }
 }

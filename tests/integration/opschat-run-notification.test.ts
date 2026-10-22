@@ -26,6 +26,8 @@ import { claimJobForTask, enqueueRun, runClaimedJob } from '@/domain/jobs/jobs';
 import { addProposal, appendAssistantMessage, appendOwnerMessage, createConversation } from '@/domain/opschat/conversations';
 import { routeDueNotifications } from '@/domain/notifications/router';
 import { getOrDefaultPreferences, updatePreferences } from '@/domain/notifications/preferences';
+import { loadLinkedRunFacts } from '@/domain/opschat/linked-runs';
+import { describeLinkedRun, RESULT_EXCERPT_CHARS } from '@/domain/opschat/linked-run-view';
 
 /**
  * P5b-1 — a run started from an Ops Chat card emails its outcome (status sentence + link, never the result) through
@@ -146,6 +148,23 @@ describe.skipIf(!available)('P5b-1 — Ops Chat run completion email', () => {
     expect(ev.body).toMatch(/^"Duct CFM calc" — Finished .* UTC; its result is ready to read\. It is an UNREVIEWED DRAFT/);
     expect(ev.body).toContain(`Open it in Ops Chat: https://hub.test.local/ops?c=${c.conversationId}#card-${c.proposalId}`);
     expect(ev.body).not.toContain('SECRET-RESULT-TEXT');
+    // The in-chat completion reply DOES show the start of the result (bounded excerpt) — the email never does.
+    const facts = await withTenant(owner, (tx) => loadLinkedRunFacts(tx, [c.proposalId]));
+    const view = describeLinkedRun(facts.get(c.proposalId)!);
+    expect(view.excerpt).toContain('SECRET-RESULT-TEXT');
+    expect(ev.body).not.toContain(view.excerpt!);
+  });
+
+  it('a long result is cut down IN SQL for the chat excerpt (≤ RESULT_EXCERPT_CHARS, flagged as continuing)', async () => {
+    const c = await card(owner, 'dispatch_task');
+    const long = Array.from({ length: 900 }, (_, i) => `line${i}`).join(' '); // ~6,000 chars
+    await runTask(owner, c.proposalId, (p) => p.reply(long));
+    const facts = (await withTenant(owner, (tx) => loadLinkedRunFacts(tx, [c.proposalId]))).get(c.proposalId)!;
+    expect(facts.run!.excerpt!.length).toBeLessThanOrEqual(RESULT_EXCERPT_CHARS + 1); // SQL left(…, N+1)
+    expect(facts.run!.resultChars).toBeGreaterThan(RESULT_EXCERPT_CHARS);
+    const view = describeLinkedRun(facts);
+    expect(view.excerpt!.length).toBeLessThanOrEqual(RESULT_EXCERPT_CHARS);
+    expect(view.excerptTruncated).toBe(true);
   });
 
   it('the router emails it exactly once (fake channel), with the link in the text', async () => {

@@ -3,7 +3,7 @@ import { type DbTx } from '@/db/client';
 import { withTenant } from '@/db/tenant';
 import { approvals, runJobs, runs } from '@/db/schema';
 import { type TenantContext } from '@/types/domain';
-import { describeLinkedRun, type LinkedRunFacts, type LinkedRunView } from '@/domain/opschat/linked-run-view';
+import { describeLinkedRun, RESULT_EXCERPT_CHARS, type LinkedRunFacts, type LinkedRunView } from '@/domain/opschat/linked-run-view';
 
 /**
  * P5a loader: each confirmed dispatch / re-run card → the newest job and run that carry its id
@@ -48,6 +48,8 @@ export async function loadLinkedRunFacts(tx: DbTx, proposalIds: readonly string[
       finishedAt: runs.finishedAt,
       errorMessage: runs.errorMessage,
       resultChars: sql<number>`coalesce(length(${runs.consolidatedResult}), 0)::int`,
+      // Bounded in SQL — the whole result never leaves the database for this view.
+      excerpt: sql<string | null>`left(${runs.consolidatedResult}, ${RESULT_EXCERPT_CHARS + 1})`,
     })
     .from(runs)
     .where(inArray(runs.opsChatProposalId, ids))
@@ -86,6 +88,7 @@ export async function loadLinkedRunFacts(tx: DbTx, proposalIds: readonly string[
             finishedAt: run.finishedAt,
             resultChars: Number(run.resultChars),
             errorMessage: run.errorMessage,
+            excerpt: run.excerpt,
           }
         : null,
       pendingApprovals: run ? (pendingByRun.get(run.id) ?? 0) : 0,

@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { currentUser, tenantForUser } from '@/domain/auth/guard';
+import { currentBuildId } from '@/lib/build-id';
 import { signOut } from '@/app/login/actions';
 import { withUser } from '@/db/tenant';
 import { buildPulse, needsYouCount, openingMessage } from '@/domain/opschat/pulse';
@@ -162,6 +163,7 @@ export default async function OpsChatPage({
         pendingTurn={pendingTurn}
         conversations={stored.conversations.map((c) => ({ id: c.id, title: c.title }))}
         leadingCompletions={anchored.get(LEADING) ?? []}
+        buildId={currentBuildId()}
       />
 
       {stored.loaded?.hasEarlier ? (
