@@ -15,6 +15,7 @@ import { createTask } from '@/domain/tasks/tasks';
 import { enqueueRun, requestRerun, RerunRefusedError } from '@/domain/jobs/jobs';
 import { listAgents } from '@/domain/agents/agents';
 import { assertUpdateCardCurrent } from '@/domain/opschat/update-card';
+import { acceptOwnerCandidates, MAX_ACCEPT_PER_CARD, recordOwnerDecision } from '@/domain/opschat/owner-decisions';
 import {
   executeGitHubPrFromOpsChat,
   executeGitHubMergeFromOpsChat,
@@ -95,6 +96,7 @@ const ActionBody = z.discriminatedUnion('action', [
         taskIds: z.array(z.string().uuid()).max(50).optional(),
         siblingRuns: z.array(z.object({ taskId: z.string().uuid(), runId: z.string().uuid() })).max(50).optional(),
         approvedIds: z.array(z.string().uuid()).max(50).optional(),
+        constraintIds: z.array(z.string().uuid()).max(50).optional(),
       })
       .nullish(),
   }),
@@ -102,6 +104,21 @@ const ActionBody = z.discriminatedUnion('action', [
     action: z.literal('rerun_task'),
     projectKey: z.string().min(1),
     taskId: z.string().uuid(),
+  }),
+  z.object({
+    action: z.literal('record_decision'),
+    projectKey: z.string().min(1),
+    taskId: z.string().uuid(),
+    title: z.string().trim().min(1).max(200),
+    statement: z.string().trim().min(1).max(2000),
+  }),
+  z.object({
+    action: z.literal('accept_decisions'),
+    projectKey: z.string().min(1),
+    decisions: z
+      .array(z.object({ decisionId: z.string().uuid(), taskId: z.string().uuid() }))
+      .min(1)
+      .max(MAX_ACCEPT_PER_CARD),
   }),
   z.object({
     action: z.literal('execute_github_pr'),
@@ -182,6 +199,8 @@ const KIND_TO_ACTION: Record<string, z.infer<typeof ActionBody>['action']> = {
   decide_approval: 'decide_approval',
   dispatch_task: 'dispatch_task',
   rerun_task: 'rerun_task',
+  record_decision: 'record_decision',
+  accept_decisions: 'accept_decisions',
   github_pr: 'execute_github_pr',
   github_merge: 'execute_github_merge',
   github_rerun: 'execute_github_rerun',
@@ -255,6 +274,15 @@ async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext, p
     case 'answer_question': {
       await withTenant(ctx, (tx) => answerOwnerQuestion(tx, ctx, body.questionId, body.answer));
       return null;
+    }
+    case 'record_decision': {
+      // Accepted, task-scoped guidance in ONE transaction (createDecision + acceptDecision; admin-only in the domain).
+      const r = await withTenant(ctx, (tx) => recordOwnerDecision(tx, ctx, { taskId: body.taskId, title: body.title, statement: body.statement }));
+      return { outcome: 'recorded', decisionIds: [r.decisionId] };
+    }
+    case 'accept_decisions': {
+      const r = await withTenant(ctx, (tx) => acceptOwnerCandidates(tx, ctx, body.decisions));
+      return { outcome: 'accepted', decisionIds: r.decisionIds };
     }
     case 'decide_approval': {
       await withTenant(ctx, (tx) => decideApproval(tx, ctx, body.approvalId, body.decision, body.note));

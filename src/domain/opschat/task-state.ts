@@ -1,6 +1,6 @@
 import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { type DbTx } from '@/db/client';
-import { approvals, opsChatProposals, ownerQuestions, runJobs, runs, tasks } from '@/db/schema';
+import { approvals, decisions as decisionRows, opsChatProposals, ownerQuestions, runJobs, runs, tasks } from '@/db/schema';
 import { type TenantContext } from '@/types/domain';
 import { PREPARE_UPDATE_CARD } from '@/domain/opschat/stale-wording';
 
@@ -26,10 +26,11 @@ export interface CardRef {
  * P5c-2 — an owner decision the task's latest run could not have known about. Counted: an owner question about this
  * task ANSWERED, or an approval for it REJECTED, after that run STARTED (anything decided once the run was under way
  * was not in its context). Approving an action the run itself proposed does not change its analysis, so approvals
- * are not counted.
+ * are not counted. Also counted: a decision the owner RECORDED for this task (accepted, task-scoped guidance —
+ * see recordedJobDecisions), at the time it was accepted.
  */
 export interface OwnerDecision {
-  kind: 'question_answered' | 'approval_rejected';
+  kind: 'question_answered' | 'approval_rejected' | 'decision_recorded';
   id: string;
   at: Date;
   /** The question text, or the approval summary (short; the full text is read by propose_update_task). */
@@ -155,8 +156,15 @@ export function describeTaskState(s: TaskStateInput): TaskState {
       : null;
   if (stale) {
     const q = after.filter((d) => d.kind === 'question_answered').length;
-    const r = after.length - q;
-    const what = [q ? `${q} answered question${q === 1 ? '' : 's'}` : '', r ? `${r} rejected approval${r === 1 ? '' : 's'}` : ''].filter(Boolean).join(' and ');
+    const r = after.filter((d) => d.kind === 'approval_rejected').length;
+    const c = after.filter((d) => d.kind === 'decision_recorded').length;
+    const what = [
+      q ? `${q} answered question${q === 1 ? '' : 's'}` : '',
+      r ? `${r} rejected approval${r === 1 ? '' : 's'}` : '',
+      c ? `${c} recorded decision${c === 1 ? '' : 's'}` : '',
+    ]
+      .filter(Boolean)
+      .join(' and ');
     ownerFacing +=
       ` Its latest run (started ${t(run!.startedAt)}) PREDATES ${after.length} owner decision${after.length === 1 ? '' : 's'} made since (${what}) — its result does not reflect them. ` +
       `Do not report the old result as current: ${PREPARE_UPDATE_CARD}`;
@@ -184,7 +192,7 @@ export async function loadTaskStates(tx: DbTx, ctx: TenantContext, taskIds: read
   const ids = [...new Set(taskIds)];
   const scope = (col: typeof tasks.projectId | typeof runs.projectId | typeof runJobs.projectId | typeof approvals.projectId) =>
     eq(col, ctx.projectId);
-  const [taskRows, jobRows, runRows, apprRows, answeredRows, rejectedRows] = await Promise.all([
+  const [taskRows, jobRows, runRows, apprRows, answeredRows, rejectedRows, recordedRows] = await Promise.all([
     tx
       .select({ id: tasks.id, title: tasks.title, status: tasks.status, opsChatProposalId: tasks.opsChatProposalId })
       .from(tasks)
@@ -222,6 +230,7 @@ export async function loadTaskStates(tx: DbTx, ctx: TenantContext, taskIds: read
       .select({ id: approvals.id, taskId: approvals.taskId, summary: approvals.summary, at: approvals.decidedAt })
       .from(approvals)
       .where(and(inArray(approvals.taskId, ids), scope(approvals.projectId), eq(approvals.status, 'rejected'), isNotNull(approvals.decidedAt))),
+    recordedJobDecisions(tx, ctx, ids),
   ]);
   const firstBy = <T extends { taskId: string | null }>(rows: T[]) => {
     const m = new Map<string, T>();
@@ -276,7 +285,40 @@ export async function loadTaskStates(tx: DbTx, ctx: TenantContext, taskIds: read
       decisions: [
         ...answeredRows.filter((q) => q.taskId === tk.id && q.at).map((q) => ({ kind: 'question_answered' as const, id: q.id, at: q.at!, summary: q.question })),
         ...rejectedRows.filter((a) => a.taskId === tk.id && a.at).map((a) => ({ kind: 'approval_rejected' as const, id: a.id, at: a.at!, summary: a.summary })),
+        ...recordedRows.filter((d) => d.taskId === tk.id).map((d) => ({ kind: 'decision_recorded' as const, id: d.id, at: d.at, summary: d.title })),
       ],
     });
   });
+}
+
+/**
+ * Decisions the owner RECORDED for these tasks: accepted, task-scoped guidance (what propose_record_decision and
+ * propose_accept_decisions write), timed by acceptance. Task-scoped guidance is injected only into runs of that
+ * exact task, so an update task (a new task) would never see it — update cards carry these explicitly.
+ *
+ * Evidence (Hub prod, 2026-10-22): the owner stated the 20 kW load twice in chat and chose the shared duct, yet none
+ * of it was recorded anywhere a run reads; the workspace held 72 run-extracted decisions, all still `proposed`.
+ */
+export async function recordedJobDecisions(
+  tx: DbTx,
+  ctx: Pick<TenantContext, 'projectId'>,
+  taskIds: readonly string[],
+): Promise<{ id: string; taskId: string; title: string; summary: string; at: Date }[]> {
+  if (taskIds.length === 0) return [];
+  const rows = await tx
+    .select({ id: decisionRows.id, taskId: decisionRows.scopeTaskId, title: decisionRows.title, summary: decisionRows.summary, at: decisionRows.reviewedAt })
+    .from(decisionRows)
+    .where(
+      and(
+        eq(decisionRows.projectId, ctx.projectId),
+        eq(decisionRows.status, 'accepted'),
+        eq(decisionRows.applicability, 'guidance'),
+        eq(decisionRows.scope, 'task'),
+        inArray(decisionRows.scopeTaskId, [...taskIds]),
+        isNotNull(decisionRows.reviewedAt),
+      ),
+    );
+  return rows
+    .filter((r): r is typeof r & { taskId: string; at: Date } => !!r.taskId && !!r.at)
+    .sort((a, b) => a.at.getTime() - b.at.getTime() || a.id.localeCompare(b.id));
 }

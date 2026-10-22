@@ -242,3 +242,57 @@ describe('buildUpdateInstructions / updateTitle', () => {
     expect(updateTitle('T'.repeat(500)).endsWith(' — updated with your answers')).toBe(true);
   });
 });
+
+describe('owner-recorded decisions (chat facts that runs must see)', () => {
+  const RUN = new Date('2026-10-22T01:59:56Z');
+  const b = (over: Partial<UpdateBasis>, decisions: UpdateDecision[] = []): UpdateBasis => ({
+    task: { id: 't1', title: 'Server Cabinet Cooling', input: 'Draft the punch list.', primaryAgentId: 'ag1' },
+    run: { id: 'r1', status: 'completed', startedAt: RUN, finishedAt: new Date('2026-10-22T02:00:52Z') },
+    siblings: [{ taskId: 't1', runId: 'r1', startedAt: RUN }],
+    decisions,
+    ...over,
+  });
+  const recorded: UpdateDecision = {
+    kind: 'decision_recorded',
+    id: 'd1',
+    taskId: 't1',
+    at: new Date('2026-10-22T03:00:00Z'),
+    subject: 'Server cabinet heat load',
+    detail: 'The single server cabinet produces 20 kW; size everything for that load.',
+  };
+
+  it('a decision recorded after the run is a DECISION line with its statement verbatim', () => {
+    const r = buildUpdateInstructions(b({}, [recorded]));
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.instructions).toContain(
+      '- DECISION recorded by the owner (2026-10-22 03:00 UTC): Server cabinet heat load\n  The single server cabinet produces 20 kW; size everything for that load.',
+    );
+  });
+
+  it('decisions recorded before the run are a standing-constraints section; "settles it" sentence appears', () => {
+    const r = buildUpdateInstructions(
+      b({ constraints: [{ id: 'c1', taskId: 't1', at: new Date('2026-10-19T12:40:11Z'), title: 'Duct choice', statement: 'Use the shared 36x18 plenum.' }] }, [recorded]),
+    );
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.instructions).toContain('=== OWNER DECISIONS ALREADY RECORDED FOR THIS JOB (still apply) ===\n- Duct choice (recorded 2026-10-19 12:40 UTC): Use the shared 36x18 plenum.');
+    expect(r.instructions.indexOf('ALREADY RECORDED')).toBeLessThan(r.instructions.indexOf('OWNER DECISIONS SINCE THE PREVIOUS RUN'));
+    expect(r.instructions).toContain('the approved results and the decisions above settle it.');
+  });
+
+  it('describeTaskState counts recorded decisions in the stale sentence', () => {
+    const s = describeTaskState({
+      taskId: 't1',
+      title: 'Server Cabinet Cooling',
+      status: 'completed',
+      job: null,
+      run: { id: 'r1', status: 'completed', reviewOutcome: null, startedAt: RUN, finishedAt: new Date('2026-10-22T02:00:52Z'), resultChars: 10 },
+      pendingApprovals: [],
+      decisions: [
+        { kind: 'question_answered', id: 'q1', at: new Date('2026-10-22T02:30:00Z'), summary: 'Q?' },
+        { kind: 'decision_recorded', id: 'd1', at: new Date('2026-10-22T03:00:00Z'), summary: 'Server cabinet heat load' },
+      ],
+    });
+    expect(s.ownerFacing).toContain('PREDATES 2 owner decisions made since (1 answered question and 1 recorded decision)');
+    expect(s.stale!.decisions.map((d) => d.kind)).toEqual(['question_answered', 'decision_recorded']);
+  });
+});

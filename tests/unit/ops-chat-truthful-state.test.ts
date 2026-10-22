@@ -117,3 +117,19 @@ describe('resolveDispatchAgent / pickDispatchReviewer', () => {
     expect(pickDispatchReviewer(A.slice(0, 2))).toBeNull();
   });
 });
+
+describe('card-state lines — recorded decisions', () => {
+  const at = new Date('2026-10-22T03:00:00Z');
+  const card = (over: Partial<StoredCard>): StoredCard => ({ kind: 'record_decision', state: 'done', proposal: { title: 'Server cabinet heat load', taskTitle: 'Server Cabinet Cooling' }, result: null, error: null, updatedAt: at, ...over });
+
+  it('a confirmed record/accept card says the decision is recorded only when the result proves it', () => {
+    expect(cardStateLines([card({ result: { outcome: 'recorded', decisionIds: ['d1'] } })])).toContain(
+      'CONFIRMED by the owner — decision recorded (later runs of the task and its update card carry it)',
+    );
+    expect(cardStateLines([card({ result: null })])).toContain('CONFIRMED by the owner — no record of what was saved');
+    expect(cardStateLines([card({ kind: 'accept_decisions', proposal: { decisions: [{}, {}] }, result: { outcome: 'accepted', decisionIds: ['a', 'b'] } })])).toContain(
+      'accept 2 extracted decision(s)',
+    );
+    expect(cardStateLines([card({ state: 'pending' })])).toContain('record decision "Server cabinet heat load" on "Server Cabinet Cooling"');
+  });
+});
