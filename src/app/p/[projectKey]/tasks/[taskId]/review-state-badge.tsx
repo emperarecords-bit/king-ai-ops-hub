@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import type { ReviewMode, ReviewOutcome } from '@/types/domain';
 
 /**
@@ -37,7 +38,11 @@ const OUTCOME_STYLE: Record<ReviewOutcome, { label: string; className: string; b
   },
 };
 
-export function ReviewStateBadge({ run }: { run: ReviewStateRun }) {
+/**
+ * `detail` (optional) replaces the generic blurb with what actually happened to THIS run's review — the task page
+ * passes the plain-language review summary + a link to the Review tab, so the warning is stated once, specifically.
+ */
+export function ReviewStateBadge({ run, detail }: { run: ReviewStateRun; detail?: ReactNode }) {
   if (!run.effectiveMode && !run.reviewOutcome) {
     // Legacy run predating answer-routing — nothing recorded, so claim nothing.
     return null;
@@ -60,7 +65,7 @@ export function ReviewStateBadge({ run }: { run: ReviewStateRun }) {
           requested {run.requestedMode} · ran {run.effectiveMode}
         </span>
       ) : null}
-      {style ? <span className="text-xs text-[var(--muted)]">{style.blurb}</span> : null}
+      {detail ? <span className="text-xs text-[var(--muted)]">{detail}</span> : style ? <span className="text-xs text-[var(--muted)]">{style.blurb}</span> : null}
     </div>
   );
 }
