@@ -45,6 +45,30 @@ export const MAX_STEPS = 4;
 export const MAX_REVISIONS = 1;
 export const MAX_RETRIES_PER_CALL = 2;
 
+/** Audit reason when the reviewer's first reply was empty and the review was retried once (same step). */
+export const EMPTY_REVIEW_RETRIED = 'reviewer returned an empty response; retried once';
+/** The failed review step's message when the reviewer's reply was still empty after the retry. */
+export const EMPTY_REVIEW_MESSAGE = 'The reviewer returned an empty response twice — no review was produced.';
+/** Prefix when the reviewer's first reply was empty and the retry then failed. */
+export const EMPTY_REVIEW_RETRY_FAILED = 'The reviewer returned an empty response; the retry failed:';
+
+/** True when a model reply carries no text at all (whitespace only). */
+export function isEmptyReply(r: AgentResponse): boolean {
+  return r.text.trim() === '';
+}
+
+/** Two calls of ONE step, billed as one recorded response: the second call's text, the summed usage + latency. */
+export function combineResponses(first: AgentResponse, second: AgentResponse): AgentResponse {
+  return {
+    ...second,
+    usage: {
+      inputTokens: first.usage.inputTokens + second.usage.inputTokens,
+      outputTokens: first.usage.outputTokens + second.usage.outputTokens,
+    },
+    latencyMs: first.latencyMs + second.latencyMs,
+  };
+}
+
 /**
  * Hub P1d — reliability signals. These are NOT provider failures: they abort the whole attempt so the
  * RUNNER can resolve them durably, and must never be recorded as a failed step or degrade the run. The
@@ -540,16 +564,29 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
       reviewResponse = null;
       verdict = null;
     } else {
+      // An EMPTY review reply (Hub prod 2026-10-22, run 2db706f8: the reviewer returned 0 characters after 46s, which
+      // parsed as a malformed "reject" with no findings) is retried ONCE inside this same step. Both calls are
+      // billed: the step's recorded usage is the sum of the two (same agent + model), and if the retry itself
+      // fails cleanly, the failed step still carries the first call's response so it is billed.
+      let firstEmpty: AgentResponse | null = null;
       try {
         if (input.resume) await input.resume.guardDispatch(reviewStepNo, 'review');
-        reviewResponse = await callWithRetry(
-          input.reviewer,
-          reviewTurns,
-          reviewSystem,
-          input.perCallTimeoutMs,
-          input.runDeadline,
-          sink.onDelta && ((text) => sink.onDelta!('review', text)),
-        );
+        const reviewer = input.reviewer;
+        const callReviewer = () =>
+          callWithRetry(
+            reviewer,
+            reviewTurns,
+            reviewSystem,
+            input.perCallTimeoutMs,
+            input.runDeadline,
+            sink.onDelta && ((text) => sink.onDelta!('review', text)),
+          );
+        reviewResponse = await callReviewer();
+        if (isEmptyReply(reviewResponse)) {
+          firstEmpty = reviewResponse;
+          await sink.onMalformedOutput(reviewStepNo, [EMPTY_REVIEW_RETRIED]);
+          reviewResponse = combineResponses(firstEmpty, await callReviewer());
+        }
       } catch (err) {
         // AMBIGUOUS reviewer outcome → escalate to reconciliation (the reviewer may have executed + charged);
         // do NOT degrade the run as if the review cleanly failed.
@@ -564,16 +601,32 @@ export async function executeRun(input: EngineInput, sink: RunSink): Promise<Eng
         await record({
           kind: 'review',
           agentId: input.reviewer.agentId,
-          response: null,
+          response: firstEmpty,
           verdict: null,
           verdictDetail: null,
           succeeded: false,
-          errorMessage: message,
+          errorMessage: firstEmpty ? `${EMPTY_REVIEW_RETRY_FAILED} ${message}` : message,
           effectivePromptHash: reviewStepHash,
         });
         reviewResponse = null;
         verdict = null;
       }
+    }
+    // Still empty after the retry (or an empty reply replayed from a checkpoint): there is NO review. Record it
+    // as a failed review step — never a "reject" verdict — so the run is an honest UNREVIEWED DRAFT.
+    if (reviewResponse && isEmptyReply(reviewResponse)) {
+      await record({
+        kind: 'review',
+        agentId: input.reviewer.agentId,
+        response: reviewResponse,
+        verdict: null,
+        verdictDetail: null,
+        succeeded: false,
+        errorMessage: EMPTY_REVIEW_MESSAGE,
+        effectivePromptHash: reviewStepHash,
+      });
+      reviewResponse = null;
+      verdict = null;
     }
     if (reviewResponse) {
       const parsedReview = parseReviewDetail(reviewResponse.text, primaryResponse.text, {
