@@ -135,7 +135,7 @@ describe.skipIf(!available)('server-cooling conversation — end to end', () => 
     // ── 2. "server cooling?" — the Hub resolves it to the ACTIVE JOB and says its result is STALE. ──
     const o2 = await withUser({ userId: owner.userId }, (tx) => conv.appendOwnerMessage(tx, owner.userId, { conversationId: c.id, content: 'server cooling?' }));
     const s2 = await sectionFor(c.id, o2.id);
-    expect(s2).toMatch(/ACTIVE JOB: dispatch "Server Cabinet Cooling — duct sizing".*STALE: its result PREDATES 4 owner decision\(s\) — offer ONE update card/);
+    expect(s2).toMatch(/ACTIVE JOB: dispatch "Server Cabinet Cooling — duct sizing".*STALE: its result PREDATES 4 owner decision\(s\) — PREPARE ONE update card now with propose_update_task/);
     expect(s2).toMatch(/RULE: a short follow-up that names no task/);
 
     // ── 3. The Hub offers ONE update-run card (persisted on its reply). ──

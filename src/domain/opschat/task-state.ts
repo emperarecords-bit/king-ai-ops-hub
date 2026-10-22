@@ -2,6 +2,7 @@ import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { type DbTx } from '@/db/client';
 import { approvals, opsChatProposals, ownerQuestions, runJobs, runs, tasks } from '@/db/schema';
 import { type TenantContext } from '@/types/domain';
+import { PREPARE_UPDATE_CARD } from '@/domain/opschat/stale-wording';
 
 /**
  * Authoritative task state for Ops Chat — task + latest job + latest run + this task's approvals, read NOW.
@@ -158,7 +159,7 @@ export function describeTaskState(s: TaskStateInput): TaskState {
     const what = [q ? `${q} answered question${q === 1 ? '' : 's'}` : '', r ? `${r} rejected approval${r === 1 ? '' : 's'}` : ''].filter(Boolean).join(' and ');
     ownerFacing +=
       ` Its latest run (started ${t(run!.startedAt)}) PREDATES ${after.length} owner decision${after.length === 1 ? '' : 's'} made since (${what}) — its result does not reflect them. ` +
-      'Offer ONE update card (propose_update_task) instead of reporting the old result as current.';
+      `Do not report the old result as current: ${PREPARE_UPDATE_CARD}`;
   }
   return {
     taskId: s.taskId,

@@ -1,4 +1,5 @@
 import { type LinkedRunState, type LinkedRunView } from '@/domain/opschat/linked-run-view';
+import { PREPARE_UPDATE_CARD } from '@/domain/opschat/stale-wording';
 
 /**
  * P5c-3 — conversational continuity, from stored facts only (pure: no DB, no React — the browser imports the types).
@@ -118,7 +119,7 @@ function jobLine(c: ContinuityCard): string {
   const label = completionLabelOf(v.state);
   let s = `${c.label} — task ${v.taskId}${c.projectKey ? ` in workspace ${c.projectKey}` : ''} (card ${short(c.proposalId)}): ${label ? `${label}. ` : ''}${v.text}`;
   if (c.supersededBy) s += ` SUPERSEDED by update task "${c.supersededBy.title}" (${c.supersededBy.taskId}) — report on that one.`;
-  else if (c.stale) s += ` STALE: its result PREDATES ${c.stale.decisions} owner decision(s) — offer ONE update card (propose_update_task).`;
+  else if (c.stale) s += ` STALE: its result PREDATES ${c.stale.decisions} owner decision(s) — ${PREPARE_UPDATE_CARD}`;
   return s;
 }
 

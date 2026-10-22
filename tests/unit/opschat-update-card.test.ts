@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { decisionsAfterRun, describeTaskState, type OwnerDecision, type TaskStateInput } from '@/domain/opschat/task-state';
+import { PREPARE_UPDATE_CARD } from '@/domain/opschat/stale-wording';
 import { buildUpdateInstructions, MAX_DISPATCH_INSTRUCTIONS, MAX_UPDATE_DECISIONS, normalizeJobTitle, UPDATE_CARD_TOO_BIG, updateTitle, type UpdateBasis, type UpdateDecision } from '@/domain/opschat/update-card';
 
 /**
@@ -46,7 +47,7 @@ describe('describeTaskState — stale / superseded', () => {
     expect(s.stale).toMatchObject({ runId: 'r1', runStartedAt: RUN_START.toISOString() });
     expect(s.stale!.decisions.map((d) => d.id)).toEqual(['q1', 'q2', 'q3', 'q4', 'a1']);
     expect(s.ownerFacing).toContain('Its latest run (started 2026-10-19 14:50 UTC) PREDATES 5 owner decisions made since (4 answered questions and 1 rejected approval) — its result does not reflect them.');
-    expect(s.ownerFacing).toContain('Offer ONE update card (propose_update_task)');
+    expect(s.ownerFacing).toContain(`Do not report the old result as current: ${PREPARE_UPDATE_CARD}`);
     expect(s.ownerFacing).toMatch(/UNREVIEWED DRAFT/); // the existing truth stays
     expect(s.supersededBy).toBeNull();
   });

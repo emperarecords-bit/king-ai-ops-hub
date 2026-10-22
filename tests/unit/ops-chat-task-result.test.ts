@@ -159,7 +159,7 @@ describe('get_task_result tool', () => {
     h.loadTaskStates.mockResolvedValue([{ stale }]);
     const out = await call({ project: 'AccurateBids', task: 'Duct' });
     expect(out).toMatchObject({ label: 'FINAL', stale });
-    expect(out.staleNote).toMatch(/PREDATES 1 owner decision.*propose_update_task.*never present it as current/);
+    expect(out.staleNote).toMatch(/PREDATES 1 owner decision.*never present it as current, and PREPARE ONE update card now with propose_update_task/);
     expect(out.result).toContain('CFM');
     // A stale flag about a DIFFERENT (newer) run never attaches to an older run being read.
     h.loadTaskStates.mockResolvedValue([{ stale: { ...stale, runId: 'other-run' } }]);

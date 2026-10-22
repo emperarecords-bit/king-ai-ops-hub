@@ -25,6 +25,7 @@ import { renderApprovalContent, type ApprovalContentView } from '@/domain/opscha
 import { loadTaskStates } from '@/domain/opschat/task-state';
 import { labelGuidance, loadTaskResultRun, resultLabel, sliceResult } from '@/domain/opschat/task-result';
 import { buildUpdateInstructions, loadUpdateBasis, normalizeJobTitle, updateTitle } from '@/domain/opschat/update-card';
+import { PREPARE_UPDATE_CARD } from '@/domain/opschat/stale-wording';
 import { pendingUpdateCardFor } from '@/domain/opschat/conversations';
 import { pickDispatchReviewer, resolveDispatchAgent, UNREVIEWED_DRAFT_NOTE } from '@/domain/opschat/dispatch-agent';
 import { listRepoLinks } from '@/domain/github/links';
@@ -567,7 +568,7 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
   {
     name: 'propose_update_task',
     description:
-      "Prepare ONE consolidated \"update this job\" card FOR THE OWNER TO CONFIRM when a task's state says its latest run PREDATES the owner's decisions (questions answered or approvals rejected after it started). The Hub builds the card itself: a new task with the original instructions PLUS every one of those decisions written in, run by the same agent. Use this instead of propose_rerun_task for stale work (a plain re-run would not carry the answers), and instead of asking the owner again and again for progress. It refuses when nothing changed since the latest run, and when an update card for the task is already waiting in this conversation. SPENDS money only after the owner confirms.",
+      "Prepare ONE consolidated \"update this job\" card FOR THE OWNER TO CONFIRM when a task's state says its latest run PREDATES the owner's decisions (questions answered or approvals rejected after it started). The Hub builds the card itself: a new task with the original instructions PLUS every one of those decisions written in, run by the same agent. Call it DIRECTLY as soon as work is stale — do not first ask the owner whether to prepare it (preparing starts nothing; the card is their confirmation). It is the ONLY way to redo stale work: never propose_rerun_task (a re-run would not carry the answers) and never propose_dispatch_task with hand-written instructions (that skips the freshness check and the duplicate-task coverage). It refuses when nothing changed since the latest run, and when an update card for the task is already waiting in this conversation. SPENDS money only after the owner confirms.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -1111,7 +1112,7 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
             ...(staleForThisRun
               ? {
                   stale: staleForThisRun,
-                  staleNote: `This result PREDATES ${staleForThisRun.decisions.length} owner decision(s) made after the run started — say so, and offer ONE update card (propose_update_task); never present it as current.`,
+                  staleNote: `This result PREDATES ${staleForThisRun.decisions.length} owner decision(s) made after the run started — say so, never present it as current, and ${PREPARE_UPDATE_CARD}`,
                 }
               : {}),
             ...(slice ? { totalChars: slice.total, offset: slice.offset, nextOffset: slice.nextOffset } : {}),
