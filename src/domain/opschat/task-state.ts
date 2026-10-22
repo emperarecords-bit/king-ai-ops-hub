@@ -1,6 +1,6 @@
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { type DbTx } from '@/db/client';
-import { approvals, opsChatProposals, runJobs, runs, tasks } from '@/db/schema';
+import { approvals, opsChatProposals, ownerQuestions, runJobs, runs, tasks } from '@/db/schema';
 import { type TenantContext } from '@/types/domain';
 
 /**
@@ -21,6 +21,26 @@ export interface CardRef {
   createdAt: Date | null;
 }
 
+/**
+ * P5c-2 — an owner decision the task's latest run could not have known about. Counted: an owner question about this
+ * task ANSWERED, or an approval for it REJECTED, after that run STARTED (anything decided once the run was under way
+ * was not in its context). Approving an action the run itself proposed does not change its analysis, so approvals
+ * are not counted.
+ */
+export interface OwnerDecision {
+  kind: 'question_answered' | 'approval_rejected';
+  id: string;
+  at: Date;
+  /** The question text, or the approval summary (short; the full text is read by propose_update_task). */
+  summary: string;
+}
+
+/** Decisions made after `runStartedAt`, oldest first. No run → nothing to be stale against. */
+export function decisionsAfterRun(runStartedAt: Date | null | undefined, decisions: readonly OwnerDecision[]): OwnerDecision[] {
+  if (!runStartedAt) return [];
+  return decisions.filter((d) => d.at.getTime() > runStartedAt.getTime()).sort((a, b) => a.at.getTime() - b.at.getTime());
+}
+
 export interface TaskStateInput {
   taskId: string;
   title: string;
@@ -32,6 +52,10 @@ export interface TaskStateInput {
   job: { status: string; createdAt: Date; updatedAt: Date } | null;
   run: { id: string; status: string; reviewOutcome: string | null; startedAt: Date | null; finishedAt: Date | null; resultChars: number } | null;
   pendingApprovals: { id: string; summary: string; actionType: string; createdAt: Date }[];
+  /** Owner decisions for this task (any time); describeTaskState keeps those after the latest run started. */
+  decisions?: readonly OwnerDecision[];
+  /** P5c-2: the newest task created from a confirmed update card for THIS task (its card's updateOf.taskId). */
+  supersededBy?: { taskId: string; title: string; createdAt: Date } | null;
 }
 
 export interface TaskState {
@@ -43,6 +67,10 @@ export interface TaskState {
   pendingApprovals: { id: string; summary: string; actionType: string }[];
   createdByCard: { proposalId: string; kind: string | null; createdAt: string | null } | null;
   latestRunCard: { proposalId: string; kind: string | null; createdAt: string | null } | null;
+  /** P5c-2: the latest run predates these owner decisions — its result does not reflect them. Null when current. */
+  stale: { runId: string; runStartedAt: string | null; decisions: { kind: OwnerDecision['kind']; id: string; at: string; summary: string }[] } | null;
+  /** P5c-2: an update task already carries the owner's decisions — report THAT task, not this one. */
+  supersededBy: { taskId: string; title: string; createdAt: string } | null;
   /** One sentence, built only from the stored facts above. Say THIS — not a guess from chat history. */
   ownerFacing: string;
 }
@@ -104,6 +132,34 @@ export function describeTaskState(s: TaskStateInput): TaskState {
     default:
       ownerFacing = `Status: ${s.status}.`;
   }
+  const after = run ? decisionsAfterRun(run.startedAt, s.decisions ?? []) : [];
+  // An update task created AFTER this task's latest run started and after the newest of those decisions already carries
+  // all of them: this task is superseded, not stale (otherwise Ops Chat would keep offering update cards for work
+  // already updated). A re-run of this task after the update task was created makes this task current again.
+  const sup = s.supersededBy ?? null;
+  const covered =
+    !!sup &&
+    (!run?.startedAt || sup.createdAt.getTime() > run.startedAt.getTime()) &&
+    after.every((d) => d.at.getTime() <= sup.createdAt.getTime());
+  if (sup && covered) {
+    ownerFacing += ` It has been SUPERSEDED by update task "${sup.title}" (${sup.taskId}, created ${t(sup.createdAt)}) which carries the owner's later decisions — report on that task instead.`;
+  }
+  const stale =
+    run && after.length > 0 && !covered
+      ? {
+          runId: run.id,
+          runStartedAt: run.startedAt?.toISOString() ?? null,
+          decisions: after.map((d) => ({ kind: d.kind, id: d.id, at: d.at.toISOString(), summary: d.summary.replace(/\s+/g, ' ').slice(0, 160) })),
+        }
+      : null;
+  if (stale) {
+    const q = after.filter((d) => d.kind === 'question_answered').length;
+    const r = after.length - q;
+    const what = [q ? `${q} answered question${q === 1 ? '' : 's'}` : '', r ? `${r} rejected approval${r === 1 ? '' : 's'}` : ''].filter(Boolean).join(' and ');
+    ownerFacing +=
+      ` Its latest run (started ${t(run!.startedAt)}) PREDATES ${after.length} owner decision${after.length === 1 ? '' : 's'} made since (${what}) — its result does not reflect them. ` +
+      'Offer ONE update card (propose_update_task) instead of reporting the old result as current.';
+  }
   return {
     taskId: s.taskId,
     title: s.title,
@@ -115,6 +171,8 @@ export function describeTaskState(s: TaskStateInput): TaskState {
     pendingApprovals: s.pendingApprovals.map((a) => ({ id: a.id, summary: a.summary, actionType: a.actionType })),
     createdByCard: cardOut(s.createdByCard),
     latestRunCard: cardOut(s.latestRunCard),
+    stale,
+    supersededBy: sup && covered ? { taskId: sup.taskId, title: sup.title, createdAt: sup.createdAt.toISOString() } : null,
     ownerFacing: ownerFacing + provenanceSentence(s),
   };
 }
@@ -125,7 +183,7 @@ export async function loadTaskStates(tx: DbTx, ctx: TenantContext, taskIds: read
   const ids = [...new Set(taskIds)];
   const scope = (col: typeof tasks.projectId | typeof runs.projectId | typeof runJobs.projectId | typeof approvals.projectId) =>
     eq(col, ctx.projectId);
-  const [taskRows, jobRows, runRows, apprRows] = await Promise.all([
+  const [taskRows, jobRows, runRows, apprRows, answeredRows, rejectedRows] = await Promise.all([
     tx
       .select({ id: tasks.id, title: tasks.title, status: tasks.status, opsChatProposalId: tasks.opsChatProposalId })
       .from(tasks)
@@ -154,6 +212,15 @@ export async function loadTaskStates(tx: DbTx, ctx: TenantContext, taskIds: read
       .from(approvals)
       .where(and(inArray(approvals.taskId, ids), scope(approvals.projectId), eq(approvals.status, 'pending')))
       .orderBy(desc(approvals.createdAt)),
+    // P5c-2: owner decisions about these tasks (staleness is decided per task against its latest run's start).
+    tx
+      .select({ id: ownerQuestions.id, taskId: ownerQuestions.taskId, question: ownerQuestions.question, at: ownerQuestions.answeredAt })
+      .from(ownerQuestions)
+      .where(and(inArray(ownerQuestions.taskId, ids), eq(ownerQuestions.projectId, ctx.projectId), eq(ownerQuestions.status, 'answered'), isNotNull(ownerQuestions.answeredAt))),
+    tx
+      .select({ id: approvals.id, taskId: approvals.taskId, summary: approvals.summary, at: approvals.decidedAt })
+      .from(approvals)
+      .where(and(inArray(approvals.taskId, ids), scope(approvals.projectId), eq(approvals.status, 'rejected'), isNotNull(approvals.decidedAt))),
   ]);
   const firstBy = <T extends { taskId: string | null }>(rows: T[]) => {
     const m = new Map<string, T>();
@@ -173,6 +240,16 @@ export async function loadTaskStates(tx: DbTx, ctx: TenantContext, taskIds: read
         .where(inArray(opsChatProposals.id, cardIds))
     : [];
   const cardById = new Map(cardRows.map((c) => [c.id, c]));
+  // P5c-2: tasks created from confirmed update cards for these tasks (the card's updateOf.taskId; P4 link on the
+  // new task). Cards are owner-private, so this resolves for the owner who confirmed them.
+  const superRows = await tx
+    .select({ forTask: sql<string>`${opsChatProposals.proposal} -> 'updateOf' ->> 'taskId'`, taskId: tasks.id, title: tasks.title, createdAt: tasks.createdAt })
+    .from(tasks)
+    .innerJoin(opsChatProposals, eq(opsChatProposals.id, tasks.opsChatProposalId))
+    .where(and(eq(tasks.projectId, ctx.projectId), inArray(sql<string>`${opsChatProposals.proposal} -> 'updateOf' ->> 'taskId'`, ids)))
+    .orderBy(desc(tasks.createdAt));
+  const supersededBy = new Map<string, { taskId: string; title: string; createdAt: Date }>();
+  for (const r of superRows) if (!supersededBy.has(r.forTask)) supersededBy.set(r.forTask, { taskId: r.taskId, title: r.title, createdAt: r.createdAt });
   const ref = (id: string | null): CardRef | null =>
     id ? { proposalId: id, kind: cardById.get(id)?.kind ?? null, createdAt: cardById.get(id)?.createdAt ?? null } : null;
   return taskRows.map((tk) => {
@@ -189,6 +266,11 @@ export async function loadTaskStates(tx: DbTx, ctx: TenantContext, taskIds: read
         ? { id: r.id, status: r.status, reviewOutcome: r.reviewOutcome ?? null, startedAt: r.startedAt, finishedAt: r.finishedAt, resultChars: (r.result ?? '').length }
         : null,
       pendingApprovals: apprRows.filter((a) => a.taskId === tk.id).map((a) => ({ id: a.id, summary: a.summary, actionType: a.actionType, createdAt: a.createdAt })),
+      supersededBy: supersededBy.get(tk.id) ?? null,
+      decisions: [
+        ...answeredRows.filter((q) => q.taskId === tk.id && q.at).map((q) => ({ kind: 'question_answered' as const, id: q.id, at: q.at!, summary: q.question })),
+        ...rejectedRows.filter((a) => a.taskId === tk.id && a.at).map((a) => ({ kind: 'approval_rejected' as const, id: a.id, at: a.at!, summary: a.summary })),
+      ],
     });
   });
 }

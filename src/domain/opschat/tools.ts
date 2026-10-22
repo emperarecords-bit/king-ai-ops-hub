@@ -24,6 +24,8 @@ import { listAgents } from '@/domain/agents/agents';
 import { renderApprovalContent, type ApprovalContentView } from '@/domain/opschat/approval-content';
 import { loadTaskStates } from '@/domain/opschat/task-state';
 import { labelGuidance, loadTaskResultRun, resultLabel, sliceResult } from '@/domain/opschat/task-result';
+import { buildUpdateInstructions, loadUpdateBasis, updateTitle } from '@/domain/opschat/update-card';
+import { pendingUpdateCardFor } from '@/domain/opschat/conversations';
 import { pickDispatchReviewer, resolveDispatchAgent, UNREVIEWED_DRAFT_NOTE } from '@/domain/opschat/dispatch-agent';
 import { listRepoLinks } from '@/domain/github/links';
 import { getGitHubClient } from '@/domain/github/client';
@@ -114,6 +116,8 @@ export type OpsChatProposal =
       /** The reviewer the card assigns, or null → the card says the result will be an UNREVIEWED DRAFT. */
       readonly reviewerAgentId?: string | null;
       readonly reviewerName?: string | null;
+      /** P5c-2: set on an "update this job" card — the task it updates and how many owner decisions it applies. */
+      readonly updateOf?: { readonly taskId: string; readonly taskTitle: string; readonly runId: string; readonly decisions: number; readonly decisionIds: readonly string[] };
     }
   | {
       readonly kind: 'rerun_task';
@@ -561,6 +565,19 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
     },
   },
   {
+    name: 'propose_update_task',
+    description:
+      "Prepare ONE consolidated \"update this job\" card FOR THE OWNER TO CONFIRM when a task's state says its latest run PREDATES the owner's decisions (questions answered or approvals rejected after it started). The Hub builds the card itself: a new task with the original instructions PLUS every one of those decisions written in, run by the same agent. Use this instead of propose_rerun_task for stale work (a plain re-run would not carry the answers), and instead of asking the owner again and again for progress. It refuses when nothing changed since the latest run, and when an update card for the task is already waiting in this conversation. SPENDS money only after the owner confirms.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        task: { type: 'string', description: 'Task title or id.' },
+      },
+      required: ['project', 'task'],
+    },
+  },
+  {
     name: 'propose_rerun_task',
     description:
       'Prepare to RE-RUN an existing task (e.g. retry a failed one) FOR THE OWNER TO CONFIRM. This SPENDS money and runs nothing until the owner confirms. Find the task with list_tasks or get_task_detail first.',
@@ -913,6 +930,8 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
 
 export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
   const proposals: OpsChatProposal[] = [];
+  /** P5c-2: tasks that got an update card this turn — a plain re-run of the same task is folded into it. */
+  const updatedTasks = new Set<string>();
   const addProposal = (p: OpsChatProposal) => {
     const k = proposalKey(p);
     if (!proposals.some((x) => proposalKey(x) === k)) proposals.push(p);
@@ -1064,6 +1083,9 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           }
           const t = m.task;
           const { run, lastCompletedRunId } = await loadTaskResultRun(tx, t.id, runRef || null);
+          // P5c-2: a result produced before the owner's later decisions is labelled as such (it still shows).
+          const stale = (await loadTaskStates(tx, ctx, [t.id]))[0]?.stale ?? null;
+          const staleForThisRun = stale && run && stale.runId === run.id ? stale : null;
           if (runRef && !run) return JSON.stringify({ workspace: p.name, task: { id: t.id, title: t.title }, error: 'That run is not on this task.' });
           const label = resultLabel(
             run ? { status: run.status, reviewOutcome: run.reviewOutcome, resultChars: run.result?.length ?? 0, pendingApprovals: run.pendingApprovals } : null,
@@ -1086,6 +1108,12 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
               : null,
             label,
             guidance: labelGuidance(label),
+            ...(staleForThisRun
+              ? {
+                  stale: staleForThisRun,
+                  staleNote: `This result PREDATES ${staleForThisRun.decisions.length} owner decision(s) made after the run started — say so, and offer ONE update card (propose_update_task); never present it as current.`,
+                }
+              : {}),
             ...(slice ? { totalChars: slice.total, offset: slice.offset, nextOffset: slice.nextOffset } : {}),
             result: slice && run ? wrapUntrusted(`Result of run ${run.id} for task "${t.title}" — ${label}`, slice.text) : null,
             ...(lastCompletedRunId && lastCompletedRunId !== run?.id
@@ -1386,6 +1414,90 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
             'This will START an AI run (uses tokens) only after the owner confirms. Do NOT claim it is running yet.',
         });
       }
+      case 'propose_update_task': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        if (p.projectRole !== 'admin') return JSON.stringify({ error: 'You must be an admin of that workspace to dispatch work.' });
+        const taskRef = argStr(input, 'task');
+        if (!taskRef) return JSON.stringify({ error: 'task is required.' });
+        const ctx = ctxFor(auth, p);
+        const prep = await withTenant(ctx, async (tx) => {
+          const m = matchTask(await listTasks(tx, ctx, 100), taskRef);
+          if ('none' in m) return { kind: 'none' as const };
+          if ('ambiguous' in m) return { kind: 'ambiguous' as const, candidates: m.ambiguous.slice(0, 10).map((x) => ({ id: x.id, title: x.title, status: x.status })) };
+          const st = (await loadTaskStates(tx, ctx, [m.task.id]))[0];
+          return { kind: 'ok' as const, task: m.task, basis: await loadUpdateBasis(tx, m.task.id), agents: await listAgents(tx, ctx), superseded: st?.supersededBy ?? null };
+        });
+        if (prep.kind === 'none') return JSON.stringify({ error: 'No matching task — call list_tasks.' });
+        if (prep.kind === 'ambiguous') {
+          return JSON.stringify({ ambiguous: true, note: 'Several tasks match — ask the owner which one, or call again with the task id. Do not guess.', candidates: prep.candidates });
+        }
+        const { task, basis, agents: ags, superseded } = prep;
+        if (superseded) {
+          return JSON.stringify({
+            prepared: false,
+            note: `"${task.title}" was already updated: task "${superseded.title}" (${superseded.taskId}) carries the owner's later decisions. Report on that task (get_task_result) — do not offer another update.`,
+          });
+        }
+        if (!basis) return JSON.stringify({ error: `"${task.title}" has no run yet — there is nothing to update. Use propose_rerun_task or propose_dispatch_task.` });
+        if (basis.decisions.length === 0) {
+          return JSON.stringify({
+            prepared: false,
+            note: `Nothing changed since the latest run of "${task.title}" (no owner question answered and no approval rejected after it started) — its result is current. If the owner just wants it run again, use propose_rerun_task.`,
+          });
+        }
+        if (auth.conversationId) {
+          const existing = await withUser({ userId: auth.userId }, (tx) => pendingUpdateCardFor(tx, auth.userId, auth.conversationId!, task.id));
+          if (existing) {
+            return JSON.stringify({
+              prepared: false,
+              alreadyOffered: existing,
+              note: 'An update card for this task is already waiting for the owner in this conversation — point them to it; do NOT offer another.',
+            });
+          }
+        }
+        // Every decision verbatim + the full original, or NO card: a card must never stand for a decision whose content
+        // is not in its instructions (it would later mark the old task SUPERSEDED by work that never got that decision).
+        const built = buildUpdateInstructions(basis);
+        if (!built.ok) {
+          return JSON.stringify({ prepared: false, decisions: basis.decisions.length, reason: built.reason, note: built.message });
+        }
+        // The same agent that ran the task (when it can still run), else the normal no-silent-default resolution.
+        const own = ags.find((a) => a.id === basis.task.primaryAgentId && a.enabled && a.role === 'primary');
+        const resolution = own ? ({ ok: true as const, agent: own }) : resolveDispatchAgent(ags, undefined);
+        if (!resolution.ok) return JSON.stringify({ error: resolution.error, agents: resolution.candidates });
+        const reviewer = pickDispatchReviewer(ags);
+        // ONE card per task per turn: a plain re-run of the same task proposed earlier this turn is folded in.
+        for (let i = proposals.length - 1; i >= 0; i--) {
+          const x = proposals[i]!;
+          if (x.kind === 'rerun_task' && x.taskId === task.id) proposals.splice(i, 1);
+        }
+        updatedTasks.add(task.id);
+        addProposal({
+          kind: 'dispatch_task',
+          projectKey: p.key,
+          workspaceName: p.name,
+          title: updateTitle(task.title),
+          instructions: built.instructions,
+          agentId: resolution.agent.id,
+          agentName: resolution.agent.name,
+          reviewerAgentId: reviewer?.id ?? null,
+          reviewerName: reviewer?.name ?? null,
+          // Frozen basis — re-checked at confirm (assertUpdateCardCurrent): same run, exactly these decisions.
+          updateOf: { taskId: task.id, taskTitle: task.title, runId: basis.run.id, decisions: basis.decisions.length, decisionIds: basis.decisions.map((d) => d.id) },
+        });
+        return JSON.stringify({
+          prepared: true,
+          decisions: basis.decisions.length,
+          agent: resolution.agent.name,
+          reviewer: reviewer?.name ?? null,
+          note:
+            `Prepared ONE update card for the owner to confirm: a new task "${updateTitle(task.title)}" in ${p.name}, run by ${resolution.agent.name}` +
+            (reviewer ? `, reviewed by ${reviewer.name}` : ` — ${UNREVIEWED_DRAFT_NOTE}`) +
+            `, with ALL ${basis.decisions.length} owner decision(s) made since the last run written in full into its instructions, together with the full original instructions. Tell the owner plainly that the old result predates their answers. ` +
+            'Do NOT also propose a re-run or another dispatch for this task. This STARTS an AI run (uses tokens) only after the owner confirms — do not claim it is running.',
+        });
+      }
       case 'propose_rerun_task': {
         const p = resolveProject(auth.projects, argStr(input, 'project'));
         if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
@@ -1400,6 +1512,9 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           return rows.find((x) => x.id === taskRef || x.title.toLowerCase().includes(taskRef.toLowerCase())) ?? null;
         });
         if (!t) return JSON.stringify({ error: 'No matching task — call list_tasks.' });
+        if (updatedTasks.has(t.id)) {
+          return JSON.stringify({ prepared: false, note: 'An update card for this task was already prepared this turn — it replaces a plain re-run. Do not offer both.' });
+        }
         addProposal({ kind: 'rerun_task', projectKey: p.key, workspaceName: p.name, taskId: t.id, taskTitle: t.title });
         return JSON.stringify({
           prepared: true,

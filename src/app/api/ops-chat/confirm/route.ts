@@ -14,6 +14,7 @@ import { executeApprovedIfEligible } from '@/domain/execution/execute-on-approva
 import { createTask } from '@/domain/tasks/tasks';
 import { enqueueRun, requestRerun, RerunRefusedError } from '@/domain/jobs/jobs';
 import { listAgents } from '@/domain/agents/agents';
+import { assertUpdateCardCurrent } from '@/domain/opschat/update-card';
 import {
   executeGitHubPrFromOpsChat,
   executeGitHubMergeFromOpsChat,
@@ -83,6 +84,16 @@ const ActionBody = z.discriminatedUnion('action', [
     agentId: z.string().uuid(),
     /** Absent on cards stored before reviewer assignment existed → no reviewer (unchanged behavior). */
     reviewerAgentId: z.string().uuid().nullish(),
+    /** P5c-2: an "update this job" card's frozen basis — re-checked for freshness at confirm. */
+    updateOf: z
+      .object({
+        taskId: z.string().uuid(),
+        taskTitle: z.string(),
+        runId: z.string().uuid(),
+        decisions: z.number().int().nonnegative(),
+        decisionIds: z.array(z.string().uuid()).max(500).optional(),
+      })
+      .nullish(),
   }),
   z.object({
     action: z.literal('rerun_task'),
@@ -273,6 +284,10 @@ async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext, p
         throw new AppError('conflict', 'The reviewer on this card is no longer available — ask Ops Chat for a new card. Nothing was started.');
       }
       const created = await withTenant(ctx, async (tx) => {
+        // P5c-2: an update card is only started if the job is still exactly as the card froze it (same run, same
+        // decisions, not already updated) — checked in THIS transaction, serialized per original task. Otherwise the
+        // card goes stale with a plain reason and nothing is created.
+        if (body.updateOf) await assertUpdateCardCurrent(tx, ctx, body.updateOf);
         const id = await createTask(tx, ctx, {
           title: body.title,
           input: body.instructions,

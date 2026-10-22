@@ -79,6 +79,8 @@ type Proposal =
       agentName: string;
       reviewerAgentId?: string | null;
       reviewerName?: string | null;
+      /** P5c-2: an "update this job" card — the task it updates and how many owner decisions it applies. */
+      updateOf?: { taskId: string; taskTitle: string; runId: string; decisions: number };
     }
   | { kind: 'rerun_task'; projectKey: string; workspaceName: string; taskId: string; taskTitle: string }
   | {
@@ -1139,6 +1141,12 @@ export function OpsChatClient({
                         ) : p.kind === 'dispatch_task' ? (
                           <>
                             <p className="mt-1 text-sm font-semibold">{p.title}</p>
+                            {p.updateOf ? (
+                              <p data-testid="update-card" className="mt-1 text-xs text-[var(--warning,#d9a441)]">
+                                Updates &ldquo;{p.updateOf.taskTitle}&rdquo;: its last result predates {p.updateOf.decisions} of your decision
+                                {p.updateOf.decisions === 1 ? '' : 's'}, which are written into this run&rsquo;s instructions below.
+                              </p>
+                            ) : null}
                             <p className="mt-1 whitespace-pre-wrap text-sm text-[var(--muted)]">{p.instructions}</p>
                             <p className="mt-1 text-xs text-[var(--muted)]">
                               Run by {p.agentName}
