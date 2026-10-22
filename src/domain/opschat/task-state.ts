@@ -242,14 +242,19 @@ export async function loadTaskStates(tx: DbTx, ctx: TenantContext, taskIds: read
   const cardById = new Map(cardRows.map((c) => [c.id, c]));
   // P5c-2: tasks created from confirmed update cards for these tasks (the card's updateOf.taskId; P4 link on the
   // new task). Cards are owner-private, so this resolves for the owner who confirmed them.
+  // P5c-2b: an update card covers EVERY task of its job (updateOf.taskIds; older cards: updateOf.taskId only).
   const superRows = await tx
-    .select({ forTask: sql<string>`${opsChatProposals.proposal} -> 'updateOf' ->> 'taskId'`, taskId: tasks.id, title: tasks.title, createdAt: tasks.createdAt })
+    .select({ updateOf: sql<{ taskId?: string; taskIds?: string[] } | null>`${opsChatProposals.proposal} -> 'updateOf'`, taskId: tasks.id, title: tasks.title, createdAt: tasks.createdAt })
     .from(tasks)
     .innerJoin(opsChatProposals, eq(opsChatProposals.id, tasks.opsChatProposalId))
-    .where(and(eq(tasks.projectId, ctx.projectId), inArray(sql<string>`${opsChatProposals.proposal} -> 'updateOf' ->> 'taskId'`, ids)))
+    .where(and(eq(tasks.projectId, ctx.projectId), sql`${opsChatProposals.proposal} -> 'updateOf' is not null`))
     .orderBy(desc(tasks.createdAt));
+  const wanted = new Set(ids);
   const supersededBy = new Map<string, { taskId: string; title: string; createdAt: Date }>();
-  for (const r of superRows) if (!supersededBy.has(r.forTask)) supersededBy.set(r.forTask, { taskId: r.taskId, title: r.title, createdAt: r.createdAt });
+  for (const r of superRows) {
+    const covers = [...(Array.isArray(r.updateOf?.taskIds) ? r.updateOf!.taskIds : []), ...(r.updateOf?.taskId ? [r.updateOf.taskId] : [])];
+    for (const id of covers) if (wanted.has(id) && !supersededBy.has(id)) supersededBy.set(id, { taskId: r.taskId, title: r.title, createdAt: r.createdAt });
+  }
   const ref = (id: string | null): CardRef | null =>
     id ? { proposalId: id, kind: cardById.get(id)?.kind ?? null, createdAt: cardById.get(id)?.createdAt ?? null } : null;
   return taskRows.map((tk) => {

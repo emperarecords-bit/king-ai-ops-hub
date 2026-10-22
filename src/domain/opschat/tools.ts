@@ -24,7 +24,7 @@ import { listAgents } from '@/domain/agents/agents';
 import { renderApprovalContent, type ApprovalContentView } from '@/domain/opschat/approval-content';
 import { loadTaskStates } from '@/domain/opschat/task-state';
 import { labelGuidance, loadTaskResultRun, resultLabel, sliceResult } from '@/domain/opschat/task-result';
-import { buildUpdateInstructions, loadUpdateBasis, updateTitle } from '@/domain/opschat/update-card';
+import { buildUpdateInstructions, loadUpdateBasis, normalizeJobTitle, updateTitle } from '@/domain/opschat/update-card';
 import { pendingUpdateCardFor } from '@/domain/opschat/conversations';
 import { pickDispatchReviewer, resolveDispatchAgent, UNREVIEWED_DRAFT_NOTE } from '@/domain/opschat/dispatch-agent';
 import { listRepoLinks } from '@/domain/github/links';
@@ -117,7 +117,7 @@ export type OpsChatProposal =
       readonly reviewerAgentId?: string | null;
       readonly reviewerName?: string | null;
       /** P5c-2: set on an "update this job" card — the task it updates and how many owner decisions it applies. */
-      readonly updateOf?: { readonly taskId: string; readonly taskTitle: string; readonly runId: string; readonly decisions: number; readonly decisionIds: readonly string[] };
+      readonly updateOf?: { readonly taskId: string; readonly taskTitle: string; readonly runId: string; readonly decisions: number; readonly decisionIds: readonly string[]; readonly taskIds: readonly string[]; readonly siblingRuns: readonly { readonly taskId: string; readonly runId: string }[] };
     }
   | {
       readonly kind: 'rerun_task';
@@ -1424,9 +1424,33 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
         const prep = await withTenant(ctx, async (tx) => {
           const m = matchTask(await listTasks(tx, ctx, 100), taskRef);
           if ('none' in m) return { kind: 'none' as const };
-          if ('ambiguous' in m) return { kind: 'ambiguous' as const, candidates: m.ambiguous.slice(0, 10).map((x) => ({ id: x.id, title: x.title, status: x.status })) };
-          const st = (await loadTaskStates(tx, ctx, [m.task.id]))[0];
-          return { kind: 'ok' as const, task: m.task, basis: await loadUpdateBasis(tx, m.task.id), agents: await listAgents(tx, ctx), superseded: st?.supersededBy ?? null };
+          let task = 'task' in m ? m.task : null;
+          let basis = task ? await loadUpdateBasis(tx, task.id) : null;
+          if ('ambiguous' in m) {
+            // P5c-2b: duplicates with the SAME title are one job (its update card covers all of them) — not a question
+            // for the owner. Different titles stay ambiguous. The base is the NEWEST duplicate that is not cancelled
+            // and has a run (a cancelled or never-run duplicate has nothing to update from).
+            const titles = new Set(m.ambiguous.map((x) => normalizeJobTitle(x.title)));
+            if (titles.size !== 1) {
+              return { kind: 'ambiguous' as const, candidates: m.ambiguous.slice(0, 10).map((x) => ({ id: x.id, title: x.title, status: x.status })) };
+            }
+            const newestFirst = m.ambiguous
+              .filter((x) => x.status !== 'cancelled')
+              .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            for (const x of newestFirst) {
+              const b = await loadUpdateBasis(tx, x.id);
+              if (b) {
+                task = x;
+                basis = b;
+                break;
+              }
+            }
+            task ??= newestFirst[0] ?? m.ambiguous[0]!;
+          }
+          if (!task) return { kind: 'none' as const };
+          const jobIds = basis ? basis.siblings.map((s) => s.taskId) : [task.id];
+          const sup = (await loadTaskStates(tx, ctx, jobIds)).find((st) => st.supersededBy)?.supersededBy ?? null;
+          return { kind: 'ok' as const, task, basis, agents: await listAgents(tx, ctx), superseded: sup };
         });
         if (prep.kind === 'none') return JSON.stringify({ error: 'No matching task — call list_tasks.' });
         if (prep.kind === 'ambiguous') {
@@ -1484,7 +1508,16 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           reviewerAgentId: reviewer?.id ?? null,
           reviewerName: reviewer?.name ?? null,
           // Frozen basis — re-checked at confirm (assertUpdateCardCurrent): same run, exactly these decisions.
-          updateOf: { taskId: task.id, taskTitle: task.title, runId: basis.run.id, decisions: basis.decisions.length, decisionIds: basis.decisions.map((d) => d.id) },
+          updateOf: {
+            taskId: task.id,
+            taskTitle: task.title,
+            runId: basis.run.id,
+            decisions: basis.decisions.length,
+            decisionIds: basis.decisions.map((d) => d.id),
+            // P5c-2b: the whole job — every duplicate task and its latest run (all re-checked at confirm; all superseded).
+            taskIds: basis.siblings.map((s) => s.taskId),
+            siblingRuns: basis.siblings.map((s) => ({ taskId: s.taskId, runId: s.runId })),
+          },
         });
         return JSON.stringify({
           prepared: true,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { decisionsAfterRun, describeTaskState, type OwnerDecision, type TaskStateInput } from '@/domain/opschat/task-state';
-import { buildUpdateInstructions, MAX_DISPATCH_INSTRUCTIONS, MAX_UPDATE_DECISIONS, UPDATE_CARD_TOO_BIG, updateTitle, type UpdateBasis, type UpdateDecision } from '@/domain/opschat/update-card';
+import { buildUpdateInstructions, MAX_DISPATCH_INSTRUCTIONS, MAX_UPDATE_DECISIONS, normalizeJobTitle, UPDATE_CARD_TOO_BIG, updateTitle, type UpdateBasis, type UpdateDecision } from '@/domain/opschat/update-card';
 
 /**
  * P5c-2 — stale work: the latest run predates owner decisions made after it started; the Hub offers ONE update card
@@ -82,10 +82,11 @@ describe('buildUpdateInstructions / updateTitle', () => {
   const basis = (over: Partial<UpdateBasis> = {}, decisions: UpdateDecision[] = []): UpdateBasis => ({
     task: { id: 't1', title: 'Server Cabinet Cooling — duct sizing', input: 'Size the supply and return ducts for the server cabinet.', primaryAgentId: 'ag1' },
     run: { id: 'r1', status: 'completed', startedAt: RUN_START, finishedAt: at('2026-10-19T14:50:11Z') },
+    siblings: [{ taskId: 't1', runId: 'r1', startedAt: RUN_START }],
     decisions,
     ...over,
   });
-  const q = (id: string, iso: string, question: string, answer: string): UpdateDecision => ({ kind: 'question_answered', id, at: at(iso), subject: question, detail: answer });
+  const q = (id: string, iso: string, question: string, answer: string): UpdateDecision => ({ kind: 'question_answered', id, taskId: 't1', at: at(iso), subject: question, detail: answer });
 
   const ok = (r: ReturnType<typeof buildUpdateInstructions>): string => {
     if (!r.ok) throw new Error(`expected a card, got refusal: ${r.reason}`);
@@ -99,7 +100,7 @@ describe('buildUpdateInstructions / updateTitle', () => {
         basis({}, [
           q('q1', '2026-10-19T17:01:00Z', 'What supply-air temperature should I assume?', '55°F'),
           q('q2', '2026-10-19T17:02:00Z', 'Is the cabinet sealed?', 'Yes, fully sealed with a rear door.'),
-          { kind: 'approval_rejected', id: 'a1', at: at('2026-10-19T17:19:00Z'), subject: 'Reply to ONEAL regarding billing', detail: 'Unrelated to this job.' },
+          { kind: 'approval_rejected', id: 'a1', taskId: 't1', at: at('2026-10-19T17:19:00Z'), subject: 'Reply to ONEAL regarding billing', detail: 'Unrelated to this job.' },
         ]),
       ),
     );
@@ -136,6 +137,29 @@ describe('buildUpdateInstructions / updateTitle', () => {
     // Too large in total (answers or original) → refused, never truncated.
     expect(buildUpdateInstructions(basis({}, many(5).map((d) => ({ ...d, detail: 'A'.repeat(8_000) }))))).toMatchObject({ ok: false, reason: 'too_large' });
     expect(buildUpdateInstructions(basis({ task: { ...basis().task, input: 'x'.repeat(31_900) } }, many(1)))).toMatchObject({ ok: false, reason: 'too_large' });
+  });
+
+  it('P5c-2b: normalizeJobTitle — case/whitespace-insensitive identity of one job', () => {
+    expect(normalizeJobTitle('  Server Cabinet Cooling —  Dual FUSION-TEC\tPunch List ')).toBe('server cabinet cooling — dual fusion-tec punch list');
+    expect(normalizeJobTitle('A b')).not.toBe(normalizeJobTitle('A bc'));
+  });
+
+  it('P5c-2b: a card for a job dispatched twice says so and carries the decisions made on EITHER task', () => {
+    const out = ok(
+      buildUpdateInstructions(
+        basis(
+          { siblings: [{ taskId: 'tA', runId: 'rA', startedAt: RUN_START }, { taskId: 't1', runId: 'r1', startedAt: RUN_START }] },
+          [
+            { ...q('qA', '2026-10-20T12:51:21Z', 'Lead-Lag or Primary-Standby?', 'Lead-Lag (alternating)'), taskId: 'tA' },
+            q('q1', '2026-10-21T05:34:02Z', 'Fire suppression interface?', 'None needed'),
+          ],
+        ),
+      ),
+    );
+    expect(out).toContain('This job was dispatched 2 times under this title (tasks tA, t1); the decisions above were made on any of them and ALL apply.');
+    expect(out).toContain("Owner's answer: Lead-Lag (alternating)");
+    expect(out).toContain("Owner's answer: None needed");
+    expect(ok(buildUpdateInstructions(basis({}, [q('q1', '2026-10-21T05:34:02Z', 'Q?', 'A')])))).not.toContain('dispatched');
   });
 
   it('updateTitle stays within the 200-char dispatch title limit', () => {
