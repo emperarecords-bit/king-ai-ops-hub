@@ -73,11 +73,11 @@ async function card(ctx: TenantContext, kind: 'dispatch_task' | 'rerun_task') {
 }
 
 /** Dispatch → run through the real worker. `cardId` null = a run NOT started from Ops Chat. */
-async function runTask(ctx: TenantContext, cardId: string | null, behave: (p: FakeProvider) => void): Promise<{ taskId: string; runId: string }> {
+async function runTask(ctx: TenantContext, cardId: string | null, behave: (p: FakeProvider) => void, input = 'Size the ducts.'): Promise<{ taskId: string; runId: string }> {
   const taskId = await withTenant(ctx, (tx) =>
     createTask(tx, ctx, {
       title: 'Duct CFM calc',
-      input: 'Size the ducts.',
+      input,
       providerSelection: 'openai',
       reviewEnabled: false,
       modelTier: 'standard',
@@ -153,6 +153,29 @@ describe.skipIf(!available)('P5b-1 — Ops Chat run completion email', () => {
     const view = describeLinkedRun(facts.get(c.proposalId)!);
     expect(view.excerpt).toContain('SECRET-RESULT-TEXT');
     expect(ev.body).not.toContain(view.excerpt!);
+  });
+
+  // Hub prod 2026-10-22: run 2db706f8 "finished" without the CFM calc or the vendor material list, and nothing said so.
+  it('"finished" is not "complete": numbered deliverables the result never mentions are named in the email and the chat view', async () => {
+    const c = await card(owner, 'dispatch_task');
+    const brief = 'Draft the punch list. Cover:\n1. Structural — the new wall.\n2. Ductwork sizing — CFM and 2-3 options.\n3. Vendor-ready material list — for the quote.';
+    const { runId } = await runTask(owner, c.proposalId, (p) => p.reply('# Punch list\n## Structural\nReinforced L-frame wall. SECRET-RESULT-TEXT'), brief);
+    const ev = (await eventFor('run_completed', runId))!;
+    expect(ev.title).toBe('Ops Chat request finished (may be incomplete, unreviewed draft): "Duct CFM calc"');
+    expect(ev.body).toContain('Not found in the result: "Ductwork sizing", "Vendor-ready material list" — it may be incomplete; check before relying on it.');
+    expect(ev.body).not.toContain('SECRET-RESULT-TEXT'); // headings come from the brief; result text never enters the email
+    // The chat view reaches the same answer with the result kept in the database (SQL position checks).
+    const facts = (await withTenant(owner, (tx) => loadLinkedRunFacts(tx, [c.proposalId]))).get(c.proposalId)!;
+    expect(facts.run!.notFound).toEqual(['Ductwork sizing', 'Vendor-ready material list']);
+    expect(describeLinkedRun(facts).text).toContain('Not found in the result: "Ductwork sizing", "Vendor-ready material list"');
+  });
+
+  it('a brief without a numbered list, or a result that covers it, is reported exactly as before', async () => {
+    const c = await card(owner, 'dispatch_task');
+    const brief = 'Cover:\n1. Structural — the wall.\n2. Ductwork sizing — options.';
+    const { runId } = await runTask(owner, c.proposalId, (p) => p.reply('Structural: L-frame. Ductwork sizing: 36x16 or 40x14.'), brief);
+    expect((await eventFor('run_completed', runId))!.title).toBe('Ops Chat request finished (unreviewed draft): "Duct CFM calc"');
+    expect((await withTenant(owner, (tx) => loadLinkedRunFacts(tx, [c.proposalId]))).get(c.proposalId)!.run!.notFound).toBeUndefined();
   });
 
   it('a long result is cut down IN SQL for the chat excerpt (≤ RESULT_EXCERPT_CHARS, flagged as continuing)', async () => {

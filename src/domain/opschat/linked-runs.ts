@@ -1,9 +1,10 @@
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { type DbTx } from '@/db/client';
 import { withTenant } from '@/db/tenant';
-import { approvals, runJobs, runs } from '@/db/schema';
+import { approvals, runJobs, runs, tasks } from '@/db/schema';
 import { type TenantContext } from '@/types/domain';
 import { describeLinkedRun, RESULT_EXCERPT_CHARS, type LinkedRunFacts, type LinkedRunView } from '@/domain/opschat/linked-run-view';
+import { allStems, briefDeliverables, notFoundHeadings } from '@/domain/opschat/deliverables';
 import { UNREVIEWED_DRAFT_BANNER } from '@/orchestration/engine';
 
 /**
@@ -86,6 +87,33 @@ export async function loadLinkedRunFacts(tx: DbTx, proposalIds: readonly string[
     for (const a of ap) if (a.runId) pendingByRun.set(a.runId, Number(a.n));
   }
 
+  // "Finished" is not "complete": for each finished run with a result, which of its brief's numbered deliverables the
+  // result never mentions. The brief is read here; the RESULT stays in the database (one position() test per stem).
+  const notFoundByRun = new Map<string, string[]>();
+  const finished = [...runByCard.values()].filter((r) => r.status === 'completed' && Number(r.resultChars) > 0);
+  if (finished.length > 0) {
+    const briefs = await tx
+      .select({ id: tasks.id, input: tasks.input })
+      .from(tasks)
+      .where(inArray(tasks.id, [...new Set(finished.map((r) => r.taskId))]));
+    const briefOf = new Map(briefs.map((b) => [b.id, b.input]));
+    for (const r of finished) {
+      const ds = briefDeliverables(briefOf.get(r.taskId) ?? '');
+      if (ds.length === 0) continue;
+      const stems = allStems(ds);
+      const row = (
+        await tx
+          .select({ found: sql<boolean[]>`array[${sql.join(stems.map((s) => sql`position(${s} in lower(${runs.consolidatedResult})) > 0`), sql`, `)}]` })
+          .from(runs)
+          .where(eq(runs.id, r.id))
+          .limit(1)
+      )[0];
+      const found = new Set(stems.filter((_, i) => row?.found?.[i] === true));
+      const missing = notFoundHeadings(ds, found);
+      if (missing.length > 0) notFoundByRun.set(r.id, missing);
+    }
+  }
+
   for (const id of ids) {
     const job = jobByCard.get(id) ?? null;
     const run = runByCard.get(id) ?? null;
@@ -107,6 +135,7 @@ export async function loadLinkedRunFacts(tx: DbTx, proposalIds: readonly string[
               const s = stripDraftBanner(run.excerpt, Number(run.resultChars));
               return { excerpt: s.text, excerptTotalChars: s.totalChars };
             })(),
+            ...(notFoundByRun.has(run.id) ? { notFound: notFoundByRun.get(run.id)! } : {}),
           }
         : null,
       pendingApprovals: run ? (pendingByRun.get(run.id) ?? 0) : 0,

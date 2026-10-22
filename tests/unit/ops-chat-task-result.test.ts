@@ -48,6 +48,19 @@ beforeEach(() => {
   h.listTasks.mockResolvedValue([TASK]);
   h.loadTaskResultRun.mockResolvedValue({ run: run(), lastCompletedRunId: null });
   h.loadTaskStates.mockResolvedValue([{ stale: null }]);
+  h.getTask.mockResolvedValue({ id: TASK.id, title: TASK.title, input: 'Size the supply and return ducts.' });
+});
+
+describe('get_task_result — deliverables the result never mentions', () => {
+  it('a numbered brief whose items are missing from the result → deliverablesNotFound + a plain note; covered → no field', async () => {
+    h.getTask.mockResolvedValue({ id: TASK.id, title: TASK.title, input: 'Cover:\n1. Ductwork sizing — CFM.\n2. Vendor-ready material list — for the quote.' });
+    h.loadTaskResultRun.mockResolvedValue({ run: run({ result: 'Ductwork sizing: CFM ≈ 3,160; 36×18.' }), lastCompletedRunId: null });
+    const out = await call({ project: 'accuratebids', task: TASK.id });
+    expect(out.deliverablesNotFound).toEqual(['Vendor-ready material list']);
+    expect(out.deliverablesNote).toMatch(/never call it complete/);
+    h.loadTaskResultRun.mockResolvedValue({ run: run({ result: 'Ductwork sizing: 3,160 CFM. Vendor-ready material list: attached.' }), lastCompletedRunId: null });
+    expect((await call({ project: 'accuratebids', task: TASK.id })).deliverablesNotFound).toBeUndefined();
+  });
 });
 
 describe('resultLabel — only from stored facts', () => {

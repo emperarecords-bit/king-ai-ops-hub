@@ -23,6 +23,7 @@ import { listApprovalsForQueue, getApprovalDetail, type QueueApprovalRow } from 
 import { listAgents } from '@/domain/agents/agents';
 import { renderApprovalContent, type ApprovalContentView } from '@/domain/opschat/approval-content';
 import { loadTaskStates } from '@/domain/opschat/task-state';
+import { deliverablesNotFound } from '@/domain/opschat/deliverables';
 import { labelGuidance, loadTaskResultRun, resultLabel, sliceResult } from '@/domain/opschat/task-result';
 import { buildUpdateInstructions, loadUpdateBasis, normalizeJobTitle, updateTitle } from '@/domain/opschat/update-card';
 import { PREPARE_UPDATE_CARD } from '@/domain/opschat/stale-wording';
@@ -1157,6 +1158,8 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           // Text is returned only for a completed run that has some; RUNNING / FAILED / NO RESULT carry none.
           const text = run && run.result && (label === 'FINAL' || label === 'UNREVIEWED DRAFT' || label === 'APPROVAL NEEDED') ? run.result : null;
           const slice = text ? sliceResult(text, offset) : null;
+          // "Finished" is not "complete": the brief's numbered deliverables this result never mentions.
+          const notFound = text ? deliverablesNotFound((await getTask(tx, ctx, t.id)).input, text) : [];
           return JSON.stringify({
             workspace: p.name,
             task: { id: t.id, title: t.title, status: t.status },
@@ -1176,6 +1179,12 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
               ? {
                   stale: staleForThisRun,
                   staleNote: `This result PREDATES ${staleForThisRun.decisions.length} owner decision(s) made after the run started — say so, never present it as current, and ${PREPARE_UPDATE_CARD}`,
+                }
+              : {}),
+            ...(notFound.length > 0
+              ? {
+                  deliverablesNotFound: notFound,
+                  deliverablesNote: `The brief's numbered deliverables ${notFound.map((h) => `"${h}"`).join(', ')} are not mentioned anywhere in this result (a word check, not a judgment). Tell the owner plainly it may be incomplete on those points — never call it complete.`,
                 }
               : {}),
             ...(slice ? { totalChars: slice.total, offset: slice.offset, nextOffset: slice.nextOffset } : {}),
