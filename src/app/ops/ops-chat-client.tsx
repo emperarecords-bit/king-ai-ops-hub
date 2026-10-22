@@ -138,6 +138,13 @@ type Proposal =
       updateOf?: { taskId: string; taskTitle: string; runId: string; decisions: number };
     }
   | { kind: 'rerun_task'; projectKey: string; workspaceName: string; taskId: string; taskTitle: string }
+  | { kind: 'record_decision'; projectKey: string; workspaceName: string; taskId: string; taskTitle: string; title: string; statement: string }
+  | {
+      kind: 'accept_decisions';
+      projectKey: string;
+      workspaceName: string;
+      decisions: Array<{ decisionId: string; title: string; summary: string; taskId: string; taskTitle: string }>;
+    }
   | {
       kind: 'github_pr';
       projectKey: string;
@@ -330,6 +337,9 @@ const TOOL_LABEL: Record<string, string> = {
   propose_decide_approval: 'preparing the decision',
   propose_dispatch_task: 'preparing the task',
   propose_rerun_task: 'preparing the re-run',
+  propose_record_decision: 'preparing the decision record',
+  list_decision_candidates: 'reading extracted decisions',
+  propose_accept_decisions: 'preparing the decisions',
   github_capabilities: 'checking GitHub capabilities',
   list_github_repos: 'listing linked repositories',
   list_pull_requests: 'reading pull requests',
@@ -414,6 +424,10 @@ function doneLabel(p: Proposal, result?: CardResult): string {
       if (result?.outcome === 'already_queued') return `ⓘ "${p.taskTitle}": ${result.message ?? 'already queued — nothing new was queued.'}`;
       if (result?.outcome === 'started') return `✓ "${p.taskTitle}": ${result.message ?? 're-run started as a new attempt.'}`;
       return `✓ Re-run requested for "${p.taskTitle}".`;
+    case 'record_decision':
+      return `✓ Recorded — later runs of "${p.taskTitle}" will be given it.`;
+    case 'accept_decisions':
+      return `✓ Accepted ${p.decisions.length} decision${p.decisions.length === 1 ? '' : 's'} in ${p.workspaceName}.`;
     case 'github_pr':
       return `✓ Pull request requested in ${p.repo}.`;
     case 'github_merge':
@@ -444,6 +458,10 @@ function headerLabel(p: Proposal): string {
       return `Confirm — start a task in ${p.workspaceName} (uses tokens)`;
     case 'rerun_task':
       return `Confirm — re-run in ${p.workspaceName} (uses tokens)`;
+    case 'record_decision':
+      return `Confirm — record this decision in ${p.workspaceName}`;
+    case 'accept_decisions':
+      return `Confirm — accept ${p.decisions.length} extracted decision${p.decisions.length === 1 ? '' : 's'} in ${p.workspaceName}`;
     case 'github_pr':
       return `Confirm — open a pull request in ${p.repo}`;
     case 'github_merge':
@@ -476,6 +494,10 @@ function confirmLabel(p: Proposal): string {
       return 'Confirm & start';
     case 'rerun_task':
       return 'Confirm & re-run';
+    case 'record_decision':
+      return 'Confirm & record';
+    case 'accept_decisions':
+      return 'Confirm & accept';
     case 'github_pr':
       return 'Confirm & open PR';
     case 'github_merge':
@@ -1301,6 +1323,29 @@ export function OpsChatClient({
                           <p className="mt-1 text-sm">
                             Re-run <span className="font-semibold">{p.taskTitle}</span>. Starts an AI run and uses tokens.
                           </p>
+                        ) : p.kind === 'record_decision' ? (
+                          <>
+                            <p className="mt-1 text-sm font-semibold">{p.title}</p>
+                            <p className="mt-1 whitespace-pre-wrap text-sm">{p.statement}</p>
+                            <p className="mt-1 text-xs text-[var(--muted)]">
+                              For &ldquo;{p.taskTitle}&rdquo;. Every later run of this job will be given it. Uses no tokens.
+                            </p>
+                          </>
+                        ) : p.kind === 'accept_decisions' ? (
+                          <>
+                            <ul className="mt-1 list-disc space-y-1 pl-4 text-sm">
+                              {p.decisions.map((d) => (
+                                <li key={d.decisionId}>
+                                  <span className="font-semibold">{d.title}</span>
+                                  <span className="whitespace-pre-wrap">: {d.summary}</span>
+                                  <span className="text-xs text-[var(--muted)]"> (from &ldquo;{d.taskTitle}&rdquo;)</span>
+                                </li>
+                              ))}
+                            </ul>
+                            <p className="mt-1 text-xs text-[var(--muted)]">
+                              Extracted by AI runs. Once accepted, later runs of each task are given them. Uses no tokens.
+                            </p>
+                          </>
                         ) : p.kind === 'github_pr' ? (
                           <div className="mt-1 flex flex-col gap-0.5 text-sm">
                             <p className="font-semibold">{p.title}</p>

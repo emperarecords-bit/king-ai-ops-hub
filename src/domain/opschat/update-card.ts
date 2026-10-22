@@ -3,7 +3,7 @@ import { type DbTx } from '@/db/client';
 import { approvals, ownerQuestions, runs, tasks } from '@/db/schema';
 import { AppError } from '@/lib/errors';
 import { type TenantContext } from '@/types/domain';
-import { decisionsAfterRun, loadTaskStates } from '@/domain/opschat/task-state';
+import { decisionsAfterRun, loadTaskStates, recordedJobDecisions } from '@/domain/opschat/task-state';
 import { redactText } from '@/domain/opschat/approval-content';
 
 /**
@@ -24,15 +24,24 @@ export const MAX_DISPATCH_INSTRUCTIONS = 32_000;
 const MAX_TITLE = 200;
 
 export interface UpdateDecision {
-  kind: 'question_answered' | 'approval_rejected';
+  kind: 'question_answered' | 'approval_rejected' | 'decision_recorded';
   id: string;
   /** The task (of the job) the decision was made on. */
   taskId: string;
   at: Date;
-  /** Question: the question; rejection: the approval summary. */
+  /** Question: the question; rejection: the approval summary; recorded decision: its title. */
   subject: string;
-  /** Question: the owner's answer; rejection: the owner's note (may be null). */
+  /** Question: the owner's answer; rejection: the owner's note (may be null); recorded decision: its statement. */
   detail: string | null;
+}
+
+/** A decision the owner recorded for the job BEFORE its latest run started — a standing constraint, always carried. */
+export interface StandingConstraint {
+  id: string;
+  taskId: string;
+  at: Date;
+  title: string;
+  statement: string;
 }
 
 /**
@@ -69,6 +78,12 @@ export interface UpdateBasis {
   decisions: UpdateDecision[];
   /** Every APPROVED approval across the job (oldest first). Optional: bases built before this field carry none. */
   approved?: ApprovedChoice[];
+  /**
+   * Decisions the owner recorded for the job that its runs already had (accepted before the latest run of their task
+   * started). Task-scoped guidance reaches only runs of that exact task, so the update task — a NEW task — gets them
+   * only through its instructions. Recorded after the run → they are in `decisions` instead (and make it stale).
+   */
+  constraints?: StandingConstraint[];
 }
 
 /** At most this many tasks are treated as one job (more → only the oldest MAX_SIBLINGS, the requested one always). */
@@ -153,20 +168,26 @@ export async function loadUpdateBasis(tx: DbTx, taskId: string): Promise<UpdateB
   const approved: ApprovedChoice[] = approvedRows
     .map((a) => ({ id: a.id, taskId: a.taskId, at: a.at!, summary: a.summary, actionType: a.actionType, content: approvedContent(a.payload) }))
     .sort((a, b) => a.at.getTime() - b.at.getTime() || a.id.localeCompare(b.id));
+  const recorded = await recordedJobDecisions(tx, { projectId: task.projectId }, siblingIds);
   const all: UpdateDecision[] = [
     ...answered.map((q) => ({ kind: 'question_answered' as const, id: q.id, taskId: q.taskId, at: q.at!, subject: q.question, detail: q.answer })),
     ...rejected.map((a) => ({ kind: 'approval_rejected' as const, id: a.id, taskId: a.taskId!, at: a.at!, subject: a.summary, detail: a.note })),
+    ...recorded.map((d) => ({ kind: 'decision_recorded' as const, id: d.id, taskId: d.taskId, at: d.at, subject: d.title, detail: d.summary })),
   ];
   // Each decision is judged against the latest run of ITS OWN task (what that run could have known).
-  const keep = all.filter(
-    (d) => decisionsAfterRun(startOf.get(d.taskId) ?? null, [{ kind: d.kind, id: d.id, at: d.at, summary: d.subject }]).length === 1,
-  );
+  const isAfter = (d: UpdateDecision) =>
+    decisionsAfterRun(startOf.get(d.taskId) ?? null, [{ kind: d.kind, id: d.id, at: d.at, summary: d.subject }]).length === 1;
+  const keep = all.filter(isAfter);
+  const constraints: StandingConstraint[] = all
+    .filter((d) => d.kind === 'decision_recorded' && !isAfter(d))
+    .map((d) => ({ id: d.id, taskId: d.taskId, at: d.at, title: d.subject, statement: d.detail ?? '' }));
   return {
     task: { id: task.id, title: task.title, input: task.input, primaryAgentId: task.primaryAgentId ?? null },
     run,
     siblings,
     decisions: keep.sort((a, b) => a.at.getTime() - b.at.getTime() || a.id.localeCompare(b.id)),
     approved,
+    constraints,
   };
 }
 
@@ -200,6 +221,8 @@ export interface UpdateOf {
   siblingRuns?: { taskId: string; runId: string }[];
   /** The APPROVED approvals written into the card. Absent on cards prepared before this field (then not re-checked). */
   approvedIds?: string[];
+  /** The standing constraints written into the card. Absent on cards prepared before this field (then not re-checked). */
+  constraintIds?: string[];
 }
 
 export const UPDATE_CARD_NOT_CURRENT =
@@ -237,6 +260,10 @@ export async function assertUpdateCardCurrent(tx: DbTx, ctx: TenantContext, u: U
     const nowApproved = (basis!.approved ?? []).map((a) => a.id).sort().join(',');
     if (nowApproved !== [...u.approvedIds].sort().join(',')) fail('the owner approved a result of this job after the card was prepared');
   }
+  if (u.constraintIds) {
+    const nowConstraints = (basis!.constraints ?? []).map((c) => c.id).sort().join(',');
+    if (nowConstraints !== [...u.constraintIds].sort().join(',')) fail("the job's recorded decisions changed after the card was prepared");
+  }
   const states = await loadTaskStates(tx, ctx, basis!.siblings.map((s) => s.taskId));
   const sup = states.find((st) => st.supersededBy)?.supersededBy;
   if (sup) fail(`it was already updated by task "${sup.title}"`);
@@ -247,6 +274,8 @@ const iso = (d: Date | null) => (d ? `${d.toISOString().slice(0, 16).replace('T'
 export const MAX_UPDATE_DECISIONS = 10;
 /** At most this many approved results go on one card. More than this → no card, as with too many decisions. */
 export const MAX_UPDATE_APPROVED = 5;
+/** At most this many standing constraints go on one card. More than this → no card. */
+export const MAX_UPDATE_CONSTRAINTS = 20;
 
 /** Text kept VERBATIM: line breaks become indented continuation lines, nothing is shortened or reflowed. */
 const verbatim = (s: string) => s.trim().replace(/\r\n?/g, '\n').replace(/\n/g, '\n    ');
@@ -274,9 +303,11 @@ export const UPDATE_CARD_TOO_BIG =
  */
 export function buildUpdateInstructions(b: UpdateBasis): UpdateInstructionsResult {
   const approved = b.approved ?? [];
-  if (b.decisions.length > MAX_UPDATE_DECISIONS || approved.length > MAX_UPDATE_APPROVED) {
+  const constraints = b.constraints ?? [];
+  if (b.decisions.length > MAX_UPDATE_DECISIONS || approved.length > MAX_UPDATE_APPROVED || constraints.length > MAX_UPDATE_CONSTRAINTS) {
     return { ok: false, reason: 'too_many_decisions', message: UPDATE_CARD_TOO_BIG };
   }
+  const constraintLines = constraints.map((c) => `- ${verbatim(c.title)} (recorded ${iso(c.at)}): ${verbatim(c.statement)}`);
   const approvedLines = approved.map(
     (a) =>
       `- APPROVED (${iso(a.at)}, approval ${a.id}): ${verbatim(a.summary)}\n` +
@@ -288,6 +319,8 @@ export function buildUpdateInstructions(b: UpdateBasis): UpdateInstructionsResul
   for (const d of b.decisions) {
     if (d.kind === 'question_answered') {
       lines.push(`- Question (answered ${iso(d.at)}): ${verbatim(d.subject)}\n  Owner's answer: ${verbatim(d.detail ?? '(no text)')}`);
+    } else if (d.kind === 'decision_recorded') {
+      lines.push(`- DECISION recorded by the owner (${iso(d.at)}): ${verbatim(d.subject)}\n  ${verbatim(d.detail ?? '(no text)')}`);
     } else {
       // The rejection note often names what was rejected ("1,400 lb rating") — say plainly that none of it is chosen.
       lines.push(
@@ -307,10 +340,17 @@ export function buildUpdateInstructions(b: UpdateBasis): UpdateInstructionsResul
       ? `\n\n=== RESULTS THE OWNER APPROVED (the owner's chosen version — build on these) ===\n${approvedLines.join('\n')}`
       : '';
   const settles =
-    approvedLines.length > 0 ? 'Where the original instructions leave a choice open, the approved results and the decisions above settle it. ' : '';
+    approvedLines.length + constraintLines.length > 0
+      ? 'Where the original instructions leave a choice open, the approved results and the decisions above settle it. '
+      : '';
+  const constraintSection =
+    constraintLines.length > 0
+      ? `\n\n=== OWNER DECISIONS ALREADY RECORDED FOR THIS JOB (still apply) ===\n${constraintLines.join('\n')}`
+      : '';
   const text =
     `=== ORIGINAL INSTRUCTIONS ===\n${b.task.input}` +
     approvedSection +
+    constraintSection +
     `\n\n=== OWNER DECISIONS SINCE THE PREVIOUS RUN (authoritative — recorded in the Hub) ===\n${lines.join('\n')}\n\n` +
     `=== WHAT TO DO ===\n${consolidated}The previous run of "${title}" (run ${b.run.id}, started ${iso(b.run.startedAt)}) predates the decisions above. ` +
     settles +

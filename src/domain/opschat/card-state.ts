@@ -69,6 +69,10 @@ export function cardLabelOf(kind: string, proposal: Record<string, unknown>): st
       return `dispatch "${str(p.title, TITLE_MAX) ?? 'task'}"${str(p.agentName) ? ` to ${str(p.agentName)}` : ''}`;
     case 'answer_question':
       return `answer question ${str(p.questionId, 36) ?? ''}`.trim();
+    case 'record_decision':
+      return `record decision "${str(p.title, TITLE_MAX) ?? 'decision'}" on "${str(p.taskTitle, TITLE_MAX) ?? 'task'}"`;
+    case 'accept_decisions':
+      return Array.isArray(p.decisions) ? `accept ${p.decisions.length} extracted decision(s)` : 'accept extracted decisions';
     default:
       return str(p.title) ?? str(p.summary) ?? kind;
   }
@@ -104,6 +108,12 @@ function doneText(c: StoredCard): string {
     return 'CONFIRMED by the owner and executed';
   }
   if (c.kind === 'answer_question') return 'CONFIRMED by the owner — answer recorded';
+  if (c.kind === 'record_decision' || c.kind === 'accept_decisions') {
+    // Recorded as accepted guidance on the job's task: later runs of that task and its update card carry it.
+    return Array.isArray(r.decisionIds) && r.decisionIds.length > 0
+      ? 'CONFIRMED by the owner — decision recorded (later runs of the task and its update card carry it)'
+      : 'CONFIRMED by the owner — no record of what was saved';
+  }
   const executed = Boolean(str(r.outcome) || str(r.jobId) || (c.kind === 'dispatch_task' && str(r.taskId)));
   return executed
     ? 'CONFIRMED by the owner and executed'
