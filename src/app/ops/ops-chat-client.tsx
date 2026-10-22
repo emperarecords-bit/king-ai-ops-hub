@@ -10,7 +10,8 @@ import {
 import type { ApprovalContentView } from '@/domain/opschat/approval-content';
 import type { LinkedRunView } from '@/domain/opschat/linked-run-view';
 import type { CompletionEntry, CompletionLabel } from '@/domain/opschat/conversation-continuity';
-import { completionReplyLead } from '@/domain/opschat/conversation-continuity';
+import { completionReplyLead, isReportedAsCompletion } from '@/domain/opschat/conversation-continuity';
+import { ExcerptMarkdown } from './excerpt-markdown';
 import { createDeadlineWatchdog } from './ops-chat-watchdog';
 import { ATTACHMENT_ACCEPT, ATTACHMENT_LIMITS } from '@/domain/opschat/attachment-limits';
 import {
@@ -63,14 +64,13 @@ function CompletionRow({ e }: { e: CompletionEntry }) {
         </div>
         <p>{completionReplyLead(e)}</p>
         {e.excerpt ? (
-          // Untrusted AI output: plain text only (no markdown, no links), bounded server-side.
+          // Untrusted AI output, bounded server-side: rendered by a minimal escaping renderer (no HTML, no links).
           <div data-testid="completion-excerpt" className="mt-2 rounded-md border border-[var(--border)] px-3 py-2">
             <p className="mb-1 text-[11px] uppercase tracking-wide text-[var(--muted)]">From the run · {e.resultLabel}</p>
-            <p className="whitespace-pre-wrap text-xs">{e.excerpt}</p>
+            <ExcerptMarkdown text={e.excerpt} />
             {e.excerptTruncated ? <p className="mt-1 text-[11px] text-[var(--muted)]">… continues — open the full result, or ask “what did it come back with?”</p> : null}
           </div>
         ) : null}
-        <p className="mt-1 text-xs text-[var(--muted)]">{e.text}</p>
         {e.taskPath ? (
           <a href={e.taskPath} className="mt-1 inline-block text-xs text-[var(--accent)] underline underline-offset-2">
             Open the full result
@@ -91,6 +91,14 @@ function linkedRunTone(v: LinkedRunView): string {
 
 /** What the run a confirmed dispatch / re-run card started actually did — server-derived, never inferred. */
 function LinkedRunLine({ view, projectKey }: { view: LinkedRunView; projectKey: string | null }) {
+  if (isReportedAsCompletion(view)) {
+    // The completion reply in the conversation says what happened (with the label + excerpt); say it once.
+    return (
+      <p data-testid="linked-run" className={`mt-1 text-xs ${linkedRunTone(view)}`}>
+        Finished — see the Ops Chat reply below for what came back.
+      </p>
+    );
+  }
   return (
     <div data-testid="linked-run" className="mt-1 flex flex-col gap-0.5 text-xs">
       <p className={linkedRunTone(view)}>{view.text}</p>

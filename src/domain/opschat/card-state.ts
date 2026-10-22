@@ -34,8 +34,23 @@ const STATE_TEXT: Record<string, string> = {
   error: 'FAILED when confirmed',
 };
 
+/** Task titles get more room than other fields — a dispatch title like "… — updated with your answers" runs ~100 chars. */
+const TITLE_MAX = 140;
+
 function str(v: unknown, max = 90): string | null {
-  return typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null;
+  return typeof v === 'string' && v.trim() ? clipLabel(v.trim(), max) : null;
+}
+
+/**
+ * A label that fits `max` characters, cut back to a word boundary with an ellipsis when it is longer (Hub prod
+ * 2026-10-22: a hard cut showed "…updated with you" for "…updated with your answers"). Identifiers are passed with
+ * their exact length as `max`, so they are never clipped.
+ */
+export function clipLabel(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const head = text.slice(0, max - 1);
+  const cut = head.lastIndexOf(' ');
+  return `${(cut > max * 0.5 ? head.slice(0, cut) : head).replace(/[\s,;:—–-]+$/, '')}…`;
 }
 
 function cardLabel(c: StoredCard): string {
@@ -49,9 +64,9 @@ export function cardLabelOf(kind: string, proposal: Record<string, unknown>): st
     case 'decide_approval':
       return `${str(p.decision) ?? 'decide'} approval ${str(p.approvalId, 36) ?? ''}`.trim();
     case 'rerun_task':
-      return `re-run "${str(p.taskTitle) ?? str(p.taskId, 36) ?? 'task'}"`;
+      return `re-run "${str(p.taskTitle, TITLE_MAX) ?? str(p.taskId, 36) ?? 'task'}"`;
     case 'dispatch_task':
-      return `dispatch "${str(p.title) ?? 'task'}"${str(p.agentName) ? ` to ${str(p.agentName)}` : ''}`;
+      return `dispatch "${str(p.title, TITLE_MAX) ?? 'task'}"${str(p.agentName) ? ` to ${str(p.agentName)}` : ''}`;
     case 'answer_question':
       return `answer question ${str(p.questionId, 36) ?? ''}`.trim();
     default:
