@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { sendChatMessageAction, type ChatFormState } from '../chat/actions';
-import { primeSpeech, speak, stopSpeaking, useSpeechInput } from '../chat/use-speech';
+import { primeSpeech, speak, stopSpeaking, useSpeechInput } from '@/lib/use-speech';
 
 interface Entry {
   id: string;
