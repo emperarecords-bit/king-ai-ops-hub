@@ -38,6 +38,12 @@ function parseToolInput(json: string): unknown {
   }
 }
 
+/** Output budget for the ONE tool-loop retry after a call hit its limit without saying anything: double, at least
+ *  16,000, at most 32,000. */
+export function toolLoopRetryOutputTokens(budget: number): number {
+  return Math.min(32_000, Math.max(16_000, budget * 2));
+}
+
 /**
  * Anthropic adapter. Messages API.
  * The ONLY file that may import `@anthropic-ai/sdk`.
@@ -222,6 +228,14 @@ export class AnthropicProvider implements AIProvider {
       // with no text, make ONE more call with tools disabled and a nudge, so it replies in words.
       let usedTools = false;
       let wrapUp = false;
+      // Output room (Hub prod 2026-10-23): the model thinks before it answers and thinking counts against max_tokens,
+      // so a big turn could stop at the limit having said nothing — or mid tool call (a cut-off tool call is never
+      // run). A call that hits the limit BEFORE any words reached the owner is retried ONCE with more room (nothing
+      // was shown, so nothing is duplicated); a call cut off after words were shown, or cut off again, ends the turn
+      // flagged `cutOff` so the caller can say so honestly.
+      let budget = request.maxOutputTokens;
+      let roomRetried = false;
+      let cutOff = false;
       const nudge = (why: string) => {
         const last = messages[messages.length - 1];
         const text = `[${why}] Reply to the owner now in plain words, without calling any tools: say what you did, what was refused or failed and why (from the tool results above), and what you need from them next. Do not claim anything was created or sent unless a tool result says so.`;
@@ -243,7 +257,7 @@ export class AnthropicProvider implements AIProvider {
               model: request.model,
               system: request.system,
               messages,
-              max_tokens: request.maxOutputTokens,
+              max_tokens: budget,
               tools: anthropicTools,
               ...(wrapUp ? { tool_choice: { type: 'none' as const } } : {}),
               ...(withTemperature ? { temperature: request.temperature } : {}),
@@ -299,6 +313,17 @@ export class AnthropicProvider implements AIProvider {
         stopReason = curStop;
 
         const present = blocks.filter((b): b is Block => Boolean(b));
+        if (curStop === 'max_tokens') {
+          const spoke = present.some((b) => b.type === 'text' && b.text.trim().length > 0);
+          if (!spoke && !roomRetried) {
+            roomRetried = true;
+            budget = toolLoopRetryOutputTokens(budget);
+            iter -= 1; // the same round again, with more room — not an extra tool round
+            continue;
+          }
+          cutOff = true;
+          break;
+        }
         const toolUses = present.filter(
           (b): b is { type: 'tool_use'; id: string; name: string; json: string } => b.type === 'tool_use',
         );
@@ -349,7 +374,7 @@ export class AnthropicProvider implements AIProvider {
         messages.push({ role: 'user', content: toolResults });
       }
 
-      yield { kind: 'done', usage: { inputTokens, outputTokens }, stopReason };
+      yield { kind: 'done', usage: { inputTokens, outputTokens }, stopReason, cutOff, roomRetried };
     } catch (err) {
       throw this.mapError(err);
     }
