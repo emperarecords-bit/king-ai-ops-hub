@@ -218,6 +218,21 @@ Approve requires zero findings. Revise and reject require at least one finding. 
 export interface ReviewableClaim { readonly anchor: string; readonly text: string }
 
 /** Stable structural claim identity: protocol version + paragraph/sentence position + bounded content digest. */
+export const CLAIM_ANCHOR_PREFIX = 'claim-v1:';
+
+/**
+ * The canonical anchor a reviewer's finding refers to, or null when it names no real claim. Exact match first; a
+ * reviewer that dropped the "claim-v1:" prefix (Hub prod 2026-10-23, run ef83a6aa: "p12:s4:87db81aa5063" — same
+ * paragraph, sentence and hash) is accepted ONLY when prefix + its text is exactly a known anchor. Nothing looser:
+ * paragraph, sentence and content hash must still match a real claim, so a guessed or stale anchor is still refused.
+ */
+export function canonicalClaimAnchor(raw: string, known: ReadonlySet<string>): string | null {
+  const anchor = raw.trim();
+  if (known.has(anchor)) return anchor;
+  if (!anchor.startsWith(CLAIM_ANCHOR_PREFIX) && known.has(`${CLAIM_ANCHOR_PREFIX}${anchor}`)) return `${CLAIM_ANCHOR_PREFIX}${anchor}`;
+  return null;
+}
+
 export function anchorReviewClaims(text: string): readonly ReviewableClaim[] {
   const claims: ReviewableClaim[] = [];
   const paragraphs = text.replace(/\r\n?/g, '\n').split(/\n\s*\n/);
@@ -225,7 +240,7 @@ export function anchorReviewClaims(text: string): readonly ReviewableClaim[] {
     const sentences = paragraph.trim().split(/(?<=[.!?])\s+|\n+/).map((v) => v.trim()).filter(Boolean);
     sentences.forEach((claim, sentenceIndex) => {
       const digest = createHash('sha256').update(claim.normalize('NFKC'), 'utf8').digest('hex').slice(0, 12);
-      claims.push({ anchor: `claim-v1:p${paragraphIndex + 1}:s${sentenceIndex + 1}:${digest}`, text: claim });
+      claims.push({ anchor: `${CLAIM_ANCHOR_PREFIX}p${paragraphIndex + 1}:s${sentenceIndex + 1}:${digest}`, text: claim });
     });
   });
   return claims;
@@ -371,19 +386,22 @@ export function parseReviewDetail(
   if (verdict !== 'approve' && findings.length === 0) return invalid([`${verdict} verdict requires at least one finding`]);
   const known = new Set(anchorReviewClaims(primaryText).map((claim) => claim.anchor));
   const seen = new Set<string>();
+  const anchors: string[] = [];
   for (const finding of findings) {
-    if (!known.has(finding.claimAnchor)) return invalid([`unknown claim anchor: ${finding.claimAnchor}`]);
-    if (seen.has(finding.claimAnchor)) return invalid([`duplicate claim anchor: ${finding.claimAnchor}`]);
-    seen.add(finding.claimAnchor);
+    const anchor = canonicalClaimAnchor(finding.claimAnchor, known);
+    if (!anchor) return invalid([`unknown claim anchor: ${finding.claimAnchor}`]);
+    if (seen.has(anchor)) return invalid([`duplicate claim anchor: ${anchor}`]);
+    seen.add(anchor);
+    anchors.push(anchor);
     if (verdict === 'revise' && !finding.requestedRevision) {
-      return invalid([`revise finding ${finding.claimAnchor} requires requestedRevision`]);
+      return invalid([`revise finding ${anchor} requires requestedRevision`]);
     }
   }
   return {
     detail: {
       contractVersion: '2', verdict, provenance,
-      issues: findings.map((finding) => ({
-        claimAnchor: finding.claimAnchor,
+      issues: findings.map((finding, i) => ({
+        claimAnchor: anchors[i]!,
         severity: finding.severity,
         rationale: finding.rationale,
         requestedRevision: finding.requestedRevision,
