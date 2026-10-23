@@ -15,6 +15,7 @@ const STATE_STYLE: Record<ReviewSummaryState, string> = {
   changes_requested: 'bg-[#3a3220] text-[#e5c07b]',
   rejected: 'bg-[#3a2026] text-[var(--danger)]',
   empty: 'bg-[#3a2026] text-[var(--danger)]',
+  cut_off: 'bg-[#3a2026] text-[var(--danger)]',
   unreadable: 'bg-[#3a2026] text-[var(--danger)]',
   failed: 'bg-[#3a2026] text-[var(--danger)]',
 };

@@ -15,6 +15,7 @@ export type ReviewSummaryState =
   | 'changes_requested'
   | 'rejected'
   | 'empty'
+  | 'cut_off'
   | 'unreadable'
   | 'failed';
 
@@ -29,6 +30,15 @@ export interface ReviewSummary {
 }
 
 const REVIEW_RESULT_BLOCK = /```review-result\s*\n/;
+const COMPLETE_REVIEW_BLOCK = /```review-result\s*\n[\s\S]*?\n?```/;
+
+const CUT_OFF: ReviewSummary = {
+  state: 'cut_off',
+  label: 'No review — reviewer reply cut off',
+  headline:
+    "The reviewer's reply was cut off at its output limit before its verdict was complete, so no review was recorded. This answer is unreviewed — it is not a rejection.",
+  substantive: false,
+};
 
 export function reviewStepOf(steps: readonly RunStepRow[]): RunStepRow | null {
   return steps.find((s) => s.kind === 'review') ?? null;
@@ -43,6 +53,7 @@ export function summarizeReview(steps: readonly RunStepRow[], messages: readonly
   const text = message?.content ?? '';
 
   if (!step.succeeded) {
+    if (/cut off/i.test(step.errorMessage ?? '')) return CUT_OFF;
     if (/empty response/i.test(step.errorMessage ?? '')) {
       return {
         state: 'empty',
@@ -73,6 +84,11 @@ export function summarizeReview(steps: readonly RunStepRow[], messages: readonly
   const verdict = detail?.verdict ?? step.verdict;
   const issues = detail?.issues ?? [];
   const revision = steps.find((s) => s.kind === 'revision') ?? null;
+
+  // Historical runs: the result block was opened but never closed — the reply hit its output limit (prod run 4afba522).
+  if (message && issues.length === 0 && text.includes('```review-result') && !COMPLETE_REVIEW_BLOCK.test(text)) {
+    return CUT_OFF;
+  }
 
   // A v2 "reject" with no findings and no structured block is the parser's fallback for unreadable output.
   if (verdict === 'reject' && issues.length === 0 && detail?.contractVersion === '2' && message && !REVIEW_RESULT_BLOCK.test(text)) {
