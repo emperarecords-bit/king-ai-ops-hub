@@ -73,6 +73,8 @@ import {
   OPS_CHAT_TIMEOUT_MESSAGE,
   OPS_CHAT_TURN_IN_PROGRESS_MESSAGE,
   opsChatClosingLine,
+  opsChatCutOffLine,
+  OPS_CHAT_MAX_OUTPUT_TOKENS,
 } from '@/domain/opschat/limits';
 
 /**
@@ -475,10 +477,17 @@ export async function POST(req: Request): Promise<Response> {
         // was never followed by any words (or that said nothing at all) gets a short, honest
         // closing line — streamed AND persisted — instead of ending on "let me try…".
         let spokeSinceLastTool = true;
-        const finishComplete = async (): Promise<void> => {
+        const finishComplete = async (cutOff = false): Promise<void> => {
           const props = toolset.getProposals();
-          if (!spokeSinceLastTool || !assistantText.trim()) {
-            const closing = `${assistantText.trim() ? '\n\n' : ''}${opsChatClosingLine(props.length)}`;
+          const spoke = assistantText.trim().length > 0;
+          if (cutOff) {
+            // The reply ran out of output room (even after the one retry with more room): say THAT, not
+            // "couldn't finish that step" — and say it even when some words were already shown.
+            const closing = `${spoke ? '\n\n' : ''}${opsChatCutOffLine(props.length, spoke)}`;
+            assistantText += closing;
+            send('delta', { text: closing });
+          } else if (!spokeSinceLastTool || !spoke) {
+            const closing = `${spoke ? '\n\n' : ''}${opsChatClosingLine(props.length)}`;
             assistantText += closing;
             send('delta', { text: closing });
           }
@@ -494,7 +503,7 @@ export async function POST(req: Request): Promise<Response> {
         const provider = getProvider('anthropic');
         if (!provider.streamWithTools) throw new Error('Tool-use is not available on this provider.');
         iterator = provider.streamWithTools(
-          { model: OPS_CHAT_MODEL, system, turns: promptTurns, temperature: 0.3, maxOutputTokens: 1500, timeoutMs: 90_000, signal },
+          { model: OPS_CHAT_MODEL, system, turns: promptTurns, temperature: 0.3, maxOutputTokens: OPS_CHAT_MAX_OUTPUT_TOKENS, timeoutMs: 90_000, signal },
           toolset.tools,
           toolset.runTool,
         )[Symbol.asyncIterator]();
@@ -525,7 +534,18 @@ export async function POST(req: Request): Promise<Response> {
             send('tool', { name: ev.name, phase: 'end', ok: ev.ok });
           }
           else if (ev.kind === 'done') {
-            await finishComplete();
+            // Usage + stop reason for every Ops Chat turn (no IDs, no content) — so a turn that ran out of room is
+            // visible in the logs instead of being guessed at afterwards.
+            log.info('ops-chat turn finished', {
+              model: OPS_CHAT_MODEL,
+              stopReason: ev.stopReason,
+              inputTokens: ev.usage.inputTokens,
+              outputTokens: ev.usage.outputTokens,
+              cutOff: Boolean(ev.cutOff),
+              roomRetried: Boolean(ev.roomRetried),
+              proposals: toolset.getProposals().length,
+            });
+            await finishComplete(Boolean(ev.cutOff));
             break;
           }
         }

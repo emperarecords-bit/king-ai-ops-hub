@@ -71,6 +71,25 @@ export function opsChatClosingLine(proposalCount: number): string {
     : "I couldn't finish that step, and nothing was created or sent. Tell me how you'd like to continue, or ask me what got in the way.";
 }
 
+/**
+ * Output room per Ops Chat model call (Hub prod 2026-10-23: at 1,500 the model's thinking used it all on big turns —
+ * a pasted conversation + image, "do all 3" — and three replies came back as "I couldn't finish that step" with
+ * nothing wrong but the limit). A call that still hits the limit before saying anything is retried once with more
+ * room by the provider's tool loop.
+ */
+export const OPS_CHAT_MAX_OUTPUT_TOKENS = 8_000;
+
+/**
+ * Appended instead of opsChatClosingLine when the turn ended because a model call ran out of output room (after
+ * the one retry with more room) — so the owner is told what actually happened, not "couldn't finish that step".
+ */
+export function opsChatCutOffLine(proposalCount: number, spoke: boolean): string {
+  const lead = spoke ? 'My reply ran out of room before I finished.' : 'My reply ran out of room before I could write it.';
+  return proposalCount > 0
+    ? `${lead} What's prepared above is complete — nothing happens until you click Confirm. Ask me to continue for the rest.`
+    : `${lead} Nothing was created or sent. Ask me to continue, or break the request into smaller steps.`;
+}
+
 /** Shown when replaying a persisted INTERRUPTED reply. An interrupted turn is kept for history but
  *  must never masquerade as a completed answer, so its replay ends in `error`, not `done`. */
 export const OPS_CHAT_INTERRUPTED_REPLAY_MESSAGE = 'This reply was interrupted. Send a new message to continue.';

@@ -579,6 +579,40 @@ describe('POST /api/ops-chat — a completed turn never ends silently after a to
     expect(text).not.toContain("couldn't finish that step");
     expect(text).not.toContain('nothing happens until you click Confirm');
   });
+
+  // Hub prod 2026-10-23: three "couldn't finish that step" replies were really the model running out of output room.
+  it('a turn that ran out of output room says so — not "couldn\'t finish that step" — and is persisted that way', async () => {
+    h.getProposals.mockReturnValue([]);
+    h.streamWithTools.mockImplementation(async function* () {
+      yield { kind: 'done', usage: { inputTokens: 9, outputTokens: 24_000 }, stopReason: 'max_tokens', cutOff: true, roomRetried: true };
+    });
+    const text = await (await call({ message: 'do all 3', conversationId: CONV, turnId: TURN })).text();
+    expect(text).toContain('My reply ran out of room before I could write it. Nothing was created or sent.');
+    expect(text).not.toContain("couldn't finish that step");
+    expect(text).toContain('event: done');
+    expect(persistedText()).toContain('ran out of room');
+  });
+
+  it('cut off after words were shown → the words stay and the note says it ran out of room', async () => {
+    h.getProposals.mockReturnValue([]);
+    h.streamWithTools.mockImplementation(async function* () {
+      yield { kind: 'delta', text: 'Here are the first two decisions…' };
+      yield { kind: 'done', usage: { inputTokens: 9, outputTokens: 8_000 }, stopReason: 'max_tokens', cutOff: true, roomRetried: false };
+    });
+    const text = await (await call({ message: 'do all 3', conversationId: CONV, turnId: TURN })).text();
+    expect(text).toContain('Here are the first two decisions…');
+    expect(text).toContain('My reply ran out of room before I finished.');
+  });
+
+  it('every Ops Chat model call gets the larger output room', async () => {
+    h.streamWithTools.mockImplementation(async function* () {
+      yield { kind: 'delta', text: 'ok' };
+      yield { kind: 'done', usage: { inputTokens: 1, outputTokens: 1 }, stopReason: 'end_turn' };
+    });
+    await (await call({ message: 'hi', conversationId: CONV, turnId: TURN })).text();
+    const req = h.streamWithTools.mock.calls.at(-1)?.[0] as { maxOutputTokens?: number };
+    expect(req.maxOutputTokens).toBe(8_000);
+  });
 });
 
 describe('POST /api/ops-chat — current AccurateBids capabilities are stated at turn start', () => {

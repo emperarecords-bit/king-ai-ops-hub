@@ -89,7 +89,15 @@ export type ToolLoopEvent =
   | { readonly kind: 'delta'; readonly text: string }
   | { readonly kind: 'tool_start'; readonly name: string }
   | { readonly kind: 'tool_end'; readonly name: string; readonly ok: boolean }
-  | { readonly kind: 'done'; readonly usage: TokenUsage; readonly stopReason: string };
+  | {
+      readonly kind: 'done';
+      readonly usage: TokenUsage;
+      readonly stopReason: string;
+      /** A call hit its output limit before it finished, even after the one retry with more room. */
+      readonly cutOff?: boolean;
+      /** A call hit its output limit before saying anything and was retried once with more room. */
+      readonly roomRetried?: boolean;
+    };
 
 export const PROVIDER_ERROR_KINDS = [
   'rate_limited',
