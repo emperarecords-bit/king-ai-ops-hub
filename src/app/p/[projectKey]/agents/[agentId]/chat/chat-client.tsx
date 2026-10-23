@@ -3,7 +3,7 @@
 import { useActionState, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { sendChatMessageAction, type ChatFormState } from './actions';
-import { speak, speechOutputSupported, stopSpeaking, useSpeechInput } from './use-speech';
+import { speak, speechOutputSupported, stopSpeaking, useSpeechInput } from '@/lib/use-speech';
 
 interface Entry {
   id: string;

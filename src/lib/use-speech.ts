@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 /**
- * Voice for Employee Chat, entirely on-device: SpeechRecognition (mic -> text) and
+ * Voice for Employee Chat, Talk and Ops Chat, entirely on-device: SpeechRecognition (mic -> text) and
  * speechSynthesis (text -> voice). No audio ever leaves the browser through the hub —
  * transcription happens in the phone/browser engine, and the hub only ever sees the
  * final TEXT the owner chooses to send.

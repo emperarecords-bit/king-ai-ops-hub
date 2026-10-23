@@ -1,7 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { consumeOpsChatStream } from './ops-chat-stream';
+import { primeSpeech, speak, stopSpeaking, useSpeechInput } from '@/lib/use-speech';
+import { appendDictation, keepListeningAfterReply, spokenReply } from './ops-chat-voice';
 import {
   OPS_CHAT_CLIENT_TIMEOUT_MS,
   OPS_CHAT_EARLIER_TURN_PENDING_MESSAGE,
@@ -803,6 +805,56 @@ export function OpsChatClient({
 
   const pending = useMemo(() => pendingTurnOf(messages, outsidePending), [messages, outsidePending]);
 
+  // Voice (owner request 2026-10-22; rules in ./ops-chat-voice). 🎤 DICTATE puts speech into the message box — the
+  // owner still presses Send. TALK is hands-free: a pause sends what was said, the reply is read aloud, then it
+  // listens again. Voice NEVER confirms a card: a reply with a card is read with a pointer to it and Talk stops.
+  const [handsFree, setHandsFree] = useState(false);
+  const handsFreeRef = useRef(false);
+  const inputRef = useRef('');
+  const formRef = useRef<HTMLFormElement>(null);
+  const talkStartRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    inputRef.current = input;
+  }, [input]);
+  const onDictated = useCallback((spoken: string) => setInput((prev) => appendDictation(prev, spoken)), []);
+  // A pause in Talk mode presses the form's own Send (same path as a tap), or listens again if nothing was said.
+  const onTalkPause = useCallback(() => {
+    if (!handsFreeRef.current) return;
+    if (inputRef.current.trim()) formRef.current?.requestSubmit();
+    else talkStartRef.current?.();
+  }, []);
+  const dictation = useSpeechInput(onDictated, { continuous: true });
+  const talk = useSpeechInput(onDictated, { continuous: false, onAutoEnd: onTalkPause });
+  useEffect(() => {
+    talkStartRef.current = talk.start;
+  }, [talk.start]);
+
+  function startHandsFree() {
+    primeSpeech(); // inside the tap: unlocks reading replies aloud on phones
+    dictation.stop();
+    handsFreeRef.current = true;
+    setHandsFree(true);
+    talk.start();
+  }
+  function stopHandsFree() {
+    handsFreeRef.current = false;
+    setHandsFree(false);
+    talk.stop();
+    stopSpeaking();
+  }
+  /** Called once a turn ends. Only Talk mode reads the reply aloud; a card or a failed turn ends the loop. */
+  function afterReply(text: string, cardCount: number, ok: boolean) {
+    if (!handsFreeRef.current) return;
+    if (!ok) {
+      stopHandsFree();
+      return;
+    }
+    speak(spokenReply(text, cardCount), () => {
+      if (keepListeningAfterReply({ handsFree: handsFreeRef.current, cardCount, replyOk: ok })) talkStartRef.current?.();
+      else stopHandsFree();
+    });
+  }
+
   // P5b-1: a notification links to `/ops?c=<conversation>#card-<proposalId>`. On the FIRST scroll after load, go to
   // and highlight that card instead of jumping to the bottom; every later update scrolls to the bottom as before. The
   // hash is read in the effect (never during render), so server and client markup match.
@@ -1002,7 +1054,14 @@ export function OpsChatClient({
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible);
 
     const patchReply = (fn: (m: Msg) => Msg) => setMessages((prev) => prev.map((m) => (m.id === replyId ? fn(m) : m)));
-    const append = (delta: string) => patchReply((m) => ({ ...m, content: m.content + delta }));
+    // Voice: the reply text and how many cards it carries, for Talk mode's read-aloud.
+    let replyText = '';
+    let cardCount = 0;
+    let replyOk = false;
+    const append = (delta: string) => {
+      replyText += delta;
+      patchReply((m) => ({ ...m, content: m.content + delta }));
+    };
     // No `saved` ⇒ no terminal reply was recorded. Drop the local bubble so the transcript matches the
     // store; the owner turn stays awaiting and becomes the recovery state (Resume message).
     let saved = false;
@@ -1051,6 +1110,7 @@ export function OpsChatClient({
           const proposal: Record<string, unknown> = { ...payload };
           const correlationKey = typeof proposal.correlationKey === 'string' ? proposal.correlationKey : undefined;
           delete proposal.correlationKey;
+          cardCount += 1;
           patchReply((m) => ({ ...m, cards: [...(m.cards ?? []), { proposal, correlationKey, state: 'pending' as const }] }));
         },
         onSaved: (s) => {
@@ -1068,6 +1128,8 @@ export function OpsChatClient({
       if (result.status === 'error') {
         showError(result.message);
         dropUnsavedReply();
+      } else {
+        replyOk = saved;
       }
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') {
@@ -1088,6 +1150,7 @@ export function OpsChatClient({
       setStreaming(false);
       setToolActivity(null);
       abortRef.current = null;
+      afterReply(replyText, cardCount, replyOk);
     }
   }
 
@@ -1526,8 +1589,15 @@ export function OpsChatClient({
       ) : null}
 
       {error ? <p className="text-sm text-[var(--danger,#c37474)]">{error}</p> : null}
+      {dictation.error || talk.error ? (
+        <p data-testid="voice-error" className="text-sm text-[var(--danger,#c37474)]">{dictation.error ?? talk.error}</p>
+      ) : null}
+      {dictation.interim || talk.interim ? (
+        <p data-testid="voice-interim" className="text-sm italic opacity-60">{dictation.interim || talk.interim}</p>
+      ) : null}
 
       <form
+        ref={formRef}
         onSubmit={(e) => {
           e.preventDefault();
           void send(input);
@@ -1577,7 +1647,42 @@ export function OpsChatClient({
             >
               📎
             </button>
-            <span className="text-xs opacity-50">Enter to send · Shift+Enter for a new line</span>
+            {dictation.supported ? (
+              <button
+                type="button"
+                data-testid="voice-dictate"
+                aria-label={dictation.listening ? 'Stop dictating' : 'Dictate a message'}
+                aria-pressed={dictation.listening}
+                title="Speak your message into the box — you still press Send"
+                disabled={streaming || !!pending || handsFree}
+                onClick={dictation.toggle}
+                className={`rounded border border-[var(--border)] px-2 py-1 text-sm hover:opacity-80 disabled:opacity-40 ${dictation.listening ? 'bg-[var(--danger,#c37474)] text-white' : ''}`}
+              >
+                🎤
+              </button>
+            ) : null}
+            {talk.supported ? (
+              <button
+                type="button"
+                data-testid="voice-talk"
+                aria-pressed={handsFree}
+                title="Hands-free: a pause sends what you said, the reply is read aloud, then it listens again. Cards still need a tap."
+                disabled={!handsFree && (streaming || !!pending)}
+                onClick={() => (handsFree ? stopHandsFree() : startHandsFree())}
+                className={`rounded border border-[var(--border)] px-2 py-1 text-sm hover:opacity-80 disabled:opacity-40 ${handsFree ? 'bg-[var(--accent)] text-white' : ''}`}
+              >
+                {handsFree ? '■ Stop talking' : '🗣 Talk'}
+              </button>
+            ) : null}
+            <span className="text-xs opacity-50">
+              {handsFree
+                ? talk.listening
+                  ? 'Listening… pause to send'
+                  : streaming
+                    ? 'Answering…'
+                    : 'Speaking the reply…'
+                : 'Enter to send · Shift+Enter for a new line'}
+            </span>
           </div>
           <button
             type="submit"
