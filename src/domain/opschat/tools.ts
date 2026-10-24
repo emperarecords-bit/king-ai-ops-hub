@@ -8,6 +8,7 @@ import { getPromptAttachment } from '@/domain/opschat/attachments';
 import { readAttachmentSlice } from '@/domain/opschat/attachment-policy';
 import { canonicalJson } from '@/orchestration/actions';
 import { sha256Hex } from '@/lib/crypto';
+import { splitPriceSources, suggestedCount, type PricedLine } from '@/domain/opschat/price-sources';
 import {
   accurateBidsEnabledFor,
   fetchAccurateBidsRecords,
@@ -248,6 +249,8 @@ export type OpsChatProposal =
       readonly payload: Record<string, unknown>;
       /** Server-rendered from the payload, for the confirm card. */
       readonly content: ApprovalContentView;
+      /** Quotes only: where each line's price came from (owner / Ops Chat's estimate / research) — shown, never sent. */
+      readonly pricing?: ReadonlyArray<PricedLine>;
     };
 
 /**
@@ -488,7 +491,7 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
   {
     name: 'propose_accuratebids_quote',
     description:
-      'Prepare a DRAFT quote in the owner\'s AccurateBids account for the owner to confirm. Nothing is created until the owner clicks Confirm, and even then it is a DRAFT — nothing is sent to the customer (use propose_accuratebids_send afterwards if the owner wants it emailed). Use the owner\'s own numbers; ask for any missing price, quantity, or customer detail rather than inventing it. `quote` fields: job_name, customer_name (required); customer_phone, customer_email, job_address, job_type ("hvac"|"plumbing"), notes; materials [{description, quantity, unit?, unit_cost}], labor [{description, hours, hourly_rate}], additional_charges [{description, amount}], markup_percent (0-100), tax_percent (0-30).',
+      'Prepare a DRAFT quote in the owner\'s AccurateBids account for the owner to confirm. Nothing is created until the owner clicks Confirm, and even then it is a DRAFT — nothing is sent to the customer (use propose_accuratebids_send afterwards if the owner wants it emailed). Prices: the owner\'s numbers, OR (when the owner asked you to price it and has SEEN your suggested line items in this conversation and accepted them) your labelled estimates / researched figures; mark EVERY line with source: "owner" | "estimate" | "research" (+ source_note: the basis or the site), and never put a price the owner has not seen into a quote. Customer details always come from the owner. `quote` fields: job_name, customer_name (required); customer_phone, customer_email, job_address, job_type ("hvac"|"plumbing"), notes; materials [{description, quantity, unit?, unit_cost}], labor [{description, hours, hourly_rate}], additional_charges [{description, amount}], markup_percent (0-100), tax_percent (0-30).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1301,7 +1304,13 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
         };
         let raw: Record<string, unknown>;
-        if (name === 'propose_accuratebids_quote') raw = { ...obj('quote'), kind: 'accuratebids_quote' };
+        let pricing: PricedLine[] | null = null;
+        if (name === 'propose_accuratebids_quote') {
+          // Per-line price sources are labels for the owner, not AccurateBids fields: split them off the strict payload.
+          const split = splitPriceSources(obj('quote'));
+          pricing = split.pricing;
+          raw = { ...split.cleaned, kind: 'accuratebids_quote' };
+        }
         else if (name === 'propose_accuratebids_invoice') raw = { ...obj('invoice'), kind: 'accuratebids_invoice' };
         else {
           const send = argStr(input, 'send');
@@ -1360,10 +1369,12 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           summary,
           payload: payload as unknown as Record<string, unknown>,
           content: renderApprovalContent('external_http', payload),
+          ...(pricing && pricing.length > 0 ? { pricing } : {}),
         });
+        const suggested = suggestedCount(pricing);
         return JSON.stringify({
           prepared: true,
-          note: `Prepared for the owner to confirm: ${summary} NOTHING has happened yet — it runs only when the owner clicks Confirm on the card. Do NOT say it was created or sent.`,
+          note: `Prepared for the owner to confirm: ${summary}${suggested > 0 ? ` It includes ${suggested} price(s) YOU suggested — the card marks each one; tell the owner to check them.` : ''} NOTHING has happened yet — it runs only when the owner clicks Confirm on the card. Do NOT say it was created or sent.`,
         });
       }
       case 'read_attachment': {
