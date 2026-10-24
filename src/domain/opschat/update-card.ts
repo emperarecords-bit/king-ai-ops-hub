@@ -280,9 +280,27 @@ export const MAX_UPDATE_CONSTRAINTS = 20;
 /** Text kept VERBATIM: line breaks become indented continuation lines, nothing is shortened or reflowed. */
 const verbatim = (s: string) => s.trim().replace(/\r\n?/g, '\n').replace(/\n/g, '\n    ');
 
+const UPDATE_SUFFIX = ' — updated with your answers';
+/** One trailing update suffix, optionally numbered: " — updated with your answers" or " — updated with your answers (3)". */
+const TRAILING_UPDATE_SUFFIX = /\s*—\s*updated with your answers(?:\s*\((\d+)\))?\s*$/i;
+
+/**
+ * The update task's title: the job title plus ONE update suffix, numbered from the second update on — "X — updated
+ * with your answers", then "… (2)", "… (3)". Hub prod 2026-10-24: updating an update gave "X — updated with your
+ * answers — updated with your answers". Each generation still gets a DISTINCT title on purpose: same title = same job
+ * (normalizeJobTitle), and an update sharing its predecessor's title would be grouped with it and refused as
+ * "already updated". Titles that already repeat the suffix (made before this fix) count each repeat as one update.
+ */
 export function updateTitle(taskTitle: string): string {
-  const suffix = ' — updated with your answers';
-  return (taskTitle.slice(0, MAX_TITLE - suffix.length) + suffix).slice(0, MAX_TITLE);
+  let base = taskTitle;
+  let generation = 0;
+  for (let m = TRAILING_UPDATE_SUFFIX.exec(base); m; m = TRAILING_UPDATE_SUFFIX.exec(base)) {
+    generation += m[1] ? Number(m[1]) : 1;
+    base = base.slice(0, m.index);
+  }
+  const next = generation + 1;
+  const suffix = next === 1 ? UPDATE_SUFFIX : `${UPDATE_SUFFIX} (${next})`;
+  return (base.slice(0, MAX_TITLE - suffix.length) + suffix).slice(0, MAX_TITLE);
 }
 
 export type UpdateInstructionsResult =

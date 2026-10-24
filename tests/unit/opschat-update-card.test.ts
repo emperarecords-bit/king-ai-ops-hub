@@ -241,6 +241,42 @@ describe('buildUpdateInstructions / updateTitle', () => {
     expect(updateTitle('T'.repeat(500)).length).toBeLessThanOrEqual(200);
     expect(updateTitle('T'.repeat(500)).endsWith(' — updated with your answers')).toBe(true);
   });
+
+  // Hub prod 2026-10-24: updating an update gave "… — updated with your answers — updated with your answers".
+  describe('updateTitle — one suffix, numbered per update', () => {
+    const job = 'Server Cabinet Cooling — Dual FUSION-TEC Punch List & Vendor Quote Prep (Senior Engineer review)';
+
+    it('an update of an update is numbered, never repeats the suffix', () => {
+      const u1 = updateTitle(job);
+      const u2 = updateTitle(u1);
+      const u3 = updateTitle(u2);
+      expect(u1).toBe(`${job} — updated with your answers`);
+      expect(u2).toBe(`${job} — updated with your answers (2)`);
+      expect(u3).toBe(`${job} — updated with your answers (3)`);
+      for (const t of [u1, u2, u3]) expect(t.match(/updated with your answers/g)).toHaveLength(1);
+    });
+
+    it('each update keeps a distinct job title (same title = same job)', () => {
+      const u1 = updateTitle(job);
+      const u2 = updateTitle(u1);
+      expect(new Set([job, u1, u2].map(normalizeJobTitle)).size).toBe(3);
+    });
+
+    it('a title that already repeats the suffix (made before the fix) counts each repeat', () => {
+      expect(updateTitle(`${job} — updated with your answers — updated with your answers`)).toBe(`${job} — updated with your answers (3)`);
+      expect(updateTitle(`${job} — Updated With Your Answers  (4) `)).toBe(`${job} — updated with your answers (5)`);
+    });
+
+    it('the phrase in the middle of a title is left alone', () => {
+      expect(updateTitle('Notes updated with your answers from Monday')).toBe('Notes updated with your answers from Monday — updated with your answers');
+    });
+
+    it('a long title keeps the numbered suffix within 200 chars', () => {
+      const t = updateTitle(updateTitle('T'.repeat(500)));
+      expect(t.length).toBeLessThanOrEqual(200);
+      expect(t.endsWith(' — updated with your answers (2)')).toBe(true);
+    });
+  });
 });
 
 describe('owner-recorded decisions (chat facts that runs must see)', () => {
