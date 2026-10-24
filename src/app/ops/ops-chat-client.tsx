@@ -151,6 +151,15 @@ type Proposal =
       decisions: Array<{ decisionId: string; title: string; summary: string; taskId: string; taskTitle: string }>;
     }
   | {
+      kind: 'record_batch';
+      projectKey: string;
+      workspaceName: string;
+      taskId: string | null;
+      taskTitle: string | null;
+      answers: Array<{ questionId: string; question: string; answer: string }>;
+      decisions: Array<{ title: string; statement: string }>;
+    }
+  | {
       kind: 'github_pr';
       projectKey: string;
       workspaceName: string;
@@ -345,6 +354,7 @@ const TOOL_LABEL: Record<string, string> = {
   propose_record_decision: 'preparing the decision record',
   list_decision_candidates: 'reading extracted decisions',
   propose_accept_decisions: 'preparing the decisions',
+  propose_record_batch: 'preparing your answers and decisions',
   github_capabilities: 'checking GitHub capabilities',
   list_github_repos: 'listing linked repositories',
   list_pull_requests: 'reading pull requests',
@@ -434,6 +444,8 @@ function doneLabel(p: Proposal, result?: CardResult): string {
       return `✓ Recorded — later runs of "${p.taskTitle}" will be given it.`;
     case 'accept_decisions':
       return `✓ Accepted ${p.decisions.length} decision${p.decisions.length === 1 ? '' : 's'} in ${p.workspaceName}.`;
+    case 'record_batch':
+      return `✓ Recorded ${batchCount(p)} in ${p.workspaceName}${p.decisions.length > 0 && p.taskTitle ? ` — later runs of "${p.taskTitle}" will be given the decisions` : ''}.`;
     case 'github_pr':
       return `✓ Pull request requested in ${p.repo}.`;
     case 'github_merge':
@@ -454,6 +466,11 @@ function doneLabel(p: Proposal, result?: CardResult): string {
       return `✓ ${abSendWhat(p)[0]!.toUpperCase()}${abSendWhat(p).slice(1)} emailed to the customer.`;
   }
 }
+/** "3 answers and 4 decisions" for a batch card. */
+function batchCount(p: Extract<Proposal, { kind: 'record_batch' }>): string {
+  const part = (n: number, one: string) => (n === 0 ? null : `${n} ${one}${n === 1 ? '' : 's'}`);
+  return [part(p.answers.length, 'answer'), part(p.decisions.length, 'decision')].filter(Boolean).join(' and ');
+}
 function headerLabel(p: Proposal): string {
   switch (p.kind) {
     case 'answer_question':
@@ -468,6 +485,8 @@ function headerLabel(p: Proposal): string {
       return `Confirm — record this decision in ${p.workspaceName}`;
     case 'accept_decisions':
       return `Confirm — accept ${p.decisions.length} extracted decision${p.decisions.length === 1 ? '' : 's'} in ${p.workspaceName}`;
+    case 'record_batch':
+      return `Confirm — record ${batchCount(p)} in ${p.workspaceName} (one tap)`;
     case 'github_pr':
       return `Confirm — open a pull request in ${p.repo}`;
     case 'github_merge':
@@ -504,6 +523,8 @@ function confirmLabel(p: Proposal): string {
       return 'Confirm & record';
     case 'accept_decisions':
       return 'Confirm & accept';
+    case 'record_batch':
+      return 'Confirm all & record';
     case 'github_pr':
       return 'Confirm & open PR';
     case 'github_merge':
@@ -1398,6 +1419,33 @@ export function OpsChatClient({
                             <p className="mt-1 whitespace-pre-wrap text-sm">{p.statement}</p>
                             <p className="mt-1 text-xs text-[var(--muted)]">
                               For &ldquo;{p.taskTitle}&rdquo;. Every later run of this job will be given it. Uses no tokens.
+                            </p>
+                          </>
+                        ) : p.kind === 'record_batch' ? (
+                          <>
+                            {p.answers.length > 0 ? (
+                              <ul data-testid="batch-answers" className="mt-1 list-disc space-y-1 pl-4 text-sm">
+                                {p.answers.map((a) => (
+                                  <li key={a.questionId}>
+                                    <span className="text-[var(--muted)]">{a.question}</span>
+                                    <span className="whitespace-pre-wrap"> → {a.answer}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : null}
+                            {p.decisions.length > 0 ? (
+                              <ul data-testid="batch-decisions" className="mt-1 list-disc space-y-1 pl-4 text-sm">
+                                {p.decisions.map((d, i) => (
+                                  <li key={i}>
+                                    <span className="font-semibold">{d.title}</span>
+                                    <span className="whitespace-pre-wrap">: {d.statement}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : null}
+                            <p className="mt-1 text-xs text-[var(--muted)]">
+                              One tap records all of these together, or none.
+                              {p.decisions.length > 0 && p.taskTitle ? <> Decisions apply to &ldquo;{p.taskTitle}&rdquo;.</> : null} Uses no tokens.
                             </p>
                           </>
                         ) : p.kind === 'accept_decisions' ? (

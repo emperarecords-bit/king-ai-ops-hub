@@ -16,6 +16,7 @@ import { enqueueRun, requestRerun, RerunRefusedError } from '@/domain/jobs/jobs'
 import { listAgents } from '@/domain/agents/agents';
 import { assertUpdateCardCurrent } from '@/domain/opschat/update-card';
 import { acceptOwnerCandidates, MAX_ACCEPT_PER_CARD, recordOwnerDecision } from '@/domain/opschat/owner-decisions';
+import { MAX_RECORD_BATCH } from '@/domain/opschat/tools';
 import {
   executeGitHubPrFromOpsChat,
   executeGitHubMergeFromOpsChat,
@@ -112,6 +113,16 @@ const ActionBody = z.discriminatedUnion('action', [
     title: z.string().trim().min(1).max(200),
     statement: z.string().trim().min(1).max(2000),
   }),
+  z
+    .object({
+      action: z.literal('record_batch'),
+      projectKey: z.string().min(1),
+      taskId: z.string().uuid().nullish(),
+      answers: z.array(z.object({ questionId: z.string().uuid(), answer: z.string().trim().min(1).max(8000) })).max(MAX_RECORD_BATCH),
+      decisions: z.array(z.object({ title: z.string().trim().min(1).max(200), statement: z.string().trim().min(1).max(2000) })).max(MAX_RECORD_BATCH),
+    })
+    .refine((b) => b.answers.length + b.decisions.length >= 1 && b.answers.length + b.decisions.length <= MAX_RECORD_BATCH, 'between 1 and MAX_RECORD_BATCH items')
+    .refine((b) => b.decisions.length === 0 || Boolean(b.taskId), 'decisions need a task'),
   z.object({
     action: z.literal('accept_decisions'),
     projectKey: z.string().min(1),
@@ -201,6 +212,7 @@ const KIND_TO_ACTION: Record<string, z.infer<typeof ActionBody>['action']> = {
   rerun_task: 'rerun_task',
   record_decision: 'record_decision',
   accept_decisions: 'accept_decisions',
+  record_batch: 'record_batch',
   github_pr: 'execute_github_pr',
   github_merge: 'execute_github_merge',
   github_rerun: 'execute_github_rerun',
@@ -283,6 +295,18 @@ async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext, p
     case 'accept_decisions': {
       const r = await withTenant(ctx, (tx) => acceptOwnerCandidates(tx, ctx, body.decisions));
       return { outcome: 'accepted', decisionIds: r.decisionIds };
+    }
+    case 'record_batch': {
+      // ONE transaction: every answer and decision is recorded, or none is (any failure rolls the whole batch back).
+      const decisionIds = await withTenant(ctx, async (tx) => {
+        for (const a of body.answers) await answerOwnerQuestion(tx, ctx, a.questionId, a.answer);
+        const ids: string[] = [];
+        for (const d of body.decisions) {
+          ids.push((await recordOwnerDecision(tx, ctx, { taskId: body.taskId!, title: d.title, statement: d.statement })).decisionId);
+        }
+        return ids;
+      });
+      return { outcome: 'recorded', answered: body.answers.length, decisionIds };
     }
     case 'decide_approval': {
       await withTenant(ctx, (tx) => decideApproval(tx, ctx, body.approvalId, body.decision, body.note));

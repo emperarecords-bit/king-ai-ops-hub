@@ -73,6 +73,11 @@ export function cardLabelOf(kind: string, proposal: Record<string, unknown>): st
       return `record decision "${str(p.title, TITLE_MAX) ?? 'decision'}" on "${str(p.taskTitle, TITLE_MAX) ?? 'task'}"`;
     case 'accept_decisions':
       return Array.isArray(p.decisions) ? `accept ${p.decisions.length} extracted decision(s)` : 'accept extracted decisions';
+    case 'record_batch': {
+      const a = Array.isArray(p.answers) ? p.answers.length : 0;
+      const d = Array.isArray(p.decisions) ? p.decisions.length : 0;
+      return `record ${a} answer(s) and ${d} decision(s)${str(p.taskTitle, TITLE_MAX) ? ` on "${str(p.taskTitle, TITLE_MAX)}"` : ''}`;
+    }
     default:
       return str(p.title) ?? str(p.summary) ?? kind;
   }
@@ -108,6 +113,11 @@ function doneText(c: StoredCard): string {
     return 'CONFIRMED by the owner and executed';
   }
   if (c.kind === 'answer_question') return 'CONFIRMED by the owner — answer recorded';
+  if (c.kind === 'record_batch') {
+    return str(r.outcome) === 'recorded'
+      ? 'CONFIRMED by the owner — every answer and decision on the card recorded together'
+      : 'CONFIRMED by the owner — no record of what was saved';
+  }
   if (c.kind === 'record_decision' || c.kind === 'accept_decisions') {
     // Recorded as accepted guidance on the job's task: later runs of that task and its update card carry it.
     return Array.isArray(r.decisionIds) && r.decisionIds.length > 0
