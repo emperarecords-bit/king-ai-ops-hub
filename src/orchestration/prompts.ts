@@ -225,9 +225,14 @@ export const CLAIM_ANCHOR_PREFIX = 'claim-v1:';
  * reviewer that dropped the "claim-v1:" prefix (Hub prod 2026-10-23, run ef83a6aa: "p12:s4:87db81aa5063" — same
  * paragraph, sentence and hash) is accepted ONLY when prefix + its text is exactly a known anchor. Nothing looser:
  * paragraph, sentence and content hash must still match a real claim, so a guessed or stale anchor is still refused.
+ * One pair of surrounding square brackets is dropped first: claims are shown as "[anchor] text" and a reviewer may copy
+ * the brackets (Hub prod 2026-10-23, run b0827cc9: "[claim-v1:p8:s3:b1362c51e5ae]"). A hash-less "claim-v1:p4:s2" is
+ * deliberately NOT accepted: positions are unique by construction, so the hash is the only proof the reviewer means
+ * the sentence it was shown rather than a misnumbered or stale one.
  */
 export function canonicalClaimAnchor(raw: string, known: ReadonlySet<string>): string | null {
-  const anchor = raw.trim();
+  const trimmed = raw.trim();
+  const anchor = trimmed.length > 2 && trimmed.startsWith('[') && trimmed.endsWith(']') ? trimmed.slice(1, -1).trim() : trimmed;
   if (known.has(anchor)) return anchor;
   if (!anchor.startsWith(CLAIM_ANCHOR_PREFIX) && known.has(`${CLAIM_ANCHOR_PREFIX}${anchor}`)) return `${CLAIM_ANCHOR_PREFIX}${anchor}`;
   return null;
