@@ -44,6 +44,8 @@ export interface AgentRequest {
   /** Per-call wall clock budget, ms. The adapter must enforce it. */
   readonly timeoutMs: number;
   readonly signal?: AbortSignal;
+  /** Tool loop only: let the model search the web (provider-side), at most `maxUses` searches per turn. */
+  readonly webSearch?: { readonly maxUses: number };
 }
 
 export interface TokenUsage {
@@ -97,6 +99,8 @@ export type ToolLoopEvent =
       readonly cutOff?: boolean;
       /** A call hit its output limit before saying anything and was retried once with more room. */
       readonly roomRetried?: boolean;
+      /** Web searches the provider ran during the turn. */
+      readonly webSearches?: number;
     };
 
 export const PROVIDER_ERROR_KINDS = [

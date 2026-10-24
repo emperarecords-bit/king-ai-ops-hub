@@ -364,6 +364,7 @@ const TOOL_LABEL: Record<string, string> = {
   validate_supabase_sql: 'validating the SQL',
   vercel_capabilities: 'checking Vercel capabilities',
   list_vercel_projects: 'listing linked Vercel projects',
+  web_search: 'searching the web',
   inspect_vercel_project: 'reading the Vercel project',
   inspect_vercel_deployments: 'reading Vercel deployments',
   propose_vercel_redeploy: 'preparing the redeploy',
