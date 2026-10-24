@@ -75,6 +75,7 @@ import {
   opsChatClosingLine,
   opsChatCutOffLine,
   OPS_CHAT_MAX_OUTPUT_TOKENS,
+  OPS_CHAT_MAX_MESSAGE_CHARS,
 } from '@/domain/opschat/limits';
 
 /**
@@ -127,7 +128,7 @@ const OPS_CHAT_MODEL = 'claude-sonnet-5';
 
 const Body = z.object({
   // Text, attachments, or both — at least one (refined below).
-  message: z.string().trim().max(4000),
+  message: z.string().trim().max(OPS_CHAT_MAX_MESSAGE_CHARS),
   /** Files uploaded into this conversation via POST /api/ops-chat/attachments, sent with this turn.
    *  Linked to the owner message in the SAME transaction (idempotent on retry). */
   attachmentIds: z.array(z.string().uuid()).max(ATTACHMENT_LIMITS.maxPerMessage).default([]),

@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { sendChatMessageAction, type ChatFormState } from '../chat/actions';
 import { primeSpeech, speak, stopSpeaking, useSpeechInput } from '@/lib/use-speech';
+import { useWakeLock } from '@/lib/use-wake-lock';
 
 interface Entry {
   id: string;
@@ -35,6 +36,8 @@ export function TalkClient({
 }) {
   const router = useRouter();
   const [phase, setPhase] = useState<Phase>('idle');
+  // Keep the phone screen on while a conversation is running (a sleeping screen suspends the page and the mic).
+  useWakeLock(phase !== 'idle');
   const [conversationOn, setConversationOn] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
   const bufferRef = useRef<string>('');

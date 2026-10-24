@@ -80,6 +80,15 @@ export function opsChatClosingLine(proposalCount: number): string {
 export const OPS_CHAT_MAX_OUTPUT_TOKENS = 8_000;
 
 /**
+ * Longest owner message (chars). Hub prod 2026-10-23: the owner pasted a whole Claude conversation about a job and it
+ * was stored at 3,999 — cut off at the old 4,000 limit, so Ops Chat only saw the start. 30,000 fits a long pasted
+ * conversation; anything longer belongs in an attached text file (read in bounded chunks).
+ */
+export const OPS_CHAT_MAX_MESSAGE_CHARS = 30_000;
+/** The composer shows a character count from here, so the limit is never a surprise. */
+export const OPS_CHAT_MESSAGE_COUNTER_FROM = 25_000;
+
+/**
  * Appended instead of opsChatClosingLine when the turn ended because a model call ran out of output room (after
  * the one retry with more room) — so the owner is told what actually happened, not "couldn't finish that step".
  */

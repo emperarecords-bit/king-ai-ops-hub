@@ -3,11 +3,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { consumeOpsChatStream } from './ops-chat-stream';
 import { primeSpeech, speak, stopSpeaking, useSpeechInput } from '@/lib/use-speech';
+import { useWakeLock } from '@/lib/use-wake-lock';
 import { appendDictation, keepListeningAfterReply, spokenReply } from './ops-chat-voice';
 import {
   OPS_CHAT_CLIENT_TIMEOUT_MS,
   OPS_CHAT_EARLIER_TURN_PENDING_MESSAGE,
   OPS_CHAT_TIMEOUT_MESSAGE,
+  OPS_CHAT_MAX_MESSAGE_CHARS,
+  OPS_CHAT_MESSAGE_COUNTER_FROM,
 } from '@/domain/opschat/limits';
 import type { ApprovalContentView } from '@/domain/opschat/approval-content';
 import type { LinkedRunView } from '@/domain/opschat/linked-run-view';
@@ -809,6 +812,8 @@ export function OpsChatClient({
   // owner still presses Send. TALK is hands-free: a pause sends what was said, the reply is read aloud, then it
   // listens again. Voice NEVER confirms a card: a reply with a card is read with a pointer to it and Talk stops.
   const [handsFree, setHandsFree] = useState(false);
+  // Keep the phone screen on during Talk (a sleeping screen suspends the page and stops the mic).
+  useWakeLock(handsFree);
   const handsFreeRef = useRef(false);
   const inputRef = useRef('');
   const formRef = useRef<HTMLFormElement>(null);
@@ -1614,7 +1619,7 @@ export function OpsChatClient({
           value={input}
           onChange={(e) => setInput(e.target.value)}
           rows={2}
-          maxLength={4000}
+          maxLength={OPS_CHAT_MAX_MESSAGE_CHARS}
           placeholder={pending ? 'Resume the unfinished message above to continue…' : 'Ask, answer, approve, or start work — all from here…'}
           className="max-h-80 min-h-[3.5rem] w-full resize-none overflow-y-auto rounded border border-[var(--border)] bg-transparent p-2.5 text-sm leading-relaxed"
           onKeyDown={(e) => {
@@ -1683,6 +1688,12 @@ export function OpsChatClient({
                     : 'Speaking the reply…'
                 : 'Enter to send · Shift+Enter for a new line'}
             </span>
+            {input.length >= OPS_CHAT_MESSAGE_COUNTER_FROM ? (
+              <span data-testid="message-length" className="text-xs opacity-60">
+                {input.length.toLocaleString()} / {OPS_CHAT_MAX_MESSAGE_CHARS.toLocaleString()} characters
+                {input.length >= OPS_CHAT_MAX_MESSAGE_CHARS ? ' — attach longer text as a file' : ''}
+              </span>
+            ) : null}
           </div>
           <button
             type="submit"
