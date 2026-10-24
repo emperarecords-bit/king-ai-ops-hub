@@ -160,3 +160,51 @@ describe('AccurateBids tools — prepare only, never execute', () => {
     expect(ts.getProposals()).toHaveLength(2);
   });
 });
+
+// E of 5 (owner-approved 2026-10-23: suggested prices). Ops Chat may price a job itself — every line says where its
+// price came from, the card flags the suggested ones, and AccurateBids still receives only the strict payload.
+describe('AccurateBids quote — suggested prices are labelled, never smuggled into the payload', () => {
+  it('per-line sources are split off: the payload passes the strict schema, the card carries the labels', async () => {
+    const { out, proposals } = await run('propose_accuratebids_quote', {
+      project: 'empera',
+      quote: {
+        job_name: 'Ray — two 4-ton heat pump swaps',
+        customer_name: 'Ray',
+        materials: [
+          { description: '4-ton heat pump condenser + air handler', quantity: 2, unit_cost: 5000, source: 'owner' },
+          { description: 'Line set, pad, disconnect, whip', quantity: 2, unit_cost: 450, source: 'estimate', source_note: 'typical install kit' },
+        ],
+        labor: [{ description: 'Swap-out labour', hours: 16, hourly_rate: 110, source: 'research', source_note: 'regional HVAC labour rates' }],
+      },
+    });
+    expect(out.prepared).toBe(true);
+    expect(out.note).toMatch(/includes 2 price\(s\) YOU suggested/);
+    const card = proposals[0] as AbProposal & { pricing?: Array<{ section: string; source: string; note?: string }> };
+    expect(JSON.stringify(card.payload)).not.toMatch(/source/); // AccurateBids never sees the labels
+    expect(card.pricing!.map((p) => [p.section, p.source])).toEqual([
+      ['materials', 'owner'],
+      ['materials', 'estimate'],
+      ['labor', 'research'],
+    ]);
+    expect(card.pricing![2]!.note).toBe('regional HVAC labour rates');
+    expect(h.executeAccurateBidsFromOpsChat).not.toHaveBeenCalled();
+  });
+
+  it('no labels → all the owner\'s (no pricing warning on the card)', async () => {
+    const { out, proposals } = await run('propose_accuratebids_quote', {
+      project: 'empera',
+      quote: { job_name: 'Condenser swap', customer_name: 'Pat', materials: [{ description: 'Condenser', quantity: 1, unit_cost: 2800 }] },
+    });
+    expect(out.note).not.toMatch(/YOU suggested/);
+    const card = proposals[0] as AbProposal & { pricing?: Array<{ source: string }> };
+    expect(card.pricing!.every((p) => p.source === 'owner')).toBe(true);
+  });
+
+  it('a field AccurateBids does not accept is still refused (labels are the only thing stripped)', async () => {
+    const { out } = await run('propose_accuratebids_quote', {
+      project: 'empera',
+      quote: { job_name: 'X', customer_name: 'Y', materials: [{ description: 'Z', quantity: 1, unit_cost: 1, source: 'estimate', url: 'https://evil.example' }] },
+    });
+    expect(out.error).toMatch(/Invalid/);
+  });
+});

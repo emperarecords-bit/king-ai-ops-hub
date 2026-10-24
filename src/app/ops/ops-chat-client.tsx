@@ -17,6 +17,7 @@ import type { LinkedRunView } from '@/domain/opschat/linked-run-view';
 import type { CompletionEntry, CompletionLabel } from '@/domain/opschat/conversation-continuity';
 import { completionReplyLead, isReportedAsCompletion } from '@/domain/opschat/conversation-continuity';
 import { ExcerptMarkdown } from './excerpt-markdown';
+import { suggestedCount, type PricedLine } from '@/domain/opschat/price-sources';
 import { createDeadlineWatchdog } from './ops-chat-watchdog';
 import { ATTACHMENT_ACCEPT, ATTACHMENT_LIMITS } from '@/domain/opschat/attachment-limits';
 import {
@@ -82,6 +83,30 @@ function CompletionRow({ e }: { e: CompletionEntry }) {
           </a>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+/** Suggested quote prices (owner-approved 2026-10-23): every line Ops Chat priced is marked before Confirm. */
+function PriceSourcesBlock({ pricing }: { pricing: PricedLine[] }) {
+  const n = suggestedCount(pricing);
+  return (
+    <div data-testid="price-sources" className="mt-1 rounded border border-[var(--warning,#d9a441)] px-2 py-1.5 text-xs">
+      <p className="font-semibold text-[var(--warning,#d9a441)]">
+        {n} suggested price{n === 1 ? '' : 's'} — check before confirming
+      </p>
+      <ul className="mt-1 space-y-0.5">
+        {pricing.map((l, i) => (
+          <li key={i}>
+            <span className={l.source === 'owner' ? 'text-[var(--muted)]' : 'font-semibold'}>
+              {l.source === 'owner' ? 'Yours' : l.source === 'estimate' ? 'Estimate' : 'Researched'}
+            </span>
+            {' · '}
+            {l.description}
+            {l.note ? <span className="text-[var(--muted)]"> ({l.note})</span> : null}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -224,6 +249,7 @@ type Proposal =
       summary: string;
       payload: Record<string, unknown>;
       content?: ApprovalContentView;
+      pricing?: PricedLine[];
     }
   | {
       kind: 'vercel_mutation';
@@ -1523,6 +1549,7 @@ export function OpsChatClient({
                         ) : p.kind === 'accuratebids_quote' || p.kind === 'accuratebids_invoice' || p.kind === 'accuratebids_send' ? (
                           <div className="mt-1 flex flex-col gap-0.5 text-sm">
                             <p className="whitespace-pre-wrap">{p.summary}</p>
+                            {p.kind === 'accuratebids_quote' && suggestedCount(p.pricing) > 0 ? <PriceSourcesBlock pricing={p.pricing!} /> : null}
                             {p.content ? <ApprovalContentBlock content={p.content} /> : null}
                             <p className="mt-1 text-xs text-[var(--muted)]">
                               {p.kind === 'accuratebids_send'
