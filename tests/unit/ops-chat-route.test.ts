@@ -673,3 +673,23 @@ describe('POST /api/ops-chat — current AccurateBids capabilities are stated at
     }
   });
 });
+
+// Owner feedback 2026-10-23: Ops Chat felt far less helpful than plain Claude/ChatGPT — every job became "should I
+// dispatch an agent?". HELP FIRST tells it to work the job out in the reply; dispatching becomes a second step.
+describe('POST /api/ops-chat — HELP FIRST is in every turn\'s instructions', () => {
+  it('the system prompt carries the work-it-out rules and keeps facts vs estimates apart', async () => {
+    h.streamWithTools.mockImplementation(async function* () {
+      yield { kind: 'delta', text: 'Here is how I would size it…' };
+      yield { kind: 'done', usage: { inputTokens: 1, outputTokens: 1 }, stopReason: 'end_turn' };
+    });
+    await (await call({ message: 'I need to cool a 20 kW server cabinet in a basement', conversationId: CONV, turnId: TURN })).text();
+    const system = (h.streamWithTools.mock.calls.at(-1)?.[0] as { system?: string }).system ?? '';
+    expect(system).toContain('HELP FIRST');
+    expect(system).toContain('WORK IT OUT IN YOUR REPLY');
+    expect(system).toMatch(/2–3 options with their trade-offs/);
+    expect(system).toMatch(/Dispatching an agent \(propose_dispatch_task\) is a SECOND step/);
+    expect(system).toMatch(/Never reply with only "do you want me to dispatch/);
+    expect(system).toMatch(/Hub FACTS .* come ONLY from the snapshot or tool results/);
+    expect(system).toMatch(/still goes through a confirm card/);
+  });
+});

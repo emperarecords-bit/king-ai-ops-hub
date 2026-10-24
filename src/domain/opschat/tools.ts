@@ -576,7 +576,7 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
   {
     name: 'propose_dispatch_task',
     description:
-      'Prepare to START NEW WORK in a workspace — create a task and queue an AI run FOR THE OWNER TO CONFIRM. This SPENDS money (an AI run uses tokens) and runs NOTHING until the owner confirms. Give a short title and clear instructions. Name the agent that owns it with its exact name from list_agents — required when the workspace has more than one agent (there is no default). The tool result names the agent and reviewer on the card; describe the dispatch with exactly those names.',
+      'Prepare to START NEW WORK in a workspace — create a task and queue an AI run FOR THE OWNER TO CONFIRM. This SPENDS money (an AI run uses tokens) and runs NOTHING until the owner confirms. A SECOND step (HELP FIRST): use it when the owner asks for an agent run or the deliverable is long and formal — not instead of answering a question or working a job out yourself. Give a short title and clear instructions. Name the agent that owns it with its exact name from list_agents — required when the workspace has more than one agent (there is no default). The tool result names the agent and reviewer on the card; describe the dispatch with exactly those names.',
     inputSchema: {
       type: 'object',
       properties: {
