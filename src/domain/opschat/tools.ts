@@ -87,6 +87,9 @@ import {
  * surfaced as its own confirm card.
  */
 
+/** Most answers + decisions one batch card may record (one tap, one transaction). */
+export const MAX_RECORD_BATCH = 12;
+
 export type OpsChatProposal =
   | {
       readonly kind: 'answer_question';
@@ -138,6 +141,19 @@ export type OpsChatProposal =
       readonly taskTitle: string;
       readonly title: string;
       readonly statement: string;
+    }
+  | {
+      /**
+       * Owner feedback 2026-10-23 (seven separate cards for one message): SEVERAL of the owner's answers and decisions for
+       * ONE workspace, recorded together with one tap — all-or-nothing in one transaction on confirm.
+       */
+      readonly kind: 'record_batch';
+      readonly projectKey: string;
+      readonly workspaceName: string;
+      readonly taskId: string | null;
+      readonly taskTitle: string | null;
+      readonly answers: ReadonlyArray<{ readonly questionId: string; readonly question: string; readonly answer: string }>;
+      readonly decisions: ReadonlyArray<{ readonly title: string; readonly statement: string }>;
     }
   | {
       /** Accept run-extracted decision candidates as task-scoped guidance on the task that produced each. */
@@ -251,6 +267,9 @@ export function proposalKey(p: OpsChatProposal): string {
       return `r:${p.taskId}`;
     case 'record_decision':
       return `rd:${p.projectKey}:${p.taskId}:${p.title.toLowerCase()}`;
+    case 'record_batch':
+      // Content-derived: the same batch twice in one turn is one card; any change is a new card.
+      return `rb:${p.projectKey}:${sha256Hex(canonicalJson({ t: p.taskId, a: p.answers.map((x) => [x.questionId, x.answer]), d: p.decisions.map((x) => [x.title, x.statement]) })).slice(0, 32)}`;
     case 'accept_decisions':
       return `ad:${p.projectKey}:${p.decisions.map((d) => d.decisionId).sort().join(',')}`;
     case 'dispatch_task':
@@ -614,6 +633,29 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
         statement: { type: 'string', description: "The decision in the owner's words, e.g. \"The single server cabinet produces 20 kW; size for that load.\"" },
       },
       required: ['project', 'task', 'title', 'statement'],
+    },
+  },
+  {
+    name: 'propose_record_batch',
+    description:
+      "Prepare ONE card that records SEVERAL of the owner's answers and decisions for ONE workspace at once — the owner confirms them all with ONE tap (all-or-nothing). Use it whenever one owner message gives two or more answers or facts (e.g. \"load is 20 kW, fence is 6 ft, lattice\") instead of a card per item. answers: [{questionId, answer}] — open questions of that workspace (ids from list_open_questions). decisions: [{title, statement}] — recorded as accepted decisions on `task` (required when there are decisions), so every later run of that job is given them. Up to " + String(MAX_RECORD_BATCH) + " items. Only answers and decisions are batched — never money, sends, deploys or dispatches. Nothing is recorded until the owner confirms.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key.' },
+        task: { type: 'string', description: 'Task title or id the decisions are about (the job). Required when decisions are given.' },
+        answers: {
+          type: 'array',
+          description: 'Answers to open owner-questions of this workspace.',
+          items: { type: 'object', properties: { questionId: { type: 'string' }, answer: { type: 'string' } }, required: ['questionId', 'answer'] },
+        },
+        decisions: {
+          type: 'array',
+          description: "Decisions / constraints in the owner's words.",
+          items: { type: 'object', properties: { title: { type: 'string' }, statement: { type: 'string' } }, required: ['title', 'statement'] },
+        },
+      },
+      required: ['project'],
     },
   },
   {
@@ -1639,6 +1681,64 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
         return JSON.stringify({
           prepared: true,
           note: `Prepared for the owner to confirm: record "${title}" as a decision on "${task.title}" in ${p.name}. Once confirmed, every later run of that task and the job's update card carry it. Nothing is recorded yet — do not claim it is saved.`,
+        });
+      }
+      case 'propose_record_batch': {
+        const p = resolveProject(auth.projects, argStr(input, 'project'));
+        if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
+        if (p.projectRole !== 'admin') return JSON.stringify({ error: 'You must be an admin of that workspace to record answers and decisions.' });
+        const obj = (input ?? {}) as Record<string, unknown>;
+        const rawAnswers = Array.isArray(obj.answers) ? obj.answers : [];
+        const rawDecisions = Array.isArray(obj.decisions) ? obj.decisions : [];
+        const answersIn = rawAnswers.map((a) => ({ questionId: argStr(a, 'questionId'), answer: argStr(a, 'answer').trim() }));
+        const decisionsIn = rawDecisions.map((d) => ({ title: argStr(d, 'title').replace(/\s+/g, ' ').trim(), statement: argStr(d, 'statement').trim() }));
+        const total = answersIn.length + decisionsIn.length;
+        if (total === 0) return JSON.stringify({ error: 'Give at least one answer or decision.' });
+        if (total > MAX_RECORD_BATCH) return JSON.stringify({ error: `At most ${MAX_RECORD_BATCH} items per card — split into two cards.` });
+        if (answersIn.some((a) => !a.questionId || !a.answer)) return JSON.stringify({ error: 'Each answer needs questionId and answer.' });
+        if (answersIn.some((a) => a.answer.length > 8000)) return JSON.stringify({ error: 'An answer is too long (max 8000 chars).' });
+        if (new Set(answersIn.map((a) => a.questionId)).size !== answersIn.length) return JSON.stringify({ error: 'The same question is answered twice — keep one.' });
+        if (decisionsIn.some((d) => !d.title || !d.statement)) return JSON.stringify({ error: 'Each decision needs title and statement.' });
+        if (decisionsIn.some((d) => d.title.length > 200 || d.statement.length > 2000)) {
+          return JSON.stringify({ error: 'A decision is too long (title max 200, statement max 2000 chars).' });
+        }
+        const open = answersIn.length > 0 ? await openQuestionsForOwner(auth.userId, auth.projects, auth.orgRoles) : [];
+        const answers: Array<{ questionId: string; question: string; answer: string }> = [];
+        for (const a of answersIn) {
+          const q = open.find((x) => x.questionId === a.questionId && x.projectKey === p.key);
+          if (!q) {
+            return JSON.stringify({ error: `Question ${a.questionId} is not open in ${p.name}, or you do not administer it. Call list_open_questions for valid ids.` });
+          }
+          answers.push({ questionId: q.questionId, question: q.question, answer: a.answer });
+        }
+        let task: { id: string; title: string } | null = null;
+        if (decisionsIn.length > 0) {
+          const taskRef = argStr(input, 'task');
+          if (!taskRef) return JSON.stringify({ error: 'task is required when recording decisions.' });
+          const ctx = ctxFor(auth, p);
+          const m = await withTenant(ctx, async (tx) => matchTask(await listTasks(tx, ctx, 100), taskRef));
+          if ('none' in m) return JSON.stringify({ error: 'No matching task — call list_tasks.' });
+          if ('ambiguous' in m) {
+            if (new Set(m.ambiguous.map((x) => normalizeJobTitle(x.title))).size !== 1) {
+              return JSON.stringify({ ambiguous: true, note: 'Several tasks match — ask the owner which job, or call again with the task id. Do not guess.', candidates: m.ambiguous.slice(0, 10).map((x) => ({ id: x.id, title: x.title, status: x.status })) });
+            }
+            task = [...m.ambiguous].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0]!;
+          } else {
+            task = m.task;
+          }
+        }
+        addProposal({
+          kind: 'record_batch',
+          projectKey: p.key,
+          workspaceName: p.name,
+          taskId: task?.id ?? null,
+          taskTitle: task?.title ?? null,
+          answers,
+          decisions: decisionsIn,
+        });
+        return JSON.stringify({
+          prepared: true,
+          note: `Prepared ONE card for the owner to confirm with one tap: ${answers.length} answer(s) and ${decisionsIn.length} decision(s) in ${p.name}${task ? ` (decisions on "${task.title}")` : ''}. All are recorded together, or none. Nothing is recorded yet — do not claim it is saved.`,
         });
       }
       case 'list_decision_candidates': {
