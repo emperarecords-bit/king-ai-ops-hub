@@ -58,6 +58,8 @@ export class AnthropicProvider implements AIProvider {
    * skip it up front. Process-lifetime cache only — cheap and self-healing.
    */
   private readonly noTemperatureModels = new Set<string>();
+  /** Web search was refused by the account (turned off in the Anthropic Console) — stop offering it. Self-healing on restart. */
+  private noWebSearch = false;
 
   constructor(apiKey: string) {
     // maxRetries: 0 — retry policy belongs to the engine, once, uniformly.
@@ -98,6 +100,11 @@ export class AnthropicProvider implements AIProvider {
       ...(withTemperature ? { temperature: request.temperature } : {}),
       max_tokens: request.maxOutputTokens,
     };
+  }
+
+  /** The account refused the web search tool (e.g. web search turned off for the organization). */
+  private isWebSearchUnavailable(err: unknown): boolean {
+    return err instanceof APIError && err.status === 400 && /web[_ ]search/i.test(err.message);
   }
 
   private isTemperatureDeprecated(err: unknown): boolean {
@@ -219,6 +226,17 @@ export class AnthropicProvider implements AIProvider {
         input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
       }));
       const messages: Anthropic.MessageParam[] = request.turns.map(toMessageParam);
+      // Web research (owner-approved 2026-10-23): Anthropic's server-side web search, capped per turn. Results are
+      // untrusted page text the model reads — nothing is acted on without a confirm card. If the account has web
+      // search turned off the API refuses the request; then the turn (and later ones) run without it.
+      let webSearches = 0;
+      const toolsFor = (): Anthropic.ToolUnion[] =>
+        request.webSearch && !this.noWebSearch
+          ? [
+              ...anthropicTools,
+              { type: 'web_search_20250305', name: 'web_search', max_uses: request.webSearch.maxUses } as Anthropic.WebSearchTool20250305,
+            ]
+          : anthropicTools;
 
       let inputTokens = 0;
       let outputTokens = 0;
@@ -258,7 +276,7 @@ export class AnthropicProvider implements AIProvider {
               system: request.system,
               messages,
               max_tokens: budget,
-              tools: anthropicTools,
+              tools: toolsFor(),
               ...(wrapUp ? { tool_choice: { type: 'none' as const } } : {}),
               ...(withTemperature ? { temperature: request.temperature } : {}),
               stream: true,
@@ -266,26 +284,36 @@ export class AnthropicProvider implements AIProvider {
             { timeout: request.timeoutMs, signal: request.signal },
           );
 
-        let stream: Awaited<ReturnType<typeof open>>;
-        if (this.noTemperatureModels.has(request.model)) {
-          stream = await open(false);
-        } else {
+        const openAdaptive = async (): Promise<Awaited<ReturnType<typeof open>>> => {
+          if (this.noTemperatureModels.has(request.model)) return open(false);
           try {
-            stream = await open(true);
+            return await open(true);
           } catch (err) {
             if (this.isTemperatureDeprecated(err)) {
               this.noTemperatureModels.add(request.model);
-              stream = await open(false);
-            } else {
-              throw err;
+              return open(false);
             }
+            throw err;
+          }
+        };
+        let stream: Awaited<ReturnType<typeof open>>;
+        try {
+          stream = await openAdaptive();
+        } catch (err) {
+          if (request.webSearch && !this.noWebSearch && this.isWebSearchUnavailable(err)) {
+            this.noWebSearch = true;
+            stream = await openAdaptive();
+          } else {
+            throw err;
           }
         }
 
         // Accumulate assistant content blocks (by stream index) for this turn.
         type Block =
           | { type: 'text'; text: string }
-          | { type: 'tool_use'; id: string; name: string; json: string };
+          | { type: 'tool_use'; id: string; name: string; json: string }
+          | { type: 'server_tool_use'; id: string; name: string; json: string }
+          | { type: 'server_result'; block: Anthropic.ContentBlockParam };
         const blocks: Block[] = [];
         let curStop = 'unknown';
 
@@ -297,22 +325,44 @@ export class AnthropicProvider implements AIProvider {
             if (cb.type === 'text') blocks[event.index] = { type: 'text', text: '' };
             else if (cb.type === 'tool_use')
               blocks[event.index] = { type: 'tool_use', id: cb.id, name: cb.name, json: '' };
+            else if (cb.type === 'server_tool_use') {
+              blocks[event.index] = { type: 'server_tool_use', id: cb.id, name: cb.name, json: '' };
+              yield { kind: 'tool_start', name: cb.name };
+            } else if (cb.type === 'web_search_tool_result') {
+              // Arrives complete; kept verbatim so a later round can send it back as the API requires.
+              blocks[event.index] = { type: 'server_result', block: cb as unknown as Anthropic.ContentBlockParam };
+              yield { kind: 'tool_end', name: 'web_search', ok: Array.isArray(cb.content) };
+            }
           } else if (event.type === 'content_block_delta') {
             const b = blocks[event.index];
             if (event.delta.type === 'text_delta' && b?.type === 'text') {
               b.text += event.delta.text;
               yield { kind: 'delta', text: event.delta.text };
-            } else if (event.delta.type === 'input_json_delta' && b?.type === 'tool_use') {
+            } else if (event.delta.type === 'input_json_delta' && (b?.type === 'tool_use' || b?.type === 'server_tool_use')) {
               b.json += event.delta.partial_json;
             }
           } else if (event.type === 'message_delta') {
             outputTokens += event.usage.output_tokens;
+            webSearches += (event.usage as { server_tool_use?: { web_search_requests?: number } | null }).server_tool_use?.web_search_requests ?? 0;
             if (event.delta.stop_reason) curStop = event.delta.stop_reason.toLowerCase();
           }
         }
         stopReason = curStop;
 
         const present = blocks.filter((b): b is Block => Boolean(b));
+        const toParam = (b: Block): Anthropic.ContentBlockParam =>
+          b.type === 'text'
+            ? { type: 'text', text: b.text }
+            : b.type === 'tool_use'
+              ? { type: 'tool_use', id: b.id, name: b.name, input: parseToolInput(b.json) }
+              : b.type === 'server_tool_use'
+                ? ({ type: 'server_tool_use', id: b.id, name: b.name, input: parseToolInput(b.json) } as Anthropic.ContentBlockParam)
+                : b.block;
+        // A long server-side search turn can pause: send its content back as-is and let the model continue.
+        if (curStop === 'pause_turn') {
+          messages.push({ role: 'assistant', content: present.map(toParam) });
+          continue;
+        }
         if (curStop === 'max_tokens') {
           const spoke = present.some((b) => b.type === 'text' && b.text.trim().length > 0);
           if (!spoke && !roomRetried) {
@@ -345,11 +395,7 @@ export class AnthropicProvider implements AIProvider {
 
         // Record the assistant's turn (text + tool_use), then run each tool and
         // feed the results back as a user turn.
-        const assistantContent: Anthropic.ContentBlockParam[] = present.map((b) =>
-          b.type === 'text'
-            ? { type: 'text', text: b.text }
-            : { type: 'tool_use', id: b.id, name: b.name, input: parseToolInput(b.json) },
-        );
+        const assistantContent: Anthropic.ContentBlockParam[] = present.map(toParam);
         messages.push({ role: 'assistant', content: assistantContent });
 
         const toolResults: Anthropic.ContentBlockParam[] = [];
@@ -374,7 +420,7 @@ export class AnthropicProvider implements AIProvider {
         messages.push({ role: 'user', content: toolResults });
       }
 
-      yield { kind: 'done', usage: { inputTokens, outputTokens }, stopReason, cutOff, roomRetried };
+      yield { kind: 'done', usage: { inputTokens, outputTokens }, stopReason, cutOff, roomRetried, webSearches };
     } catch (err) {
       throw this.mapError(err);
     }

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { HELP_FIRST } from '@/domain/opschat/help-first';
+import { HELP_FIRST, OPS_CHAT_WEB_SEARCH_MAX_USES } from '@/domain/opschat/help-first';
 import { AppError, RateLimitedError, toPublicMessage } from '@/lib/errors';
 import { log } from '@/lib/log';
 import { requireUser, listMyProjectsWithOrgRoles, tenantForUser } from '@/domain/auth/guard';
@@ -507,7 +507,7 @@ export async function POST(req: Request): Promise<Response> {
         const provider = getProvider('anthropic');
         if (!provider.streamWithTools) throw new Error('Tool-use is not available on this provider.');
         iterator = provider.streamWithTools(
-          { model: OPS_CHAT_MODEL, system, turns: promptTurns, temperature: 0.3, maxOutputTokens: OPS_CHAT_MAX_OUTPUT_TOKENS, timeoutMs: 90_000, signal },
+          { model: OPS_CHAT_MODEL, system, turns: promptTurns, temperature: 0.3, maxOutputTokens: OPS_CHAT_MAX_OUTPUT_TOKENS, timeoutMs: 90_000, signal, webSearch: { maxUses: OPS_CHAT_WEB_SEARCH_MAX_USES } },
           toolset.tools,
           toolset.runTool,
         )[Symbol.asyncIterator]();
@@ -548,6 +548,7 @@ export async function POST(req: Request): Promise<Response> {
               cutOff: Boolean(ev.cutOff),
               roomRetried: Boolean(ev.roomRetried),
               proposals: toolset.getProposals().length,
+              webSearches: ev.webSearches ?? 0,
             });
             await finishComplete(Boolean(ev.cutOff));
             break;
