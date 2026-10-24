@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { type AIProvider, type ProviderId } from '@/types/provider';
 import { getProvider as defaultGetProvider } from '@/providers/registry';
 import { FLAGSHIP_MODELS } from '@/orchestration/routing';
+import { OPS_CHAT_MAX_MESSAGE_CHARS } from '@/domain/opschat/limits';
 
 /**
  * Ops Chat — Council review layer (v2 "Council Mode"). OWNER-TRIGGERED, READ/REVIEW ONLY.
@@ -58,7 +59,8 @@ export const COUNCIL_HEARTBEAT_MS = 10_000;
 export const COUNCIL_QUORUM = 2;
 
 /** Max input sizes accepted into Council (also enforced by the route schema). */
-export const COUNCIL_MAX_QUESTION_CHARS = 4000;
+/** The owner question is the Ops Chat message it answered, so it may be as long as one. */
+export const COUNCIL_MAX_QUESTION_CHARS = OPS_CHAT_MAX_MESSAGE_CHARS;
 export const COUNCIL_MAX_ANSWER_CHARS = 12_000;
 
 /** A reviewer's concise, conclusions-only output (or a graceful failure marker). */

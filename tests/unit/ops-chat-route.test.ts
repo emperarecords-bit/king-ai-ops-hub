@@ -140,6 +140,21 @@ describe('POST /api/ops-chat (v2) — input validation', () => {
     expect(res.status).toBe(400);
     expect(h.streamWithTools).not.toHaveBeenCalled();
   });
+
+  // Hub prod 2026-10-23: a pasted Claude conversation was cut off at the old 4,000-char limit (stored at 3,999).
+  it('a long pasted message (30,000 chars) is accepted whole; 30,001 is refused before any model call', async () => {
+    h.streamWithTools.mockImplementation(async function* () {
+      yield { kind: 'delta', text: 'ok' };
+      yield { kind: 'done', usage: { inputTokens: 1, outputTokens: 1 }, stopReason: 'end_turn' };
+    });
+    const ok = await call({ message: 'x'.repeat(30_000), conversationId: CONV, turnId: TURN });
+    expect(ok.status).toBe(200);
+    await ok.text();
+    h.streamWithTools.mockClear();
+    const tooLong = await call({ message: 'x'.repeat(30_001), conversationId: CONV, turnId: TURN });
+    expect(tooLong.status).toBe(400);
+    expect(h.streamWithTools).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /api/ops-chat — P5a linked runs in the prompt (best-effort)', () => {
