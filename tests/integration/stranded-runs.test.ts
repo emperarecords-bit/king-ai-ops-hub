@@ -46,7 +46,7 @@ async function seedRun(c: Case, opts: { taskStatus: string; startedAt: Date; job
   await admin`insert into tasks (id, org_id, project_id, title, input, provider_selection, created_by, status)
     values (${c.task}, ${ids.org}, ${ids.project}, 'stranded fixture', 'x', 'anthropic', ${ids.user}, ${opts.taskStatus})`;
   await admin`insert into runs (id, org_id, project_id, task_id, primary_agent_id, classification, status, reliability_state, checkpointed_result, started_at)
-    values (${c.run}, ${ids.org}, ${ids.project}, ${c.task}, ${ids.agent}, 'live', 'running', 'finalizing', 'draft answer', ${opts.startedAt})`;
+    values (${c.run}, ${ids.org}, ${ids.project}, ${c.task}, ${ids.agent}, 'live', 'running', 'finalizing', 'draft answer', ${opts.startedAt.toISOString()})`;
   await admin`insert into run_jobs (org_id, project_id, task_id, status) values (${ids.org}, ${ids.project}, ${c.task}, ${opts.jobStatus})`;
   if (opts.audit) {
     await tx((t) =>
@@ -72,7 +72,7 @@ beforeAll(async () => {
   await seedRun(cases.liveJob, { taskStatus: 'running', startedAt: old, jobStatus: 'running', audit: true });
   await seedRun(cases.hasLaterRun, { taskStatus: 'running', startedAt: old, jobStatus: 'done', audit: true });
   await admin`insert into runs (id, org_id, project_id, task_id, primary_agent_id, classification, status, started_at)
-    values (${randomUUID()}, ${ids.org}, ${ids.project}, ${cases.hasLaterRun.task}, ${ids.agent}, 'live', 'completed', ${new Date(old.getTime() + DAY)})`;
+    values (${randomUUID()}, ${ids.org}, ${ids.project}, ${cases.hasLaterRun.task}, ${ids.agent}, 'live', 'completed', ${new Date(old.getTime() + DAY).toISOString()})`;
   await seedRun(cases.noFinalizationAudit, { taskStatus: 'running', startedAt: old, jobStatus: 'done', audit: false });
 });
 

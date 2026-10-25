@@ -36,7 +36,7 @@ const strandedPredicate = (cutoff: Date) => sql`
   r.status = 'running'
   and r.reliability_state = 'finalizing'
   and r.consolidated_result is null
-  and r.started_at < ${cutoff}
+  and r.started_at < ${cutoff.toISOString()}::timestamptz
   and not exists (select 1 from run_jobs j where j.task_id = r.task_id and j.status in ('queued', 'running'))
   and not exists (select 1 from runs r2 where r2.task_id = r.task_id and r2.id <> r.id and r2.started_at > r.started_at)
   and exists (select 1 from audit_logs a where a.entity_type = 'run' and a.entity_id = r.id and a.action = 'run.finalization_completed')`;
