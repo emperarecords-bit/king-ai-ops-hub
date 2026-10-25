@@ -4,7 +4,7 @@ import { withTenant } from '@/db/tenant';
 import { approvals, runJobs, runs, tasks } from '@/db/schema';
 import { type TenantContext } from '@/types/domain';
 import { describeLinkedRun, RESULT_EXCERPT_CHARS, type LinkedRunFacts, type LinkedRunView } from '@/domain/opschat/linked-run-view';
-import { allStems, briefDeliverables, notFoundHeadings } from '@/domain/opschat/deliverables';
+import { allStems, briefDeliverables, notFoundHeadings, RESULT_HEADING_SQL_PATTERN } from '@/domain/opschat/deliverables';
 import { UNREVIEWED_DRAFT_BANNER } from '@/orchestration/engine';
 
 /**
@@ -103,13 +103,17 @@ export async function loadLinkedRunFacts(tx: DbTx, proposalIds: readonly string[
       const stems = allStems(ds);
       const row = (
         await tx
-          .select({ found: sql<boolean[]>`array[${sql.join(stems.map((s) => sql`position(${s} in lower(${runs.consolidatedResult})) > 0`), sql`, `)}]` })
+          .select({
+            found: sql<boolean[]>`array[${sql.join(stems.map((s) => sql`position(${s} in lower(${runs.consolidatedResult})) > 0`), sql`, `)}]`,
+            // Only the result's section heading lines leave the database, never its body.
+            headings: sql<string[]>`(select coalesce(array_agg(m[1]), '{}') from regexp_matches(${runs.consolidatedResult}, ${RESULT_HEADING_SQL_PATTERN}, 'gn') as m)`,
+          })
           .from(runs)
           .where(eq(runs.id, r.id))
           .limit(1)
       )[0];
       const found = new Set(stems.filter((_, i) => row?.found?.[i] === true));
-      const missing = notFoundHeadings(ds, found);
+      const missing = notFoundHeadings(ds, found, row?.headings ?? []);
       if (missing.length > 0) notFoundByRun.set(r.id, missing);
     }
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { allStems, briefDeliverables, deliverablesNotFound, notFoundHeadings, notFoundSentence } from '@/domain/opschat/deliverables';
+import { allStems, briefDeliverables, deliverablesNotFound, notFoundHeadings, notFoundSentence, RESULT_HEADING_SQL_PATTERN, resultHeadings } from '@/domain/opschat/deliverables';
 import { describeLinkedRun } from '@/domain/opschat/linked-run-view';
 import { completionReplyLead } from '@/domain/opschat/conversation-continuity';
 
@@ -74,7 +74,83 @@ describe('deliverablesNotFound — the production fixture', () => {
     const ds = briefDeliverables(BRIEF);
     const lower = RESULT.toLowerCase();
     const found = new Set(allStems(ds).filter((s) => lower.includes(s)));
-    expect(notFoundHeadings(ds, found)).toEqual(deliverablesNotFound(BRIEF, RESULT));
+    expect(notFoundHeadings(ds, found, resultHeadings(RESULT))).toEqual(deliverablesNotFound(BRIEF, RESULT));
+  });
+});
+
+/**
+ * Hub prod 2026-10-24, run b7e7522e (read-only): a COMPLETE result was reported "not found" for all three items,
+ * because every incidental word had to appear ("capacity", "unresolved", "needing", "component"). Its own sections are
+ * "3. CFM Calculation & Duct Sizing Options", "7. Vendor Material List (Quantities)" and "8. Open Items (…)".
+ */
+const BRIEF_B7 = `=== ORIGINAL INSTRUCTIONS ===
+Finalize the punch list and vendor quote prep. Deliver:
+1. CFM calculation with 2–3 sizing options, each with tradeoffs (capacity, ductwork implications, cost/complexity)
+2. A clear open-items list (anything still unresolved or needing owner input)
+3. A vendor material list (units, ductwork, dampers, controls, structural components, etc. with quantities)
+
+=== WHAT TO DO ===
+Update the job.`;
+
+const RESULT_B7 = `# Server Cabinet Cooling — Dual Bard FUSION-TEC Punch List & Vendor Quote Prep (Finalized)
+## 2. System Design Summary
+Clearances per manufacturer; two units, lead-lag.
+## 3. CFM Calculation & Duct Sizing Options
+**Load conversion:** 20 kW × 3.412 = **68,243 BTU/hr** (5.69 tons)
+| Option | Design ΔT | CFM | Duct size (H×W) | Actual velocity | Tradeoffs |
+## 7. Vendor Material List (Quantities)
+| Item | Qty | Notes |
+| Bard FUSION-TEC unit | 2 | wall-mount |
+| Motorized damper | 2 | isolation |
+| Lead-lag controller | 1 | 24-hr rotation |
+## 8. Open Items (Owner / Field Input Still Needed)
+1. Pick duct Option 1, 2 or 3.
+2. Confirm exact model numbers.`;
+
+describe('deliverablesNotFound — main words and section headings (run b7e7522e)', () => {
+  it('main words come from the item heading before "(" or ","', () => {
+    const ds = briefDeliverables(BRIEF_B7);
+    expect(ds.map((d) => d.mainStems)).toEqual([['calcu', 'sizin', 'optio'], ['clear', 'open'], ['vendo', 'mater']]);
+  });
+
+  it('reads the result headings (markdown and whole-line bold), not table rows or body text', () => {
+    expect(resultHeadings(RESULT_B7)).toEqual([
+      '# Server Cabinet Cooling — Dual Bard FUSION-TEC Punch List & Vendor Quote Prep (Finalized)',
+      '## 2. System Design Summary',
+      '## 3. CFM Calculation & Duct Sizing Options',
+      '## 7. Vendor Material List (Quantities)',
+      '## 8. Open Items (Owner / Field Input Still Needed)',
+    ]);
+    expect(resultHeadings('**Bold heading**\r\nbody **not** a heading')).toEqual(['**Bold heading**']);
+  });
+
+  it('the complete result is no longer flagged', () => {
+    expect(deliverablesNotFound(BRIEF_B7, RESULT_B7)).toEqual([]);
+  });
+
+  it('still flags an item whose main words are absent', () => {
+    const noVendorList = RESULT_B7.replace(/## 7\. Vendor Material List[\s\S]*?(?=## 8\.)/, '');
+    expect(deliverablesNotFound(BRIEF_B7, noVendorList)).toEqual(['A vendor material list (units, ductwork, dampers, controls, structural component']);
+  });
+
+  it('body match needs all main words AND at least three quarters of all words', () => {
+    const ds = briefDeliverables(BRIEF_B7);
+    const open = ds[1]!; // stems: clear, open, anyth, still, unres, needi, owner, input
+    const has = (...s: string[]) => new Set(s);
+    expect(notFoundHeadings([open], has('clear', 'open', 'anyth', 'still', 'owner', 'input'))).toEqual([]); // 6 of 8
+    expect(notFoundHeadings([open], has('clear', 'open', 'anyth', 'still', 'owner'))).toEqual([open.heading]); // 5 of 8
+    expect(notFoundHeadings([open], has('anyth', 'still', 'unres', 'needi', 'owner', 'input', 'clear'))).toEqual([open.heading]); // main "open" missing
+  });
+
+  it('the SQL path (found stems + headings) agrees with the in-memory path', () => {
+    const ds = briefDeliverables(BRIEF_B7);
+    const lower = RESULT_B7.toLowerCase();
+    const found = new Set(allStems(ds).filter((s) => lower.includes(s)));
+    expect(notFoundHeadings(ds, found, resultHeadings(RESULT_B7))).toEqual(deliverablesNotFound(BRIEF_B7, RESULT_B7));
+  });
+
+  it('the SQL heading pattern is the same expression as resultHeadings', () => {
+    expect(new RegExp(RESULT_HEADING_SQL_PATTERN, 'gm').source).toBe(/^(#{1,6} [^\r\n]{1,200}|\*\*[^\r\n]{1,200}\*\*)\r?$/gm.source);
   });
 });
 
