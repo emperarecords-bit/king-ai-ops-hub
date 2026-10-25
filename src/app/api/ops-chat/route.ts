@@ -29,6 +29,7 @@ import { loadContinuityCards } from '@/domain/opschat/continuity';
 import { conversationContextSection } from '@/domain/opschat/conversation-continuity';
 import { type LinkedRunView } from '@/domain/opschat/linked-run-view';
 import { tryClaimConversation, tryClaimTurn, type TurnClaim } from '@/domain/opschat/turn-claim';
+import { recordOpsChatUsage } from '@/domain/opschat/usage';
 import { type ToolLoopEvent, type Turn, type TurnImage } from '@/types/provider';
 import { ATTACHMENT_LIMITS } from '@/domain/opschat/attachment-limits';
 import { decoratePromptTurns } from '@/domain/opschat/attachment-policy';
@@ -550,6 +551,25 @@ export async function POST(req: Request): Promise<Response> {
               proposals: toolset.getProposals().length,
               webSearches: ev.webSearches ?? 0,
             });
+            // The same numbers, durably, for the usage page (ops_chat_usage — never a workspace's spend limit).
+            // Best-effort: a failed write is logged and never fails or delays the owner's reply beyond this await.
+            try {
+              await withUser({ userId }, (tx) =>
+                recordOpsChatUsage(tx, {
+                  userId,
+                  conversationId,
+                  ownerMessageId,
+                  provider: 'anthropic',
+                  model: OPS_CHAT_MODEL,
+                  usage: ev.usage,
+                  webSearches: ev.webSearches ?? 0,
+                  stopReason: ev.stopReason ?? null,
+                  cutOff: Boolean(ev.cutOff),
+                }),
+              );
+            } catch (err) {
+              log.warn('ops-chat usage record failed (turn continues)', { errorClass: err instanceof Error ? err.name : 'unknown' });
+            }
             await finishComplete(Boolean(ev.cutOff));
             break;
           }
