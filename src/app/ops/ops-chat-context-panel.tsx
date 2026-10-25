@@ -11,6 +11,7 @@ export interface PanelUsage {
 
 const TONE: Record<PanelJob['state'], string> = {
   starting: 'text-[var(--muted)]',
+  untracked: 'text-[var(--muted)]',
   queued: 'text-[var(--muted)]',
   running: 'text-[var(--accent)]',
   ready: 'text-[#7bd88f]',
