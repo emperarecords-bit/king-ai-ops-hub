@@ -43,7 +43,8 @@
     "secrets:rewrap": "tsx scripts/rewrap-secrets.ts",
     "verify": "npm run typecheck && npm run lint && npm run test",
     "test:rls": "node scripts/test-rls.mjs",
-    "test:s3": "vitest run -c vitest.s3.config.ts"
+    "test:s3": "vitest run -c vitest.s3.config.ts",
+    "repair:stranded-runs": "tsx --conditions=react-server scripts/repair-stranded-runs.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.114.0",
