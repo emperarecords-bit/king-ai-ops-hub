@@ -1083,6 +1083,23 @@ begin
          using (user_id = app.current_user_id())
          with check (user_id = app.current_user_id())';
   end if;
+
+  -- Ops Chat attachments (migration 0086): owner-private like the rest of the Ops Chat store.
+  -- Metadata only (bodies live in the object store). Immutable except the ONE link to the
+  -- sending owner message (message_id, set once by the domain while null). No delete grant:
+  -- conversation history is never deleted.
+  if to_regclass('public.ops_chat_attachments') is not null then
+    grant select, insert on ops_chat_attachments to app_server;
+    revoke update on ops_chat_attachments from app_server;
+    grant update (message_id, updated_at) on ops_chat_attachments to app_server;
+    alter table ops_chat_attachments enable row level security;
+    alter table ops_chat_attachments force row level security;
+    drop policy if exists ops_chat_attachments_self on ops_chat_attachments;
+    execute
+      'create policy ops_chat_attachments_self on ops_chat_attachments
+         using (user_id = app.current_user_id())
+         with check (user_id = app.current_user_id())';
+  end if;
 end
 $$;
 

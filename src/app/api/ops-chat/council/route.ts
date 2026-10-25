@@ -6,7 +6,15 @@ import { getDb } from '@/db/client';
 import { consumeRateLimit } from '@/domain/usage/rate-limit';
 import { serverEnv } from '@/lib/env.server';
 import { buildPulse, pulseContext } from '@/domain/opschat/pulse';
-import { runCouncil, CouncilUnavailableError, COUNCIL_MAX_QUESTION_CHARS, COUNCIL_MAX_ANSWER_CHARS } from '@/domain/opschat/council';
+import { heartbeatJson } from './heartbeat';
+import {
+  runCouncil,
+  CouncilUnavailableError,
+  COUNCIL_HEARTBEAT_MS,
+  COUNCIL_MAX_QUESTION_CHARS,
+  COUNCIL_MAX_ANSWER_CHARS,
+  type CouncilResult,
+} from '@/domain/opschat/council';
 
 /**
  * POST — Ops Chat COUNCIL review (owner-triggered). REVIEW ONLY.
@@ -100,20 +108,15 @@ export async function POST(req: Request): Promise<Response> {
     return Response.json({ error: toPublicMessage(err) }, { status: 500 });
   }
 
-  try {
-    const result = await runCouncil({
-      question: body.message,
-      primaryAnswer: body.answer,
-      context,
-      focusWorkspace,
-      signal: req.signal,
-    });
-    return Response.json(result);
-  } catch (err) {
-    if (err instanceof CouncilUnavailableError) {
-      return Response.json({ error: err.message }, { status: 503 });
-    }
+  // The Council runs on reasoning models and can take well over a minute. Every check that can fail cleanly has
+  // already returned a proper status code above; from here the response is a 200 JSON body that is preceded by
+  // whitespace heartbeats (valid JSON — leading whitespace is ignored by any parser) so no proxy closes a quiet
+  // connection. The body is the Council result, or { error } with the same safe message the 503/500 used to carry.
+  const run = (): Promise<CouncilResult> =>
+    runCouncil({ question: body.message, primaryAnswer: body.answer, context, focusWorkspace, signal: req.signal });
+  return heartbeatJson(run, COUNCIL_HEARTBEAT_MS, (err) => {
+    if (err instanceof CouncilUnavailableError) return { error: err.message };
     log.error('ops-chat council failed', { err });
-    return Response.json({ error: 'Something went wrong.' }, { status: 500 });
-  }
+    return { error: 'Something went wrong.' };
+  });
 }

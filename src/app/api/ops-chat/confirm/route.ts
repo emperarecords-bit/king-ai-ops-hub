@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AppError, RateLimitedError, toPublicMessage } from '@/lib/errors';
 import { log } from '@/lib/log';
+import { writeAudit } from '@/domain/audit/audit';
 import { requireTenant, requireUser } from '@/domain/auth/guard';
 import { withTenant, withUser } from '@/db/tenant';
 import { getDb } from '@/db/client';
@@ -10,9 +11,12 @@ import { serverEnv } from '@/lib/env.server';
 import { answerOwnerQuestion } from '@/domain/questions/questions';
 import { decideApproval } from '@/domain/approvals/approvals';
 import { executeApprovedIfEligible } from '@/domain/execution/execute-on-approval';
-import { createTask, getTask } from '@/domain/tasks/tasks';
-import { enqueueRun } from '@/domain/jobs/jobs';
+import { createTask } from '@/domain/tasks/tasks';
+import { enqueueRun, requestRerun, RerunRefusedError } from '@/domain/jobs/jobs';
 import { listAgents } from '@/domain/agents/agents';
+import { assertUpdateCardCurrent } from '@/domain/opschat/update-card';
+import { acceptOwnerCandidates, MAX_ACCEPT_PER_CARD, recordOwnerDecision } from '@/domain/opschat/owner-decisions';
+import { MAX_RECORD_BATCH } from '@/domain/opschat/tools';
 import {
   executeGitHubPrFromOpsChat,
   executeGitHubMergeFromOpsChat,
@@ -21,6 +25,7 @@ import {
 } from '@/domain/opschat/github-action';
 import { executeSupabaseDeployFromOpsChat } from '@/domain/opschat/supabase-action';
 import { executeVercelMutationFromOpsChat, type OpsChatVercelMutationInput } from '@/domain/opschat/vercel-action';
+import { executeAccurateBidsFromOpsChat } from '@/domain/opschat/accuratebids-action';
 import { loadProposal, transitionProposal } from '@/domain/opschat/conversations';
 
 /**
@@ -79,11 +84,52 @@ const ActionBody = z.discriminatedUnion('action', [
     title: z.string().trim().min(1).max(200),
     instructions: z.string().trim().min(1).max(32_000),
     agentId: z.string().uuid(),
+    /** Absent on cards stored before reviewer assignment existed → no reviewer (unchanged behavior). */
+    reviewerAgentId: z.string().uuid().nullish(),
+    /** P5c-2: an "update this job" card's frozen basis — re-checked for freshness at confirm. */
+    updateOf: z
+      .object({
+        taskId: z.string().uuid(),
+        taskTitle: z.string(),
+        runId: z.string().uuid(),
+        decisions: z.number().int().nonnegative(),
+        decisionIds: z.array(z.string().uuid()).max(500).optional(),
+        taskIds: z.array(z.string().uuid()).max(50).optional(),
+        siblingRuns: z.array(z.object({ taskId: z.string().uuid(), runId: z.string().uuid() })).max(50).optional(),
+        approvedIds: z.array(z.string().uuid()).max(50).optional(),
+        constraintIds: z.array(z.string().uuid()).max(50).optional(),
+      })
+      .nullish(),
   }),
   z.object({
     action: z.literal('rerun_task'),
     projectKey: z.string().min(1),
     taskId: z.string().uuid(),
+  }),
+  z.object({
+    action: z.literal('record_decision'),
+    projectKey: z.string().min(1),
+    taskId: z.string().uuid(),
+    title: z.string().trim().min(1).max(200),
+    statement: z.string().trim().min(1).max(2000),
+  }),
+  z
+    .object({
+      action: z.literal('record_batch'),
+      projectKey: z.string().min(1),
+      taskId: z.string().uuid().nullish(),
+      answers: z.array(z.object({ questionId: z.string().uuid(), answer: z.string().trim().min(1).max(8000) })).max(MAX_RECORD_BATCH),
+      decisions: z.array(z.object({ title: z.string().trim().min(1).max(200), statement: z.string().trim().min(1).max(2000) })).max(MAX_RECORD_BATCH),
+    })
+    .refine((b) => b.answers.length + b.decisions.length >= 1 && b.answers.length + b.decisions.length <= MAX_RECORD_BATCH, 'between 1 and MAX_RECORD_BATCH items')
+    .refine((b) => b.decisions.length === 0 || Boolean(b.taskId), 'decisions need a task'),
+  z.object({
+    action: z.literal('accept_decisions'),
+    projectKey: z.string().min(1),
+    decisions: z
+      .array(z.object({ decisionId: z.string().uuid(), taskId: z.string().uuid() }))
+      .min(1)
+      .max(MAX_ACCEPT_PER_CARD),
   }),
   z.object({
     action: z.literal('execute_github_pr'),
@@ -148,6 +194,14 @@ const ActionBody = z.discriminatedUnion('action', [
     expectedCurrentProductionDeploymentId: z.string().trim().regex(/^dpl_[A-Za-z0-9]{8,64}$/).optional(),
     description: z.string().trim().max(500).optional(),
   }),
+  z.object({
+    action: z.literal('execute_accuratebids'),
+    // The stored proposal kind — must match the payload's own kind (checked in runAction).
+    kind: z.enum(['accuratebids_quote', 'accuratebids_invoice', 'accuratebids_send']),
+    projectKey: z.string().min(1),
+    // The exact executor payload the owner saw; re-validated per kind by the bridge.
+    payload: z.record(z.string(), z.unknown()),
+  }),
 ]);
 
 /** The stored proposal `kind` → the confirm `action`. */
@@ -156,12 +210,18 @@ const KIND_TO_ACTION: Record<string, z.infer<typeof ActionBody>['action']> = {
   decide_approval: 'decide_approval',
   dispatch_task: 'dispatch_task',
   rerun_task: 'rerun_task',
+  record_decision: 'record_decision',
+  accept_decisions: 'accept_decisions',
+  record_batch: 'record_batch',
   github_pr: 'execute_github_pr',
   github_merge: 'execute_github_merge',
   github_rerun: 'execute_github_rerun',
   github_revert: 'execute_github_revert',
   supabase_deploy: 'execute_supabase_deploy',
   vercel_mutation: 'execute_vercel_mutation',
+  accuratebids_quote: 'execute_accuratebids',
+  accuratebids_invoice: 'execute_accuratebids',
+  accuratebids_send: 'execute_accuratebids',
 };
 
 function statusFor(err: unknown): number {
@@ -185,11 +245,68 @@ function requireAdmin(projectRole: string): void {
 
 /** Run the governed action with server-stored fields. Returns the `executed` result (or null
  *  for actions that produce none). Throws on failure — the caller maps that to stale/error. */
-async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext): Promise<unknown> {
+/**
+ * P4 — structured proposal lifecycle audit: ops_chat.proposal.{confirmed,cancelled,stale,error} with every id the
+ * outcome knows (conversation, message, task, job, approval). Best-effort: the card's state is already recorded,
+ * so a failed audit is logged, never surfaced as a failed action.
+ */
+async function auditProposalLifecycle(
+  ctx: TenantContext,
+  stored: { id: string; conversationId: string; messageId: string; kind: string; proposal: unknown },
+  state: 'confirmed' | 'cancelled' | 'stale' | 'error',
+  executed: unknown,
+  error?: string,
+): Promise<void> {
+  const p = (stored.proposal ?? {}) as Record<string, unknown>;
+  const r = executed && typeof executed === 'object' ? (executed as Record<string, unknown>) : {};
+  const id = (v: unknown) => (typeof v === 'string' && v.length > 0 ? v : null);
+  const detail: Record<string, unknown> = {
+    proposalId: stored.id,
+    conversationId: stored.conversationId,
+    messageId: stored.messageId,
+    kind: stored.kind,
+    taskId: id(r.taskId) ?? id(p.taskId),
+    jobId: id(r.jobId),
+    approvalId: id(p.approvalId) ?? id(r.approvalId),
+    outcome: id(r.outcome),
+    ...(error ? { error: error.slice(0, 300) } : {}),
+  };
+  for (const k of Object.keys(detail)) if (detail[k] === null) delete detail[k];
+  try {
+    await withTenant(ctx, (tx) =>
+      writeAudit(tx, ctx, { action: `ops_chat.proposal.${state}`, entityType: 'ops_chat_proposal', entityId: stored.id, detail }),
+    );
+  } catch (err) {
+    log.warn('ops-chat proposal lifecycle audit failed', { errorClass: err instanceof Error ? err.name : 'unknown', state });
+  }
+}
+
+async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext, proposalId: string): Promise<unknown> {
   switch (body.action) {
     case 'answer_question': {
       await withTenant(ctx, (tx) => answerOwnerQuestion(tx, ctx, body.questionId, body.answer));
       return null;
+    }
+    case 'record_decision': {
+      // Accepted, task-scoped guidance in ONE transaction (createDecision + acceptDecision; admin-only in the domain).
+      const r = await withTenant(ctx, (tx) => recordOwnerDecision(tx, ctx, { taskId: body.taskId, title: body.title, statement: body.statement }));
+      return { outcome: 'recorded', decisionIds: [r.decisionId] };
+    }
+    case 'accept_decisions': {
+      const r = await withTenant(ctx, (tx) => acceptOwnerCandidates(tx, ctx, body.decisions));
+      return { outcome: 'accepted', decisionIds: r.decisionIds };
+    }
+    case 'record_batch': {
+      // ONE transaction: every answer and decision is recorded, or none is (any failure rolls the whole batch back).
+      const decisionIds = await withTenant(ctx, async (tx) => {
+        for (const a of body.answers) await answerOwnerQuestion(tx, ctx, a.questionId, a.answer);
+        const ids: string[] = [];
+        for (const d of body.decisions) {
+          ids.push((await recordOwnerDecision(tx, ctx, { taskId: body.taskId!, title: d.title, statement: d.statement })).decisionId);
+        }
+        return ids;
+      });
+      return { outcome: 'recorded', answered: body.answers.length, decisionIds };
     }
     case 'decide_approval': {
       await withTenant(ctx, (tx) => decideApproval(tx, ctx, body.approvalId, body.decision, body.note));
@@ -209,32 +326,72 @@ async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext): 
       return executed;
     }
     case 'dispatch_task': {
-      const agent = (await withTenant(ctx, (tx) => listAgents(tx, ctx))).find((a) => a.id === body.agentId && a.enabled);
-      if (!agent) throw new AppError('not_found', 'That agent is not available in this workspace.');
-      const taskId = await withTenant(ctx, async (tx) => {
+      // Agent truth: the card's agent (and reviewer) must still be exactly what runs. If routing changed since
+      // the card was shown (agent disabled / removed / no longer primary), refuse — the owner gets a new card
+      // naming the new agent rather than a run by someone they were not told about. Nothing is started.
+      const ags = await withTenant(ctx, (tx) => listAgents(tx, ctx));
+      const agent = ags.find((a) => a.id === body.agentId && a.enabled && a.role === 'primary');
+      if (!agent) {
+        throw new AppError('conflict', 'The agent on this card is no longer available — ask Ops Chat for a new card. Nothing was started.');
+      }
+      const reviewer = body.reviewerAgentId ? ags.find((a) => a.id === body.reviewerAgentId && a.enabled && a.role === 'reviewer') : null;
+      if (body.reviewerAgentId && !reviewer) {
+        throw new AppError('conflict', 'The reviewer on this card is no longer available — ask Ops Chat for a new card. Nothing was started.');
+      }
+      const created = await withTenant(ctx, async (tx) => {
+        // P5c-2: an update card is only started if the job is still exactly as the card froze it (same run, same
+        // decisions, not already updated) — checked in THIS transaction, serialized per original task. Otherwise the
+        // card goes stale with a plain reason and nothing is created.
+        if (body.updateOf) await assertUpdateCardCurrent(tx, ctx, body.updateOf);
         const id = await createTask(tx, ctx, {
           title: body.title,
           input: body.instructions,
           providerSelection: agent.provider,
-          reviewEnabled: false,
+          // Review policy: with a reviewer on the card the run is reviewed; without one the card already told
+          // the owner the result is an UNREVIEWED DRAFT (the run records review_outcome=required_unmet).
+          reviewEnabled: Boolean(reviewer),
           modelTier: 'standard',
           flagshipCategory: null,
           objectiveId: null,
           scheduleId: null,
           primaryAgentId: agent.id,
-          reviewerAgentId: null,
+          reviewerAgentId: reviewer?.id ?? null,
+          // P4: this card CREATED the task (set once; a later re-run never overwrites it).
+          opsChatProposalId: proposalId,
         });
-        await enqueueRun(tx, ctx, id);
-        return id;
+        // …and queued its first attempt, so the first run is traceable to this card too.
+        const enq = await enqueueRun(tx, ctx, id, 'interactive', { opsChatProposalId: proposalId });
+        return { id, jobId: enq.jobId };
       });
-      return { taskId };
+      return { taskId: created.id, jobId: created.jobId, agentName: agent.name, reviewerName: reviewer?.name ?? null };
     }
     case 'rerun_task': {
-      await withTenant(ctx, async (tx) => {
-        await getTask(tx, ctx, body.taskId); // throws NotFound if outside tenant
-        await enqueueRun(tx, ctx, body.taskId);
-      });
-      return null;
+      // A re-run is a real NEW attempt or an explicit refusal — never a job drained with no run while the card
+      // says "re-run queued" (server-cooling evidence, 2026-10-19 17:19). See requestRerun.
+      let r: Awaited<ReturnType<typeof requestRerun>>;
+      try {
+        // P4: this re-run card is linked on the NEW job (and the run it creates) — not on the task.
+        r = await withTenant(ctx, (tx) => requestRerun(tx, ctx, body.taskId, { opsChatProposalId: proposalId }));
+      } catch (err) {
+        if (err instanceof RerunRefusedError) {
+          throw new AppError(err.reason === 'not_found' ? 'not_found' : 'conflict', err.message);
+        }
+        throw err;
+      }
+      return r.status === 'started'
+        ? {
+            outcome: 'started',
+            message: `Re-run started as a new attempt${r.previousStatus === 'completed' || r.previousStatus === 'failed' ? ` (the previous ${r.previousStatus} run and its result are kept)` : ''}.`,
+            taskId: r.taskId,
+            jobId: r.jobId,
+            previousRunId: r.previousRunId,
+          }
+        : {
+            outcome: 'already_queued',
+            message: 'Already queued or running — nothing new was queued.',
+            taskId: r.taskId,
+            jobId: r.jobId,
+          };
     }
     case 'execute_github_pr':
       return executeGitHubPrFromOpsChat(ctx, {
@@ -299,6 +456,10 @@ async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext): 
       }
       return executeVercelMutationFromOpsChat(ctx, input);
     }
+    case 'execute_accuratebids': {
+      if (body.payload.kind !== body.kind) throw new AppError('validation', 'The AccurateBids card does not match its payload.');
+      return executeAccurateBidsFromOpsChat(ctx, body.projectKey, body.payload);
+    }
   }
 }
 
@@ -326,6 +487,9 @@ export async function POST(req: Request): Promise<Response> {
       transitionProposal(tx, user.id, { proposalId: input.proposalId, from: 'pending', to: 'cancelled' }),
     );
     if (!cancelled) return Response.json({ error: 'This proposal is no longer pending.', state: stored.state }, { status: 409 });
+    // The cancel path has no tenant context yet: resolve the card's own workspace for the audit (best-effort).
+    const cancelCtx = await requireTenant(String((stored.proposal as Record<string, unknown>).projectKey ?? '')).catch(() => null);
+    if (cancelCtx) await auditProposalLifecycle(cancelCtx, stored, 'cancelled', null);
     return Response.json({ ok: true, state: 'cancelled' });
   }
 
@@ -378,7 +542,7 @@ export async function POST(req: Request): Promise<Response> {
   //    merged, a deploy shipped), so we must never report a terminal state we did not persist:
   //    if the terminal CAS does not land, surface it as `unrecorded` rather than pretending.
   try {
-    const executed = await runAction(body, ctx);
+    const executed = await runAction(body, ctx, input.proposalId);
     const done = await withUser({ userId: user.id }, (tx) =>
       transitionProposal(tx, user.id, { proposalId: input.proposalId, from: 'confirming', to: 'done', result: executed ?? null }),
     ).catch(() => null);
@@ -386,9 +550,11 @@ export async function POST(req: Request): Promise<Response> {
       log.error('ops-chat confirm: executed but failed to persist done state', { proposalId: input.proposalId, action: body.action });
       return Response.json({ ok: true, executed, state: 'unrecorded', warning: 'The action executed, but its card state could not be recorded — reload to see the true state.' });
     }
+    await auditProposalLifecycle(ctx, stored, 'confirmed', executed);
     return Response.json({ ok: true, executed, state: 'done' });
   } catch (err) {
     const to = isStaleFailure(err) ? 'stale' : 'error';
+    await auditProposalLifecycle(ctx, stored, to, null, toPublicMessage(err));
     if (!(err instanceof AppError)) log.error('ops-chat confirm execution failed', { err, action: body.action });
     const recorded = await withUser({ userId: user.id }, (tx) =>
       transitionProposal(tx, user.id, { proposalId: input.proposalId, from: 'confirming', to, error: toPublicMessage(err) }),

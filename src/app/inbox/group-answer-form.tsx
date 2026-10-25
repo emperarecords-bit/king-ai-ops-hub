@@ -1,14 +1,12 @@
 'use client';
 
 import { useState, useTransition } from 'react';
-import { resolveQuestionFromInbox, type QuestionAnswerState } from './actions';
-
-const INITIAL: QuestionAnswerState = { error: null, resolved: false };
+import { resolveMany } from './resolve-many';
 
 /**
  * "Answer all in this group": the SAME governed path as the single-question form —
- * `resolveQuestionFromInbox` is called once per question id, sequentially, after an explicit
- * confirmation. No batch write type exists; each call re-derives tenancy and admin authority
+ * `resolveQuestionFromInbox` is called once per question id, sequentially (`resolveMany`), after an
+ * explicit confirmation. No batch write type exists; each call re-derives tenancy and admin authority
  * and records its own knowledge + audit entry. Stops at the first failure and says how far it got.
  */
 export function GroupAnswerForm({ projectKey, questionIds }: { projectKey: string; questionIds: readonly string[] }) {
@@ -30,22 +28,8 @@ export function GroupAnswerForm({ projectKey, questionIds }: { projectKey: strin
     if (!window.confirm(`Save this same answer to all ${total} questions in this group? Each is recorded individually.`)) return;
     setError(null);
     startTransition(async () => {
-      let answered = done;
-      for (const questionId of questionIds.slice(done)) {
-        const fd = new FormData();
-        fd.set('projectKey', projectKey);
-        fd.set('questionId', questionId);
-        fd.set('intent', 'answer');
-        fd.set('answer', answer);
-        const res = await resolveQuestionFromInbox(INITIAL, fd);
-        if (!res.resolved) {
-          setError(`Answered ${answered} of ${total}. ${res.error ?? 'Something went wrong.'}`);
-          setDone(answered);
-          return;
-        }
-        answered += 1;
-        setDone(answered);
-      }
+      const res = await resolveMany(projectKey, questionIds, 'answer', answer, done, setDone);
+      if (res.error) setError(`Answered ${res.resolved} of ${total}. ${res.error}`);
     });
   }
 

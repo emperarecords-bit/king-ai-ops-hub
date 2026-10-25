@@ -33,6 +33,7 @@ import { assemblePortfolioBriefing } from '@/domain/portfolio/portfolio';
 import { assembleAccurateBidsSight, sightEnabledKeys } from '@/domain/integrations/accuratebids-sight';
 import { createOwnerQuestions } from '@/domain/questions/questions';
 import { enqueueNotificationSafe } from '@/domain/notifications/enqueue';
+import { buildOpsChatRunNoticeSafe } from '@/domain/opschat/run-notice';
 import { createHqQuestions, deliverHqAnswer } from '@/domain/questions/hq-questions';
 import { HQ_QUESTION_RULES, extractHqQuestions } from '@/orchestration/questions-block';
 import { resolveModelForTier } from '@/orchestration/routing';
@@ -55,6 +56,8 @@ import { loadObjectiveForRun } from '@/domain/objectives/objectives';
 import { assembleDocumentSources } from '@/domain/documents/retrieval-mode';
 import { writeRunVersionEvidence } from '@/domain/documents/references';
 import { assembleProjectState } from '@/domain/state/project-state';
+import { includesEmailDesk, runContextScope } from '@/domain/tasks/run-context-scope';
+import { approvalSubjectKey, decideSubject, loadSubjectHistory, type ProposingTask } from '@/domain/approvals/subject';
 import { assembleTaskGraph } from '@/domain/dependencies/graph-context';
 import { assembleDecisionMemory, logDecisionInjections, objectiveTaskIds } from '@/domain/decisions/decisions';
 import {
@@ -274,7 +277,10 @@ async function assembleRunContext(
   const coreRefs = docSources.coreRefs;
   const productionStatus = docSources.productionStatus;
 
-  const projectState = await assembleProjectState(tx, ctx, task.objectiveId, task.id);
+  const projectState = await assembleProjectState(tx, ctx, task.objectiveId, task.id, {
+    scheduleId: task.scheduleId,
+    scope: runContextScope(task),
+  });
   const taskGraph = await assembleTaskGraph(tx, ctx, task.id);
   const objTaskIds = await objectiveTaskIds(tx, ctx, task.objectiveId);
   const decisionMemory = await assembleDecisionMemory(tx, ctx, {
@@ -581,12 +587,19 @@ export async function startRun(
 
     const assembled = await assembleRunContext(tx, ctx, task, primaryRow, reviewerRow, nowIso);
 
+    // P4 provenance: the run inherits the Ops Chat card (dispatch or re-run) of the job that started it, so each
+    // result can be traced to the exact card behind it — independent of the task's originating card.
+    const opsChatProposalId = jobCtx
+      ? ((await tx.select({ p: runJobs.opsChatProposalId }).from(runJobs).where(eq(runJobs.id, jobCtx.jobId)).limit(1))[0]?.p ?? null)
+      : null;
+
     const runInserted = await tx
       .insert(runs)
       .values({
         orgId: ctx.orgId,
         projectId: ctx.projectId,
         taskId,
+        opsChatProposalId,
         status: 'running',
         primaryAgentId: primaryRow.id,
         reviewerAgentId: reviewerRow?.id ?? null,
@@ -1289,7 +1302,10 @@ async function executeAndFinalize(
         tx.select({ key: projects.key }).from(projects).where(eq(projects.id, ctx.projectId)).limit(1),
       );
       if (projRows[0] && sightKeys.includes(projRows[0].key)) {
-        accurateBidsSight = await assembleAccurateBidsSight();
+        // A focused owner task never sees the actionable Email Desk (see run-context-scope.ts).
+        accurateBidsSight = await assembleAccurateBidsSight(undefined, {
+          includeEmailDesk: includesEmailDesk(runContextScope(task)),
+        });
       }
     }
   } catch (err) {
@@ -1486,7 +1502,33 @@ async function finalizeCompleted(
   // resume redoes it cleanly (no duplicates — nothing committed).
   const outcome = await withTenant(ctx, async (tx) => {
     let authorizationsRequested = 0;
+    let proposingTask: ProposingTask | null = null;
     for (const action of result.proposedActions) {
+      // Persistent rejection / supersession (approvals/subject.ts): a subject the owner rejected is not
+      // re-proposed from stale context, and a subject already awaiting a decision is not proposed twice —
+      // whatever the wording or action type. Suppressed actions never park the task behind an approval.
+      const subjectKey = approvalSubjectKey(action.payload);
+      if (subjectKey) {
+        proposingTask ??= (
+          await tx
+            .select({ scheduleId: tasks.scheduleId, createdAt: tasks.createdAt, input: tasks.input })
+            .from(tasks)
+            .where(eq(tasks.id, taskId))
+            .limit(1)
+        )[0] ?? null;
+        const decision = proposingTask
+          ? decideSubject(subjectKey, await loadSubjectHistory(tx, ctx, subjectKey), proposingTask)
+          : ({ allow: true } as const);
+        if (!decision.allow) {
+          await writeAudit(tx, ctx, {
+            action: decision.reason === 'rejected_subject' ? 'approval.rejected_subject_suppressed' : 'approval.duplicate_subject_suppressed',
+            entityType: 'task',
+            entityId: taskId,
+            detail: { actionType: action.type, summary: action.summary, subjectKey, priorApprovalId: decision.approvalId, runId },
+          });
+          continue;
+        }
+      }
       if (await pendingDuplicateExists(tx, ctx, action.type, action.payloadSha256)) {
         await writeAudit(tx, ctx, {
           action: 'approval.duplicate_suppressed',
@@ -1743,13 +1785,24 @@ async function finalizeCompleted(
     // A clean completion is an in-app notification (success → in_app_only). When finalStatus is
     // 'awaiting_approval' the approval_pending notifications above already carry the attention signal.
     if (finalStatus === 'completed') {
-      await enqueueNotificationSafe(tx, ctx, {
-        eventType: 'run_completed',
-        entityType: 'run',
-        entityId: runId,
-        title: 'A run completed',
-        body: `A run completed with ${result.steps.length} step(s).`,
+      // P5b-1: a run started from an Ops Chat card is emailed (immediate) with the card's outcome line and a link
+      // back to it; any other run keeps the in-app-only notice. No result text goes into the notification.
+      const notice = await buildOpsChatRunNoticeSafe(tx, {
+        runId,
+        taskId,
+        outcome: 'completed',
+        reviewOutcome: result.reviewOutcome,
+        resultChars: result.consolidated?.length ?? 0,
+        errorMessage: null,
+        finishedAt: new Date(),
       });
+      await enqueueNotificationSafe(
+        tx,
+        ctx,
+        notice
+          ? { eventType: 'run_completed', entityType: 'run', entityId: runId, title: notice.title, body: notice.body, opsChat: notice.opsChat }
+          : { eventType: 'run_completed', entityType: 'run', entityId: runId, title: 'A run completed', body: `A run completed with ${result.steps.length} step(s).` },
+      );
     }
 
     return { runId, status: finalStatus, failureReason: null as string | null };
@@ -1778,13 +1831,15 @@ async function finalizeFailed(
       .where(eq(runs.id, runId));
     await tx.update(tasks).set({ status: 'failed', updatedAt: new Date() }).where(eq(tasks.id, taskId));
     await writeAudit(tx, ctx, { action: 'run.failed', entityType: 'run', entityId: runId, detail: { reason } });
-    await enqueueNotificationSafe(tx, ctx, {
-      eventType: 'run_failed',
-      entityType: 'run',
-      entityId: runId,
-      title: 'A run failed',
-      body: `A run failed and may need your attention. Reason: ${reason}`,
-    });
+    // P5b-1: an Ops Chat-started run's failure (already critical + immediate) names the task and links back.
+    const notice = await buildOpsChatRunNoticeSafe(tx, { runId, taskId, outcome: 'failed', reviewOutcome: null, resultChars: 0, errorMessage: reason, finishedAt: new Date() });
+    await enqueueNotificationSafe(
+      tx,
+      ctx,
+      notice
+        ? { eventType: 'run_failed', entityType: 'run', entityId: runId, title: notice.title, body: notice.body, opsChat: notice.opsChat }
+        : { eventType: 'run_failed', entityType: 'run', entityId: runId, title: 'A run failed', body: `A run failed and may need your attention. Reason: ${reason}` },
+    );
     log.warn('Run failed', { runId, failureClass: reason.split(/[\s(:]/, 1)[0] || 'unknown', recoverable: true });
     return { runId, status: 'failed', failureReason: reason };
   });

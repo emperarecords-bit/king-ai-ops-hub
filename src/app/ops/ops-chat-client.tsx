@@ -1,19 +1,42 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { consumeOpsChatStream } from './ops-chat-stream';
+import { primeSpeech, speak, stopSpeaking, useSpeechInput } from '@/lib/use-speech';
+import { useWakeLock } from '@/lib/use-wake-lock';
+import { appendDictation, keepListeningAfterReply, spokenReply } from './ops-chat-voice';
 import {
   OPS_CHAT_CLIENT_TIMEOUT_MS,
   OPS_CHAT_EARLIER_TURN_PENDING_MESSAGE,
   OPS_CHAT_TIMEOUT_MESSAGE,
+  OPS_CHAT_MAX_MESSAGE_CHARS,
+  OPS_CHAT_MESSAGE_COUNTER_FROM,
 } from '@/domain/opschat/limits';
 import type { ApprovalContentView } from '@/domain/opschat/approval-content';
+import type { LinkedRunView } from '@/domain/opschat/linked-run-view';
+import type { CompletionEntry, CompletionLabel } from '@/domain/opschat/conversation-continuity';
+import { completionReplyLead, isReportedAsCompletion } from '@/domain/opschat/conversation-continuity';
+import { ExcerptMarkdown } from './excerpt-markdown';
+import { suggestedCount, type PricedLine } from '@/domain/opschat/price-sources';
 import { createDeadlineWatchdog } from './ops-chat-watchdog';
+import { ATTACHMENT_ACCEPT, ATTACHMENT_LIMITS } from '@/domain/opschat/attachment-limits';
 import {
+  ComposerAttachmentChips,
+  precheckFile,
+  SentAttachmentChips,
+  uploadAttachment,
+  type ComposerFile,
+} from './ops-chat-attachments';
+import {
+  applyLiveRunUpdate,
   applySavedMapping,
+  attachmentOnlyContent,
   buildTranscript,
+  cardIdFromHash,
   confirmOutcome,
   isActionable,
+  isBuildSkewed,
+  needsRunPolling,
   pendingOutsideWindow,
   pendingTurnOf,
   RELOAD_TO_SEE_STATE,
@@ -22,6 +45,101 @@ import {
   type TranscriptCard,
   type TranscriptMsg,
 } from './ops-chat-transcript';
+
+/** How often a visible tab checks whether the server now runs a newer build. */
+const BUILD_CHECK_MS = 5 * 60_000;
+
+/** P5c-3: how often an open conversation re-reads the runs it started (only while visible + something can change). */
+const RUN_POLL_MS = 15_000;
+const RUN_POLL_MAX_MS = 120_000;
+
+const COMPLETION_TONE: Record<CompletionLabel, string> = {
+  FINAL: 'text-[var(--success,#6bbf73)]',
+  'UNREVIEWED DRAFT': 'text-[var(--warning,#d9a441)]',
+  'APPROVAL NEEDED': 'text-[var(--warning,#d9a441)]',
+  FAILED: 'text-[var(--danger,#c37474)]',
+};
+
+/** P5c-3: a finished run reported back into the conversation that started it (server record — not a model reply). */
+function CompletionRow({ e }: { e: CompletionEntry }) {
+  return (
+    <div data-testid="completion-entry" className="flex justify-start">
+      <div className="max-w-[85%] rounded-2xl rounded-bl-sm border border-[var(--accent)] bg-[var(--surface)] px-3.5 py-2.5 text-sm leading-relaxed shadow-sm">
+        <div className="mb-1 text-xs opacity-50">
+          Ops Chat · work finished · <span className={COMPLETION_TONE[e.resultLabel]}>{e.resultLabel}</span>
+        </div>
+        <p>{completionReplyLead(e)}</p>
+        {e.excerpt ? (
+          // Untrusted AI output, bounded server-side: rendered by a minimal escaping renderer (no HTML, no links).
+          <div data-testid="completion-excerpt" className="mt-2 rounded-md border border-[var(--border)] px-3 py-2">
+            <p className="mb-1 text-[11px] uppercase tracking-wide text-[var(--muted)]">From the run · {e.resultLabel}</p>
+            <ExcerptMarkdown text={e.excerpt} />
+            {e.excerptTruncated ? <p className="mt-1 text-[11px] text-[var(--muted)]">… continues — open the full result, or ask “what did it come back with?”</p> : null}
+          </div>
+        ) : null}
+        {e.taskPath ? (
+          <a href={e.taskPath} className="mt-1 inline-block text-xs text-[var(--accent)] underline underline-offset-2">
+            Open the full result
+          </a>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/** Suggested quote prices (owner-approved 2026-10-23): every line Ops Chat priced is marked before Confirm. */
+function PriceSourcesBlock({ pricing }: { pricing: PricedLine[] }) {
+  const n = suggestedCount(pricing);
+  return (
+    <div data-testid="price-sources" className="mt-1 rounded border border-[var(--warning,#d9a441)] px-2 py-1.5 text-xs">
+      <p className="font-semibold text-[var(--warning,#d9a441)]">
+        {n} suggested price{n === 1 ? '' : 's'} — check before confirming
+      </p>
+      <ul className="mt-1 space-y-0.5">
+        {pricing.map((l, i) => (
+          <li key={i}>
+            <span className={l.source === 'owner' ? 'text-[var(--muted)]' : 'font-semibold'}>
+              {l.source === 'owner' ? 'Yours' : l.source === 'estimate' ? 'Estimate' : 'Researched'}
+            </span>
+            {' · '}
+            {l.description}
+            {l.note ? <span className="text-[var(--muted)]"> ({l.note})</span> : null}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** P5a: tone for a linked run's outcome line. */
+function linkedRunTone(v: LinkedRunView): string {
+  if (v.state === 'ready') return 'text-[var(--success,#6bbf73)]';
+  if (v.state === 'failed') return 'text-[var(--danger,#c37474)]';
+  if (v.state === 'draft' || v.state === 'needs_approval') return 'text-[var(--warning,#d9a441)]';
+  return 'text-[var(--muted)]';
+}
+
+/** What the run a confirmed dispatch / re-run card started actually did — server-derived, never inferred. */
+function LinkedRunLine({ view, projectKey }: { view: LinkedRunView; projectKey: string | null }) {
+  if (isReportedAsCompletion(view)) {
+    // The completion reply in the conversation says what happened (with the label + excerpt); say it once.
+    return (
+      <p data-testid="linked-run" className={`mt-1 text-xs ${linkedRunTone(view)}`}>
+        Finished — see the Ops Chat reply below for what came back.
+      </p>
+    );
+  }
+  return (
+    <div data-testid="linked-run" className="mt-1 flex flex-col gap-0.5 text-xs">
+      <p className={linkedRunTone(view)}>{view.text}</p>
+      {projectKey ? (
+        <a href={`/p/${encodeURIComponent(projectKey)}/tasks/${encodeURIComponent(view.taskId)}`} className="self-start text-[var(--accent)] underline underline-offset-2">
+          Open the task{view.runId ? ' and its result' : ''}
+        </a>
+      ) : null}
+    </div>
+  );
+}
 
 type Proposal =
   | { kind: 'answer_question'; questionId: string; projectKey: string; workspaceName: string; question: string; answer: string }
@@ -44,8 +162,28 @@ type Proposal =
       instructions: string;
       agentId: string;
       agentName: string;
+      reviewerAgentId?: string | null;
+      reviewerName?: string | null;
+      /** P5c-2: an "update this job" card — the task it updates and how many owner decisions it applies. */
+      updateOf?: { taskId: string; taskTitle: string; runId: string; decisions: number };
     }
   | { kind: 'rerun_task'; projectKey: string; workspaceName: string; taskId: string; taskTitle: string }
+  | { kind: 'record_decision'; projectKey: string; workspaceName: string; taskId: string; taskTitle: string; title: string; statement: string }
+  | {
+      kind: 'accept_decisions';
+      projectKey: string;
+      workspaceName: string;
+      decisions: Array<{ decisionId: string; title: string; summary: string; taskId: string; taskTitle: string }>;
+    }
+  | {
+      kind: 'record_batch';
+      projectKey: string;
+      workspaceName: string;
+      taskId: string | null;
+      taskTitle: string | null;
+      answers: Array<{ questionId: string; question: string; answer: string }>;
+      decisions: Array<{ title: string; statement: string }>;
+    }
   | {
       kind: 'github_pr';
       projectKey: string;
@@ -103,6 +241,15 @@ type Proposal =
       importMapPath: string | null;
       verifyJwt: boolean;
       riskClass: string;
+    }
+  | {
+      kind: 'accuratebids_quote' | 'accuratebids_invoice' | 'accuratebids_send';
+      projectKey: string;
+      workspaceName: string;
+      summary: string;
+      payload: Record<string, unknown>;
+      content?: ApprovalContentView;
+      pricing?: PricedLine[];
     }
   | {
       kind: 'vercel_mutation';
@@ -220,11 +367,20 @@ const TOOL_LABEL: Record<string, string> = {
   list_open_questions: 'finding open questions',
   list_pending_approvals: 'finding pending approvals',
   get_approval_detail: 'reading the approval',
+  read_attachment: 'reading your attachment',
+  list_accuratebids_records: 'checking AccurateBids',
+  propose_accuratebids_quote: 'preparing the quote',
+  propose_accuratebids_invoice: 'preparing the invoice',
+  propose_accuratebids_send: 'preparing the email',
   list_agents: 'listing the agents',
   propose_answer_question: 'preparing the answer',
   propose_decide_approval: 'preparing the decision',
   propose_dispatch_task: 'preparing the task',
   propose_rerun_task: 'preparing the re-run',
+  propose_record_decision: 'preparing the decision record',
+  list_decision_candidates: 'reading extracted decisions',
+  propose_accept_decisions: 'preparing the decisions',
+  propose_record_batch: 'preparing your answers and decisions',
   github_capabilities: 'checking GitHub capabilities',
   list_github_repos: 'listing linked repositories',
   list_pull_requests: 'reading pull requests',
@@ -244,6 +400,7 @@ const TOOL_LABEL: Record<string, string> = {
   validate_supabase_sql: 'validating the SQL',
   vercel_capabilities: 'checking Vercel capabilities',
   list_vercel_projects: 'listing linked Vercel projects',
+  web_search: 'searching the web',
   inspect_vercel_project: 'reading the Vercel project',
   inspect_vercel_deployments: 'reading Vercel deployments',
   propose_vercel_redeploy: 'preparing the redeploy',
@@ -296,7 +453,7 @@ function ApprovalContentBlock({ content }: { content: ApprovalContentView }) {
   );
 }
 
-function doneLabel(p: Proposal): string {
+function doneLabel(p: Proposal, result?: CardResult): string {
   switch (p.kind) {
     case 'answer_question':
       return `✓ Recorded — saved and added to ${p.workspaceName}'s knowledge.`;
@@ -305,7 +462,16 @@ function doneLabel(p: Proposal): string {
     case 'dispatch_task':
       return `✓ Started — task queued in ${p.workspaceName}.`;
     case 'rerun_task':
-      return `✓ Re-run queued for "${p.taskTitle}".`;
+      // The server's real outcome (new attempt vs already queued) — never a fixed "queued" claim.
+      if (result?.outcome === 'already_queued') return `ⓘ "${p.taskTitle}": ${result.message ?? 'already queued — nothing new was queued.'}`;
+      if (result?.outcome === 'started') return `✓ "${p.taskTitle}": ${result.message ?? 're-run started as a new attempt.'}`;
+      return `✓ Re-run requested for "${p.taskTitle}".`;
+    case 'record_decision':
+      return `✓ Recorded — later runs of "${p.taskTitle}" will be given it.`;
+    case 'accept_decisions':
+      return `✓ Accepted ${p.decisions.length} decision${p.decisions.length === 1 ? '' : 's'} in ${p.workspaceName}.`;
+    case 'record_batch':
+      return `✓ Recorded ${batchCount(p)} in ${p.workspaceName}${p.decisions.length > 0 && p.taskTitle ? ` — later runs of "${p.taskTitle}" will be given the decisions` : ''}.`;
     case 'github_pr':
       return `✓ Pull request requested in ${p.repo}.`;
     case 'github_merge':
@@ -318,7 +484,18 @@ function doneLabel(p: Proposal): string {
       return `✓ Deploy requested for "${p.functionSlug}" in project ${p.projectRef}.`;
     case 'vercel_mutation':
       return `✓ ${p.operation} requested for ${p.vercelProjectId}.`;
+    case 'accuratebids_quote':
+      return '✓ Draft quote created in AccurateBids.';
+    case 'accuratebids_invoice':
+      return '✓ Invoice created in AccurateBids.';
+    case 'accuratebids_send':
+      return `✓ ${abSendWhat(p)[0]!.toUpperCase()}${abSendWhat(p).slice(1)} emailed to the customer.`;
   }
+}
+/** "3 answers and 4 decisions" for a batch card. */
+function batchCount(p: Extract<Proposal, { kind: 'record_batch' }>): string {
+  const part = (n: number, one: string) => (n === 0 ? null : `${n} ${one}${n === 1 ? '' : 's'}`);
+  return [part(p.answers.length, 'answer'), part(p.decisions.length, 'decision')].filter(Boolean).join(' and ');
 }
 function headerLabel(p: Proposal): string {
   switch (p.kind) {
@@ -330,6 +507,12 @@ function headerLabel(p: Proposal): string {
       return `Confirm — start a task in ${p.workspaceName} (uses tokens)`;
     case 'rerun_task':
       return `Confirm — re-run in ${p.workspaceName} (uses tokens)`;
+    case 'record_decision':
+      return `Confirm — record this decision in ${p.workspaceName}`;
+    case 'accept_decisions':
+      return `Confirm — accept ${p.decisions.length} extracted decision${p.decisions.length === 1 ? '' : 's'} in ${p.workspaceName}`;
+    case 'record_batch':
+      return `Confirm — record ${batchCount(p)} in ${p.workspaceName} (one tap)`;
     case 'github_pr':
       return `Confirm — open a pull request in ${p.repo}`;
     case 'github_merge':
@@ -344,6 +527,12 @@ function headerLabel(p: Proposal): string {
       return p.operation === 'redeploy'
         ? `Confirm — redeploy in ${p.vercelProjectId} (no traffic change)`
         : `Confirm — ${p.operation} PRODUCTION in ${p.vercelProjectId}`;
+    case 'accuratebids_quote':
+      return 'Confirm — draft a quote in AccurateBids (not sent to the customer)';
+    case 'accuratebids_invoice':
+      return 'Confirm — create a real unpaid invoice in AccurateBids (not sent yet)';
+    case 'accuratebids_send':
+      return `Confirm — EMAIL the ${abSendWhat(p)} to the customer`;
   }
 }
 function confirmLabel(p: Proposal): string {
@@ -356,6 +545,12 @@ function confirmLabel(p: Proposal): string {
       return 'Confirm & start';
     case 'rerun_task':
       return 'Confirm & re-run';
+    case 'record_decision':
+      return 'Confirm & record';
+    case 'accept_decisions':
+      return 'Confirm & accept';
+    case 'record_batch':
+      return 'Confirm all & record';
     case 'github_pr':
       return 'Confirm & open PR';
     case 'github_merge':
@@ -368,7 +563,19 @@ function confirmLabel(p: Proposal): string {
       return 'Confirm & deploy';
     case 'vercel_mutation':
       return p.operation === 'redeploy' ? 'Confirm & redeploy' : p.operation === 'promote' ? 'Confirm & promote' : 'Confirm & roll back';
+    case 'accuratebids_quote':
+      return 'Confirm & create draft';
+    case 'accuratebids_invoice':
+      return 'Confirm & create invoice';
+    case 'accuratebids_send':
+      return 'Confirm & email customer';
   }
+}
+
+/** What an AccurateBids send emails, in the owner's words. */
+function abSendWhat(p: { payload: Record<string, unknown> }): string {
+  const s = p.payload.send;
+  return s === 'quote' ? 'quote' : s === 'invoice_reminder' ? 'payment reminder' : 'invoice';
 }
 
 const CONFIDENCE_STYLE: Record<Confidence, string> = {
@@ -546,14 +753,20 @@ export function OpsChatClient({
   persisted,
   pendingTurn: serverPending,
   conversations,
+  leadingCompletions = [],
+  buildId = null,
 }: {
   opening: string;
   conversationId: string | null;
   persisted: PersistedMessage[];
   pendingTurn: PendingTurn | null;
   conversations: Array<{ id: string; title: string | null }>;
+  /** P5c-3: completion entries older than every loaded message (shown first). */
+  leadingCompletions?: CompletionEntry[];
+  /** The build that rendered this page — compared with the server's current build to detect a stale tab. */
+  buildId?: string | null;
 }) {
-  const [initialTranscript] = useState(() => buildTranscript(persisted));
+  const [initialTranscript] = useState(() => buildTranscript(persisted, leadingCompletions));
   const [messages, setMessages] = useState<Msg[]>(() => [
     { id: 'opening', role: 'assistant', content: opening },
     ...initialTranscript,
@@ -567,6 +780,73 @@ export function OpsChatClient({
   // fork a second conversation.
   const [currentId, setCurrentId] = useState<string | null>(initialConversationId);
   const [input, setInput] = useState('');
+
+  // Build skew: a tab left open across a deploy keeps running OLD client code (Hub prod 2026-10-22 — it never got live
+  // refresh, so finished work never appeared). Check the server's build when the tab becomes visible again and every
+  // BUILD_CHECK_MS while visible; on a mismatch show a reload banner. Never reloads by itself (an unsent draft would be lost).
+  const [buildSkewed, setBuildSkewed] = useState(false);
+  useEffect(() => {
+    if (!buildId || buildId === 'dev') return;
+    let stopped = false;
+    const check = async (): Promise<void> => {
+      if (stopped || document.visibilityState !== 'visible') return;
+      try {
+        const res = await fetch('/api/ops-chat/version', { cache: 'no-store' });
+        if (!res.ok) return;
+        const j = (await res.json()) as { buildId?: string };
+        if (!stopped && isBuildSkewed(buildId, j.buildId)) setBuildSkewed(true);
+      } catch {
+        // offline / transient — try again on the next visibility change or tick
+      }
+    };
+    const onVisible = (): void => void check();
+    document.addEventListener('visibilitychange', onVisible);
+    const timer = setInterval(() => void check(), BUILD_CHECK_MS);
+    return () => {
+      stopped = true;
+      document.removeEventListener('visibilitychange', onVisible);
+      clearInterval(timer);
+    };
+  }, [buildId]);
+
+  // P5c-3 live refresh: while something this conversation started can still change (a dispatch / re-run card being
+  // confirmed, or its run queued / running), re-read the linked runs every RUN_POLL_MS — only while the tab is
+  // visible, backing off on errors, and stopping by itself once everything has finished. A run that finishes while
+  // the owner is looking then shows its outcome on the card and a completion entry in the chat without anyone asking.
+  // No model call, nothing written.
+  const needsPoll = useMemo(() => Boolean(currentId) && needsRunPolling(messages), [currentId, messages]);
+  useEffect(() => {
+    if (!needsPoll || !currentId) return;
+    let stopped = false;
+    let delay = RUN_POLL_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async (): Promise<void> => {
+      if (stopped) return;
+      if (document.visibilityState === 'visible') {
+        try {
+          const res = await fetch(`/api/ops-chat/linked-runs?conversationId=${encodeURIComponent(currentId)}`, { cache: 'no-store' });
+          if (res.ok) {
+            const j = (await res.json()) as { views?: Record<string, LinkedRunView>; entries?: CompletionEntry[] };
+            if (!stopped) setMessages((prev) => applyLiveRunUpdate(prev, j.views ?? {}, j.entries ?? []));
+            delay = RUN_POLL_MS;
+          } else {
+            delay = Math.min(delay * 2, RUN_POLL_MAX_MS);
+          }
+        } catch {
+          delay = Math.min(delay * 2, RUN_POLL_MAX_MS);
+        }
+      }
+      if (!stopped) timer = setTimeout(() => void tick(), delay);
+    };
+    timer = setTimeout(() => void tick(), RUN_POLL_MS);
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [needsPoll, currentId]);
+  // Files uploaded into this conversation for the NEXT send (uploaded immediately, sent with the message).
+  const [composerFiles, setComposerFiles] = useState<ComposerFile[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [streaming, setStreaming] = useState(false);
   const [toolActivity, setToolActivity] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -576,7 +856,73 @@ export function OpsChatClient({
 
   const pending = useMemo(() => pendingTurnOf(messages, outsidePending), [messages, outsidePending]);
 
+  // Voice (owner request 2026-10-22; rules in ./ops-chat-voice). 🎤 DICTATE puts speech into the message box — the
+  // owner still presses Send. TALK is hands-free: a pause sends what was said, the reply is read aloud, then it
+  // listens again. Voice NEVER confirms a card: a reply with a card is read with a pointer to it and Talk stops.
+  const [handsFree, setHandsFree] = useState(false);
+  // Keep the phone screen on during Talk (a sleeping screen suspends the page and stops the mic).
+  useWakeLock(handsFree);
+  const handsFreeRef = useRef(false);
+  const inputRef = useRef('');
+  const formRef = useRef<HTMLFormElement>(null);
+  const talkStartRef = useRef<(() => void) | null>(null);
   useEffect(() => {
+    inputRef.current = input;
+  }, [input]);
+  const onDictated = useCallback((spoken: string) => setInput((prev) => appendDictation(prev, spoken)), []);
+  // A pause in Talk mode presses the form's own Send (same path as a tap), or listens again if nothing was said.
+  const onTalkPause = useCallback(() => {
+    if (!handsFreeRef.current) return;
+    if (inputRef.current.trim()) formRef.current?.requestSubmit();
+    else talkStartRef.current?.();
+  }, []);
+  const dictation = useSpeechInput(onDictated, { continuous: true });
+  const talk = useSpeechInput(onDictated, { continuous: false, onAutoEnd: onTalkPause });
+  useEffect(() => {
+    talkStartRef.current = talk.start;
+  }, [talk.start]);
+
+  function startHandsFree() {
+    primeSpeech(); // inside the tap: unlocks reading replies aloud on phones
+    dictation.stop();
+    handsFreeRef.current = true;
+    setHandsFree(true);
+    talk.start();
+  }
+  function stopHandsFree() {
+    handsFreeRef.current = false;
+    setHandsFree(false);
+    talk.stop();
+    stopSpeaking();
+  }
+  /** Called once a turn ends. Only Talk mode reads the reply aloud; a card or a failed turn ends the loop. */
+  function afterReply(text: string, cardCount: number, ok: boolean) {
+    if (!handsFreeRef.current) return;
+    if (!ok) {
+      stopHandsFree();
+      return;
+    }
+    speak(spokenReply(text, cardCount), () => {
+      if (keepListeningAfterReply({ handsFree: handsFreeRef.current, cardCount, replyOk: ok })) talkStartRef.current?.();
+      else stopHandsFree();
+    });
+  }
+
+  // P5b-1: a notification links to `/ops?c=<conversation>#card-<proposalId>`. On the FIRST scroll after load, go to
+  // and highlight that card instead of jumping to the bottom; every later update scrolls to the bottom as before. The
+  // hash is read in the effect (never during render), so server and client markup match.
+  const initialScrollRef = useRef(true);
+  useEffect(() => {
+    if (initialScrollRef.current) {
+      initialScrollRef.current = false;
+      const id = cardIdFromHash(window.location.hash);
+      const target = id ? document.getElementById(`card-${id}`) : null;
+      if (target) {
+        target.classList.add('ring-2', 'ring-[var(--accent)]');
+        target.scrollIntoView({ block: 'center' });
+        return;
+      }
+    }
     bottomRef.current?.scrollIntoView({ block: 'end' });
   }, [messages, streaming, toolActivity]);
 
@@ -651,8 +997,10 @@ export function OpsChatClient({
         const j = await res.json().catch(() => ({}));
         throw new Error(j.error || 'Council is unavailable right now.');
       }
-      const result = (await res.json()) as CouncilResult;
-      setCouncil(msgId, { status: 'done', result });
+      // A Council run streams whitespace heartbeats, then ONE JSON body: the result, or { error } (safe message).
+      const body = (await res.json()) as CouncilResult | { error?: string };
+      if ('error' in body && body.error) throw new Error(body.error);
+      setCouncil(msgId, { status: 'done', result: body as CouncilResult });
     } catch (e) {
       setCouncil(msgId, { status: 'error', error: e instanceof Error ? e.message : 'Council is unavailable right now.' });
     }
@@ -663,19 +1011,59 @@ export function OpsChatClient({
     window.location.assign(id ? `/ops?c=${encodeURIComponent(id)}` : '/ops?new=1');
   }
 
-  async function send(text: string) {
-    const trimmed = text.trim();
-    // A pending turn pauses new sends: the server answers owner turns strictly in order.
-    if (!trimmed || streaming || pending) return;
-    setError(null);
-    setInput('');
+  /** The conversation id, minted once (on the first send OR the first upload) and then stable. */
+  function ensureConversationId(): string {
     const conversationId = currentId ?? crypto.randomUUID();
     if (!currentId) setCurrentId(conversationId);
     // Keep the URL on this conversation so a refresh (or the same link on another device) resumes it.
     window.history.replaceState(null, '', `/ops?c=${conversationId}`);
+    return conversationId;
+  }
+
+  const uploading = composerFiles.some((f) => f.state === 'uploading');
+  const readyFiles = composerFiles.filter((f) => f.state === 'ready' && f.chip);
+
+  /** Upload picked files into this conversation, one at a time. Nothing is sent until the owner sends. */
+  async function addFiles(list: FileList | null) {
+    if (!list || list.length === 0 || streaming || pending) return;
+    setError(null);
+    const room = ATTACHMENT_LIMITS.maxPerMessage - composerFiles.filter((f) => f.state !== 'error').length;
+    const picked = Array.from(list).slice(0, Math.max(0, room));
+    if (list.length > picked.length) setError(`A message can carry at most ${ATTACHMENT_LIMITS.maxPerMessage} attachments.`);
+    if (picked.length === 0) return;
+    const conversationId = ensureConversationId();
+    for (const file of picked) {
+      const localId = nextId();
+      const refusal = precheckFile(file);
+      if (refusal) {
+        setComposerFiles((prev) => [...prev, { localId, filename: file.name, sizeBytes: file.size, state: 'error', error: refusal }]);
+        continue;
+      }
+      setComposerFiles((prev) => [...prev, { localId, filename: file.name, sizeBytes: file.size, state: 'uploading' }]);
+      const r = await uploadAttachment(file, conversationId);
+      setComposerFiles((prev) =>
+        prev.map((f) => (f.localId !== localId ? f : r.ok ? { ...f, state: 'ready', chip: r.chip } : { ...f, state: 'error', error: r.error })),
+      );
+    }
+  }
+
+  async function send(text: string) {
+    const trimmed = text.trim();
+    const files = readyFiles.map((f) => f.chip!);
+    // A pending turn pauses new sends: the server answers owner turns strictly in order.
+    if ((!trimmed && files.length === 0) || streaming || pending || uploading) return;
+    setError(null);
+    setInput('');
+    setComposerFiles([]);
+    const conversationId = ensureConversationId();
     const turnId = crypto.randomUUID();
-    setMessages((prev) => [...prev, { id: turnId, role: 'owner', content: trimmed, awaitingReply: true }]);
-    await runTurn({ conversationId, turnId, content: trimmed, fresh: true });
+    // Attachment-only: the same deterministic text the server derives (so a resume re-sends it exactly).
+    const content = trimmed || attachmentOnlyContent(files.map((f) => f.filename));
+    setMessages((prev) => [
+      ...prev,
+      { id: turnId, role: 'owner', content, awaitingReply: true, ...(files.length > 0 ? { attachments: files } : {}) },
+    ]);
+    await runTurn({ conversationId, turnId, content, fresh: true, attachmentIds: files.map((f) => f.id) });
   }
 
   /** Explicit, owner-clicked recovery: re-send the EXACT pending turn (same ids, same content). The
@@ -688,7 +1076,7 @@ export function OpsChatClient({
     await runTurn({ conversationId, turnId: turn.turnId, content: turn.content, fresh: false });
   }
 
-  async function runTurn(t: { conversationId: string; turnId: string; content: string; fresh: boolean }) {
+  async function runTurn(t: { conversationId: string; turnId: string; content: string; fresh: boolean; attachmentIds?: string[] }) {
     setToolActivity(null);
     const replyId = nextId();
     // The reply sits directly after its own owner turn (turn-aware), or at the end when that turn is
@@ -719,7 +1107,14 @@ export function OpsChatClient({
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible);
 
     const patchReply = (fn: (m: Msg) => Msg) => setMessages((prev) => prev.map((m) => (m.id === replyId ? fn(m) : m)));
-    const append = (delta: string) => patchReply((m) => ({ ...m, content: m.content + delta }));
+    // Voice: the reply text and how many cards it carries, for Talk mode's read-aloud.
+    let replyText = '';
+    let cardCount = 0;
+    let replyOk = false;
+    const append = (delta: string) => {
+      replyText += delta;
+      patchReply((m) => ({ ...m, content: m.content + delta }));
+    };
     // No `saved` ⇒ no terminal reply was recorded. Drop the local bubble so the transcript matches the
     // store; the owner turn stays awaiting and becomes the recovery state (Resume message).
     let saved = false;
@@ -733,7 +1128,8 @@ export function OpsChatClient({
       const res = await fetch('/api/ops-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: t.content, conversationId: t.conversationId, turnId: t.turnId }),
+        // A resume re-sends no attachment ids: the files were linked when the turn was first persisted.
+        body: JSON.stringify({ message: t.content, conversationId: t.conversationId, turnId: t.turnId, attachmentIds: t.attachmentIds ?? [] }),
         signal: controller.signal,
       });
       if (!res.ok || !res.body) {
@@ -767,6 +1163,7 @@ export function OpsChatClient({
           const proposal: Record<string, unknown> = { ...payload };
           const correlationKey = typeof proposal.correlationKey === 'string' ? proposal.correlationKey : undefined;
           delete proposal.correlationKey;
+          cardCount += 1;
           patchReply((m) => ({ ...m, cards: [...(m.cards ?? []), { proposal, correlationKey, state: 'pending' as const }] }));
         },
         onSaved: (s) => {
@@ -784,6 +1181,8 @@ export function OpsChatClient({
       if (result.status === 'error') {
         showError(result.message);
         dropUnsavedReply();
+      } else {
+        replyOk = saved;
       }
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') {
@@ -804,6 +1203,7 @@ export function OpsChatClient({
       setStreaming(false);
       setToolActivity(null);
       abortRef.current = null;
+      afterReply(replyText, cardCount, replyOk);
     }
   }
 
@@ -836,8 +1236,23 @@ export function OpsChatClient({
         </button>
       </div>
 
+      {buildSkewed ? (
+        <div data-testid="build-skew-banner" className="mb-3 flex items-center justify-between gap-3 rounded-md border border-[var(--warning,#d9a441)] px-3 py-2 text-sm">
+          <span>Ops Chat was updated. Reload to get the latest version (an unsent message would be lost).</span>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="shrink-0 rounded-md border border-[var(--border)] px-3 py-1 text-xs hover:text-[var(--foreground)]"
+          >
+            Reload
+          </button>
+        </div>
+      ) : null}
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto pr-1">
-        {messages.map((m) => (
+        {messages.map((m) =>
+          m.role === 'server' && m.completion ? (
+            <CompletionRow key={m.id} e={m.completion} />
+          ) : (
           <div key={m.id} className={m.role === 'owner' ? 'flex justify-end' : 'flex justify-start'}>
             <div
               className={
@@ -855,6 +1270,7 @@ export function OpsChatClient({
               ) : m.role === 'assistant' && !m.cards ? (
                 <span className="opacity-60">{toolActivity ? `🔍 ${toolActivity}…` : 'Thinking…'}</span>
               ) : null}
+              {m.role === 'owner' && m.attachments ? <SentAttachmentChips chips={m.attachments} /> : null}
               {m.role === 'assistant' && m.status === 'interrupted' ? (
                 <p className="mt-1 text-[11px] text-[var(--muted)]">Interrupted — partial reply, kept for history only.</p>
               ) : null}
@@ -867,11 +1283,24 @@ export function OpsChatClient({
                 return (
                   <div
                     key={i}
+                    id={card.proposalId ? `card-${card.proposalId}` : undefined}
                     className="mt-3 rounded-md border border-[var(--accent)] bg-[var(--surface-raised,rgba(120,160,255,0.06))] p-3"
                   >
-                    {card.state === 'done' ? (
+                    {card.state === 'done' && (p.kind === 'accuratebids_quote' || p.kind === 'accuratebids_invoice' || p.kind === 'accuratebids_send') ? (
+                      // AccurateBids: show the executor's REAL outcome — never a green ✓ for a blocked / failed / unconfirmed send.
                       <div className="flex flex-col gap-1">
-                        <p className="text-sm text-[var(--success,#6bbf73)]">{doneLabel(p)}</p>
+                        {result?.outcome === 'succeeded' ? (
+                          <p className="text-sm text-[var(--success,#6bbf73)]">{doneLabel(p)}</p>
+                        ) : (
+                          <p className="text-sm text-[var(--danger,#c37474)]">
+                            {result?.outcome === 'ambiguous' ? '⚠ Outcome unconfirmed — check AccurateBids before retrying.' : '✗ Not completed.'}
+                          </p>
+                        )}
+                        {result?.message ? <p className="text-xs text-[var(--muted)]">{result.message}</p> : null}
+                      </div>
+                    ) : card.state === 'done' ? (
+                      <div className="flex flex-col gap-1">
+                        <p className="text-sm text-[var(--success,#6bbf73)]">{doneLabel(p, result)}</p>
                         {p.kind === 'github_pr' && result?.prUrl ? (
                           <a
                             href={result.prUrl}
@@ -941,6 +1370,9 @@ export function OpsChatClient({
                             ) : null}
                           </div>
                         ) : null}
+                        {card.linkedRun ? (
+                          <LinkedRunLine view={card.linkedRun} projectKey={typeof card.proposal.projectKey === 'string' ? card.proposal.projectKey : null} />
+                        ) : null}
                       </div>
                     ) : card.state === 'cancelled' ? (
                       <p className="text-sm text-[var(--muted)]">Cancelled — nothing was changed.</p>
@@ -986,15 +1418,77 @@ export function OpsChatClient({
                         ) : p.kind === 'dispatch_task' ? (
                           <>
                             <p className="mt-1 text-sm font-semibold">{p.title}</p>
+                            {p.updateOf ? (
+                              <p data-testid="update-card" className="mt-1 text-xs text-[var(--warning,#d9a441)]">
+                                Updates &ldquo;{p.updateOf.taskTitle}&rdquo;: its last result predates {p.updateOf.decisions} of your decision
+                                {p.updateOf.decisions === 1 ? '' : 's'}, which are written into this run&rsquo;s instructions below.
+                              </p>
+                            ) : null}
                             <p className="mt-1 whitespace-pre-wrap text-sm text-[var(--muted)]">{p.instructions}</p>
                             <p className="mt-1 text-xs text-[var(--muted)]">
-                              Run by {p.agentName}. Starts an AI run and uses tokens.
+                              Run by {p.agentName}
+                              {p.reviewerName ? `, reviewed by ${p.reviewerName}` : ''}. Starts an AI run and uses tokens.
                             </p>
+                            {p.reviewerAgentId === null ? (
+                              <p className="mt-1 text-xs text-[var(--warning,#d9a441)]">
+                                No reviewer in this workspace — the result will be an UNREVIEWED DRAFT (not final).
+                              </p>
+                            ) : null}
                           </>
                         ) : p.kind === 'rerun_task' ? (
                           <p className="mt-1 text-sm">
                             Re-run <span className="font-semibold">{p.taskTitle}</span>. Starts an AI run and uses tokens.
                           </p>
+                        ) : p.kind === 'record_decision' ? (
+                          <>
+                            <p className="mt-1 text-sm font-semibold">{p.title}</p>
+                            <p className="mt-1 whitespace-pre-wrap text-sm">{p.statement}</p>
+                            <p className="mt-1 text-xs text-[var(--muted)]">
+                              For &ldquo;{p.taskTitle}&rdquo;. Every later run of this job will be given it. Uses no tokens.
+                            </p>
+                          </>
+                        ) : p.kind === 'record_batch' ? (
+                          <>
+                            {p.answers.length > 0 ? (
+                              <ul data-testid="batch-answers" className="mt-1 list-disc space-y-1 pl-4 text-sm">
+                                {p.answers.map((a) => (
+                                  <li key={a.questionId}>
+                                    <span className="text-[var(--muted)]">{a.question}</span>
+                                    <span className="whitespace-pre-wrap"> → {a.answer}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : null}
+                            {p.decisions.length > 0 ? (
+                              <ul data-testid="batch-decisions" className="mt-1 list-disc space-y-1 pl-4 text-sm">
+                                {p.decisions.map((d, i) => (
+                                  <li key={i}>
+                                    <span className="font-semibold">{d.title}</span>
+                                    <span className="whitespace-pre-wrap">: {d.statement}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : null}
+                            <p className="mt-1 text-xs text-[var(--muted)]">
+                              One tap records all of these together, or none.
+                              {p.decisions.length > 0 && p.taskTitle ? <> Decisions apply to &ldquo;{p.taskTitle}&rdquo;.</> : null} Uses no tokens.
+                            </p>
+                          </>
+                        ) : p.kind === 'accept_decisions' ? (
+                          <>
+                            <ul className="mt-1 list-disc space-y-1 pl-4 text-sm">
+                              {p.decisions.map((d) => (
+                                <li key={d.decisionId}>
+                                  <span className="font-semibold">{d.title}</span>
+                                  <span className="whitespace-pre-wrap">: {d.summary}</span>
+                                  <span className="text-xs text-[var(--muted)]"> (from &ldquo;{d.taskTitle}&rdquo;)</span>
+                                </li>
+                              ))}
+                            </ul>
+                            <p className="mt-1 text-xs text-[var(--muted)]">
+                              Extracted by AI runs. Once accepted, later runs of each task are given them. Uses no tokens.
+                            </p>
+                          </>
                         ) : p.kind === 'github_pr' ? (
                           <div className="mt-1 flex flex-col gap-0.5 text-sm">
                             <p className="font-semibold">{p.title}</p>
@@ -1052,7 +1546,20 @@ export function OpsChatClient({
                               Risk: {p.riskClass.replace(/_/g, ' ')} · Side effect: deploys the function&apos;s exact bytes at that commit SHA to the live project (refused unless the project + repo are linked, the source path has files, and the entrypoint is present). Rollback: redeploy the prior source SHA. Recovery: a server error mid-deploy is marked ambiguous for reconciliation, never auto-retried.
                             </p>
                           </div>
-                        ) : (
+                        ) : p.kind === 'accuratebids_quote' || p.kind === 'accuratebids_invoice' || p.kind === 'accuratebids_send' ? (
+                          <div className="mt-1 flex flex-col gap-0.5 text-sm">
+                            <p className="whitespace-pre-wrap">{p.summary}</p>
+                            {p.kind === 'accuratebids_quote' && suggestedCount(p.pricing) > 0 ? <PriceSourcesBlock pricing={p.pricing!} /> : null}
+                            {p.content ? <ApprovalContentBlock content={p.content} /> : null}
+                            <p className="mt-1 text-xs text-[var(--muted)]">
+                              {p.kind === 'accuratebids_send'
+                                ? 'Emails the customer through AccurateBids (its own email with the pay / approve link). Sent at most once — a retry never emails twice.'
+                                : p.kind === 'accuratebids_invoice'
+                                  ? 'Creates a real unpaid invoice in your AccurateBids account. It is NOT emailed to the customer until you confirm a send. A quote can only be invoiced once.'
+                                  : 'Creates a DRAFT quote in your AccurateBids account. Nothing goes to the customer until you send it.'}
+                            </p>
+                          </div>
+                        ) : p.kind === 'vercel_mutation' ? (
                           <div className="mt-1 flex flex-col gap-0.5 text-sm">
                             <p className="font-semibold">
                               Vercel {p.operation} — {p.vercelProjectId}
@@ -1074,7 +1581,7 @@ export function OpsChatClient({
                               Recovery: a server error mid-operation is marked ambiguous for reconciliation, never auto-retried.
                             </p>
                           </div>
-                        )}
+                        ) : null}
 
                         {card.error ? (
                           <p className="mt-2 text-xs text-[var(--danger,#c37474)]">{card.error}</p>
@@ -1122,7 +1629,8 @@ export function OpsChatClient({
               ) : null}
             </div>
           </div>
-        ))}
+          ),
+        )}
         <div ref={bottomRef} />
       </div>
 
@@ -1162,20 +1670,32 @@ export function OpsChatClient({
       ) : null}
 
       {error ? <p className="text-sm text-[var(--danger,#c37474)]">{error}</p> : null}
+      {dictation.error || talk.error ? (
+        <p data-testid="voice-error" className="text-sm text-[var(--danger,#c37474)]">{dictation.error ?? talk.error}</p>
+      ) : null}
+      {dictation.interim || talk.interim ? (
+        <p data-testid="voice-interim" className="text-sm italic opacity-60">{dictation.interim || talk.interim}</p>
+      ) : null}
 
       <form
+        ref={formRef}
         onSubmit={(e) => {
           e.preventDefault();
           void send(input);
         }}
         className="flex flex-col gap-2"
       >
+        <ComposerAttachmentChips
+          files={composerFiles}
+          disabled={streaming}
+          onRemove={(localId) => setComposerFiles((prev) => prev.filter((f) => f.localId !== localId))}
+        />
         <textarea
           ref={taRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           rows={2}
-          maxLength={4000}
+          maxLength={OPS_CHAT_MAX_MESSAGE_CHARS}
           placeholder={pending ? 'Resume the unfinished message above to continue…' : 'Ask, answer, approve, or start work — all from here…'}
           className="max-h-80 min-h-[3.5rem] w-full resize-none overflow-y-auto rounded border border-[var(--border)] bg-transparent p-2.5 text-sm leading-relaxed"
           onKeyDown={(e) => {
@@ -1186,10 +1706,74 @@ export function OpsChatClient({
           }}
         />
         <div className="flex items-center justify-between gap-2">
-          <span className="text-xs opacity-50">Enter to send · Shift+Enter for a new line</span>
+          <div className="flex items-center gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept={ATTACHMENT_ACCEPT}
+              className="hidden"
+              onChange={(e) => {
+                void addFiles(e.target.files);
+                e.target.value = '';
+              }}
+            />
+            <button
+              type="button"
+              aria-label="Attach files"
+              title="Attach PDF, Word, Excel, CSV, text, Markdown, or an image"
+              disabled={streaming || !!pending || uploading}
+              onClick={() => fileInputRef.current?.click()}
+              className="rounded border border-[var(--border)] px-2 py-1 text-sm hover:opacity-80 disabled:opacity-40"
+            >
+              📎
+            </button>
+            {dictation.supported ? (
+              <button
+                type="button"
+                data-testid="voice-dictate"
+                aria-label={dictation.listening ? 'Stop dictating' : 'Dictate a message'}
+                aria-pressed={dictation.listening}
+                title="Speak your message into the box — you still press Send"
+                disabled={streaming || !!pending || handsFree}
+                onClick={dictation.toggle}
+                className={`rounded border border-[var(--border)] px-2 py-1 text-sm hover:opacity-80 disabled:opacity-40 ${dictation.listening ? 'bg-[var(--danger,#c37474)] text-white' : ''}`}
+              >
+                🎤
+              </button>
+            ) : null}
+            {talk.supported ? (
+              <button
+                type="button"
+                data-testid="voice-talk"
+                aria-pressed={handsFree}
+                title="Hands-free: a pause sends what you said, the reply is read aloud, then it listens again. Cards still need a tap."
+                disabled={!handsFree && (streaming || !!pending)}
+                onClick={() => (handsFree ? stopHandsFree() : startHandsFree())}
+                className={`rounded border border-[var(--border)] px-2 py-1 text-sm hover:opacity-80 disabled:opacity-40 ${handsFree ? 'bg-[var(--accent)] text-white' : ''}`}
+              >
+                {handsFree ? '■ Stop talking' : '🗣 Talk'}
+              </button>
+            ) : null}
+            <span className="text-xs opacity-50">
+              {handsFree
+                ? talk.listening
+                  ? 'Listening… pause to send'
+                  : streaming
+                    ? 'Answering…'
+                    : 'Speaking the reply…'
+                : 'Enter to send · Shift+Enter for a new line'}
+            </span>
+            {input.length >= OPS_CHAT_MESSAGE_COUNTER_FROM ? (
+              <span data-testid="message-length" className="text-xs opacity-60">
+                {input.length.toLocaleString()} / {OPS_CHAT_MAX_MESSAGE_CHARS.toLocaleString()} characters
+                {input.length >= OPS_CHAT_MAX_MESSAGE_CHARS ? ' — attach longer text as a file' : ''}
+              </span>
+            ) : null}
+          </div>
           <button
             type="submit"
-            disabled={streaming || !!pending || input.trim().length === 0}
+            disabled={streaming || !!pending || uploading || (input.trim().length === 0 && readyFiles.length === 0)}
             className="rounded border border-[var(--border)] px-4 py-1.5 text-sm hover:opacity-80 disabled:opacity-40"
           >
             {streaming ? 'Answering…' : 'Send'}

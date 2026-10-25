@@ -19,8 +19,10 @@ export const PRODUCTION_PINS: ReleasePins = {
   // Bumped 2026-10-11 (0083 graceful_zemo — Phase 2D Vercel mutation: ALTER TYPE action_type ADD VALUE 'vercel_mutation').
   // Bumped 2026-10-13 (0084 previous_frightful_four — Persistent Ops Chat: ops_chat_conversations/messages/proposals tables).
   // Bumped 2026-10-14 (0085 rich_queen_noir — Ops Chat owner->assistant reply linkage: ops_chat_messages.reply_to_message_id).
-  expectedMigrationEndpoint: '0085_rich_queen_noir',
-  expectedCommittedMigrationCount: 86,
+  // Bumped 2026-10-20 (0087 kind_nicolaos — P4 Ops Chat provenance: nullable ops_chat_proposal_id on tasks /
+  // run_jobs / runs + immutability trigger).
+  expectedMigrationEndpoint: '0087_kind_nicolaos',
+  expectedCommittedMigrationCount: 88,
   /**
    * Production REQUIRES an explicit APPLIED_COUNT at signing time and never falls back to a baked default. The
    * previous `defaultAppliedCount: 68` was a stale assumption (production has since applied through 0078) and, if

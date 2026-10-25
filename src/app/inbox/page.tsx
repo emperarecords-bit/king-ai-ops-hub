@@ -3,11 +3,13 @@ import { listMyProjectsWithOrgRoles } from '@/domain/auth/guard';
 import { ownerInbox } from '@/domain/inbox/inbox';
 import { openQuestionsForOwner } from '@/domain/questions/questions';
 import { groupOpenQuestions } from '@/domain/questions/grouping';
+import { sameSelectionWorkspaces } from '@/domain/questions/same-selection';
 import { notificationsForOwner } from '@/domain/notifications/history';
 import { Card, EmptyState, PageHeader } from '@/components/ui';
 import { InboxDecisionForm } from './inbox-decision-form';
 import { QuestionAnswerForm } from './question-answer-form';
 import { GroupAnswerForm } from './group-answer-form';
+import { SameQuestionsPicker } from './same-questions-picker';
 import { NotificationReadForm } from './notification-read-form';
 
 const SEVERITY_LABEL: Record<string, string> = {
@@ -44,6 +46,10 @@ export default async function InboxPage() {
   const questions = await openQuestionsForOwner(user.id, projects, orgRoles);
   // Display-only: identical (normalized) questions in one workspace collapse into one row.
   const questionGroups = groupOpenQuestions(questions);
+  // Owner-confirmed alternative for reworded repeats the strict grouping cannot merge: the owner
+  // selects the questions that are the same. Offered per workspace with ≥2 open questions; nothing
+  // is merged or stored.
+  const sameSelection = sameSelectionWorkspaces(questions);
   const notifications = await notificationsForOwner(user.id, projects, orgRoles);
   const unreadCount = notifications.filter((n) => !n.read).length;
 
@@ -68,6 +74,20 @@ export default async function InboxPage() {
           <h2 className="text-sm font-semibold uppercase tracking-wide text-[var(--muted)]">
             Questions for you — your answer becomes that business&apos;s knowledge
           </h2>
+          {sameSelection.map((w) => (
+            <Card key={`same:${w.projectKey}`}>
+              <SameQuestionsPicker
+                projectKey={w.projectKey}
+                workspaceName={w.workspaceName}
+                questions={w.questions.map((q) => ({
+                  questionId: q.questionId,
+                  question: q.question,
+                  askedBy: q.askedBy,
+                  createdAt: q.createdAt.toISOString(),
+                }))}
+              />
+            </Card>
+          ))}
           {questionGroups.map((g) =>
             g.count === 1 ? (
               <Card key={g.groupKey}>

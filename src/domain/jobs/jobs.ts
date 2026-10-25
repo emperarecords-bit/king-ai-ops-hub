@@ -136,22 +136,136 @@ function ctxForJob(job: ClaimedJob): TenantContext {
  *  `dispatchKind` (Hub P1d) records HOW the job entered the queue — metadata
  *  only, it never changes claim eligibility. Defaults to 'interactive' for the
  *  inline user-started path; the standing-work tick passes 'standing'. */
+export interface EnqueueResult {
+  /** True only when a NEW job row was inserted (the audit says `run_job.enqueued` only then). */
+  inserted: boolean;
+  /** The new job, or the already-live job that blocked the insert (null if neither is visible). */
+  jobId: string | null;
+}
+
 export async function enqueueRun(
   tx: DbTx,
   ctx: TenantContext,
   taskId: string,
   dispatchKind: DispatchKind = 'interactive',
-): Promise<void> {
-  await tx
+  /** P4 provenance: the Ops Chat card (dispatch or re-run) queuing THIS attempt; copied onto the run it creates. */
+  opts: { opsChatProposalId?: string | null } = {},
+): Promise<EnqueueResult> {
+  const insertedRows = await tx
     .insert(runJobs)
-    .values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId, status: 'queued', dispatchKind })
-    .onConflictDoNothing();
+    .values({ orgId: ctx.orgId, projectId: ctx.projectId, taskId, status: 'queued', dispatchKind, opsChatProposalId: opts.opsChatProposalId ?? null })
+    .onConflictDoNothing()
+    .returning({ id: runJobs.id });
+  if (insertedRows[0]) {
+    await writeAudit(tx, ctx, {
+      action: 'run_job.enqueued',
+      entityType: 'task',
+      entityId: taskId,
+      detail: { dispatchKind, jobId: insertedRows[0].id, ...(opts.opsChatProposalId ? { opsChatProposalId: opts.opsChatProposalId } : {}) },
+    });
+    return { inserted: true, jobId: insertedRows[0].id };
+  }
+  // A live job already exists for this task: nothing was queued — never audit it as if it had been.
+  const live = await activeJobFor(tx, taskId);
   await writeAudit(tx, ctx, {
-    action: 'run_job.enqueued',
+    action: 'run_job.enqueue_skipped',
     entityType: 'task',
     entityId: taskId,
-    detail: { dispatchKind },
+    detail: { dispatchKind, reason: 'active_job_exists', activeJobId: live?.id ?? null },
   });
+  return { inserted: false, jobId: live?.id ?? null };
+}
+
+async function activeJobFor(tx: DbTx, taskId: string): Promise<{ id: string; status: string } | null> {
+  const rows = await tx
+    .select({ id: runJobs.id, status: runJobs.status })
+    .from(runJobs)
+    .where(and(eq(runJobs.taskId, taskId), sql`${runJobs.status} in ('queued','running')`))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+/**
+ * The owner asked to RE-RUN a task. Server-cooling evidence (Hub prod 2026-10-19 17:19): "reject and rerun"
+ * on a COMPLETED task queued job ad2c49ee, the worker saw a non-runnable status and drained it as `done` in
+ * 0.42 s with ZERO runs, while Ops Chat reported "✓ Re-run queued". A re-run is now either a real NEW attempt
+ * or an explicit refusal with a reason — never a silent drain:
+ *
+ *  - completed / failed → the task returns to `pending` and a job is queued; the worker's startRun creates a
+ *    NEW run row. Prior runs, results and approvals are never touched (history is append-only).
+ *  - pending / running with a live job → `already_queued` (nothing new queued, said plainly).
+ *  - pending without a live job → queued.
+ *  - awaiting_approval → refused: decide its pending approval first (a re-run would race that decision).
+ *  - cancelled → refused: dispatch a new task instead.
+ */
+export type RerunResult =
+  | { status: 'started'; taskId: string; jobId: string | null; previousStatus: string; previousRunId: string | null }
+  | { status: 'already_queued'; taskId: string; jobId: string | null; previousStatus: string };
+
+export class RerunRefusedError extends Error {
+  constructor(
+    readonly reason: 'awaiting_approval' | 'cancelled' | 'not_found',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'RerunRefusedError';
+  }
+}
+
+export async function requestRerun(
+  tx: DbTx,
+  ctx: TenantContext,
+  taskId: string,
+  /** P4: the re-run card. Linked on the NEW job (and so its run) — never written to tasks.ops_chat_proposal_id. */
+  opts: { opsChatProposalId?: string | null } = {},
+): Promise<RerunResult> {
+  const task = (
+    await tx
+      .select({ id: tasks.id, status: tasks.status, title: tasks.title })
+      .from(tasks)
+      .where(and(eq(tasks.id, taskId), eq(tasks.projectId, ctx.projectId), eq(tasks.orgId, ctx.orgId)))
+      .limit(1)
+  )[0];
+  if (!task) throw new RerunRefusedError('not_found', 'That task was not found in this workspace.');
+  if (task.status === 'awaiting_approval') {
+    throw new RerunRefusedError(
+      'awaiting_approval',
+      `"${task.title}" is waiting on an approval decision. Decide that approval first — a re-run now would race it.`,
+    );
+  }
+  if (task.status === 'cancelled') {
+    throw new RerunRefusedError('cancelled', `"${task.title}" was cancelled. Dispatch a new task instead of re-running it.`);
+  }
+
+  const live = await activeJobFor(tx, taskId);
+  if (live) return { status: 'already_queued', taskId, jobId: live.id, previousStatus: task.status };
+
+  const previousRunId =
+    (
+      await tx
+        .select({ id: runs.id })
+        .from(runs)
+        .where(eq(runs.taskId, taskId))
+        .orderBy(desc(runs.createdAt))
+        .limit(1)
+    )[0]?.id ?? null;
+
+  if (task.status === 'completed' || task.status === 'failed') {
+    // A new attempt: the task becomes runnable again; its earlier runs stay exactly as they were.
+    await tx
+      .update(tasks)
+      .set({ status: 'pending', updatedAt: new Date() })
+      .where(and(eq(tasks.id, taskId), eq(tasks.projectId, ctx.projectId), eq(tasks.orgId, ctx.orgId)));
+    await writeAudit(tx, ctx, {
+      action: 'task.rerun_requested',
+      entityType: 'task',
+      entityId: taskId,
+      detail: { fromStatus: task.status, previousRunId, ...(opts.opsChatProposalId ? { opsChatProposalId: opts.opsChatProposalId } : {}) },
+    });
+  }
+  const enq = await enqueueRun(tx, ctx, taskId, 'interactive', { opsChatProposalId: opts.opsChatProposalId ?? null });
+  if (!enq.inserted) return { status: 'already_queued', taskId, jobId: enq.jobId, previousStatus: task.status };
+  return { status: 'started', taskId, jobId: enq.jobId, previousStatus: task.status, previousRunId };
 }
 
 /**
@@ -228,6 +342,15 @@ export async function runClaimedJob(job: ClaimedJob, live?: RunLiveEvents): Prom
     // Already completed / awaiting_approval / cancelled — nothing to execute; drain the job with ZERO
     // provider calls (this also cleanly terminates a job left behind by a cancelled-while-queued task).
     await finishJob(job.jobId, 'done');
+    // Never invisible: a job that ends with no run is recorded as such (a re-run must not look like one).
+    await withTenant(ctx, (tx) =>
+      writeAudit(tx, ctx, {
+        action: 'run_job.drained_without_run',
+        entityType: 'task',
+        entityId: job.taskId,
+        detail: { jobId: job.jobId, taskStatus: task.status },
+      }),
+    ).catch((err) => log.warn('drain audit failed', { errorClass: err instanceof Error ? err.name : 'unknown' }));
     return null;
   }
 

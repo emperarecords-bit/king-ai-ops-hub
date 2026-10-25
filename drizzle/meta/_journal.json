@@ -603,6 +603,20 @@
       "when": 1791966858456,
       "tag": "0085_rich_queen_noir",
       "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1792393047930,
+      "tag": "0086_flowery_thunderbolt_ross",
+      "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1792488267850,
+      "tag": "0087_kind_nicolaos",
+      "breakpoints": true
     }
   ]
 }

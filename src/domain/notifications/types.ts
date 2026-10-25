@@ -6,6 +6,7 @@ import {
   type NotificationMessageKind,
   type NotificationMessageStatus,
 } from '@/types/domain';
+import { type OpsChatRunLink } from './ops-chat-link';
 
 export type {
   NotificationEventType,
@@ -28,4 +29,9 @@ export interface NotificationInput {
   readonly entityId: string;
   readonly title: string;
   readonly body: string;
+  /**
+   * P5b-1: set ONLY for a run started from an Ops Chat card (runs.ops_chat_proposal_id). Makes a completion
+   * immediate (emailed) and appends a link — to the card when the recipient owns it, else to the task.
+   */
+  readonly opsChat?: OpsChatRunLink;
 }

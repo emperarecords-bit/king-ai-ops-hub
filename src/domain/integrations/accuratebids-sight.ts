@@ -56,8 +56,18 @@ const n = (v: unknown): number => {
 };
 const money = (v: unknown): string => `$${n(v).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
 
+export interface SightFormatOptions {
+  /**
+   * Include the actionable Email Desk (inquiry ids, names, messages, and the "propose an accuratebids_reply"
+   * instruction). Only runs whose scope owns that queue get it (see run-context-scope.ts); a focused owner
+   * task gets a bare count with an explicit "not this task's job" line, so it cannot act on an inquiry.
+   */
+  includeEmailDesk?: boolean;
+}
+
 /** Pure formatter so the briefing shape is unit-testable without a network. */
-export function formatSightBriefing(data: Record<string, unknown>): string {
+export function formatSightBriefing(data: Record<string, unknown>, opts: SightFormatOptions = {}): string {
+  const includeEmailDesk = opts.includeEmailDesk ?? true;
   const quotes = (data.quotes ?? {}) as Record<string, unknown>;
   const invoices = (data.invoices ?? {}) as Record<string, unknown>;
   const byStatus = (quotes.by_status ?? {}) as Record<string, unknown>;
@@ -94,7 +104,12 @@ export function formatSightBriefing(data: Record<string, unknown>): string {
   // Email Desk: unanswered support inquiries. The id is what an accuratebids_reply payload needs.
   const support = (data.support ?? {}) as Record<string, unknown>;
   const openInquiries = Array.isArray(support.open) ? (support.open as Record<string, unknown>[]) : [];
-  if (openInquiries.length > 0) {
+  if (openInquiries.length > 0 && !includeEmailDesk) {
+    lines.push(
+      '',
+      `Email Desk: ${openInquiries.length} unanswered support inquiries exist. They are handled by standing Email Desk work, NOT by this task — do not draft, propose, or send replies to them here.`,
+    );
+  } else if (openInquiries.length > 0) {
     lines.push('', `EMAIL DESK - ${openInquiries.length} unanswered support inquiries (draft a reply and propose it as an accuratebids_reply action; the owner's approval sends it):`);
     for (const q of openInquiries) {
       lines.push(`  [id ${s(q.id, 40)}] ${s(q.created_at, 10)} | ${s(q.name, 40)} <${s(q.email, 60)}> | ${s(q.topic, 40)}`);
@@ -106,7 +121,10 @@ export function formatSightBriefing(data: Record<string, unknown>): string {
 }
 
 /** Fetch + format, or null (missing config, timeout, non-200, bad JSON — the run continues). */
-export async function assembleAccurateBidsSight(deps: AccurateBidsSightDeps = sightDepsFromEnv()): Promise<string | null> {
+export async function assembleAccurateBidsSight(
+  deps: AccurateBidsSightDeps = sightDepsFromEnv(),
+  opts: SightFormatOptions = {},
+): Promise<string | null> {
   if (!deps.snapshotUrl || !deps.serviceToken) return null;
   try {
     const fetcher = deps.fetcher ?? fetch;
@@ -118,7 +136,7 @@ export async function assembleAccurateBidsSight(deps: AccurateBidsSightDeps = si
     if (!res.ok) return null;
     const data = (await res.json()) as Record<string, unknown>;
     if (!data || typeof data !== 'object') return null;
-    return formatSightBriefing(data);
+    return formatSightBriefing(data, opts);
   } catch {
     return null;
   }

@@ -7,6 +7,7 @@ import { log } from '@/lib/log';
 import { type TenantContext } from '@/types/domain';
 import { classifyNotification, notificationDedupeKey } from './severity';
 import { type NotificationInput } from './types';
+import { opsChatLinkLine } from './ops-chat-link';
 
 /**
  * Capture a notifiable event CO-TRANSACTIONALLY with the change that caused it. Call this immediately next to
@@ -24,7 +25,7 @@ export async function enqueueNotification(
   ctx: TenantContext,
   input: NotificationInput,
 ): Promise<string | null> {
-  const { severity, routing } = classifyNotification(input.eventType);
+  const { severity, routing } = classifyNotification(input.eventType, { opsChatLinked: Boolean(input.opsChat) });
   const dedupeKey = notificationDedupeKey(input);
 
   // The recipient is the workspace OWNER, not the run author whose context we're in. Resolve via a SECURITY
@@ -34,6 +35,8 @@ export async function enqueueNotification(
   const rows = (res as { rows?: Array<{ uid: string | null }> }).rows ?? (res as unknown as Array<{ uid: string | null }>);
   const recipientUserId = (Array.isArray(rows) ? rows[0]?.uid : null) ?? null;
   if (!recipientUserId) return null;
+  // P5b-1: the link is chosen per RECIPIENT — the owner-private card only for the card's owner (ops-chat-link.ts).
+  const body = input.opsChat ? input.body + '\n\n' + opsChatLinkLine(input.opsChat, recipientUserId, process.env.APP_URL) : input.body;
 
   const inserted = await tx
     .insert(notificationEvents)
@@ -45,7 +48,7 @@ export async function enqueueNotification(
       severity,
       routing,
       title: input.title.slice(0, 300),
-      body: input.body.slice(0, 4000),
+      body: body.slice(0, 4000),
       entityType: input.entityType,
       entityId: input.entityId,
       dedupeKey,

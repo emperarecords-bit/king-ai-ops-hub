@@ -417,31 +417,31 @@ describe('loadPromptTurns — turn-aware prompt reconstruction (owner order + li
     // and B is the final (current) turn with no trailing assistant.
     const forB = await withUser({ userId: userA }, (tx) => loadPromptTurns(tx, userA, convId, b, { maxOwnerTurns: 8 }));
     expect(forB).toEqual([
-      { role: 'user', content: 'question A' },
+      { role: 'user', content: 'question A', ownerMessageId: a },
       { role: 'assistant', content: 'answer A' },
-      { role: 'user', content: 'question B' },
+      { role: 'user', content: 'question B', ownerMessageId: b },
     ]);
 
     // Prompt for turn A (while A is the current turn): only up through A, and A's own reply is NOT
     // appended (we are generating it); B (higher seq) is excluded.
     const forA = await withUser({ userId: userA }, (tx) => loadPromptTurns(tx, userA, convId, a, { maxOwnerTurns: 8 }));
-    expect(forA).toEqual([{ role: 'user', content: 'question A' }]);
+    expect(forA).toEqual([{ role: 'user', content: 'question A', ownerMessageId: a }]);
   });
 
   it.runIf(available)('excludes an INTERRUPTED assistant reply from the prompt, but keeps it in the display transcript', async () => {
-    const { convId, b } = await withUser({ userId: userA }, async (tx) => {
+    const { convId, a, b } = await withUser({ userId: userA }, async (tx) => {
       const c = await createConversation(tx, userA);
       const ma = await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'q A' });
       await appendAssistantMessage(tx, userA, { conversationId: c.id, content: 'partial A', replyToMessageId: ma.id, status: 'interrupted' });
       const mb = await appendOwnerMessage(tx, userA, { conversationId: c.id, content: 'q B' });
-      return { convId: c.id, b: mb.id };
+      return { convId: c.id, a: ma.id, b: mb.id };
     });
 
     // The interrupted reply is NOT fed back as model history — A appears with no assistant turn.
     const forB = await withUser({ userId: userA }, (tx) => loadPromptTurns(tx, userA, convId, b, { maxOwnerTurns: 8 }));
     expect(forB).toEqual([
-      { role: 'user', content: 'q A' },
-      { role: 'user', content: 'q B' },
+      { role: 'user', content: 'q A', ownerMessageId: a },
+      { role: 'user', content: 'q B', ownerMessageId: b },
     ]);
 
     // ...but it remains in the persisted display transcript (UI/history evidence).

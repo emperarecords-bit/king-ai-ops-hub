@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
-import { currentUser } from '@/domain/auth/guard';
+import { currentUser, tenantForUser } from '@/domain/auth/guard';
+import { currentBuildId } from '@/lib/build-id';
 import { signOut } from '@/app/login/actions';
 import { withUser } from '@/db/tenant';
 import { buildPulse, needsYouCount, openingMessage } from '@/domain/opschat/pulse';
@@ -10,6 +11,12 @@ import {
   loadConversation,
   mostRecentConversationId,
 } from '@/domain/opschat/conversations';
+import { attachmentsForMessages, type AttachmentSummary } from '@/domain/opschat/attachments';
+import { cardLabelOf } from '@/domain/opschat/card-state';
+import { loadLinkedRunViews } from '@/domain/opschat/linked-runs';
+import { type LinkedRunView } from '@/domain/opschat/linked-run-view';
+import { anchorEntries, completionEntries, LEADING, type CompletionEntry } from '@/domain/opschat/conversation-continuity';
+import { log } from '@/lib/log';
 import { OpsChatClient } from './ops-chat-client';
 import { type PersistedMessage, type PendingTurn } from './ops-chat-transcript';
 
@@ -51,9 +58,36 @@ export default async function OpsChatPage({
       // RLS + the explicit user filter scope this load: another user's id simply loads nothing.
       const loaded = id ? await loadConversation(tx, user.id, id, { limit: historyLimit }) : null;
       const pending = loaded ? await earliestUnansweredOwnerTurn(tx, user.id, loaded.conversation.id) : null;
-      return { conversations, loaded, pending };
+      // Attachment chips for the owner messages in the display window (metadata only).
+      const attachments = loaded
+        ? await attachmentsForMessages(tx, user.id, loaded.conversation.id, loaded.messages.filter((m) => m.role === 'user').map((m) => m.id))
+        : new Map<string, AttachmentSummary[]>();
+      return { conversations, loaded, pending, attachments };
     }),
   ]);
+  // P5a: what each confirmed dispatch / re-run card's run actually did, read from the P4 links (never chat text).
+  // Read per project under that project's tenant RLS, AFTER the owner-private load (no nested transactions).
+  // Best-effort: a failure shows the cards exactly as before.
+  const allCards = (stored.loaded?.messages ?? []).flatMap((m) => m.proposals);
+  const linkedRuns: Map<string, LinkedRunView> = await loadLinkedRunViews(allCards, (key) => tenantForUser(user.id, key)).catch((err: unknown) => {
+    log.warn('ops page linked-run lookup failed (cards shown without run outcome)', { errorClass: err instanceof Error ? err.name : 'unknown' });
+    return new Map<string, LinkedRunView>();
+  });
+  // P5c-3: one COMPLETION ENTRY per finished linked run, placed in the transcript at its finish time (after the last
+  // message created before it finished). Derived from the run rows on every load — exactly one per run, nothing stored.
+  const entries: CompletionEntry[] = completionEntries(
+    allCards.map((c) => {
+      const p = c.proposal && typeof c.proposal === 'object' ? (c.proposal as Record<string, unknown>) : {};
+      return {
+        proposalId: c.id,
+        kind: c.kind,
+        label: cardLabelOf(c.kind, p),
+        projectKey: typeof p.projectKey === 'string' ? p.projectKey : null,
+        view: linkedRuns.get(c.id) ?? null,
+      };
+    }),
+  );
+  const anchored = anchorEntries(stored.loaded?.messages ?? [], entries);
   const opening = openingMessage(pulse);
   // Combined needs-you count (approvals + open questions) — the Inbox surfaces
   // both, so this never shows a misleading approvals-only "0" when only
@@ -68,7 +102,16 @@ export default async function OpsChatPage({
     content: m.content,
     question: m.question,
     replyToMessageId: m.replyToMessageId,
-    proposals: m.proposals.map((p) => ({ id: p.id, proposal: p.proposal, state: p.state, result: p.result, error: p.error })),
+    proposals: m.proposals.map((p) => ({ id: p.id, proposal: p.proposal, state: p.state, result: p.result, error: p.error, linkedRun: linkedRuns.get(p.id) ?? null })),
+    completionsAfter: anchored.get(m.id) ?? [],
+    attachments: (stored.attachments.get(m.id) ?? []).map((a) => ({
+      id: a.id,
+      filename: a.filename,
+      kind: a.kind,
+      sizeBytes: a.sizeBytes,
+      status: a.status,
+      error: a.error,
+    })),
   }));
   const pendingTurn: PendingTurn | null = stored.pending ? { turnId: stored.pending.id, content: stored.pending.content } : null;
   const notFound = requested !== '' && !startNew && !stored.loaded;
@@ -119,6 +162,8 @@ export default async function OpsChatPage({
         persisted={persisted}
         pendingTurn={pendingTurn}
         conversations={stored.conversations.map((c) => ({ id: c.id, title: c.title }))}
+        leadingCompletions={anchored.get(LEADING) ?? []}
+        buildId={currentBuildId()}
       />
 
       {stored.loaded?.hasEarlier ? (

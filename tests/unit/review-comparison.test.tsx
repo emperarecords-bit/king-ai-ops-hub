@@ -48,16 +48,33 @@ describe('ReviewComparison', () => {
     const html = renderToStaticMarkup(<ReviewComparison
       reviewerName={null}
       steps={[step('p', 'primary'), step('r', 'review', legacy)]}
-      messages={[message('m1', 'p', '<script>alert(1)</script> long text', 'assistant')]}
+      messages={[message('m1', 'p', 'Primary text.', 'assistant'), message('m2', 'r', '<script>alert(1)</script> long text', 'reviewer')]}
     />);
     expect(html).toContain('Legacy finding — no claim anchor');
-    expect(html).toContain('Not recorded for this historical run.');
+    expect(html).toContain('Rejected by reviewer');
     expect(html).toContain('Legacy record');
     expect(html).toContain('&lt;script&gt;');
     expect(html).not.toContain('<script>');
+    // No revision → the original is the Answer tab's result; it is NOT repeated here.
+    expect(html).not.toContain('Primary text.');
+    expect(html).not.toContain('Revised response');
   });
 
-  it('renders nothing when the run has no review step', () => {
-    expect(renderToStaticMarkup(<ReviewComparison reviewerName={null} steps={[step('p', 'primary')]} messages={[]} />)).toBe('');
+  it('an EMPTY reviewer reply recorded as "reject" (prod run 2db706f8) says no review happened — not a rejection', () => {
+    const fallback = { contractVersion: '2' as const, verdict: 'reject' as const, issues: [] };
+    const html = renderToStaticMarkup(<ReviewComparison
+      reviewerName={null}
+      steps={[step('p', 'primary'), step('r', 'review', fallback)]}
+      messages={[message('m1', 'p', 'Punch list.', 'assistant'), message('m2', 'r', '', 'reviewer')]}
+    />);
+    expect(html).toContain('No review — reviewer replied empty');
+    expect(html).toContain('not a real rejection');
+    expect(html).not.toContain('Rejected by reviewer');
+    expect(html).not.toContain('No specific findings');
+    expect(html).not.toContain('Findings');
+  });
+
+  it('says plainly when the run had no review step', () => {
+    expect(renderToStaticMarkup(<ReviewComparison reviewerName={null} steps={[step('p', 'primary')]} messages={[]} />)).toContain('No reviewer looked at this answer.');
   });
 });

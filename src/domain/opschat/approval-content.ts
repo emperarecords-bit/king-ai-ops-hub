@@ -98,6 +98,12 @@ function scrub(s: string, acc: Acc): string {
   return out;
 }
 
+/** Credential-shaped strings scrubbed from free text, nothing shortened (same patterns as the rendered view). */
+export function redactText(s: string): { text: string; redacted: boolean } {
+  const acc: Acc = { truncated: false, redacted: false };
+  return { text: scrub(s, acc), redacted: acc.redacted };
+}
+
 function cap(s: string, max: number, acc: Acc): string {
   if (s.length <= max) return s;
   acc.truncated = true;
@@ -219,6 +225,24 @@ function renderQuoteOrInvoice(p: Record<string, unknown>, kind: 'quote' | 'invoi
   );
 }
 
+function renderSend(p: Record<string, unknown>): ApprovalContentView {
+  const b = new Builder();
+  const send = firstStr(p, ['send']);
+  const what = send === 'quote' ? 'quote' : send === 'invoice_reminder' ? 'payment reminder for invoice' : 'invoice';
+  b.field('Sends', what)
+    .field('Record', firstStr(p, ['label']))
+    .field('Invoice id', firstStr(p, ['invoice_id']))
+    .field('Quote id', firstStr(p, ['quote_id']))
+    // Shown in full: this is the address the owner is confirming will be saved and emailed.
+    .field('Save + email to', firstStr(p, ['customer_email']));
+  const saving = Boolean(firstStr(p, ['customer_email']));
+  return b.build(
+    'email',
+    `${saving ? 'Save this email on the invoice (it has none on file), then email' : 'Email'} the ${what} to the customer through AccurateBids (its own "View & ${send === 'quote' ? 'Approve' : 'Pay'}" email)`,
+    null,
+  );
+}
+
 function renderHttp(p: Record<string, unknown>): ApprovalContentView {
   const b = new Builder();
   b.field('Method', (firstStr(p, ['method']) ?? 'unspecified').toUpperCase()).field(
@@ -272,6 +296,7 @@ export function renderApprovalContent(actionType: string, payload: unknown): App
     }
     if (p.kind === 'accuratebids_quote') return withPre(renderQuoteOrInvoice(p, 'quote'));
     if (p.kind === 'accuratebids_invoice') return withPre(renderQuoteOrInvoice(p, 'invoice'));
+    if (p.kind === 'accuratebids_send') return withPre(renderSend(p));
     return withPre(renderHttp(p));
   }
   return withPre(renderJson(p, actionType));

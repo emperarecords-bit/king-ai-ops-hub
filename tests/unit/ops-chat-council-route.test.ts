@@ -38,6 +38,7 @@ vi.mock('@/domain/opschat/council', () => ({
   CouncilUnavailableError: h.CouncilUnavailableError,
   COUNCIL_MAX_QUESTION_CHARS: 4000,
   COUNCIL_MAX_ANSWER_CHARS: 12_000,
+  COUNCIL_HEARTBEAT_MS: 10_000,
 }));
 vi.mock('@/domain/usage/rate-limit', () => ({ consumeRateLimit: h.consumeRateLimit }));
 vi.mock('@/db/client', () => ({ getDb: () => ({ transaction: (fn: (tx: unknown) => unknown) => fn({}) }) }));
@@ -176,19 +177,46 @@ describe('POST /api/ops-chat/council — results and safe failure', () => {
     expect(arg.primaryAnswer).toBe(GOOD.answer);
   });
 
-  it('CouncilUnavailableError → 503 with its safe message', async () => {
+  // Once the Council starts, the response is a heartbeat-kept 200 whose JSON body carries the outcome (pre-run checks
+  // above still fail with real status codes). The safe messages are unchanged.
+  it('CouncilUnavailableError → { error } with its safe message', async () => {
     h.runCouncil.mockRejectedValue(new h.CouncilUnavailableError('Council is unavailable right now.'));
     const res = await call(GOOD);
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.error).toBe('Council is unavailable right now.');
+    expect(body).toEqual({ error: 'Council is unavailable right now.' });
   });
 
-  it('an unexpected error → 500 generic', async () => {
+  it('an unexpected error → { error } generic, never the raw message', async () => {
     h.runCouncil.mockRejectedValue(new Error('boom'));
     const res = await call(GOOD);
-    expect(res.status).toBe(500);
-    const body = await res.json();
-    expect(body.error).toBe('Something went wrong.');
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(JSON.parse(text)).toEqual({ error: 'Something went wrong.' });
+    expect(text).not.toContain('boom');
+  });
+
+  it('a slow Council keeps the connection alive with whitespace, and the body still parses as JSON', async () => {
+    vi.useFakeTimers();
+    try {
+      let finish!: (v: unknown) => void;
+      h.runCouncil.mockReturnValue(new Promise((r) => (finish = r)));
+      const res = await call(GOOD);
+      const reader = res.body!.getReader();
+      const chunks: string[] = [];
+      const dec = new TextDecoder();
+      await vi.advanceTimersByTimeAsync(25_000); // two heartbeats
+      finish({ synthesis: { recommendation: 'Proceed.', confidence: 'high', agreement: [], disagreement: [], risks: [] }, reviewers: [], degraded: false });
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(dec.decode(value));
+      }
+      const text = chunks.join('');
+      expect(text.startsWith('  ')).toBe(true);
+      expect(JSON.parse(text).synthesis.recommendation).toBe('Proceed.');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

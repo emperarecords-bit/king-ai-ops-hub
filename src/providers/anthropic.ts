@@ -11,8 +11,21 @@ import {
   type ToolSpec,
   type ToolRunner,
   type ToolLoopEvent,
+  type Turn,
 } from '@/types/provider';
 import { costForUsage, modelsForProvider } from './pricing';
+
+/** A Turn → Anthropic message. A USER turn with images becomes image blocks followed by its text;
+ *  everything else stays plain string content (unchanged for every existing caller). */
+export function toMessageParam(t: Turn): Anthropic.MessageParam {
+  if (t.role !== 'user' || !t.images || t.images.length === 0) return { role: t.role, content: t.content };
+  const blocks: Anthropic.ContentBlockParam[] = t.images.map((img) => ({
+    type: 'image',
+    source: { type: 'base64', media_type: img.mediaType, data: img.dataBase64 },
+  }));
+  blocks.push({ type: 'text', text: t.content.length > 0 ? t.content : '(image attached)' });
+  return { role: 'user', content: blocks };
+}
 
 /** Parse a streamed tool-input JSON string; empty/partial → {} (never throws). */
 function parseToolInput(json: string): unknown {
@@ -23,6 +36,12 @@ function parseToolInput(json: string): unknown {
   } catch {
     return {};
   }
+}
+
+/** Output budget for the ONE tool-loop retry after a call hit its limit without saying anything: double, at least
+ *  16,000, at most 32,000. */
+export function toolLoopRetryOutputTokens(budget: number): number {
+  return Math.min(32_000, Math.max(16_000, budget * 2));
 }
 
 /**
@@ -39,6 +58,8 @@ export class AnthropicProvider implements AIProvider {
    * skip it up front. Process-lifetime cache only — cheap and self-healing.
    */
   private readonly noTemperatureModels = new Set<string>();
+  /** Web search was refused by the account (turned off in the Anthropic Console) — stop offering it. Self-healing on restart. */
+  private noWebSearch = false;
 
   constructor(apiKey: string) {
     // maxRetries: 0 — retry policy belongs to the engine, once, uniformly.
@@ -75,10 +96,15 @@ export class AnthropicProvider implements AIProvider {
     return {
       model: request.model,
       system: request.system,
-      messages: request.turns.map((t) => ({ role: t.role, content: t.content })),
+      messages: request.turns.map(toMessageParam),
       ...(withTemperature ? { temperature: request.temperature } : {}),
       max_tokens: request.maxOutputTokens,
     };
+  }
+
+  /** The account refused the web search tool (e.g. web search turned off for the organization). */
+  private isWebSearchUnavailable(err: unknown): boolean {
+    return err instanceof APIError && err.status === 400 && /web[_ ]search/i.test(err.message);
   }
 
   private isTemperatureDeprecated(err: unknown): boolean {
@@ -181,7 +207,9 @@ export class AnthropicProvider implements AIProvider {
   /**
    * Tool-use conversation loop (Ops Chat v2). The model may call the supplied
    * tools; `runTool` executes each and its string result is fed back until the
-   * model returns a final text answer or `maxIterations` is reached. All
+   * model returns a final text answer or `maxIterations` is reached. If tools ran
+   * and the turn would otherwise end with no words (round cap, or an empty final
+   * answer), one extra tools-disabled "wrap-up" call makes the model reply. All
    * Anthropic-specific message shapes (tool_use / tool_result blocks) stay
    * inside this file. Yields text deltas + tool-activity events, then one 'done'.
    */
@@ -197,50 +225,95 @@ export class AnthropicProvider implements AIProvider {
         description: t.description,
         input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
       }));
-      const messages: Anthropic.MessageParam[] = request.turns.map((t) => ({
-        role: t.role,
-        content: t.content,
-      }));
+      const messages: Anthropic.MessageParam[] = request.turns.map(toMessageParam);
+      // Web research (owner-approved 2026-10-23): Anthropic's server-side web search, capped per turn. Results are
+      // untrusted page text the model reads — nothing is acted on without a confirm card. If the account has web
+      // search turned off the API refuses the request; then the turn (and later ones) run without it.
+      let webSearches = 0;
+      const toolsFor = (): Anthropic.ToolUnion[] =>
+        request.webSearch && !this.noWebSearch
+          ? [
+              ...anthropicTools,
+              { type: 'web_search_20250305', name: 'web_search', max_uses: request.webSearch.maxUses } as Anthropic.WebSearchTool20250305,
+            ]
+          : anthropicTools;
 
       let inputTokens = 0;
       let outputTokens = 0;
       let stopReason = 'unknown';
+      // A turn must never end on a tool result with nothing said after it (the owner sees the
+      // conversation just stop). After tools have run, if the model hits the round cap or answers
+      // with no text, make ONE more call with tools disabled and a nudge, so it replies in words.
+      let usedTools = false;
+      let wrapUp = false;
+      // Output room (Hub prod 2026-10-23): the model thinks before it answers and thinking counts against max_tokens,
+      // so a big turn could stop at the limit having said nothing — or mid tool call (a cut-off tool call is never
+      // run). A call that hits the limit BEFORE any words reached the owner is retried ONCE with more room (nothing
+      // was shown, so nothing is duplicated); a call cut off after words were shown, or cut off again, ends the turn
+      // flagged `cutOff` so the caller can say so honestly.
+      let budget = request.maxOutputTokens;
+      let roomRetried = false;
+      let cutOff = false;
+      const nudge = (why: string) => {
+        const last = messages[messages.length - 1];
+        const text = `[${why}] Reply to the owner now in plain words, without calling any tools: say what you did, what was refused or failed and why (from the tool results above), and what you need from them next. Do not claim anything was created or sent unless a tool result says so.`;
+        if (last && last.role === 'user' && Array.isArray(last.content)) last.content.push({ type: 'text', text });
+        else messages.push({ role: 'user', content: text });
+      };
 
-      for (let iter = 0; iter < maxIterations; iter++) {
+      for (let iter = 0; iter <= maxIterations; iter++) {
+        if (iter === maxIterations && !wrapUp) {
+          // Round cap reached right after a tool round: wrap up instead of ending silently.
+          // (If an empty-answer wrap-up is already pending, this iteration IS that call.)
+          if (!usedTools) break;
+          wrapUp = true;
+          nudge('Tool-round limit reached');
+        }
         const open = (withTemperature: boolean) =>
           this.client.messages.create(
             {
               model: request.model,
               system: request.system,
               messages,
-              max_tokens: request.maxOutputTokens,
-              tools: anthropicTools,
+              max_tokens: budget,
+              tools: toolsFor(),
+              ...(wrapUp ? { tool_choice: { type: 'none' as const } } : {}),
               ...(withTemperature ? { temperature: request.temperature } : {}),
               stream: true,
             },
             { timeout: request.timeoutMs, signal: request.signal },
           );
 
-        let stream: Awaited<ReturnType<typeof open>>;
-        if (this.noTemperatureModels.has(request.model)) {
-          stream = await open(false);
-        } else {
+        const openAdaptive = async (): Promise<Awaited<ReturnType<typeof open>>> => {
+          if (this.noTemperatureModels.has(request.model)) return open(false);
           try {
-            stream = await open(true);
+            return await open(true);
           } catch (err) {
             if (this.isTemperatureDeprecated(err)) {
               this.noTemperatureModels.add(request.model);
-              stream = await open(false);
-            } else {
-              throw err;
+              return open(false);
             }
+            throw err;
+          }
+        };
+        let stream: Awaited<ReturnType<typeof open>>;
+        try {
+          stream = await openAdaptive();
+        } catch (err) {
+          if (request.webSearch && !this.noWebSearch && this.isWebSearchUnavailable(err)) {
+            this.noWebSearch = true;
+            stream = await openAdaptive();
+          } else {
+            throw err;
           }
         }
 
         // Accumulate assistant content blocks (by stream index) for this turn.
         type Block =
           | { type: 'text'; text: string }
-          | { type: 'tool_use'; id: string; name: string; json: string };
+          | { type: 'tool_use'; id: string; name: string; json: string }
+          | { type: 'server_tool_use'; id: string; name: string; json: string }
+          | { type: 'server_result'; block: Anthropic.ContentBlockParam };
         const blocks: Block[] = [];
         let curStop = 'unknown';
 
@@ -252,36 +325,77 @@ export class AnthropicProvider implements AIProvider {
             if (cb.type === 'text') blocks[event.index] = { type: 'text', text: '' };
             else if (cb.type === 'tool_use')
               blocks[event.index] = { type: 'tool_use', id: cb.id, name: cb.name, json: '' };
+            else if (cb.type === 'server_tool_use') {
+              blocks[event.index] = { type: 'server_tool_use', id: cb.id, name: cb.name, json: '' };
+              yield { kind: 'tool_start', name: cb.name };
+            } else if (cb.type === 'web_search_tool_result') {
+              // Arrives complete; kept verbatim so a later round can send it back as the API requires.
+              blocks[event.index] = { type: 'server_result', block: cb as unknown as Anthropic.ContentBlockParam };
+              yield { kind: 'tool_end', name: 'web_search', ok: Array.isArray(cb.content) };
+            }
           } else if (event.type === 'content_block_delta') {
             const b = blocks[event.index];
             if (event.delta.type === 'text_delta' && b?.type === 'text') {
               b.text += event.delta.text;
               yield { kind: 'delta', text: event.delta.text };
-            } else if (event.delta.type === 'input_json_delta' && b?.type === 'tool_use') {
+            } else if (event.delta.type === 'input_json_delta' && (b?.type === 'tool_use' || b?.type === 'server_tool_use')) {
               b.json += event.delta.partial_json;
             }
           } else if (event.type === 'message_delta') {
             outputTokens += event.usage.output_tokens;
+            webSearches += (event.usage as { server_tool_use?: { web_search_requests?: number } | null }).server_tool_use?.web_search_requests ?? 0;
             if (event.delta.stop_reason) curStop = event.delta.stop_reason.toLowerCase();
           }
         }
         stopReason = curStop;
 
         const present = blocks.filter((b): b is Block => Boolean(b));
+        const toParam = (b: Block): Anthropic.ContentBlockParam =>
+          b.type === 'text'
+            ? { type: 'text', text: b.text }
+            : b.type === 'tool_use'
+              ? { type: 'tool_use', id: b.id, name: b.name, input: parseToolInput(b.json) }
+              : b.type === 'server_tool_use'
+                ? ({ type: 'server_tool_use', id: b.id, name: b.name, input: parseToolInput(b.json) } as Anthropic.ContentBlockParam)
+                : b.block;
+        // A long server-side search turn can pause: send its content back as-is and let the model continue.
+        if (curStop === 'pause_turn') {
+          messages.push({ role: 'assistant', content: present.map(toParam) });
+          continue;
+        }
+        if (curStop === 'max_tokens') {
+          const spoke = present.some((b) => b.type === 'text' && b.text.trim().length > 0);
+          if (!spoke && !roomRetried) {
+            roomRetried = true;
+            budget = toolLoopRetryOutputTokens(budget);
+            iter -= 1; // the same round again, with more room — not an extra tool round
+            continue;
+          }
+          cutOff = true;
+          break;
+        }
         const toolUses = present.filter(
           (b): b is { type: 'tool_use'; id: string; name: string; json: string } => b.type === 'tool_use',
         );
 
-        // Final answer produced (no tool calls) — stop.
-        if (curStop !== 'tool_use' || toolUses.length === 0) break;
+        // Final answer produced (no tool calls) — stop. But an EMPTY answer right after tools ran
+        // is not an answer: ask once more (tools off) so the owner gets a reply.
+        if (curStop !== 'tool_use' || toolUses.length === 0) {
+          const said = present.some((b) => b.type === 'text' && b.text.trim().length > 0);
+          if (!said && usedTools && !wrapUp) {
+            wrapUp = true;
+            nudge('Your last reply was empty');
+            continue;
+          }
+          break;
+        }
+        // Tools are disabled on the wrap-up call; never run another round after it.
+        if (wrapUp) break;
+        usedTools = true;
 
         // Record the assistant's turn (text + tool_use), then run each tool and
         // feed the results back as a user turn.
-        const assistantContent: Anthropic.ContentBlockParam[] = present.map((b) =>
-          b.type === 'text'
-            ? { type: 'text', text: b.text }
-            : { type: 'tool_use', id: b.id, name: b.name, input: parseToolInput(b.json) },
-        );
+        const assistantContent: Anthropic.ContentBlockParam[] = present.map(toParam);
         messages.push({ role: 'assistant', content: assistantContent });
 
         const toolResults: Anthropic.ContentBlockParam[] = [];
@@ -306,7 +420,7 @@ export class AnthropicProvider implements AIProvider {
         messages.push({ role: 'user', content: toolResults });
       }
 
-      yield { kind: 'done', usage: { inputTokens, outputTokens }, stopReason };
+      yield { kind: 'done', usage: { inputTokens, outputTokens }, stopReason, cutOff, roomRetried, webSearches };
     } catch (err) {
       throw this.mapError(err);
     }

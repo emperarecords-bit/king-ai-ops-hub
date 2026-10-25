@@ -2,6 +2,8 @@ import 'server-only';
 import { z } from 'zod';
 import { type AIProvider, type ProviderId } from '@/types/provider';
 import { getProvider as defaultGetProvider } from '@/providers/registry';
+import { FLAGSHIP_MODELS } from '@/orchestration/routing';
+import { OPS_CHAT_MAX_MESSAGE_CHARS } from '@/domain/opschat/limits';
 
 /**
  * Ops Chat — Council review layer (v2 "Council Mode"). OWNER-TRIGGERED, READ/REVIEW ONLY.
@@ -37,15 +39,28 @@ export type CouncilConfidence = 'low' | 'medium' | 'high';
 
 /** Hard caps (cost control). Exported so tests and the route can assert them. */
 export const COUNCIL_MAX_REVIEWERS = 3;
-export const COUNCIL_MAX_REVIEWER_TOKENS = 700;
-export const COUNCIL_MAX_SYNTHESIS_TOKENS = 900;
-export const COUNCIL_REVIEWER_TIMEOUT_MS = 30_000;
-export const COUNCIL_OVERALL_TIMEOUT_MS = 60_000;
+/**
+ * Owner decision 2026-10-22: the Council runs on the TOP model per vendor (Opus 4.8, GPT-5.4, Gemini 3.1 Pro, DeepSeek
+ * Reasoner). Those models reason before they answer, and the reasoning counts against the output budget — at the old
+ * 700-token cap a reviewer could spend it all thinking and return EMPTY text (exactly the failure seen on the run
+ * reviewer, prod run 2db706f8). So the caps leave room to think; the visible conclusion is still clamped (2,000 chars)
+ * and the prompts still ask for conclusions only. Time is sized the same way; the route keeps the connection alive
+ * while the Council works (see COUNCIL_HEARTBEAT_MS).
+ */
+export const COUNCIL_MAX_REVIEWER_TOKENS = 4_000;
+export const COUNCIL_MAX_SYNTHESIS_TOKENS = 4_000;
+export const COUNCIL_REVIEWER_TIMEOUT_MS = 90_000;
+export const COUNCIL_SYNTHESIS_TIMEOUT_MS = 60_000;
+/** Reviewers + synthesis, with margin; still one bounded deadline for the whole Council. */
+export const COUNCIL_OVERALL_TIMEOUT_MS = 160_000;
+/** The route writes a whitespace byte this often while the Council works, so no proxy closes a quiet connection. */
+export const COUNCIL_HEARTBEAT_MS = 10_000;
 /** Minimum reviewer conclusions required to synthesise; below this we fail safe. */
 export const COUNCIL_QUORUM = 2;
 
 /** Max input sizes accepted into Council (also enforced by the route schema). */
-export const COUNCIL_MAX_QUESTION_CHARS = 4000;
+/** The owner question is the Ops Chat message it answered, so it may be as long as one. */
+export const COUNCIL_MAX_QUESTION_CHARS = OPS_CHAT_MAX_MESSAGE_CHARS;
 export const COUNCIL_MAX_ANSWER_CHARS = 12_000;
 
 /** A reviewer's concise, conclusions-only output (or a graceful failure marker). */
@@ -110,13 +125,11 @@ export interface CouncilDeps {
 /** Candidate vendors in preference order for availability probing. */
 const CANDIDATE_PROVIDERS: readonly ProviderId[] = ['anthropic', 'openai', 'google', 'deepseek'];
 
-/** Reviewer model per vendor — cost-aware mid models; all present in pricing. */
-const REVIEWER_MODEL: Readonly<Record<ProviderId, string>> = {
-  anthropic: 'claude-sonnet-5',
-  openai: 'gpt-5.4-mini',
-  google: 'gemini-3.1-flash-lite',
-  deepseek: 'deepseek-chat',
-};
+/**
+ * Reviewer (and synthesis) model per vendor — the platform's FLAGSHIP model for that vendor (one source of truth with
+ * task-tier routing; all present in pricing). Owner decision 2026-10-22: the Council gets the best models.
+ */
+export const REVIEWER_MODEL: Readonly<Record<ProviderId, string>> = FLAGSHIP_MODELS;
 
 /** Synthesis always runs on Anthropic when available (falls back to any vendor). */
 const SYNTHESIS_PREFERRED: ProviderId = 'anthropic';
@@ -300,7 +313,7 @@ async function synthesise(
       turns: [{ role: 'user', content: user }],
       temperature: 0.2,
       maxOutputTokens: COUNCIL_MAX_SYNTHESIS_TOKENS,
-      timeoutMs: COUNCIL_REVIEWER_TIMEOUT_MS,
+      timeoutMs: COUNCIL_SYNTHESIS_TIMEOUT_MS,
       signal,
     });
   } catch {

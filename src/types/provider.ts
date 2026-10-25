@@ -21,9 +21,18 @@ export interface ModelDescriptor {
 
 export type TurnRole = 'user' | 'assistant';
 
+/** An image the owner attached to a user turn (Ops Chat). Raster types only — never SVG. */
+export interface TurnImage {
+  readonly mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+  readonly dataBase64: string;
+}
+
 export interface Turn {
   readonly role: TurnRole;
   readonly content: string;
+  /** Optional images for a USER turn. Only adapters that support image input map them (Anthropic);
+   *  `content` stays the authoritative text, so run hashing and text-only adapters are unaffected. */
+  readonly images?: readonly TurnImage[];
 }
 
 export interface AgentRequest {
@@ -35,6 +44,8 @@ export interface AgentRequest {
   /** Per-call wall clock budget, ms. The adapter must enforce it. */
   readonly timeoutMs: number;
   readonly signal?: AbortSignal;
+  /** Tool loop only: let the model search the web (provider-side), at most `maxUses` searches per turn. */
+  readonly webSearch?: { readonly maxUses: number };
 }
 
 export interface TokenUsage {
@@ -80,7 +91,17 @@ export type ToolLoopEvent =
   | { readonly kind: 'delta'; readonly text: string }
   | { readonly kind: 'tool_start'; readonly name: string }
   | { readonly kind: 'tool_end'; readonly name: string; readonly ok: boolean }
-  | { readonly kind: 'done'; readonly usage: TokenUsage; readonly stopReason: string };
+  | {
+      readonly kind: 'done';
+      readonly usage: TokenUsage;
+      readonly stopReason: string;
+      /** A call hit its output limit before it finished, even after the one retry with more room. */
+      readonly cutOff?: boolean;
+      /** A call hit its output limit before saying anything and was retried once with more room. */
+      readonly roomRetried?: boolean;
+      /** Web searches the provider ran during the turn. */
+      readonly webSearches?: number;
+    };
 
 export const PROVIDER_ERROR_KINDS = [
   'rate_limited',

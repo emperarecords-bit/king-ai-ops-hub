@@ -32,7 +32,17 @@ const h = vi.hoisted(() => ({
   createTask: vi.fn(),
   getTask: vi.fn(),
   enqueueRun: vi.fn(),
+  requestRerun: vi.fn(),
+  writeAudit: vi.fn(),
   listAgents: vi.fn(),
+  RerunRefusedError: class RerunRefusedError extends Error {
+    constructor(
+      readonly reason: string,
+      message: string,
+    ) {
+      super(message);
+    }
+  },
 }));
 
 vi.mock('@/domain/auth/guard', () => ({ requireUser: h.requireUser, requireTenant: h.requireTenant }));
@@ -45,8 +55,9 @@ vi.mock('@/domain/questions/questions', () => ({ answerOwnerQuestion: h.answerOw
 vi.mock('@/domain/approvals/approvals', () => ({ decideApproval: h.decideApproval }));
 vi.mock('@/domain/execution/execute-on-approval', () => ({ executeApprovedIfEligible: h.executeApprovedIfEligible }));
 vi.mock('@/domain/tasks/tasks', () => ({ createTask: h.createTask, getTask: h.getTask }));
-vi.mock('@/domain/jobs/jobs', () => ({ enqueueRun: h.enqueueRun }));
+vi.mock('@/domain/jobs/jobs', () => ({ enqueueRun: h.enqueueRun, requestRerun: h.requestRerun, RerunRefusedError: h.RerunRefusedError }));
 vi.mock('@/domain/agents/agents', () => ({ listAgents: h.listAgents }));
+vi.mock('@/domain/audit/audit', () => ({ writeAudit: h.writeAudit }));
 vi.mock('@/domain/opschat/conversations', () => ({ loadProposal: h.loadProposal, transitionProposal: h.transitionProposal }));
 // The confirm route imports the governed external executors at top level; mock them so the
 // module loads without their server-only dependencies (they are not exercised in this suite).
@@ -96,6 +107,7 @@ function expectNoWrites() {
   expect(h.decideApproval).not.toHaveBeenCalled();
   expect(h.createTask).not.toHaveBeenCalled();
   expect(h.enqueueRun).not.toHaveBeenCalled();
+  expect(h.requestRerun).not.toHaveBeenCalled();
   expect(h.executeApprovedIfEligible).not.toHaveBeenCalled();
 }
 
@@ -116,8 +128,9 @@ beforeEach(() => {
   h.executeApprovedIfEligible.mockResolvedValue({ outcome: 'done', message: null });
   h.createTask.mockResolvedValue('task-123');
   h.getTask.mockResolvedValue({ id: UUID, title: 'T', status: 'completed' });
-  h.enqueueRun.mockResolvedValue(undefined);
-  h.listAgents.mockResolvedValue([{ id: UUID, name: 'Scout', role: 'researcher', enabled: true, provider: 'anthropic' }]);
+  h.enqueueRun.mockResolvedValue({ inserted: true, jobId: 'job-1' });
+  h.requestRerun.mockResolvedValue({ status: 'started', taskId: UUID, jobId: 'job-2', previousStatus: 'completed', previousRunId: 'run-1' });
+  h.listAgents.mockResolvedValue([{ id: UUID, name: 'Scout', role: 'primary', enabled: true, provider: 'anthropic' }]);
 });
 
 describe('confirm — auth & validation gates (zero writes on rejection)', () => {
@@ -215,6 +228,35 @@ describe('confirm — writes happen only after a valid confirm (from the stored 
     expect(h.enqueueRun).toHaveBeenCalledTimes(1);
   });
 
+  it('dispatch_task: the agent on the card is the agent that runs; a changed/disabled agent fails stale with a reason', async () => {
+    h.loadProposal.mockResolvedValue(storedProposal('dispatch_task'));
+    h.listAgents.mockResolvedValue([{ id: UUID, name: 'Scout', role: 'primary', enabled: false, provider: 'anthropic' }]);
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.state).toBe('stale');
+    expect(body.error).toMatch(/agent on this card is no longer available — ask Ops Chat for a new card. Nothing was started/);
+    expect(h.createTask).not.toHaveBeenCalled();
+  });
+
+  it('dispatch_task with a reviewer on the card → the task is created REVIEWED by exactly that reviewer', async () => {
+    const REV = '99999999-9999-4999-8999-999999999999';
+    h.loadProposal.mockResolvedValue(storedProposal('dispatch_task', { reviewerAgentId: REV }));
+    h.listAgents.mockResolvedValue([
+      { id: UUID, name: 'Scout', role: 'primary', enabled: true, provider: 'anthropic' },
+      { id: REV, name: 'Checker', role: 'reviewer', enabled: true, provider: 'openai' },
+    ]);
+    const body = await (await call({ proposalId: PROP, intent: 'confirm' })).json();
+    expect(body.executed).toMatchObject({ taskId: 'task-123', agentName: 'Scout', reviewerName: 'Checker' });
+    expect(h.createTask.mock.calls[0]![2]).toMatchObject({ primaryAgentId: UUID, reviewEnabled: true, reviewerAgentId: REV });
+  });
+
+  it('dispatch_task card from before reviewer assignment (no reviewer field) → unreviewed, exactly as the card said', async () => {
+    h.loadProposal.mockResolvedValue(storedProposal('dispatch_task'));
+    await call({ proposalId: PROP, intent: 'confirm' });
+    expect(h.createTask.mock.calls[0]![2]).toMatchObject({ reviewEnabled: false, reviewerAgentId: null });
+  });
+
   it('dispatch_task with an unavailable agent → 409 (stale), no writes', async () => {
     h.loadProposal.mockResolvedValue(storedProposal('dispatch_task'));
     h.listAgents.mockResolvedValue([]); // agent not found
@@ -224,12 +266,38 @@ describe('confirm — writes happen only after a valid confirm (from the stored 
     expect(h.enqueueRun).not.toHaveBeenCalled();
   });
 
-  it('rerun_task (admin) → tenant-verifies task then enqueueRun', async () => {
+  it('rerun_task of a COMPLETED task → a real new attempt; the card result says so and carries the ids', async () => {
     h.loadProposal.mockResolvedValue(storedProposal('rerun_task'));
     const res = await call({ proposalId: PROP, intent: 'confirm' });
     expect(res.status).toBe(200);
-    expect(h.getTask).toHaveBeenCalledTimes(1);
-    expect(h.enqueueRun).toHaveBeenCalledTimes(1);
+    expect(h.requestRerun).toHaveBeenCalledTimes(1);
+    expect(h.requestRerun.mock.calls[0]![2]).toBe(UUID);
+    const body = await res.json();
+    expect(body).toMatchObject({ state: 'done', executed: { outcome: 'started', taskId: UUID, jobId: 'job-2', previousRunId: 'run-1' } });
+    expect(body.executed.message).toMatch(/new attempt .*previous completed run and its result are kept/);
+  });
+
+  it('rerun_task when a job is already live → "already queued", nothing new claimed', async () => {
+    h.loadProposal.mockResolvedValue(storedProposal('rerun_task'));
+    h.requestRerun.mockResolvedValue({ status: 'already_queued', taskId: UUID, jobId: 'job-live', previousStatus: 'running' });
+    const body = await (await call({ proposalId: PROP, intent: 'confirm' })).json();
+    expect(body.executed).toMatchObject({ outcome: 'already_queued', jobId: 'job-live' });
+    expect(body.executed.message).toMatch(/nothing new was queued/);
+  });
+
+  it.each([
+    ['awaiting_approval', /Decide that approval first/],
+    ['cancelled', /Dispatch a new task/],
+  ])('rerun_task of a %s task fails EXPLICITLY (409 stale with the reason) — never a silent "queued"', async (reason, msg) => {
+    h.loadProposal.mockResolvedValue(storedProposal('rerun_task'));
+    h.requestRerun.mockRejectedValue(
+      new h.RerunRefusedError(reason, reason === 'cancelled' ? '"T" was cancelled. Dispatch a new task instead.' : '"T" is waiting on an approval decision. Decide that approval first.'),
+    );
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.state).toBe('stale');
+    expect(body.error).toMatch(msg);
   });
 
   it('stale/missing target → 409 (NotFound mapped to the stale terminal)', async () => {
@@ -274,5 +342,52 @@ describe('confirm — CAS & cancel (proposal-id authoritative)', () => {
     expect(res.status).toBe(200);
     expect(h.answerOwnerQuestion).toHaveBeenCalledTimes(1); // the action DID run
     expect(await res.json()).toMatchObject({ ok: true, state: 'unrecorded' });
+  });
+});
+
+describe('P4 — card provenance + structured lifecycle audits', () => {
+  const audits = () => h.writeAudit.mock.calls.map((c) => c[2] as { action: string; entityType: string; entityId: string; detail: Record<string, unknown> });
+
+  it('dispatch: the card is stored as the task’s creator AND on its first job; confirmed audit carries conversation/message/task/job ids', async () => {
+    h.loadProposal.mockResolvedValue(storedProposal('dispatch_task'));
+    await call({ proposalId: PROP, intent: 'confirm' });
+    expect(h.createTask.mock.calls[0]![2]).toMatchObject({ opsChatProposalId: PROP });
+    expect(h.enqueueRun.mock.calls[0]!.slice(2)).toEqual(['task-123', 'interactive', { opsChatProposalId: PROP }]);
+    expect(audits()).toContainEqual({
+      action: 'ops_chat.proposal.confirmed',
+      entityType: 'ops_chat_proposal',
+      entityId: PROP,
+      detail: { proposalId: PROP, conversationId: CONV, messageId: MSG, kind: 'dispatch_task', taskId: 'task-123', jobId: 'job-1' },
+    });
+  });
+
+  it('re-run: the card goes on the NEW attempt only (never createTask / the task row); audit has task + job + outcome', async () => {
+    h.loadProposal.mockResolvedValue(storedProposal('rerun_task'));
+    await call({ proposalId: PROP, intent: 'confirm' });
+    expect(h.requestRerun.mock.calls[0]!.slice(2)).toEqual([UUID, { opsChatProposalId: PROP }]);
+    expect(h.createTask).not.toHaveBeenCalled();
+    expect(audits()[0]).toMatchObject({ action: 'ops_chat.proposal.confirmed', detail: { kind: 'rerun_task', taskId: UUID, jobId: 'job-2', outcome: 'started' } });
+  });
+
+  it('a refused re-run is audited as stale with the reason; a cancel is audited as cancelled', async () => {
+    h.loadProposal.mockResolvedValue(storedProposal('rerun_task'));
+    h.requestRerun.mockRejectedValue(new h.RerunRefusedError('cancelled', '"T" was cancelled. Dispatch a new task instead.'));
+    await call({ proposalId: PROP, intent: 'confirm' });
+    expect(audits()[0]).toMatchObject({ action: 'ops_chat.proposal.stale', detail: { proposalId: PROP, kind: 'rerun_task', taskId: UUID, error: expect.stringMatching(/was cancelled/) } });
+
+    h.writeAudit.mockClear();
+    h.loadProposal.mockResolvedValue(storedProposal('dispatch_task'));
+    const res = await call({ proposalId: PROP, intent: 'cancel' });
+    expect((await res.json()).state).toBe('cancelled');
+    expect(audits()).toEqual([expect.objectContaining({ action: 'ops_chat.proposal.cancelled', entityId: PROP, detail: expect.objectContaining({ kind: 'dispatch_task' }) })]);
+    expect(h.createTask).not.toHaveBeenCalled();
+  });
+
+  it('an audit failure never fails the confirmed action (best-effort; the card state is already recorded)', async () => {
+    h.loadProposal.mockResolvedValue(storedProposal('dispatch_task'));
+    h.writeAudit.mockRejectedValue(new Error('audit down'));
+    const res = await call({ proposalId: PROP, intent: 'confirm' });
+    expect(res.status).toBe(200);
+    expect((await res.json()).state).toBe('done');
   });
 });

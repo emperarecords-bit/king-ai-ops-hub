@@ -1354,6 +1354,10 @@ export const tasks = pgTable(
       .references(() => projects.id, { onDelete: 'cascade' }),
     /** Employee Chat: set when this task is one exchange of a conversation thread. */
     conversationId: uuid('conversation_id').references(() => conversations.id, { onDelete: 'set null' }),
+    /** P4 provenance — the Ops Chat dispatch card that CREATED this task (null for every other origin and for
+     *  rows that predate 0087). Set once at insert; a re-run never overwrites it (re-runs are linked on
+     *  run_jobs/runs). Immutable except for the FK's own ON DELETE SET NULL (trigger, 0087). */
+    opsChatProposalId: uuid('ops_chat_proposal_id').references((): AnyPgColumn => opsChatProposals.id, { onDelete: 'set null' }),
     title: text('title').notNull(),
     /** The user's brief, verbatim. Injection surface — handled per SECURITY.md T2. */
     input: text('input').notNull(),
@@ -1402,6 +1406,7 @@ export const tasks = pgTable(
   },
   (t) => [
     unique('tasks_tenant_id_uq').on(t.orgId, t.projectId, t.id),
+    index('tasks_ops_chat_proposal_idx').on(t.opsChatProposalId),
     index('tasks_org_project_idx').on(t.orgId, t.projectId),
     index('tasks_project_status_idx').on(t.projectId, t.status),
     index('tasks_project_created_idx').on(t.projectId, t.createdAt),
@@ -1643,9 +1648,13 @@ export const runJobs = pgTable(
      *  never affects claim eligibility. Null for legacy rows enqueued before the column existed. */
     dispatchKind: text('dispatch_kind').$type<DispatchKind>(),
     lastError: text('last_error'),
+    /** P4 provenance — the Ops Chat card (dispatch or re-run) that queued THIS attempt; null otherwise. Set once
+     *  at insert, immutable except for ON DELETE SET NULL (trigger, 0087). */
+    opsChatProposalId: uuid('ops_chat_proposal_id').references((): AnyPgColumn => opsChatProposals.id, { onDelete: 'set null' }),
     ...timestamps,
   },
   (t) => [
+    index('run_jobs_ops_chat_proposal_idx').on(t.opsChatProposalId),
     // One live job per task: prevents a duplicate enqueue from double-running.
     uniqueIndex('run_jobs_active_task_uq')
       .on(t.taskId)
@@ -1747,10 +1756,14 @@ export const runs = pgTable(
     errorMessage: text('error_message'),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp('finished_at', { withTimezone: true }),
+    /** P4 provenance — the Ops Chat card whose job produced THIS run/result (copied from run_jobs at run
+     *  creation); null for non-Ops-Chat runs and pre-0087 rows. Immutable except for ON DELETE SET NULL. */
+    opsChatProposalId: uuid('ops_chat_proposal_id').references((): AnyPgColumn => opsChatProposals.id, { onDelete: 'set null' }),
     ...timestamps,
   },
   (t) => [
     unique('runs_tenant_id_uq').on(t.orgId, t.projectId, t.id),
+    index('runs_ops_chat_proposal_idx').on(t.opsChatProposalId),
     index('runs_org_project_idx').on(t.orgId, t.projectId),
     index('runs_task_idx').on(t.taskId),
     // P1a agent pinning — composite FKs on the immutable requested-agent evidence. Same MATCH SIMPLE /
@@ -2611,5 +2624,62 @@ export const opsChatProposals = pgTable(
       'ops_chat_proposals_state_chk',
       sql`state in ('pending', 'confirming', 'done', 'error', 'cancelled', 'stale')`,
     ),
+  ],
+);
+
+/**
+ * Ops Chat file attachments — owner-private, user-scoped like the rest of the Ops Chat store.
+ * METADATA ONLY: the file body lives in the shared object store (`object_key`), never in a row.
+ * `extracted_text` is the bounded, server-extracted text (capped by the domain + a CHECK), used as
+ * UNTRUSTED context for the turn it was sent with. An attachment is uploaded into a conversation
+ * first (message_id null) and linked once to the owner message that sends it; it is otherwise
+ * immutable. It is NOT a workspace `documents` row: it never enters a workspace library or run
+ * retrieval. `project_id` is an optional owner-chosen association, validated with tenant authority.
+ */
+export const opsChatAttachments = pgTable(
+  'ops_chat_attachments',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id').notNull(),
+    conversationId: uuid('conversation_id').notNull(),
+    // Null until the owner message that sends it is committed; set exactly once.
+    messageId: uuid('message_id'),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
+    filename: text('filename').notNull(),
+    mimeType: text('mime_type').notNull(),
+    kind: text('kind').notNull(), // pdf | docx | xlsx | csv | text | markdown | image
+    sizeBytes: integer('size_bytes').notNull(),
+    sha256: text('sha256').notNull(),
+    objectKey: text('object_key').notNull(),
+    // ready | failed | unsupported — extraction runs synchronously before the row is written.
+    status: text('status').notNull(),
+    error: text('error'),
+    extractedText: text('extracted_text'),
+    // Bounded, non-content facts about the extraction (pages, sheets, truncated, chars).
+    meta: jsonb('meta').notNull().default(sql`'{}'::jsonb`),
+    ...timestamps,
+  },
+  (t) => [
+    // The conversation belongs to the SAME user — DB-enforced.
+    foreignKey({
+      columns: [t.conversationId, t.userId],
+      foreignColumns: [opsChatConversations.id, opsChatConversations.userId],
+      name: 'ops_chat_attachments_conversation_user_fk',
+    }).onDelete('restrict'),
+    // The sending message is IN THE SAME conversation — DB-enforced.
+    foreignKey({
+      columns: [t.messageId, t.conversationId],
+      foreignColumns: [opsChatMessages.id, opsChatMessages.conversationId],
+      name: 'ops_chat_attachments_message_conversation_fk',
+    }).onDelete('restrict'),
+    index('ops_chat_attachments_conversation_created_idx').on(t.conversationId, t.createdAt),
+    index('ops_chat_attachments_message_idx').on(t.messageId),
+    check('ops_chat_attachments_status_chk', sql`status in ('ready', 'failed', 'unsupported')`),
+    check(
+      'ops_chat_attachments_kind_chk',
+      sql`kind in ('pdf', 'docx', 'xlsx', 'csv', 'text', 'markdown', 'image')`,
+    ),
+    check('ops_chat_attachments_size_chk', sql`size_bytes > 0 and size_bytes <= 10485760`),
+    check('ops_chat_attachments_text_cap_chk', sql`extracted_text is null or char_length(extracted_text) <= 100000`),
   ],
 );

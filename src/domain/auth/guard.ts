@@ -78,6 +78,19 @@ export async function currentUser(): Promise<AuthenticatedUser | null> {
 }
 
 /**
+ * The same membership gate as requireTenant for an ALREADY-authenticated user id (no session read), returning
+ * null instead of throwing. For server code that runs after the request's auth check — e.g. inside the Ops Chat
+ * stream — where a project key comes from the user's own stored card.
+ */
+export async function tenantForUser(userId: string, projectKey: string): Promise<TenantContext | null> {
+  const access = await findProjectAccessByKey(userId, projectKey);
+  if (!access) return null;
+  const orgRole = await findOrgRole(userId, access.orgId);
+  if (!orgRole) return null;
+  return { userId, orgId: access.orgId, projectId: access.projectId, orgRole, projectRole: access.projectRole };
+}
+
+/**
  * The tenancy gate. Resolves a project key to a TenantContext or throws.
  * Returns identical errors for "project does not exist" and "not a member" so
  * project keys cannot be probed.

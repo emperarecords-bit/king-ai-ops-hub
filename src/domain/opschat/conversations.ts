@@ -3,6 +3,9 @@ import { alias } from 'drizzle-orm/pg-core';
 import { AppError } from '@/lib/errors';
 import { type DbTx } from '@/db/client';
 import { opsChatConversations, opsChatMessages, opsChatProposals } from '@/db/schema';
+import { cardStateLines, type StoredCard } from '@/domain/opschat/card-state';
+import { type LinkedRunView } from '@/domain/opschat/linked-run-view';
+import { RUN_STARTING_KINDS, type LinkableCard } from '@/domain/opschat/linked-runs';
 
 /**
  * Ops Chat persistence — owner-private, USER-scoped conversation store.
@@ -23,6 +26,13 @@ import { opsChatConversations, opsChatMessages, opsChatProposals } from '@/db/sc
 export type OpsChatMessageRole = 'user' | 'assistant';
 export type OpsChatMessageStatus = 'complete' | 'interrupted';
 export type OpsChatProposalState = 'pending' | 'confirming' | 'done' | 'error' | 'cancelled' | 'stale';
+
+/** One prompt turn. Owner turns carry their message id so the route can attach that turn's files. */
+export interface PromptTurn {
+  role: OpsChatMessageRole;
+  content: string;
+  ownerMessageId?: string;
+}
 
 /** The allowed proposal state machine. Terminal states have no outgoing edges — a
  *  stale/errored/cancelled proposal requires a NEW proposal, never a re-transition. */
@@ -102,8 +112,12 @@ export async function loadPromptTurns(
   userId: string,
   conversationId: string,
   ownerMessageId: string,
-  opts: { maxOwnerTurns?: number } = {},
-): Promise<Array<{ role: OpsChatMessageRole; content: string }>> {
+  opts: {
+    maxOwnerTurns?: number;
+    /** P5a: each confirmed dispatch/re-run card's linked run (from loadLinkedRunViews), keyed by card id. */
+    linkedRuns?: ReadonlyMap<string, LinkedRunView>;
+  } = {},
+): Promise<PromptTurn[]> {
   const maxTurns = Math.max(1, Math.min(opts.maxOwnerTurns ?? 8, 50));
 
   // The current owner message fixes the upper bound (its seq). It is always persisted first.
@@ -128,7 +142,7 @@ export async function loadPromptTurns(
   const ownerIds = owners.map((o) => o.id);
   const replies = ownerIds.length
     ? await tx
-        .select({ replyTo: opsChatMessages.replyToMessageId, content: opsChatMessages.content })
+        .select({ id: opsChatMessages.id, replyTo: opsChatMessages.replyToMessageId, content: opsChatMessages.content })
         .from(opsChatMessages)
         .where(
           and(
@@ -140,12 +154,46 @@ export async function loadPromptTurns(
           ),
         )
     : [];
+  // Each reply's cards, with their CURRENT stored state (card-state.ts): history text never overrides
+  // what actually happened to a card after it was shown.
+  const replyIds = replies.map((r) => r.id);
+  const cards = replyIds.length
+    ? await tx
+        .select({
+          id: opsChatProposals.id,
+          messageId: opsChatProposals.messageId,
+          kind: opsChatProposals.kind,
+          state: opsChatProposals.state,
+          proposal: opsChatProposals.proposal,
+          result: opsChatProposals.result,
+          error: opsChatProposals.error,
+          updatedAt: opsChatProposals.updatedAt,
+        })
+        .from(opsChatProposals)
+        .where(and(eq(opsChatProposals.userId, userId), eq(opsChatProposals.conversationId, conversationId), inArray(opsChatProposals.messageId, replyIds)))
+        .orderBy(asc(opsChatProposals.createdAt))
+    : [];
+  const cardsByMessage = new Map<string, StoredCard[]>();
+  for (const c of cards) {
+    const list = cardsByMessage.get(c.messageId) ?? [];
+    list.push({
+      id: c.id,
+      kind: c.kind,
+      state: c.state,
+      proposal: (c.proposal ?? {}) as Record<string, unknown>,
+      result: c.result,
+      error: c.error,
+      updatedAt: c.updatedAt,
+      linkedRun: opts.linkedRuns?.get(c.id) ?? null,
+    });
+    cardsByMessage.set(c.messageId, list);
+  }
   const replyByOwner = new Map<string, string>();
-  for (const r of replies) if (r.replyTo) replyByOwner.set(r.replyTo, r.content);
+  for (const r of replies) if (r.replyTo) replyByOwner.set(r.replyTo, r.content + cardStateLines(cardsByMessage.get(r.id) ?? []));
 
-  const turns: Array<{ role: OpsChatMessageRole; content: string }> = [];
+  const turns: PromptTurn[] = [];
   for (const o of owners) {
-    turns.push({ role: 'user', content: o.content });
+    turns.push({ role: 'user', content: o.content, ownerMessageId: o.id });
     // The current owner message is the turn we are answering now — never attach a trailing reply.
     if (o.id !== ownerMessageId) {
       const reply = replyByOwner.get(o.id);
@@ -526,6 +574,76 @@ export async function loadConversation(
       proposals: byMessage.get(m.id) ?? [],
     })),
   };
+}
+
+/**
+ * P5a: the conversation's newest CONFIRMED run-starting cards (dispatch / re-run), for loadLinkedRunViews before
+ * a prompt is built. Bounded; owner-private (RLS + explicit user filter).
+ */
+export async function listRunStartingCards(tx: DbTx, userId: string, conversationId: string, opts: { limit?: number } = {}): Promise<LinkableCard[]> {
+  const limit = Math.max(1, Math.min(opts.limit ?? 50, 200));
+  return tx
+    .select({ id: opsChatProposals.id, kind: opsChatProposals.kind, state: opsChatProposals.state, proposal: opsChatProposals.proposal })
+    .from(opsChatProposals)
+    .where(
+      and(
+        eq(opsChatProposals.userId, userId),
+        eq(opsChatProposals.conversationId, conversationId),
+        eq(opsChatProposals.state, 'done'),
+        inArray(opsChatProposals.kind, [...RUN_STARTING_KINDS]),
+      ),
+    )
+    .orderBy(desc(opsChatProposals.seq))
+    .limit(limit);
+}
+
+/**
+ * P5c-2: the id of a still-PENDING update card for `taskId` in this conversation (a dispatch_task card whose payload
+ * carries updateOf.taskId), or null. Lets propose_update_task offer ONE card per task, not one per turn.
+ */
+export async function pendingUpdateCardFor(tx: DbTx, userId: string, conversationId: string, taskId: string): Promise<string | null> {
+  const rows = await tx
+    .select({ id: opsChatProposals.id })
+    .from(opsChatProposals)
+    .where(
+      and(
+        eq(opsChatProposals.userId, userId),
+        eq(opsChatProposals.conversationId, conversationId),
+        eq(opsChatProposals.kind, 'dispatch_task'),
+        eq(opsChatProposals.state, 'pending'),
+        sql`(${opsChatProposals.proposal} -> 'updateOf' ->> 'taskId' = ${taskId} or coalesce(${opsChatProposals.proposal} -> 'updateOf' -> 'taskIds', '[]'::jsonb) @> jsonb_build_array(${taskId}::text))`,
+      ),
+    )
+    .orderBy(desc(opsChatProposals.seq))
+    .limit(1);
+  return rows[0]?.id ?? null;
+}
+
+/**
+ * P5c-3: when the owner's PREVIOUS message (before `ownerMessageId`) was created, or null for the first turn — the
+ * boundary for "finished since the owner's previous message" in the per-turn conversation section.
+ */
+export async function previousOwnerMessageAt(tx: DbTx, userId: string, conversationId: string, ownerMessageId: string): Promise<Date | null> {
+  const cur = await tx
+    .select({ seq: opsChatMessages.seq })
+    .from(opsChatMessages)
+    .where(and(eq(opsChatMessages.id, ownerMessageId), eq(opsChatMessages.userId, userId), eq(opsChatMessages.conversationId, conversationId)))
+    .limit(1);
+  if (!cur[0]) return null;
+  const prev = await tx
+    .select({ createdAt: opsChatMessages.createdAt })
+    .from(opsChatMessages)
+    .where(
+      and(
+        eq(opsChatMessages.conversationId, conversationId),
+        eq(opsChatMessages.userId, userId),
+        eq(opsChatMessages.role, 'user'),
+        sql`${opsChatMessages.seq} < ${cur[0].seq}`,
+      ),
+    )
+    .orderBy(desc(opsChatMessages.seq))
+    .limit(1);
+  return prev[0]?.createdAt ?? null;
 }
 
 /** A user's conversations, most-recently-updated first (the history list). */

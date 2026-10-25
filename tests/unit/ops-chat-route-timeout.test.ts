@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as LimitsNs from '@/domain/opschat/limits';
 
 /**
  * POST /api/ops-chat — overall end-to-end deadline. Fully mocked (no real auth,
@@ -47,6 +48,8 @@ vi.mock('@/domain/usage/rate-limit', () => ({ consumeRateLimit: h.consumeRateLim
 vi.mock('@/db/client', () => ({ getDb: () => ({ transaction: (fn: (tx: unknown) => unknown) => fn({}) }) }));
 vi.mock('@/db/tenant', () => ({ withUser: (_s: unknown, fn: (tx: unknown) => unknown) => fn({}) }));
 vi.mock('@/domain/opschat/conversations', () => ({
+  // P5a: the prompt's linked-run lookup (best-effort) — no confirmed run-starting cards here.
+  listRunStartingCards: async () => [],
   appendOwnerMessage: h.appendOwnerMessage,
   appendAssistantMessage: h.appendAssistantMessage,
   addProposal: h.addProposal,
@@ -62,7 +65,8 @@ vi.mock('@/lib/log', () => ({ log: { error: vi.fn(), info: vi.fn(), warn: vi.fn(
 // Tiny server deadline so real timers fire fast; same message as production.
 // NB: the factory is hoisted above module consts — the message is inlined here
 // (it must equal TIMEOUT_MSG below, which assertions use).
-vi.mock('@/domain/opschat/limits', () => ({
+vi.mock('@/domain/opschat/limits', async (orig) => ({
+  ...(await orig<typeof LimitsNs>()),
   OPS_CHAT_SERVER_DEADLINE_MS: 40,
   OPS_CHAT_TIMEOUT_MESSAGE: 'The AI request timed out. Nothing was changed. Try again.',
   OPS_CHAT_CLIENT_TIMEOUT_MS: 120_000,
