@@ -16,7 +16,12 @@ const DECISION_KINDS = new Set(['answer_question', 'record_decision', 'record_ba
 export interface PanelJob {
   key: string;
   label: string;
-  state: LinkedRunState | 'starting';
+  /**
+   * `starting`: confirmed in THIS session, its run not linked yet (the linked-run refresh fills it in seconds).
+   * `untracked`: loaded from history with no linked run — dispatched before run tracking existed (P4, 2026-10-20),
+   * so its status is only on the task page. Hub prod 2026-10-25: those showed "Starting" for jobs finished days ago.
+   */
+  state: LinkedRunState | 'starting' | 'untracked';
   stateLabel: string;
   /** Task page, when the task and its workspace are known. */
   href: string | null;
@@ -41,6 +46,7 @@ export interface ConversationPanel {
 
 export const STATE_LABEL: Record<PanelJob['state'], string> = {
   starting: 'Starting',
+  untracked: 'Status not tracked — open the task',
   queued: 'Queued',
   running: 'Working',
   ready: 'Done',
@@ -74,7 +80,7 @@ export function conversationPanel(messages: ReadonlyArray<{ id: string; cards?: 
 
       if (JOB_KINDS.has(kind) && (card.state === 'done' || card.linkedRun)) {
         const run = card.linkedRun;
-        const state: PanelJob['state'] = run ? run.state : 'starting';
+        const state: PanelJob['state'] = run ? run.state : card.fromHistory ? 'untracked' : 'starting';
         const projectKey = str(card.proposal.projectKey);
         const executed = (card.executed ?? {}) as Record<string, unknown>;
         const taskId = run?.taskId ?? str(executed.taskId) ?? str(card.proposal.taskId);

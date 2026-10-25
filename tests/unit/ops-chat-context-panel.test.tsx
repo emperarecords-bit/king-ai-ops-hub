@@ -64,6 +64,22 @@ describe('conversationPanel', () => {
     expect(p.decisions.map((d) => d.label)).toEqual(['answer question q-1']);
   });
 
+  // Hub prod 2026-10-25: jobs dispatched before run tracking (2026-10-20) showed "Starting" days after finishing.
+  it('a job loaded from history with no linked run is "Status not tracked", still linked to its task', () => {
+    const old: TranscriptCard = {
+      proposal: { kind: 'dispatch_task', projectKey: 'empera-air-conditioning-and-heating', title: 'Duct CFM calc' },
+      proposalId: 'old-1',
+      state: 'done',
+      executed: { taskId: 't-old', jobId: 'j-old' },
+      fromHistory: true,
+    };
+    const [job] = conversationPanel([{ id: 'm', cards: [old] }]).jobs;
+    expect(job).toMatchObject({ state: 'untracked', stateLabel: 'Status not tracked — open the task', href: '/p/empera-air-conditioning-and-heating/tasks/t-old' });
+    // Confirmed in this session (not from history): its run link arrives with the next refresh → "Starting".
+    expect(conversationPanel([{ id: 'm', cards: [{ ...old, fromHistory: false }] }]).jobs[0]!.state).toBe('starting');
+    expect(conversationPanel([{ id: 'm', cards: [old] }]).results).toEqual([]);
+  });
+
   it('an empty conversation is empty everywhere', () => {
     expect(conversationPanel([{ id: 'opening' }])).toEqual({ jobs: [], results: [], needsYou: [], decisions: [] });
   });
