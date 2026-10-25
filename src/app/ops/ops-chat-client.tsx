@@ -19,6 +19,8 @@ import { completionReplyLead, isReportedAsCompletion } from '@/domain/opschat/co
 import { ExcerptMarkdown } from './excerpt-markdown';
 import { suggestedCount, type PricedLine } from '@/domain/opschat/price-sources';
 import { createDeadlineWatchdog } from './ops-chat-watchdog';
+import { OpsChatSidebar } from './ops-chat-sidebar';
+import { type SidebarConversation } from './ops-chat-sidebar-model';
 import { ATTACHMENT_ACCEPT, ATTACHMENT_LIMITS } from '@/domain/opschat/attachment-limits';
 import {
   ComposerAttachmentChips,
@@ -753,6 +755,7 @@ export function OpsChatClient({
   persisted,
   pendingTurn: serverPending,
   conversations,
+  workspaces = [],
   leadingCompletions = [],
   buildId = null,
 }: {
@@ -760,7 +763,9 @@ export function OpsChatClient({
   conversationId: string | null;
   persisted: PersistedMessage[];
   pendingTurn: PendingTurn | null;
-  conversations: Array<{ id: string; title: string | null }>;
+  conversations: SidebarConversation[];
+  /** Workspace shortcuts for the left panel (key + name only). */
+  workspaces?: ReadonlyArray<{ key: string; name: string }>;
   /** P5c-3: completion entries older than every loaded message (shown first). */
   leadingCompletions?: CompletionEntry[];
   /** The build that rendered this page — compared with the server's current build to detect a stale tab. */
@@ -1208,8 +1213,16 @@ export function OpsChatClient({
   }
 
   return (
-    <div className="flex flex-1 flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-2">
+    // Wide screens: conversations on the left, the chat in a readable centre column. Phones: the chat alone, with the
+    // conversation picker above it (the left panel is hidden below lg).
+    <div className="flex flex-1 gap-6">
+      <aside className="hidden w-64 shrink-0 lg:block">
+        <div className="sticky top-4 h-[calc(100dvh-7rem)]">
+          <OpsChatSidebar conversations={conversations} currentId={currentId} streaming={streaming} workspaces={workspaces} onOpen={openConversation} />
+        </div>
+      </aside>
+    <div className="mx-auto flex w-full min-w-0 max-w-3xl flex-1 flex-col gap-4">
+      <div className="flex flex-wrap items-center gap-2 lg:hidden">
         <label className="sr-only" htmlFor="ops-chat-conversation">Conversation</label>
         <select
           id="ops-chat-conversation"
@@ -1780,6 +1793,7 @@ export function OpsChatClient({
           </button>
         </div>
       </form>
+    </div>
     </div>
   );
 }
