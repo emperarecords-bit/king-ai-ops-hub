@@ -78,15 +78,22 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (admin && available) {
-    await admin`delete from audit_logs where org_id = ${ids.org}`.catch(() => {});
-    await admin`delete from run_jobs where org_id = ${ids.org}`;
-    await admin`delete from runs where org_id = ${ids.org}`;
-    await admin`delete from tasks where org_id = ${ids.org}`;
-    await admin`delete from agents where org_id = ${ids.org}`;
-    await admin`delete from projects where org_id = ${ids.org}`;
-    await admin`delete from memberships where org_id = ${ids.org}`;
-    await admin`delete from organizations where id = ${ids.org}`.catch(() => {});
-    await admin`delete from profiles where id = ${ids.user}`.catch(() => {});
+    // The append-only trigger (correctly) blocks deleting audit rows; for teardown only, the table owner disables it
+    // (same pattern as tenancy.test.ts).
+    await admin`alter table audit_logs disable trigger audit_logs_append_only`;
+    try {
+      await admin`delete from audit_logs where org_id = ${ids.org}`;
+      await admin`delete from run_jobs where org_id = ${ids.org}`;
+      await admin`delete from runs where org_id = ${ids.org}`;
+      await admin`delete from tasks where org_id = ${ids.org}`;
+      await admin`delete from agents where org_id = ${ids.org}`;
+      await admin`delete from projects where org_id = ${ids.org}`;
+      await admin`delete from memberships where org_id = ${ids.org}`;
+      await admin`delete from organizations where id = ${ids.org}`;
+      await admin`delete from profiles where id = ${ids.user}`;
+    } finally {
+      await admin`alter table audit_logs enable trigger audit_logs_append_only`;
+    }
     await admin.end();
   }
 });
