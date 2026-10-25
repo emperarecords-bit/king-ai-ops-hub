@@ -1,6 +1,6 @@
 import { ModelText, ProviderBadge } from '@/components/ui';
 import type { MessageRow, RunStepRow } from '@/domain/tasks/tasks';
-import { reviewStepOf, summarizeReview, type ReviewSummaryState } from '@/domain/tasks/review-summary';
+import { reviewStepOf, summarizeReview, type ReviewRunContext, type ReviewSummaryState } from '@/domain/tasks/review-summary';
 
 const SEVERITY_STYLE: Record<string, string> = {
   critical: 'bg-[#3a2026] text-[var(--danger)]',
@@ -10,6 +10,7 @@ const SEVERITY_STYLE: Record<string, string> = {
 
 const STATE_STYLE: Record<ReviewSummaryState, string> = {
   none: 'bg-[var(--surface)] text-[var(--muted)] border border-[var(--border)]',
+  pending: 'bg-[var(--surface)] text-[var(--muted)] border border-[var(--border)]',
   approved: 'bg-[#22303a] text-[#7bb8e5]',
   revised: 'bg-[#22303a] text-[#7bb8e5]',
   changes_requested: 'bg-[#3a3220] text-[#e5c07b]',
@@ -51,12 +52,15 @@ export function ReviewComparison({
   steps,
   messages,
   reviewerName,
+  run = null,
 }: {
   steps: readonly RunStepRow[];
   messages: readonly MessageRow[];
   reviewerName: string | null;
+  /** The run the steps belong to — lets a still-running reviewed run read "pending", not "no review". */
+  run?: ReviewRunContext | null;
 }) {
-  const summary = summarizeReview(steps, messages);
+  const summary = summarizeReview(steps, messages, run);
   const primaryStep = steps.find((step) => step.kind === 'primary') ?? null;
   const reviewStep = reviewStepOf(steps);
   const revisionStep = steps.find((step) => step.kind === 'revision') ?? null;

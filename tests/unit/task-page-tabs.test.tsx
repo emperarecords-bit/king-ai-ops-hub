@@ -55,6 +55,20 @@ describe('summarizeReview', () => {
   it('no review step', () => {
     expect(summarizeReview([step('p', 'primary')], []).state).toBe('none');
   });
+  // Hub prod 2026-10-24: a task still drafting showed "Review · No review".
+  it('a running run that will be reviewed is "Review pending", not "No review"', () => {
+    const running = { status: 'running', effectiveMode: 'reviewed' as const, reviewRequired: true };
+    const s = summarizeReview([step('p', 'primary')], [], running);
+    expect(s).toMatchObject({ state: 'pending', label: 'Review pending', substantive: false });
+    expect(summarizeReview([], [], { status: 'running', effectiveMode: null, reviewRequired: true }).state).toBe('pending');
+    expect(summarizeReview([], [], { status: 'running', effectiveMode: 'reviewed', reviewRequired: null }).state).toBe('pending');
+    expect(renderToStaticMarkup(<TaskTabNav basePath="/p/x/tasks/t" active="answer" reviewNote={s.label} />)).toContain('Review pending');
+  });
+  it('still "No review" when the run is finished, or will not be reviewed', () => {
+    expect(summarizeReview([step('p', 'primary')], [], { status: 'completed', effectiveMode: 'reviewed', reviewRequired: true }).state).toBe('none');
+    expect(summarizeReview([step('p', 'primary')], [], { status: 'running', effectiveMode: 'quick', reviewRequired: false }).state).toBe('none');
+    expect(summarizeReview([step('p', 'primary')], [], null).state).toBe('none');
+  });
   it('new runs: an empty reply recorded as a failed step', () => {
     const s = summarizeReview([step('p', 'primary'), step('r', 'review', { succeeded: false, errorMessage: EMPTY_REVIEW_MESSAGE })], []);
     expect(s).toMatchObject({ state: 'empty', substantive: false });
