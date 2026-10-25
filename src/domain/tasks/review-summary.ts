@@ -1,4 +1,4 @@
-import type { MessageRow, RunStepRow } from '@/domain/tasks/tasks';
+import type { MessageRow, RunRow, RunStepRow } from '@/domain/tasks/tasks';
 
 /**
  * What the review of a run ACTUALLY was, in plain words, from the stored step + reviewer message only.
@@ -10,6 +10,7 @@ import type { MessageRow, RunStepRow } from '@/domain/tasks/tasks';
  */
 export type ReviewSummaryState =
   | 'none'
+  | 'pending'
   | 'approved'
   | 'revised'
   | 'changes_requested'
@@ -44,9 +45,29 @@ export function reviewStepOf(steps: readonly RunStepRow[]): RunStepRow | null {
   return steps.find((s) => s.kind === 'review') ?? null;
 }
 
-export function summarizeReview(steps: readonly RunStepRow[], messages: readonly MessageRow[]): ReviewSummary {
+/** The run fields that say whether a review is still to come. */
+export type ReviewRunContext = Pick<RunRow, 'status' | 'effectiveMode' | 'reviewRequired'>;
+
+const PENDING: ReviewSummary = {
+  state: 'pending',
+  label: 'Review pending',
+  headline: 'The reviewer looks at this answer once the draft is finished. Check back when the task completes.',
+  substantive: false,
+};
+
+/**
+ * `run` (optional) is the run the steps belong to. Hub prod 2026-10-24: a task still drafting showed "Review · No
+ * review" — the review step is only recorded when the review finishes, so a run that is still going and will be
+ * reviewed is "pending", never "no review".
+ */
+export function summarizeReview(
+  steps: readonly RunStepRow[],
+  messages: readonly MessageRow[],
+  run?: ReviewRunContext | null,
+): ReviewSummary {
   const step = reviewStepOf(steps);
   if (!step) {
+    if (run?.status === 'running' && (run.effectiveMode === 'reviewed' || run.reviewRequired === true)) return PENDING;
     return { state: 'none', label: 'No review', headline: 'No reviewer looked at this answer.', substantive: false };
   }
   const message = messages.find((m) => m.runStepId === step.id) ?? null;

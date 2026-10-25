@@ -136,7 +136,7 @@ export default async function TaskDetailPage({
   const nonCancelledIds = new Set(allTasks.filter((t) => t.status === 'cancelled').map((t) => t.id));
   const supersedeCandidates = selectableTaskCandidates(allTasks, { excludeId: taskId, excludeIds: nonCancelledIds }).map((t) => ({ id: t.id, title: t.title }));
   const reviewStep = steps.find((s) => s.kind === 'review' && s.verdictDetail != null);
-  const reviewSummary = summarizeReview(steps, msgs);
+  const reviewSummary = summarizeReview(steps, msgs, latestRun);
   // The badge above the result states an unmet review, so the stored banner is hidden on this page only.
   const resultView = latestRun?.consolidatedResult
     ? splitResult(latestRun.consolidatedResult, { hideDraftBanner: latestRun.reviewOutcome === 'required_unmet' })
@@ -232,7 +232,7 @@ export default async function TaskDetailPage({
             <ReviewStateBadge
               run={latestRun}
               detail={
-                reviewSummary.state !== 'none' ? (
+                reviewSummary.state !== 'none' && reviewSummary.state !== 'pending' ? (
                   <>
                     {latestRun.reviewOutcome === 'required_unmet' ? 'This answer has NOT been reviewed — ' : 'Review: '}
                     {reviewSummary.label}.{' '}
@@ -424,7 +424,7 @@ export default async function TaskDetailPage({
       ) : null}
 
       {tab === 'review' ? (
-        <ReviewComparison steps={steps} messages={msgs} reviewerName={comparisonReviewerName} />
+        <ReviewComparison steps={steps} messages={msgs} reviewerName={comparisonReviewerName} run={latestRun} />
       ) : null}
 
       {tab === 'how' ? (
