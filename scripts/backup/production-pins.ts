@@ -21,8 +21,10 @@ export const PRODUCTION_PINS: ReleasePins = {
   // Bumped 2026-10-14 (0085 rich_queen_noir — Ops Chat owner->assistant reply linkage: ops_chat_messages.reply_to_message_id).
   // Bumped 2026-10-20 (0087 kind_nicolaos — P4 Ops Chat provenance: nullable ops_chat_proposal_id on tasks /
   // run_jobs / runs + immutability trigger).
-  expectedMigrationEndpoint: '0087_kind_nicolaos',
-  expectedCommittedMigrationCount: 88,
+  // Bumped 2026-10-25 (0088 ops_chat_usage — per-turn Ops Chat tokens/web searches/cost, user-scoped, append-only;
+  // a new table only, no change to existing tables).
+  expectedMigrationEndpoint: '0088_ops_chat_usage',
+  expectedCommittedMigrationCount: 89,
   /**
    * Production REQUIRES an explicit APPLIED_COUNT at signing time and never falls back to a baked default. The
    * previous `defaultAppliedCount: 68` was a stale assumption (production has since applied through 0078) and, if

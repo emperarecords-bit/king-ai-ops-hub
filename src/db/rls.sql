@@ -1100,6 +1100,20 @@ begin
          using (user_id = app.current_user_id())
          with check (user_id = app.current_user_id())';
   end if;
+
+  -- Ops Chat token/web-search/cost per completed turn (migration 0088). Append-only billing
+  -- history: insert + select only, no update or delete grant. Own rows only.
+  if to_regclass('public.ops_chat_usage') is not null then
+    grant select, insert on ops_chat_usage to app_server;
+    revoke update, delete on ops_chat_usage from app_server;
+    alter table ops_chat_usage enable row level security;
+    alter table ops_chat_usage force row level security;
+    drop policy if exists ops_chat_usage_self on ops_chat_usage;
+    execute
+      'create policy ops_chat_usage_self on ops_chat_usage
+         using (user_id = app.current_user_id())
+         with check (user_id = app.current_user_id())';
+  end if;
 end
 $$;
 

@@ -2683,3 +2683,45 @@ export const opsChatAttachments = pgTable(
     check('ops_chat_attachments_text_cap_chk', sql`extracted_text is null or char_length(extracted_text) <= 100000`),
   ],
 );
+
+/**
+ * One row per COMPLETED Ops Chat model turn: tokens, web searches and cost. Ops Chat is per-user and spans
+ * workspaces, so this is deliberately NOT `usage_events` (which is per-workspace and counts toward each workspace's
+ * monthly spend limit — chat must never block a workspace's tasks). Append-only, user-scoped by RLS (rls.sql).
+ * A turn that timed out or failed before the provider reported usage has no row; those turns are logged only.
+ */
+export const opsChatUsage = pgTable(
+  'ops_chat_usage',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id').notNull(),
+    conversationId: uuid('conversation_id').notNull(),
+    // The owner message this turn answered (a retry of the same message is a second turn, a second row).
+    ownerMessageId: uuid('owner_message_id').notNull(),
+    provider: providerIdEnum('provider').notNull(),
+    model: text('model').notNull(),
+    inputTokens: integer('input_tokens').notNull(),
+    outputTokens: integer('output_tokens').notNull(),
+    webSearches: integer('web_searches').notNull().default(0),
+    /** Tokens at the versioned price table plus web searches, in integer micro-dollars. */
+    costMicros: bigint('cost_micros', { mode: 'bigint' }).notNull(),
+    pricingVersion: text('pricing_version').notNull(),
+    stopReason: text('stop_reason'),
+    cutOff: boolean('cut_off').notNull().default(false),
+    ...timestamps,
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.conversationId, t.userId],
+      foreignColumns: [opsChatConversations.id, opsChatConversations.userId],
+      name: 'ops_chat_usage_conversation_user_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [t.ownerMessageId, t.conversationId],
+      foreignColumns: [opsChatMessages.id, opsChatMessages.conversationId],
+      name: 'ops_chat_usage_owner_message_fk',
+    }).onDelete('restrict'),
+    index('ops_chat_usage_user_created_idx').on(t.userId, t.createdAt),
+    check('ops_chat_usage_counts_chk', sql`input_tokens >= 0 and output_tokens >= 0 and web_searches >= 0 and cost_micros >= 0`),
+  ],
+);

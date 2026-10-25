@@ -1,5 +1,6 @@
 import { requireTenant } from '@/domain/auth/guard';
-import { withTenant } from '@/db/tenant';
+import { withTenant, withUser } from '@/db/tenant';
+import { opsChatUsageSince } from '@/domain/opschat/usage';
 import {
   currentPeriodStart,
   projectSpendLimit,
@@ -24,6 +25,10 @@ export default async function UsagePage({
     limit: await projectSpendLimit(tx, ctx.projectId),
     reviews: await reviewStats(tx, ctx.projectId),
   }));
+
+  // Ops Chat is per-user and spans workspaces: shown here for the signed-in owner, never part of this workspace's
+  // spend or limit above.
+  const opsChat = await withUser({ userId: ctx.userId }, (tx) => opsChatUsageSince(tx, ctx.userId, currentPeriodStart()));
 
   const period = currentPeriodStart().toISOString().slice(0, 7);
 
@@ -94,6 +99,27 @@ export default async function UsagePage({
           </table>
         )}
       </Card>
+
+      <div className="mt-6">
+        <Card title="Ops Chat (you, all workspaces)">
+          {opsChat.turns === 0 ? (
+            <EmptyState>No Ops Chat replies recorded this period.</EmptyState>
+          ) : (
+            <>
+              <p className="text-3xl font-bold">{formatMoney({ usdMicros: opsChat.costMicros })}</p>
+              <p className="mt-1 text-sm text-[var(--muted)]">
+                {opsChat.turns} repl{opsChat.turns === 1 ? 'y' : 'ies'} · {opsChat.inputTokens.toLocaleString()} input /{' '}
+                {opsChat.outputTokens.toLocaleString()} output tokens · {opsChat.webSearches} web search
+                {opsChat.webSearches === 1 ? '' : 'es'}
+              </p>
+            </>
+          )}
+          <p className="mt-2 text-xs text-[var(--muted)]">
+            Not counted toward this workspace&apos;s spend or monthly limit. Replies that timed out before finishing are not
+            included.
+          </p>
+        </Card>
+      </div>
     </div>
   );
 }
