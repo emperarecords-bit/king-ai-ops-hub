@@ -20,6 +20,7 @@ import { ExcerptMarkdown } from './excerpt-markdown';
 import { suggestedCount, type PricedLine } from '@/domain/opschat/price-sources';
 import { createDeadlineWatchdog } from './ops-chat-watchdog';
 import { OpsChatSidebar } from './ops-chat-sidebar';
+import { startsCollapsed, stepsLine, type ReplyStep } from './ops-chat-fold';
 import { type SidebarConversation } from './ops-chat-sidebar-model';
 import { OpsChatContextPanel, type PanelUsage } from './ops-chat-context-panel';
 import { conversationPanel } from './ops-chat-panel-model';
@@ -354,6 +355,8 @@ interface CouncilState {
  *  owner message id — which IS the client-minted turnId — as their id. */
 interface Msg extends TranscriptMsg {
   council?: CouncilState;
+  /** Assistant replies streamed in this session: the tools the reply used, in order (not persisted). */
+  steps?: ReplyStep[];
 }
 
 const SUGGESTIONS = [
@@ -421,6 +424,46 @@ function Rich({ text }: { text: string }) {
     <span className="whitespace-pre-wrap">
       {parts.map((p, i) => (i % 2 === 1 ? <strong key={i}>{p}</strong> : <span key={i}>{p}</span>))}
     </span>
+  );
+}
+
+/** The tools a reply used, as one expandable line (like "Ran 3 commands ›"). */
+export function StepsLine({ steps }: { steps: readonly ReplyStep[] }) {
+  return (
+    <details data-testid="reply-steps" className="mb-1.5 text-xs text-[var(--muted)]">
+      <summary className="cursor-pointer select-none hover:text-[var(--foreground)]">{stepsLine(steps, TOOL_LABEL)}</summary>
+      <ol className="mt-1 list-decimal space-y-0.5 pl-5">
+        {steps.map((s, i) => (
+          <li key={i}>{TOOL_LABEL[s.name] ?? 'looking that up'}</li>
+        ))}
+      </ol>
+    </details>
+  );
+}
+
+/**
+ * A finished long reply starts collapsed to its first part with "Show full answer"; short replies and the reply that
+ * is still streaming are shown in full. The owner's choice sticks for the rest of the session.
+ */
+export function FoldableReply({ text, streaming }: { text: string; streaming: boolean }) {
+  const [open, setOpen] = useState(false);
+  const collapsed = !open && startsCollapsed(text, streaming);
+  return (
+    <div>
+      <div className={collapsed ? 'relative max-h-[24rem] overflow-hidden' : undefined} data-testid={collapsed ? 'reply-collapsed' : undefined}>
+        <Rich text={text} />
+        {collapsed ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-[var(--surface)] to-transparent" /> : null}
+      </div>
+      {startsCollapsed(text, streaming) ? (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="mt-1.5 text-xs text-[var(--accent)] underline-offset-2 hover:underline"
+        >
+          {open ? 'Show less' : `Show full answer (${Math.ceil(text.length / 1000)}k characters)`}
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -1166,7 +1209,10 @@ export function OpsChatClient({
           append(text);
           setToolActivity(null);
         },
-        onToolStart: (name) => setToolActivity(TOOL_LABEL[name] ?? 'looking that up'),
+        onToolStart: (name) => {
+          setToolActivity(TOOL_LABEL[name] ?? 'looking that up');
+          patchReply((m) => ({ ...m, steps: [...(m.steps ?? []), { name }] }));
+        },
         onToolEnd: () => setToolActivity(null),
         onProposal: (payload) => {
           // Shown as proposed, but NOT actionable until `saved` supplies its persisted proposalId.
@@ -1285,8 +1331,13 @@ export function OpsChatClient({
               <div className={'mb-1 text-xs ' + (m.role === 'owner' ? 'text-[#0b0e14]/60' : 'opacity-50')}>
                 {m.role === 'owner' ? 'You' : 'Ops Chat'}
               </div>
+              {m.role === 'assistant' && m.steps && m.steps.length > 0 ? <StepsLine steps={m.steps} /> : null}
               {m.content.length > 0 ? (
-                <Rich text={m.content} />
+                m.role === 'assistant' ? (
+                  <FoldableReply text={m.content} streaming={streaming && m.id === messages[messages.length - 1]?.id} />
+                ) : (
+                  <Rich text={m.content} />
+                )
               ) : m.role === 'assistant' && !m.cards ? (
                 <span className="opacity-60">{toolActivity ? `🔍 ${toolActivity}…` : 'Thinking…'}</span>
               ) : null}
