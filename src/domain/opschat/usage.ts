@@ -60,8 +60,11 @@ export interface OpsChatUsageTotals {
   costMicros: bigint;
 }
 
-/** The user's Ops Chat totals since `since` (RLS confines the sum to their own rows). */
-export async function opsChatUsageSince(tx: DbTx, userId: string, since: Date): Promise<OpsChatUsageTotals> {
+/**
+ * The user's Ops Chat totals since `since` (RLS confines the sum to their own rows); only one conversation's when
+ * `conversationId` is given (that conversation's right panel).
+ */
+export async function opsChatUsageSince(tx: DbTx, userId: string, since: Date, conversationId?: string): Promise<OpsChatUsageTotals> {
   const rows = await tx
     .select({
       turns: sql<string>`count(*)`,
@@ -71,7 +74,13 @@ export async function opsChatUsageSince(tx: DbTx, userId: string, since: Date): 
       costMicros: sql<string>`coalesce(sum(${opsChatUsage.costMicros}), 0)`,
     })
     .from(opsChatUsage)
-    .where(and(eq(opsChatUsage.userId, userId), gte(opsChatUsage.createdAt, since)));
+    .where(
+      and(
+        eq(opsChatUsage.userId, userId),
+        gte(opsChatUsage.createdAt, since),
+        conversationId ? eq(opsChatUsage.conversationId, conversationId) : undefined,
+      ),
+    );
   const r = rows[0];
   return {
     turns: Number(r?.turns ?? 0),

@@ -5,6 +5,7 @@ import { currentBuildId } from '@/lib/build-id';
 import { signOut } from '@/app/login/actions';
 import { withUser } from '@/db/tenant';
 import { findAccessibleProjects } from '@/db/system';
+import { opsChatUsageSince } from '@/domain/opschat/usage';
 import { buildPulse, needsYouCount, openingMessage } from '@/domain/opschat/pulse';
 import {
   earliestUnansweredOwnerTurn,
@@ -70,6 +71,13 @@ export default async function OpsChatPage({
       return { conversations, loaded, pending, attachments };
     }),
   ]);
+  // Right panel: this conversation's recorded usage (own rows only). Best-effort and separate from the load above,
+  // so a failure here never blocks the chat.
+  const conversationUsage = stored.loaded
+    ? await withUser({ userId: user.id }, (tx) => opsChatUsageSince(tx, user.id, new Date(0), stored.loaded!.conversation.id))
+        .then((u) => ({ turns: u.turns, webSearches: u.webSearches, costMicros: u.costMicros.toString() }))
+        .catch(() => null)
+    : null;
   // P5a: what each confirmed dispatch / re-run card's run actually did, read from the P4 links (never chat text).
   // Read per project under that project's tenant RLS, AFTER the owner-private load (no nested transactions).
   // Best-effort: a failure shows the cards exactly as before.
@@ -168,6 +176,7 @@ export default async function OpsChatPage({
         pendingTurn={pendingTurn}
         conversations={stored.conversations.map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt.toISOString() }))}
         workspaces={workspaces}
+        conversationUsage={conversationUsage}
         leadingCompletions={anchored.get(LEADING) ?? []}
         buildId={currentBuildId()}
       />

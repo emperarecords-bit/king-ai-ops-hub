@@ -21,6 +21,8 @@ import { suggestedCount, type PricedLine } from '@/domain/opschat/price-sources'
 import { createDeadlineWatchdog } from './ops-chat-watchdog';
 import { OpsChatSidebar } from './ops-chat-sidebar';
 import { type SidebarConversation } from './ops-chat-sidebar-model';
+import { OpsChatContextPanel, type PanelUsage } from './ops-chat-context-panel';
+import { conversationPanel } from './ops-chat-panel-model';
 import { ATTACHMENT_ACCEPT, ATTACHMENT_LIMITS } from '@/domain/opschat/attachment-limits';
 import {
   ComposerAttachmentChips,
@@ -756,6 +758,7 @@ export function OpsChatClient({
   pendingTurn: serverPending,
   conversations,
   workspaces = [],
+  conversationUsage = null,
   leadingCompletions = [],
   buildId = null,
 }: {
@@ -766,6 +769,8 @@ export function OpsChatClient({
   conversations: SidebarConversation[];
   /** Workspace shortcuts for the left panel (key + name only). */
   workspaces?: ReadonlyArray<{ key: string; name: string }>;
+  /** This conversation's recorded Ops Chat usage, as of page load (right panel). */
+  conversationUsage?: PanelUsage | null;
   /** P5c-3: completion entries older than every loaded message (shown first). */
   leadingCompletions?: CompletionEntry[];
   /** The build that rendered this page — compared with the server's current build to detect a stale tab. */
@@ -1212,9 +1217,11 @@ export function OpsChatClient({
     }
   }
 
+  const panel = conversationPanel(messages);
+
   return (
-    // Wide screens: conversations on the left, the chat in a readable centre column. Phones: the chat alone, with the
-    // conversation picker above it (the left panel is hidden below lg).
+    // Wide screens: conversations on the left, the chat in a readable centre column, and (extra-wide) what this
+    // conversation set in motion on the right. Phones: the chat alone, with the conversation picker above it.
     <div className="flex flex-1 gap-6">
       <aside className="hidden w-64 shrink-0 lg:block">
         <div className="sticky top-4 h-[calc(100dvh-7rem)]">
@@ -1794,6 +1801,11 @@ export function OpsChatClient({
         </div>
       </form>
     </div>
+      <div className="hidden w-72 shrink-0 xl:block">
+        <div className="sticky top-4 h-[calc(100dvh-7rem)]">
+          <OpsChatContextPanel panel={panel} usage={conversationUsage} />
+        </div>
+      </div>
     </div>
   );
 }

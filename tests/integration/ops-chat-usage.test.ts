@@ -81,6 +81,11 @@ describe('ops_chat_usage — recorded per turn, owner-private (RLS)', () => {
     const row = await admin`select cut_off, stop_reason, pricing_version from ops_chat_usage where id = ${r2.id}`;
     expect(row[0]).toMatchObject({ cut_off: true, stop_reason: 'max_tokens' });
     expect(row[0]!.pricing_version).toBeTruthy();
+
+    // One conversation's totals (the right panel): t1 and t2 are separate conversations.
+    const onlyT1 = await withUser({ userId: userA }, (tx) => opsChatUsageSince(tx, userA, new Date(0), t1.conversationId));
+    expect(onlyT1).toMatchObject({ turns: 1, inputTokens: 32_172, outputTokens: 1_112, webSearches: 1 });
+    expect(onlyT1.costMicros).toBe(r1.costMicros);
   });
 
   it.runIf(available)('another user can neither see nor write my usage', async () => {
