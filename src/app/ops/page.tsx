@@ -4,6 +4,7 @@ import { currentUser, tenantForUser } from '@/domain/auth/guard';
 import { currentBuildId } from '@/lib/build-id';
 import { signOut } from '@/app/login/actions';
 import { withUser } from '@/db/tenant';
+import { findAccessibleProjects } from '@/db/system';
 import { buildPulse, needsYouCount, openingMessage } from '@/domain/opschat/pulse';
 import {
   earliestUnansweredOwnerTurn,
@@ -50,10 +51,14 @@ export default async function OpsChatPage({
   const parsedHistory = Number.parseInt(one(sp.history), 10);
   const historyLimit = Number.isFinite(parsedHistory) ? Math.max(200, Math.min(parsedHistory, 1000)) : 200;
 
-  const [pulse, stored] = await Promise.all([
+  const [pulse, workspaces, stored] = await Promise.all([
     buildPulse(),
+    // Left-panel shortcuts (key + name only). Best-effort: a failure just hides the list.
+    findAccessibleProjects(user.id)
+      .then((ps) => ps.map((p) => ({ key: p.key, name: p.name })).sort((a, b) => a.name.localeCompare(b.name)))
+      .catch(() => [] as Array<{ key: string; name: string }>),
     withUser({ userId: user.id }, async (tx) => {
-      const conversations = await listConversations(tx, user.id, { limit: 20 });
+      const conversations = await listConversations(tx, user.id, { limit: 100 });
       const id = startNew ? null : UUID_RE.test(requested) ? requested : await mostRecentConversationId(tx, user.id);
       // RLS + the explicit user filter scope this load: another user's id simply loads nothing.
       const loaded = id ? await loadConversation(tx, user.id, id, { limit: historyLimit }) : null;
@@ -117,7 +122,7 @@ export default async function OpsChatPage({
   const notFound = requested !== '' && !startNew && !stored.loaded;
 
   return (
-    <main className="mx-auto flex min-h-[100dvh] max-w-3xl flex-col p-4 sm:p-6">
+    <main className="mx-auto flex min-h-[100dvh] w-full max-w-[1600px] flex-col p-4 sm:p-6">
       <header className="mb-4 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <h1 className="text-lg font-bold">Ops Chat</h1>
@@ -161,7 +166,8 @@ export default async function OpsChatPage({
         conversationId={stored.loaded?.conversation.id ?? null}
         persisted={persisted}
         pendingTurn={pendingTurn}
-        conversations={stored.conversations.map((c) => ({ id: c.id, title: c.title }))}
+        conversations={stored.conversations.map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt.toISOString() }))}
+        workspaces={workspaces}
         leadingCompletions={anchored.get(LEADING) ?? []}
         buildId={currentBuildId()}
       />
