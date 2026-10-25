@@ -87,14 +87,25 @@ describe('ops_chat_usage — recorded per turn, owner-private (RLS)', () => {
     const t = await turnFor(userA);
     const { id } = await withUser({ userId: userA }, (tx) => recordOpsChatUsage(tx, t));
 
+    // RLS is proven as the app_server role (asUser). The test's withUser connection may be privileged and skip RLS,
+    // so it is only used for the owner's own reads/writes, never as proof of isolation.
     const raw = await asUser(app, userB, (tx) => tx`select count(*)::int n from ops_chat_usage where id = ${id}`);
     expect(raw[0]!.n).toBe(0);
-    const bTotals = await withUser({ userId: userB }, (tx) => opsChatUsageSince(tx, userA, new Date(0)));
-    expect(bTotals.turns).toBe(0);
+    const rawSum = await asUser(app, userB, (tx) => tx`select count(*)::int n from ops_chat_usage where user_id = ${userA}`);
+    expect(rawSum[0]!.n).toBe(0);
+    const bOwn = await withUser({ userId: userB }, (tx) => opsChatUsageSince(tx, userB, new Date(0)));
+    expect(bOwn.turns).toBe(0);
 
-    // B cannot insert a row claiming A (RLS with-check), nor attach a row to A's conversation as B (composite FK).
-    await expect(withUser({ userId: userB }, (tx) => recordOpsChatUsage(tx, t))).rejects.toThrow();
-    await expect(withUser({ userId: userB }, (tx) => recordOpsChatUsage(tx, { ...t, userId: userB }))).rejects.toThrow();
+    // B cannot insert a row claiming A (RLS with-check) …
+    await expect(
+      asUser(app, userB, (tx) => tx`insert into ops_chat_usage (user_id, conversation_id, owner_message_id, provider, model, input_tokens, output_tokens, cost_micros, pricing_version)
+        values (${userA}, ${t.conversationId}, ${t.ownerMessageId}, 'anthropic', 'claude-sonnet-5', 1, 1, 1, 'x')`),
+    ).rejects.toThrow();
+    // … nor attach a row of its own to A's conversation (composite FK: the conversation must be B's).
+    await expect(
+      asUser(app, userB, (tx) => tx`insert into ops_chat_usage (user_id, conversation_id, owner_message_id, provider, model, input_tokens, output_tokens, cost_micros, pricing_version)
+        values (${userB}, ${t.conversationId}, ${t.ownerMessageId}, 'anthropic', 'claude-sonnet-5', 1, 1, 1, 'x')`),
+    ).rejects.toThrow();
   });
 
   it.runIf(available)('rows are append-only and never reach usage_events', async () => {
