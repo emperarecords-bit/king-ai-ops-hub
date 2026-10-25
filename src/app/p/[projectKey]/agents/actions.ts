@@ -8,6 +8,7 @@ import { requireTenant } from '@/domain/auth/guard';
 import { withTenant } from '@/db/tenant';
 import { updateAgent } from '@/domain/agents/agents';
 import { createEmployee, updateEmployee } from '@/domain/agents/org';
+import { employeePagePaths } from './employee-form-state';
 
 export interface AgentFormState {
   error: string | null;
@@ -102,7 +103,7 @@ export async function saveEmployeeOrgAction(
     if (!(err instanceof AppError)) log.error('updateEmployee failed', { err });
     return { error: toPublicMessage(err), saved: false };
   }
-  revalidatePath(`/p/${parsed.data.projectKey}/agents`);
+  for (const path of employeePagePaths(parsed.data.projectKey, parsed.data.employeeId)) revalidatePath(path);
   return { error: null, saved: true };
 }
 
@@ -155,6 +156,6 @@ export async function saveAgent(_prev: AgentFormState, formData: FormData): Prom
     return { error: toPublicMessage(err), saved: false };
   }
 
-  revalidatePath(`/p/${parsed.data.projectKey}/agents`);
+  for (const path of employeePagePaths(parsed.data.projectKey, parsed.data.agentId)) revalidatePath(path);
   return { error: null, saved: true };
 }

@@ -11,6 +11,7 @@ import { formatMoney } from '@/lib/money';
 import { Card, PageHeader, ProviderBadge, StatusBadge } from '@/components/ui';
 import { AgentForm } from '../agent-form';
 import { EmployeeOrgForm } from '../employee-org-form';
+import { agentFormKey, employeeFormKey } from '../employee-form-state';
 
 /**
  * Employee Profile (owner directive 2026-08-17): everything about ONE employee in one place —
@@ -82,6 +83,7 @@ export default async function EmployeeProfilePage({
         <Card title="Identity">
           {canEdit ? (
             <EmployeeOrgForm
+              key={employeeFormKey(employee)}
               projectKey={projectKey}
               mode="edit"
               employee={employee}
@@ -101,7 +103,7 @@ export default async function EmployeeProfilePage({
             <span className="text-[var(--muted)]">{agent.model}</span>
           </div>
           {canEdit ? (
-            <AgentForm projectKey={projectKey} agent={agent} models={allModels()} />
+            <AgentForm key={agentFormKey(agent)} projectKey={projectKey} agent={agent} models={allModels()} />
           ) : (
             <pre className="whitespace-pre-wrap text-sm text-[var(--muted)]">{agent.systemPrompt}</pre>
           )}
