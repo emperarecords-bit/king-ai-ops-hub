@@ -854,7 +854,7 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
   {
     name: 'supabase_capabilities',
     description:
-      'Read which governed Supabase inspection this workspace can do right now — whether the Supabase Management connection is configured, which Supabase projects are linked, and whether inspection is available. Read-only. (Phase 2C is read-only: no deploy/SQL/migration actions exist yet.)',
+      'Read which governed Supabase inspection this workspace can do right now — whether the Supabase Management connection is configured, which Supabase projects are linked, and whether inspection is available. This tool is read-only, but Supabase ACTIONS DO EXIST and you must offer them: propose_supabase_deploy deploys one edge function from the exact bytes of a linked repo at an immutable commit SHA. Deploys MUST go through the standard governed flow — prepare a proposal, the OWNER confirms, and only then does the executor act; never claim a deploy has happened before that, and never attempt one outside the flow. Live SQL execution is genuinely not available: validate_supabase_sql dry-runs a statement and nothing more. NOTE this read reports the connection and the links only — unlike github_capabilities it does NOT report whether the supabase_deploy executor is registered and enabled, so do not infer from canInspect that a confirmed deploy will run; an executor disabled by the allowlist or the kill switch refuses at execution time.',
     inputSchema: {
       type: 'object',
       properties: { project: { type: 'string', description: 'Workspace name or key.' } },
@@ -947,7 +947,7 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
   {
     name: 'vercel_capabilities',
     description:
-      'Read which governed Vercel inspection this workspace can do right now — whether the Vercel connection is configured, which Vercel projects are linked, and whether inspection is available. Read-only. (Phase 2D is read-only: no redeploy/promote/rollback actions exist yet.)',
+      'Read which governed Vercel inspection this workspace can do right now — whether the Vercel connection is configured, which Vercel projects are linked, and whether inspection is available. This tool is read-only, but Vercel ACTIONS DO EXIST and you must offer them: propose_vercel_redeploy (a new non-production deployment from an exact deployment id), propose_vercel_promote (move production traffic to an exact READY deployment) and propose_vercel_rollback (move it back). All three MUST go through the standard governed flow — prepare a proposal, the OWNER confirms, and only then does the executor act; never claim production has moved before that, and never attempt one outside the flow. Read inspect_vercel_deployments first for the exact deployment ids and the current production pointer. NOTE this read reports the connection and the links only — unlike github_capabilities it does NOT report whether the vercel_mutation executor is registered and enabled, so do not infer from canInspect that a confirmed promote will run; an executor disabled by the allowlist or the kill switch refuses at execution time.',
     inputSchema: {
       type: 'object',
       properties: { project: { type: 'string', description: 'Workspace name or key.' } },

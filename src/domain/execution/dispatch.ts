@@ -63,6 +63,17 @@ export function resolveDispatchPolicyFromEnv(env: Record<string, string | undefi
   return { enabledExecutorIds: stop ? [] : ids };
 }
 
+/**
+ * The ONE server-enablement check every executor passes — git_pr, supabase_deploy, vercel_mutation and
+ * the no-op that `file_write` resolves to alike. Exact string equality on the resolved executor's id, so
+ * naming an action type, a prefix, or a different case never enables anything; fail-closed when the
+ * allowlist is absent, and empty once EXECUTORS_KILL_SWITCH is set. Exported so the gate and its tests
+ * share one definition rather than two that can drift apart.
+ */
+export function isExecutorEnabled(policy: DispatchPolicy, executorId: string): boolean {
+  return (policy.enabledExecutorIds ?? []).includes(executorId);
+}
+
 /** Risk classes any executor may act on. Everything above external_reversible stays prohibited. */
 const ALLOWED_RISKS = new Set(['reversible_internal_write', 'external_reversible']);
 const noop = new NoopDryRunExecutor();
@@ -181,7 +192,7 @@ export async function executeApprovedAction(
   if (!executor || !executor.capability.actionTypes.includes(row.actionType)) {
     return writeBlocked(tx, ctx, row.id, 'No executor declares this action type.', { actionType: row.actionType });
   }
-  if (!(policy.enabledExecutorIds ?? []).includes(executor.capability.executorId)) return writeBlocked(tx, ctx, row.id, 'The executor is disabled.');
+  if (!isExecutorEnabled(policy, executor.capability.executorId)) return writeBlocked(tx, ctx, row.id, 'The executor is disabled.');
   if (!executor.capability.supportedModes.includes(request.mode)) {
     return writeBlocked(tx, ctx, row.id, `The executor does not support ${request.mode} mode.`, { mode: request.mode });
   }

@@ -5,7 +5,8 @@ import { canonicalizeFileWriteAction } from '@/domain/execution/file-write-actio
 import { confirmationBindingSha256, validateConfirmationUse, type FileWriteConfirmationFields } from '@/domain/execution/file-write-confirmation';
 import { classifyIdempotency, interruptionOutcome, mayClaimAttempt } from '@/domain/execution/executor-lifecycle-policy';
 import { reconcileFileWrite, type FileWriteReconciliationEvidence } from '@/domain/execution/file-write-reconciliation';
-import { evaluateExecutorEnablement, type ExecutorEnablementInput } from '@/domain/execution/executor-enablement-policy';
+import { isExecutorEnabled, resolveDispatchPolicyFromEnv } from '@/domain/execution/dispatch';
+import { NOOP_EXECUTOR_CAPABILITY } from '@/domain/execution/noop-executor';
 
 describe('consolidated Phase 3 file-write adversarial suite (no I/O)', () => {
   it.each(['../x.md', '/etc/passwd.txt', 'C:/Windows/x.txt', '\\\\host\\share\\x.txt', '.git/config.txt', 'foo/.git/x.md', 'node_modules/x/readme.md', '.env.txt', 'plans/a\u202eb.md'])('denies path attack %s', (path) => {
@@ -31,14 +32,31 @@ describe('consolidated Phase 3 file-write adversarial suite (no I/O)', () => {
       expect(validateConfirmationUse(changed, digest, new Date('2026-08-08T12:01:00Z'), new Set()).allowed).toBe(false);
     }
   });
-  it('denies duplicate conflicts, concurrent claims, disabled/client/model direct live dispatch, and kill switch', () => {
+  it('denies duplicate conflicts, concurrent claims, and — on the real dispatch gate — an unset or killed allowlist, a foreign executor identity, and live mode', () => {
     expect(classifyIdempotency('binding-a', 'binding-b')).toBe('conflict');
     expect(mayClaimAttempt('confirmed', 1, 2, true)).toBe(false);
-    const base: ExecutorEnablementInput = { mode: 'live', environmentAllowsExecutors: true, executorFamilyEnabled: true, workspaceEnabled: true, fileWriteEnabled: true, emergencyKillSwitch: false, requestedOrgId: 'o', requestedProjectId: 'p', configuredOrgId: 'o', configuredProjectId: 'p', requestedExecutorId: 'file_write', configuredExecutorId: 'file_write' };
-    expect(evaluateExecutorEnablement({ ...base, fileWriteEnabled: false }).allowed).toBe(false);
-    expect(evaluateExecutorEnablement({ ...base, requestedExecutorId: 'client_direct' }).allowed).toBe(false);
-    expect(evaluateExecutorEnablement({ ...base, requestedExecutorId: 'model_direct' }).allowed).toBe(false);
-    expect(evaluateExecutorEnablement({ ...base, emergencyKillSwitch: true }).allowed).toBe(false);
+
+    // file_write resolves to the no-op executor, so its enablement is the SAME single gate the
+    // git_pr / supabase_deploy / vercel_mutation connectors pass: exact membership of the resolved
+    // executor's id in EXECUTORS_ENABLED, fail-closed when unset, emptied by EXECUTORS_KILL_SWITCH.
+    // This calls the gate's OWN predicate, so a change to dispatch's enablement check fails here;
+    // it replaces the unwired four-layer enablement policy that used to be asserted at this spot and
+    // never gated anything in production.
+    const enabled = (env: Record<string, string | undefined>): boolean =>
+      isExecutorEnabled(resolveDispatchPolicyFromEnv(env), NOOP_EXECUTOR_CAPABILITY.executorId);
+
+    expect(enabled({ EXECUTORS_ENABLED: 'noop_dry_run' })).toBe(true); // positive control: it CAN be enabled
+    expect(enabled({})).toBe(false); // absence of configuration never enables
+    expect(enabled({ EXECUTORS_ENABLED: 'noop_dry_run', EXECUTORS_KILL_SWITCH: '1' })).toBe(false);
+    expect(enabled({ EXECUTORS_ENABLED: 'noop_dry_run', EXECUTORS_KILL_SWITCH: 'true' })).toBe(false);
+    // Exact string match: not the action type, not a prefix/suffix, not a different case, and not a
+    // direct-write identity the model or client might claim.
+    for (const value of ['file_write', 'client_direct', 'model_direct', 'noop', 'noop_dry_run_extra', 'NOOP_DRY_RUN']) {
+      expect(enabled({ EXECUTORS_ENABLED: value })).toBe(false);
+    }
+    // Even once enabled, a LIVE file_write cannot run: the resolved executor is dry-run only.
+    expect([...NOOP_EXECUTOR_CAPABILITY.supportedModes] as string[]).not.toContain('live');
+    expect(NOOP_EXECUTOR_CAPABILITY.externalSideEffects).toBe(false);
   });
   it('keeps crash, timeout, unavailable evidence, fake not-executed, and conflicts ambiguous', () => {
     expect(interruptionOutcome('worker_crash', true)).toBe('ambiguous');
