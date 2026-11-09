@@ -134,6 +134,29 @@ function assertProductionSafe(env: ServerEnv): void {
       }
     }
   }
+  // Connector credentials (GitHub App, Supabase Management, Vercel). Read from process.env rather than
+  // the schema because the connector clients read them there too — each is OPTIONAL, and absence is a
+  // valid fail-closed posture: the client returns a typed refusal and performs no I/O. So nothing here
+  // REQUIRES them. What is rejected is a credential that is present but unusable, because that is worse
+  // than absence: `is*Configured()` tests truthiness, so a placeholder reports the connector as
+  // configured and defers the failure to the first live API call. Whitespace is the same trap — truthy,
+  // unusable, and invisible in a secrets listing.
+  const CONNECTOR_CREDENTIALS = [
+    'GITHUB_APP_ID',
+    'GITHUB_APP_PRIVATE_KEY',
+    'SUPABASE_MANAGEMENT_TOKEN',
+    'VERCEL_TOKEN',
+  ] as const;
+  for (const name of CONNECTOR_CREDENTIALS) {
+    const value = process.env[name];
+    if (value === undefined || value === '') continue; // absent ⇒ that connector fails closed, which is fine
+    if (value.trim() === '') offenders.push(`${name} (whitespace-only: truthy but unusable)`);
+    else check(name, value);
+  }
+  // EXECUTORS_ENABLED is deliberately NOT checked here. It is an allowlist, not a credential: an
+  // unrecognised entry matches no executor and therefore enables nothing, so a bad value fails closed on
+  // its own. Refusing to boot over it would turn a safe no-op into an outage.
+
   if (offenders.length > 0) {
     throw new Error(
       `Refusing to start in production with placeholder/insecure config: ${offenders.join(', ')}`,
