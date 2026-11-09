@@ -1,4 +1,4 @@
-import { config as loadDotenv } from 'dotenv';
+import '../load-env';
 import { and, eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
@@ -52,13 +52,6 @@ import { type TenantContext } from '@/types/domain';
  *     --project accuratebids --actor owner@example.com --vercel-project-id prj_abc12345
  *   npm run admin:link-vercel-project -- ... --confirm
  */
-
-// Next.js loads `.env.local` on its own, but plain `tsx` does not and `dotenv/config` reads only
-// `.env` — which this repo does not have, so DATABASE_URL came back unset. Load both files with
-// Next's precedence (.env.local wins over .env) and, because dotenv never overrides an existing
-// value, let real environment variables beat both. That is what Fly supplies.
-loadDotenv({ path: '.env.local', quiet: true });
-loadDotenv({ quiet: true });
 
 const FLAGS = new Set(['project', 'actor', 'vercel-project-id', 'team-id', 'label']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

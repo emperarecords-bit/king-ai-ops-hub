@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './load-env';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { drizzle } from 'drizzle-orm/postgres-js';
