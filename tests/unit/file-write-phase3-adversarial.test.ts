@@ -5,7 +5,7 @@ import { canonicalizeFileWriteAction } from '@/domain/execution/file-write-actio
 import { confirmationBindingSha256, validateConfirmationUse, type FileWriteConfirmationFields } from '@/domain/execution/file-write-confirmation';
 import { classifyIdempotency, interruptionOutcome, mayClaimAttempt } from '@/domain/execution/executor-lifecycle-policy';
 import { reconcileFileWrite, type FileWriteReconciliationEvidence } from '@/domain/execution/file-write-reconciliation';
-import { isExecutorEnabled, resolveDispatchPolicyFromEnv } from '@/domain/execution/dispatch';
+import { executorEnablementId, isExecutorEnabled, resolveDispatchPolicyFromEnv } from '@/domain/execution/dispatch';
 import { NOOP_EXECUTOR_CAPABILITY } from '@/domain/execution/noop-executor';
 
 describe('consolidated Phase 3 file-write adversarial suite (no I/O)', () => {
@@ -36,24 +36,35 @@ describe('consolidated Phase 3 file-write adversarial suite (no I/O)', () => {
     expect(classifyIdempotency('binding-a', 'binding-b')).toBe('conflict');
     expect(mayClaimAttempt('confirmed', 1, 2, true)).toBe(false);
 
-    // file_write resolves to the no-op executor, so its enablement is the SAME single gate the
-    // git_pr / supabase_deploy / vercel_mutation connectors pass: exact membership of the resolved
-    // executor's id in EXECUTORS_ENABLED, fail-closed when unset, emptied by EXECUTORS_KILL_SWITCH.
-    // This calls the gate's OWN predicate, so a change to dispatch's enablement check fails here;
-    // it replaces the unwired four-layer enablement policy that used to be asserted at this spot and
-    // never gated anything in production.
+    // file_write passes the SAME single gate the git_pr / supabase_deploy / vercel_mutation connectors
+    // pass: exact membership of the resolved enablement id in EXECUTORS_ENABLED, fail-closed when unset,
+    // emptied by EXECUTORS_KILL_SWITCH. It is now addressed by its own action type rather than by the
+    // shared no-op's id, so enabling it enables file_write ALONE. This calls the gate's OWN predicate and
+    // the real enablement resolver, so a change to either fails here; it replaces the unwired four-layer
+    // enablement policy that used to be asserted at this spot and never gated anything in production.
     const enabled = (env: Record<string, string | undefined>): boolean =>
-      isExecutorEnabled(resolveDispatchPolicyFromEnv(env), NOOP_EXECUTOR_CAPABILITY.executorId);
+      isExecutorEnabled(
+        resolveDispatchPolicyFromEnv(env),
+        executorEnablementId('file_write', NOOP_EXECUTOR_CAPABILITY.executorId),
+      );
 
-    expect(enabled({ EXECUTORS_ENABLED: 'noop_dry_run' })).toBe(true); // positive control: it CAN be enabled
+    expect(enabled({ EXECUTORS_ENABLED: 'file_write' })).toBe(true); // positive control: it CAN be enabled
     expect(enabled({})).toBe(false); // absence of configuration never enables
-    expect(enabled({ EXECUTORS_ENABLED: 'noop_dry_run', EXECUTORS_KILL_SWITCH: '1' })).toBe(false);
-    expect(enabled({ EXECUTORS_ENABLED: 'noop_dry_run', EXECUTORS_KILL_SWITCH: 'true' })).toBe(false);
-    // Exact string match: not the action type, not a prefix/suffix, not a different case, and not a
-    // direct-write identity the model or client might claim.
-    for (const value of ['file_write', 'client_direct', 'model_direct', 'noop', 'noop_dry_run_extra', 'NOOP_DRY_RUN']) {
+    expect(enabled({ EXECUTORS_ENABLED: 'file_write', EXECUTORS_KILL_SWITCH: '1' })).toBe(false);
+    expect(enabled({ EXECUTORS_ENABLED: 'file_write', EXECUTORS_KILL_SWITCH: 'true' })).toBe(false);
+    // Exact string match: not the shared no-op's id — which used to enable it for EVERY action type
+    // routed to the same instance — not a prefix/suffix, not a different case, and not a direct-write
+    // identity the model or client might claim.
+    for (const value of ['noop_dry_run', 'client_direct', 'model_direct', 'noop', 'file_write_extra', 'FILE_WRITE']) {
       expect(enabled({ EXECUTORS_ENABLED: value })).toBe(false);
     }
+    // A sibling connector's name never enables file_write, and the resolver leaves a real connector's
+    // own id alone — a resolver that returned the action type for everything would pass the rest of
+    // this block while quietly renaming every gate in the system.
+    expect(enabled({ EXECUTORS_ENABLED: 'git_pr,supabase_deploy,vercel_mutation' })).toBe(false);
+    expect(executorEnablementId('git_pr', 'git_pr')).toBe('git_pr');
+    expect(executorEnablementId('supabase_deploy', 'supabase_deploy')).toBe('supabase_deploy');
+    expect(executorEnablementId('external_http', 'accuratebids_quote')).toBe('accuratebids_quote');
     // Even once enabled, a LIVE file_write cannot run: the resolved executor is dry-run only.
     expect([...NOOP_EXECUTOR_CAPABILITY.supportedModes] as string[]).not.toContain('live');
     expect(NOOP_EXECUTOR_CAPABILITY.externalSideEffects).toBe(false);
