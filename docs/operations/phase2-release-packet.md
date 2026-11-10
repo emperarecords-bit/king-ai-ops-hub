@@ -1,6 +1,10 @@
 # Phase 2 governed control-surface — production release packet (PREP / dry-run)
 
-**Status: ceremony preparation only. No production change has been or will be made by this packet.**
+> **SHIPPED as prod v64 2026-10-11; current prod v78 — historical record.**
+> Preserved as written; nothing below is live guidance. For what actually shipped see
+> `docs/operations/phase2-v64-release-evidence.md` and the current production state.
+
+**Status at the time of writing: ceremony preparation only. No production change had been or would be made by this packet.**
 Prepared 2026-10-11 against `main` and live prod reads. The actual release runs later, under the
 receipt-gated G-Backup ceremony, only on explicit owner authorization.
 
