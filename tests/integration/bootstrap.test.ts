@@ -429,7 +429,14 @@ describe('P1c bootstrap does not fabricate journal rows', () => {
 
 describe('P1c standard command (scripts/migrate.ts) — env + exit behavior', () => {
   it('fails BEFORE any connection when both DB URLs are missing (nonzero exit, clear message)', () => {
-    const env: Record<string, string | undefined> = { ...process.env, SKIP_PREMIGRATION_BACKUP: '1' };
+    // Deleting the two vars is not enough on its own: scripts/load-env reads `.env.local`, which defines both,
+    // so the child would be handed them straight back and this assertion could never fail. HUB_SKIP_DOTENV=1
+    // stops that file load, making the no-URL precondition real on a dev machine as well as in CI.
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      SKIP_PREMIGRATION_BACKUP: '1',
+      HUB_SKIP_DOTENV: '1',
+    };
     delete env.DATABASE_MIGRATION_URL;
     delete env.DATABASE_URL;
     const r = spawnSync('npx', ['tsx', 'scripts/migrate.ts'], { env: env as NodeJS.ProcessEnv, encoding: 'utf8', shell: true });

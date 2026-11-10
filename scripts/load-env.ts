@@ -27,7 +27,14 @@ import { config as loadEnv } from 'dotenv';
  * cloud: on Fly these come from secrets, no file exists, and loading a missing file is a no-op.
  */
 
-// `quiet` keeps dotenv's "injected env" banner out of operator output. Centralising the load is
-// what makes that a one-line decision for every script instead of sixteen.
-loadEnv({ path: '.env.local', quiet: true });
-loadEnv({ quiet: true });
+// A TEST SEAM, and the only way to stop the load: with HUB_SKIP_DOTENV=1 nothing is read from disk, so a
+// spawned child can be handed a genuinely empty database configuration. Without it, a test that deletes
+// DATABASE_URL from a child's env has it handed straight back by `.env.local`, and the assertion it meant to
+// make becomes unreachable on every machine that has one — while CI, which has no `.env.local`, stays green.
+// It only ever skips reading FILES: it cannot add, remove, or override a real environment variable.
+if (process.env.HUB_SKIP_DOTENV !== '1') {
+  // `quiet` keeps dotenv's "injected env" banner out of operator output. Centralising the load is
+  // what makes that a one-line decision for every script instead of sixteen.
+  loadEnv({ path: '.env.local', quiet: true });
+  loadEnv({ quiet: true });
+}
