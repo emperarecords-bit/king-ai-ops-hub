@@ -1,6 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type ReceiptV2Expectation, type ReceiptV2FailCode } from './receipt-v2-verify';
+/**
+ * Re-exported through the gate so scripts/migrate.ts can default its freshness window from the SAME constant the
+ * publish-time verifier enforces, without importing a second backup module: migrate.ts's permitted consumer surface
+ * is the gate plus the transport, asserted by tests/unit/gbackup-import-boundary.test.ts.
+ */
+export { DEFAULT_MAX_SNAPSHOT_AGE_MS } from './receipt-v2-verify';
 import {
   type ReceiptFetcher,
   type TransportControls,

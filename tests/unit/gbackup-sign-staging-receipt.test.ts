@@ -11,6 +11,7 @@ import { type RunCliOptions, runCli } from '../../scripts/ci/sign-staging-receip
 import {
   type ReleasePins,
   type StagingReceiptInputs,
+  SELF_VERIFY_MAX_SNAPSHOT_AGE_MS,
   STAGING_PINS,
   StagingReceiptInputError,
   assertNoPrivateMaterial,
@@ -22,7 +23,7 @@ import {
 import { receiptV2Schema } from '../../scripts/backup/receipt-v2-schema';
 import { readRuntimeMigrationSet } from '../../scripts/backup/runtime-migration-set';
 import { loadReceiptKeyBundle } from '../../scripts/backup/receipt-key-bundle';
-import { verifyReceiptV2Parsed } from '../../scripts/backup/receipt-v2-verify';
+import { DEFAULT_MAX_SNAPSHOT_AGE_MS, verifyReceiptV2Parsed } from '../../scripts/backup/receipt-v2-verify';
 
 /**
  * G-Backup staging-receipt producer — tests use EPHEMERAL, NON-PRODUCTION ed25519 keys generated in-process. No real
@@ -102,6 +103,30 @@ function goodInputs(over: Partial<StagingReceiptInputs> = {}): StagingReceiptInp
     ...over,
   };
 }
+
+describe('snapshot-freshness window — one constant, no drift between consumers', () => {
+  // This number is the binding constraint on the WHOLE ceremony, not a producer sanity check:
+  // publishSignedReceiptV2 substitutes the real publish clock for migrationStartedAt and keeps this window, and no
+  // environment variable reaches it. It previously sat at an independent 30-minute literal here while the release
+  // gate defaulted to its own 30-minute literal, so widening GBACKUP_MAX_SNAPSHOT_AGE_MS could satisfy the gate
+  // while publication was still refused at step 16. One constant is what prevents that split.
+  it('self-verify (and therefore publish-time verify) uses the shared constant', () => {
+    expect(SELF_VERIFY_MAX_SNAPSHOT_AGE_MS).toBe(DEFAULT_MAX_SNAPSHOT_AGE_MS);
+  });
+  it('the shared window is 60 minutes', () => {
+    expect(DEFAULT_MAX_SNAPSHOT_AGE_MS).toBe(60 * 60 * 1000);
+  });
+  it('the self-verify expectation is built from the constant, not a literal', () => {
+    const src = readFileSync(join(process.cwd(), 'scripts', 'backup', 'sign-staging-receipt.ts'), 'utf8');
+    expect(src).toContain('maxSnapshotAgeMs: SELF_VERIFY_MAX_SNAPSHOT_AGE_MS');
+    expect(src).toContain('SELF_VERIFY_MAX_SNAPSHOT_AGE_MS = DEFAULT_MAX_SNAPSHOT_AGE_MS');
+  });
+  it('the release gate defaults to the same constant rather than restating a literal', () => {
+    const src = readFileSync(join(process.cwd(), 'scripts', 'migrate.ts'), 'utf8');
+    expect(src).toContain('intEnv(env.GBACKUP_MAX_SNAPSHOT_AGE_MS, DEFAULT_MAX_SNAPSHOT_AGE_MS)');
+    expect(src).not.toMatch(/GBACKUP_MAX_SNAPSHOT_AGE_MS,\s*\d/);
+  });
+});
 
 describe('staging pins — consistency with the repository', () => {
   const runtime = readRuntimeMigrationSet(process.cwd(), 'drizzle');
