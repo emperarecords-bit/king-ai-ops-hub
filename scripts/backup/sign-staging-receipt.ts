@@ -9,6 +9,7 @@ import {
 import { finalizeReceiptV2Id, isValidDeploymentNonce, receiptV2CanonicalHash } from './receipt-v2-canonical';
 import { signReceiptV2 } from './receipt-v2-sign';
 import {
+  DEFAULT_MAX_SNAPSHOT_AGE_MS,
   type ReceiptV2Expectation,
   verifyReceiptV2Parsed,
 } from './receipt-v2-verify';
@@ -90,7 +91,12 @@ export const STAGING_PINS: ReleasePins = {
 
 /** Gate defaults (mirror scripts/migrate.ts buildGateConfigFromEnv): used for the producer's self-verification. */
 export const SELF_VERIFY_MIN_RETENTION_DAYS = 7;
-export const SELF_VERIFY_MAX_SNAPSHOT_AGE_MS = 30 * 60 * 1000;
+/**
+ * Shared with the release gate's default (DEFAULT_MAX_SNAPSHOT_AGE_MS) rather than restated, because
+ * `publishSignedReceiptV2` substitutes the real publish clock for `migrationStartedAt` and keeps THIS window — so a
+ * number that is only correct here silently becomes the binding constraint on the whole ceremony.
+ */
+export const SELF_VERIFY_MAX_SNAPSHOT_AGE_MS = DEFAULT_MAX_SNAPSHOT_AGE_MS;
 
 const PLACEHOLDERS = new Set(['', 'UNKNOWN', 'unknown', 'PLACEHOLDER', 'placeholder', 'none', 'null', 'TODO']);
 const HEX_COMMIT = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;

@@ -82,6 +82,19 @@ export type ReceiptV2VerifyResult =
   | { readonly ok: true; readonly receiptCanonicalHash: string; readonly imageTrust: ImageTrustDiagnostics }
   | { readonly ok: false; readonly step: number; readonly code: ReceiptV2FailCode; readonly detail: string };
 
+/**
+ * The snapshot-freshness window, shared by EVERY consumer so they can never drift apart.
+ *
+ * It is the single source of parity for:
+ *  - `scripts/migrate.ts` buildGateConfigFromEnv (the release gate's default, overridable by GBACKUP_MAX_SNAPSHOT_AGE_MS)
+ *  - `SELF_VERIFY_MAX_SNAPSHOT_AGE_MS` in `sign-staging-receipt.ts` (producer self-verify AND publish-time verify)
+ *
+ * These were previously two independent literals of 30 minutes. `publishSignedReceiptV2` re-evaluates the window
+ * against the real clock at publish time, so the publish step enforced its own hardcoded 30 minutes that no
+ * environment variable could reach — a two-approval ceremony could satisfy the gate and still be refused at publish.
+ */
+export const DEFAULT_MAX_SNAPSHOT_AGE_MS = 60 * 60 * 1000;
+
 export interface ReceiptV2Expectation {
   readonly environment: ReceiptV2Environment;
   /**

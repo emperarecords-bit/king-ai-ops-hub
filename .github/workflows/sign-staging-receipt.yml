@@ -92,12 +92,13 @@ on:
         required: true
         type: string
       receipt_mode:
-        description: 'artifact-only (this PR) never publishes to the HTTPS endpoint.'
+        description: 'artifact-only uploads the signed receipt and stops. sign-and-publish ALSO writes it create-only to the WORM receipt origin inside this same approved run, so one approval covers the whole ceremony.'
         required: true
         default: artifact-only
         type: choice
         options:
           - artifact-only
+          - sign-and-publish
 
 # Least privilege: read-only repository token. No packages, deployments, or id-token.
 permissions:
@@ -204,5 +205,83 @@ jobs:
             receipt-out/staging-receipt.v2.json
             receipt-out/trust-bundle.public.json
             receipt-out/verification-metadata.json
+          if-no-files-found: error
+          retention-days: 7
+
+      # 5. OPTIONAL SAME-RUN PUBLICATION (receipt_mode: sign-and-publish).
+      #
+      #    WHY THIS EXISTS. publishSignedReceiptV2 substitutes the real publish clock for migrationStartedAt and
+      #    re-checks the freshness window, so publication is itself on the snapshot's clock. Routing it through the
+      #    standalone publish-staging-receipt.yml costs a SECOND human approval, and the snapshot keeps ageing
+      #    between the two clicks — observed single-click latencies of 23 and 65 minutes made the two-gate ceremony
+      #    unable to finish inside its own window. Publishing from the already-approved signing job removes the
+      #    second gate entirely: one approval now covers signing and publication.
+      #
+      #    PROVENANCE IS STRICTLY STRONGER HERE. The standalone path authenticates a cross-run artifact (gh api run
+      #    lookup + download-artifact, needing actions: read and the Actions token). In this job the receipt was just
+      #    produced by the reviewed signer in the same workspace, so there is no artifact to authenticate, no extra
+      #    permission scope, and no third-party download action.
+      #
+      #    CREDENTIAL SEPARATION. These steps carry ONLY the dedicated least-privilege receipt-publish credential.
+      #    The Ed25519 signing key is step-scoped to the signing step above and is not in scope here; conversely the
+      #    publish credential is not in scope for the signing step. Both directions are asserted in
+      #    tests/unit/sign-staging-receipt-workflow.test.ts.
+      - name: Publish receipt (create-only) + anonymous read-back verification
+        if: inputs.receipt_mode == 'sign-and-publish'
+        env:
+          # The receipt signed moments ago by this same job (never a downloaded artifact).
+          RECEIPT_FILE: ${{ github.workspace }}/receipt-out/staging-receipt.v2.json
+          SOURCE_DIR: ${{ github.workspace }}/selected-source
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          TARGET_IMAGE_REF: ${{ inputs.target_image_ref }}
+          TARGET_IMAGE_DIGEST: ${{ inputs.target_image_digest }}
+          DEPLOYMENT_NONCE: ${{ inputs.deployment_nonce }}
+          DATABASE_SYSTEM_IDENTIFIER: ${{ inputs.database_system_identifier }}
+          SNAPSHOT_ID: ${{ inputs.snapshot_id }}
+          # The real controller-established timestamps, exactly as signed. The standalone workflow omits these and
+          # hardcodes the discovery method, which is survivable only because the verifier reads both from the
+          # receipt itself; passing the true values keeps this step's expectation identical to the signer's.
+          SNAPSHOT_REQUESTED_AT: ${{ inputs.snapshot_requested_at }}
+          SNAPSHOT_CREATED_AT: ${{ inputs.snapshot_created_at }}
+          PROVIDER_OBSERVED_AT: ${{ inputs.provider_observed_at }}
+          RECEIPT_CREATED_AT: ${{ inputs.receipt_created_at }}
+          EXPIRES_AT: ${{ inputs.expires_at }}
+          RETENTION_DAYS: ${{ inputs.retention_days }}
+          SNAPSHOT_DISCOVERY_METHOD: ${{ inputs.snapshot_discovery_method }}
+          CREATE_RESPONSE_SNAPSHOT_ID: ${{ inputs.create_response_snapshot_id }}
+          PRE_REQUEST_SET_DIGEST: ${{ inputs.pre_request_set_digest }}
+          POST_REQUEST_SET_DIGEST: ${{ inputs.post_request_set_digest }}
+          STORED_SIZE_BYTES: ${{ inputs.stored_size_bytes }}
+          KEY_ID: ${{ inputs.key_id }}
+          APPLIED_COUNT: ${{ inputs.applied_count }}
+          # Existing PUBLIC verification config (non-secret) — the gate's locator base + host allowlist + trust bundle.
+          GBACKUP_RECEIPT_BASE_URL: ${{ vars.GBACKUP_RECEIPT_BASE_URL }}
+          GBACKUP_RECEIPT_HOSTS: ${{ vars.GBACKUP_RECEIPT_HOSTS }}
+          GBACKUP_RECEIPT_TRUST_BUNDLE: ${{ vars.GBACKUP_RECEIPT_TRUST_BUNDLE }}
+          # DEDICATED least-privilege receipt-publish credential — NEVER the app AWS_* / VER-002 storage credential.
+          GBACKUP_RECEIPT_S3_ACCESS_KEY_ID: ${{ secrets.GBACKUP_RECEIPT_S3_ACCESS_KEY_ID }}
+          GBACKUP_RECEIPT_S3_SECRET_ACCESS_KEY: ${{ secrets.GBACKUP_RECEIPT_S3_SECRET_ACCESS_KEY }}
+          GBACKUP_RECEIPT_S3_ENDPOINT: ${{ secrets.GBACKUP_RECEIPT_S3_ENDPOINT }}
+          GBACKUP_RECEIPT_S3_REGION: ${{ secrets.GBACKUP_RECEIPT_S3_REGION }}
+          GBACKUP_RECEIPT_S3_BUCKET: ${{ secrets.GBACKUP_RECEIPT_S3_BUCKET }}
+          PUBLISH_EVIDENCE_FILE: ${{ github.workspace }}/publish-out/evidence.json
+        run: |
+          mkdir -p publish-out
+          npx tsx scripts/ci/publish-receipt.ts
+
+      - name: Assert no credential material in the evidence
+        if: inputs.receipt_mode == 'sign-and-publish'
+        run: |
+          if grep -rliE "SECRET|ACCESS_KEY|PRIVATE KEY|AWS_SECRET" publish-out 2>/dev/null | grep -qz .; then
+            echo "::error::credential material found in publication evidence"; exit 1
+          fi
+          echo "evidence is free of credential material"
+
+      - name: Upload sanitized publication evidence (public material only)
+        if: inputs.receipt_mode == 'sign-and-publish'
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: staging-publish-evidence
+          path: publish-out/evidence.json
           if-no-files-found: error
           retention-days: 7

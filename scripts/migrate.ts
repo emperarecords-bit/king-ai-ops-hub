@@ -17,6 +17,7 @@ import {
   DEFAULT_RECEIPT_TRANSPORT_TIMEOUT_MS,
   createHttpsReceiptFetcher,
 } from './backup/receipt-transport';
+import { DEFAULT_MAX_SNAPSHOT_AGE_MS } from './backup/receipt-v2-verify';
 import { ensureAppSchema } from './bootstrap-prerequisite';
 import { verifyBootstrap } from './bootstrap-verify';
 
@@ -84,7 +85,7 @@ function buildGateConfigFromEnv(): GateConfig {
     // identity lives in the signed receipt, verified by the B1 verifier.
     expectedImageRef: env.FLY_IMAGE_REF,
     minRetentionDays: intEnv(env.GBACKUP_MIN_RETENTION_DAYS, 7),
-    maxSnapshotAgeMs: intEnv(env.GBACKUP_MAX_SNAPSHOT_AGE_MS, 30 * 60 * 1000),
+    maxSnapshotAgeMs: intEnv(env.GBACKUP_MAX_SNAPSHOT_AGE_MS, DEFAULT_MAX_SNAPSHOT_AGE_MS),
     transportMaxBytes: intEnv(env.GBACKUP_TRANSPORT_MAX_BYTES, DEFAULT_RECEIPT_TRANSPORT_MAX_BYTES),
     transportTimeoutMs: intEnv(env.GBACKUP_TRANSPORT_TIMEOUT_MS, DEFAULT_RECEIPT_TRANSPORT_TIMEOUT_MS),
   };
