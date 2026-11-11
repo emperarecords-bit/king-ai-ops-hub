@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './load-env';
 import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { DEFAULT_STAFF, STAFF_RENAMES } from '../src/domain/projects/default-staff';

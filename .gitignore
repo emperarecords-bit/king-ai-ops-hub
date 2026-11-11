@@ -25,3 +25,8 @@ npm-debug.log*
 
 pgdata/
 .rtr-ids.json
+
+# Local Claude plugin/session data (launch.json is intentionally tracked)
+.claude/
+!.claude/launch.json
+_pre_snaps.json

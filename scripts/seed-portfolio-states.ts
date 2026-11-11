@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './load-env';
 import { createHash, randomUUID } from 'node:crypto';
 import { and, eq, inArray, like } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';

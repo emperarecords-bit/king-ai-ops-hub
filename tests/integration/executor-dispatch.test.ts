@@ -72,9 +72,9 @@ describe.skipIf(!available)('trusted executor dispatch', { timeout: 15_000 }, ()
   it('performs a dry-run only, persists intent/result, and rejects duplicate idempotency', async () => {
     const a = await approved();
     const input = request(a.approvalId, a.hash);
-    const first = await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, input, { enabledExecutorIds: ['noop_dry_run'] }));
+    const first = await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, input, { enabledExecutorIds: ['file_write'] }));
     expect(first).toMatchObject({ outcome: 'not_executed', reconciliation: 'not_required' });
-    const again = await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, input, { enabledExecutorIds: ['noop_dry_run'] }));
+    const again = await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, input, { enabledExecutorIds: ['file_write'] }));
     expect(again).toMatchObject({ outcome: 'blocked', message: 'Duplicate idempotency key.' });
     const events = await getSetupDb().select({ action: auditLogs.action, detail: auditLogs.detail }).from(auditLogs).where(eq(auditLogs.entityId, a.approvalId));
     expect(events.map((e: { action: string }) => e.action)).toEqual(expect.arrayContaining(['execution.intent', 'execution.result', 'execution.blocked']));
@@ -84,13 +84,13 @@ describe.skipIf(!available)('trusted executor dispatch', { timeout: 15_000 }, ()
   it('rejects unauthorized, live, stale confirmation, prohibited action, and tenant mismatch', async () => {
     const a = await approved();
     const member = { ...ctx, projectRole: 'member' as const };
-    expect((await withTenant(member, (tx) => executeApprovedAction(tx, member, request(a.approvalId, a.hash), { enabledExecutorIds: ['noop_dry_run'] }))).outcome).toBe('blocked');
-    expect((await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, request(a.approvalId, a.hash, { mode: 'live' }), { enabledExecutorIds: ['noop_dry_run'] }))).outcome).toBe('blocked');
-    expect((await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, request(a.approvalId, a.hash, { confirmation: { confirmedBy: ctx.userId, confirmedAt: new Date(Date.now() - 60_000), expiresAt: new Date(Date.now() - 1), payloadSha256: a.hash } }), { enabledExecutorIds: ['noop_dry_run'] }))).outcome).toBe('blocked');
+    expect((await withTenant(member, (tx) => executeApprovedAction(tx, member, request(a.approvalId, a.hash), { enabledExecutorIds: ['file_write'] }))).outcome).toBe('blocked');
+    expect((await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, request(a.approvalId, a.hash, { mode: 'live' }), { enabledExecutorIds: ['file_write'] }))).outcome).toBe('blocked');
+    expect((await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, request(a.approvalId, a.hash, { confirmation: { confirmedBy: ctx.userId, confirmedAt: new Date(Date.now() - 60_000), expiresAt: new Date(Date.now() - 1), payloadSha256: a.hash } }), { enabledExecutorIds: ['file_write'] }))).outcome).toBe('blocked');
     const prohibited = await approved('git_pr');
-    expect((await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, request(prohibited.approvalId, prohibited.hash), { enabledExecutorIds: ['noop_dry_run'] }))).outcome).toBe('blocked');
+    expect((await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, request(prohibited.approvalId, prohibited.hash), { enabledExecutorIds: ['file_write'] }))).outcome).toBe('blocked');
     const foreign = { ...ctx, projectId: '00000000-0000-4000-8000-000000000099' };
-    await expect(withTenant(foreign, (tx) => executeApprovedAction(tx, foreign, request(a.approvalId, a.hash), { enabledExecutorIds: ['noop_dry_run'] }))).rejects.toThrow();
+    await expect(withTenant(foreign, (tx) => executeApprovedAction(tx, foreign, request(a.approvalId, a.hash), { enabledExecutorIds: ['file_write'] }))).rejects.toThrow();
   });
 
   it('executes an approved git_pr live end-to-end, exactly once (Action Executors v1)', async () => {
@@ -214,12 +214,12 @@ describe.skipIf(!available)('trusted executor dispatch', { timeout: 15_000 }, ()
   });
 
   it('audits malformed input without dispatching', async () => {
-    const result = await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, { approvalId: 'forged', mode: 'live' }, { enabledExecutorIds: ['noop_dry_run'] }));
+    const result = await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, { approvalId: 'forged', mode: 'live' }, { enabledExecutorIds: ['file_write'] }));
     expect(result).toMatchObject({ outcome: 'blocked', message: 'Malformed execution request.' });
     const a = await approved();
-    const unknownExecutor = await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, request(a.approvalId, a.hash, { executorId: 'attacker_executor' }), { enabledExecutorIds: ['noop_dry_run'] }));
+    const unknownExecutor = await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, request(a.approvalId, a.hash, { executorId: 'attacker_executor' }), { enabledExecutorIds: ['file_write'] }));
     expect(unknownExecutor).toMatchObject({ outcome: 'blocked', message: 'Malformed execution request.' });
-    const missingConfirmation = await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, request(a.approvalId, a.hash, { confirmation: null }), { enabledExecutorIds: ['noop_dry_run'] }));
+    const missingConfirmation = await withTenant(ctx, (tx) => executeApprovedAction(tx, ctx, request(a.approvalId, a.hash, { confirmation: null }), { enabledExecutorIds: ['file_write'] }));
     expect(missingConfirmation).toMatchObject({ outcome: 'blocked', message: 'A fresh payload-bound confirmation is required.' });
   });
 });
