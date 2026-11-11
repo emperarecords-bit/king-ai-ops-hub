@@ -1536,3 +1536,266 @@ $fn$;
 alter function app.touch_verification_runner_key(uuid) owner to verification_key_reader;
 revoke all on function app.touch_verification_runner_key(uuid) from public;
 grant execute on function app.touch_verification_runner_key(uuid) to app_server;
+
+-- ─────────────────── VER-002 PR-7: recoverable retention / purge lifecycle ───────────────────
+-- docs/verification/external-runner-design.md §3.2. PR-1 made verification_evidence append-only and
+-- flipped its parents to RESTRICT, which closed the deletion path completely: a project holding
+-- evidence cannot currently be deleted at all. This is the sanctioned way back — governed, durable
+-- and crash-recoverable — and it is deliberately NOT a cascade.
+--
+-- ROLE SEPARATION, and its honest limit. Like `purge_agent` (above), this role HOLDS the DELETE grant
+-- directly; the functions below are the sanctioned path, not a privilege boundary the role itself
+-- cannot step around. The protection that matters is that `app_server` — the role every request
+-- handler connects as — has no DELETE and no EXECUTE here, and that this role is reachable only on a
+-- separate connection used by the retention worker alone. A stricter two-role split (an owner that
+-- holds DELETE and a caller that holds only EXECUTE) is possible but would diverge from the reviewed
+-- purge_agent precedent; the tradeoff is recorded here rather than left implicit.
+do $$
+begin
+  if not exists (select from pg_roles where rolname = 'verification_retention_agent') then
+    create role verification_retention_agent login password 'verification_retention_dev_only' nosuperuser nobypassrls;
+  end if;
+  alter role verification_retention_agent login nosuperuser nobypassrls nocreatedb nocreaterole;
+end
+$$;
+-- NOBYPASSRLS: every statement this role runs is still tenant-filtered by the same policies.
+grant usage on schema public to verification_retention_agent;
+-- CREATE on app so the role can own the SECURITY DEFINER functions below.
+grant usage, create on schema app to verification_retention_agent;
+grant execute on function app.current_user_id(), app.current_org_id(), app.current_project_id() to verification_retention_agent;
+
+do $$
+begin
+  if to_regclass('public.verification_purge_jobs') is not null then
+    -- app_server may OBSERVE the lifecycle and nothing more: it can neither open a purge nor advance one.
+    grant select on verification_purge_jobs to app_server;
+    revoke insert, update, delete on verification_purge_jobs from app_server;
+    -- The retention role is the only writer. NOTE: unlike every other verification table these two are
+    -- NOT append-only, because the worker must mark objects deleted and record retried failures. That is
+    -- why there is no forbid_mutation trigger here — an append-only purge ledger could never be resumed.
+    grant select, insert, update on verification_purge_jobs to verification_retention_agent;
+    alter table verification_purge_jobs enable row level security;
+    alter table verification_purge_jobs force row level security;
+    drop policy if exists verification_purge_jobs_tenant on verification_purge_jobs;
+    execute
+      'create policy verification_purge_jobs_tenant on verification_purge_jobs
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+  end if;
+
+  if to_regclass('public.verification_purge_job_objects') is not null then
+    grant select on verification_purge_job_objects to app_server;
+    revoke insert, update, delete on verification_purge_job_objects from app_server;
+    grant select, insert, update on verification_purge_job_objects to verification_retention_agent;
+    alter table verification_purge_job_objects enable row level security;
+    alter table verification_purge_job_objects force row level security;
+    drop policy if exists verification_purge_job_objects_tenant on verification_purge_job_objects;
+    execute
+      'create policy verification_purge_job_objects_tenant on verification_purge_job_objects
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+  end if;
+
+  if to_regclass('public.verification_evidence') is not null then
+    -- The ONLY DELETE grant on evidence in the entire schema. Reasserted belt-and-braces against
+    -- app_server because a future GRANT ALL must not quietly reopen the app-side deletion path.
+    revoke delete on verification_evidence from app_server;
+    grant select, delete on verification_evidence to verification_retention_agent;
+  end if;
+  if to_regclass('public.verification_requests') is not null then
+    -- Read-only: the retention function reads the contract to scope a purge; requests are removed only
+    -- by the child-up offboarding order (§3.2), never as a side effect of an evidence purge.
+    grant select on verification_requests to verification_retention_agent;
+  end if;
+end
+$$;
+grant usage on all sequences in schema public to verification_retention_agent;
+
+-- THE APPEND-ONLY EXCEPTION, and why it has to exist.
+-- PR-1 put a `before update or delete` trigger on verification_evidence running app.forbid_mutation(),
+-- which by design fires for EVERY role — table owner and superuser included, because triggers are not
+-- bypassed by RLS or by SECURITY DEFINER. A purge function therefore cannot delete a single row no
+-- matter what it is granted: the trigger refuses first. (document_versions does not hit this because its
+-- guard covers UPDATE only, which is how purge_agent deletes there.)
+--
+-- So the generic trigger is replaced, for THIS TABLE ONLY, with a guard that keeps PR-1's property
+-- intact and carves out exactly one hole:
+--   * UPDATE stays blocked for everyone, unconditionally — evidence is still never rewritten.
+--   * DELETE is blocked for everyone EXCEPT verification_retention_agent. Inside
+--     app.purge_verification_evidence() (SECURITY DEFINER, owned by that role) current_user IS that
+--     role, so the sanctioned path passes and app_server — which also has no DELETE grant — cannot.
+-- This is narrower than it looks: it is a single named role, and the function is the only thing that
+-- records the object keys before the references go, so a bare DELETE by that role still loses nothing
+-- that the job rows would have captured. It is deliberately a role check rather than a GUC: §3.2 is
+-- explicit that a purge must never be authorized by a GUC alone.
+create or replace function app.verification_evidence_guard() returns trigger
+language plpgsql as $fn$
+begin
+  if tg_op = 'UPDATE' then
+    raise exception 'verification_evidence is append-only: UPDATE blocked (row id %)', old.id
+      using errcode = 'raise_exception';
+  end if;
+  if current_user <> 'verification_retention_agent' then
+    raise exception 'verification_evidence: DELETE is reserved for the retention purge path (role % blocked, row id %)',
+      current_user, old.id using errcode = 'raise_exception';
+  end if;
+  return old;
+end
+$fn$;
+
+do $$
+begin
+  if to_regclass('public.verification_evidence') is not null then
+    -- Supersede PR-1's generic append-only trigger on this table with the guard above. The generic
+    -- forbid_mutation() trigger remains in force on every other append-only table.
+    execute 'drop trigger if exists verification_evidence_append_only on verification_evidence';
+    execute 'drop trigger if exists verification_evidence_retention_guard on verification_evidence';
+    execute
+      'create trigger verification_evidence_retention_guard
+         before update or delete on verification_evidence
+         for each row execute function app.verification_evidence_guard()';
+  end if;
+end
+$$;
+
+-- OPEN: record the job and its exact object identifiers in the SAME transaction that removes the
+-- evidence references. This ordering is the entire guarantee — the keys are committed BEFORE the only
+-- pointer to them disappears, so a crash immediately after commit loses nothing and the worker resumes
+-- from the recorded list. Tenant comes from the transaction GUCs, never from a parameter, so a caller
+-- can only ever purge inside its own project.
+--
+-- The design also asks for an audit_logs row per action. That is written by the TypeScript layer via
+-- domain/audit/writeAudit(), NOT here: audit_logs carries a prev_hash/row_hash chain computed in app
+-- code, and reimplementing that chain in plpgsql to satisfy the wording would risk forking the chain.
+-- The purge job and its per-object rows are themselves the durable record (tenant, reason, requester,
+-- timestamp, per-object state and every failed attempt).
+create or replace function app.purge_verification_evidence(
+  p_evidence_ids uuid[], p_reason text)
+returns uuid
+language plpgsql security definer set search_path = pg_catalog as $fn$
+declare
+  v_job_id uuid;
+  v_count bigint;
+begin
+  if p_reason is null or p_reason not in ('retention_expiry', 'erasure_request') then
+    raise exception 'purge reason must be retention_expiry or erasure_request (got %)', p_reason
+      using errcode = 'raise_exception';
+  end if;
+  if p_evidence_ids is null or array_length(p_evidence_ids, 1) is null then
+    raise exception 'purge requires at least one evidence id' using errcode = 'raise_exception';
+  end if;
+
+  insert into public.verification_purge_jobs
+    (org_id, project_id, reason, requested_by, status, object_count)
+  values
+    (app.current_org_id(), app.current_project_id(), p_reason, app.current_user_id(), 'open', 0)
+  returning id into v_job_id;
+
+  -- 1. Durably record every object the job must delete, derived from the evidence rows themselves.
+  --    DISTINCT because one key may be referenced by more than one evidence row in the set.
+  --    version_id is NULL today and that is deliberate, not an oversight: SubmittedArtifact
+  --    (src/types/verification.ts) records only path/sha256/sizeBytes/storageKey, and PR-4 issues
+  --    conditional-create keys unique per tenant, so there is no pinned version to capture yet. The
+  --    column exists for when versioned objects appear; §3.2's "object keys AND versionIds" is met as
+  --    far as the evidence record can currently express it.
+  --    The jsonb field is "storageKey" (camelCase, as the app stores it) — NOT storage_key.
+  insert into public.verification_purge_job_objects
+    (org_id, project_id, job_id, object_key, version_id, state, attempts)
+  select distinct
+    e.org_id, e.project_id, v_job_id, a."storageKey", null::text, 'pending', 0
+  from public.verification_evidence e
+    -- jsonb_typeof guard: jsonb_to_recordset RAISES on a non-array, so a single malformed artifacts
+    -- payload would otherwise abort the entire purge. A bad row contributes no keys instead.
+    cross join lateral jsonb_to_recordset(case when jsonb_typeof(e.artifacts) = 'array' then e.artifacts else '[]'::jsonb end)
+      as a("storageKey" text)
+  where e.id = any(p_evidence_ids)
+    and e.org_id = app.current_org_id()
+    and e.project_id = app.current_project_id()
+    and a."storageKey" is not null
+    and a."storageKey" <> ''
+  on conflict (job_id, object_key) do nothing;
+
+  select count(*) into v_count
+  from public.verification_purge_job_objects
+  where job_id = v_job_id;
+
+  update public.verification_purge_jobs
+     set object_count = v_count,
+         -- A purge that references no objects has nothing to confirm gone, so it is complete at open.
+         status = case when v_count = 0 then 'complete' else 'open' end,
+         completed_at = case when v_count = 0 then now() else null end
+   where id = v_job_id;
+
+  -- 2. Only now remove the references. Same transaction, so the keys above are never orphaned.
+  delete from public.verification_evidence
+   where id = any(p_evidence_ids)
+     and org_id = app.current_org_id()
+     and project_id = app.current_project_id();
+
+  return v_job_id;
+end
+$fn$;
+alter function app.purge_verification_evidence(uuid[], text) owner to verification_retention_agent;
+revoke all on function app.purge_verification_evidence(uuid[], text) from public;
+-- Deliberately NOT granted to app_server: application code can never start a purge.
+grant execute on function app.purge_verification_evidence(uuid[], text) to verification_retention_agent;
+
+-- CONFIRM: mark one object gone. The job flips to 'complete' only when EVERY listed object is
+-- confirmed deleted — never early, and never by a timer.
+create or replace function app.record_verification_purge_object_deleted(p_object_id uuid)
+returns boolean
+language plpgsql security definer set search_path = pg_catalog as $fn$
+declare
+  v_job_id uuid;
+  v_outstanding bigint;
+begin
+  update public.verification_purge_job_objects
+     set state = 'deleted',
+         deleted_at = coalesce(deleted_at, now()),
+         attempts = attempts + 1,
+         last_error = null
+   where id = p_object_id
+     and org_id = app.current_org_id()
+     and project_id = app.current_project_id()
+     and state <> 'deleted'
+  returning job_id into v_job_id;
+
+  if v_job_id is null then
+    return false;  -- unknown, foreign, or already-confirmed object: idempotent no-op
+  end if;
+
+  select count(*) into v_outstanding
+  from public.verification_purge_job_objects
+  where job_id = v_job_id and state <> 'deleted';
+
+  if v_outstanding = 0 then
+    update public.verification_purge_jobs
+       set status = 'complete', completed_at = now()
+     where id = v_job_id and status <> 'complete';
+  end if;
+  return true;
+end
+$fn$;
+alter function app.record_verification_purge_object_deleted(uuid) owner to verification_retention_agent;
+revoke all on function app.record_verification_purge_object_deleted(uuid) from public;
+grant execute on function app.record_verification_purge_object_deleted(uuid) to verification_retention_agent;
+
+-- RETRY: record a transient failure. There is no terminal 'failed' state by design — a failure raises
+-- the attempt count and leaves the object pending, so the worker retries and the job stays open. An
+-- object is never silently skipped.
+create or replace function app.record_verification_purge_object_failure(p_object_id uuid, p_error text)
+returns void
+language plpgsql security definer set search_path = pg_catalog as $fn$
+begin
+  update public.verification_purge_job_objects
+     set attempts = attempts + 1,
+         last_error = left(coalesce(p_error, 'unknown'), 2000)
+   where id = p_object_id
+     and org_id = app.current_org_id()
+     and project_id = app.current_project_id()
+     and state <> 'deleted';
+end
+$fn$;
+alter function app.record_verification_purge_object_failure(uuid, text) owner to verification_retention_agent;
+revoke all on function app.record_verification_purge_object_failure(uuid, text) from public;
+grant execute on function app.record_verification_purge_object_failure(uuid, text) to verification_retention_agent;
