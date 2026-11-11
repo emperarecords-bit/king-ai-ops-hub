@@ -23,6 +23,10 @@ import type {
   UploadGrantEventType,
   UploadGrantStore,
   VerificationStore,
+  PurgeJob,
+  PurgeJobObject,
+  PurgeJobStore,
+  PurgeReason,
 } from './ports';
 import type { TaskVerificationStatus } from './types';
 
@@ -407,4 +411,89 @@ export function createDrizzleUploadGrantStore(tx: DbTx): UploadGrantStore {
     },
   };
   return store;
+}
+
+// -- VER-002 PR-7: retention / purge lifecycle -------------------------------
+
+/** Normalize a drizzle `execute` result (postgres-js returns an array or a `{ rows }` wrapper).
+ *  Defined locally rather than imported across domains, as src/domain/jobs/jobs.ts does. */
+function purgeRows<T>(result: unknown): T[] {
+  const wrapped = (result as { rows?: T[] }).rows;
+  if (Array.isArray(wrapped)) return wrapped;
+  if (Array.isArray(result)) return result as T[];
+  return [];
+}
+
+/**
+ * The purge lifecycle over Postgres. Every mutation goes through a SECURITY DEFINER function owned by
+ * `verification_retention_agent`, never a direct write — the functions are what guarantee the ordering
+ * (object list committed before the references go) and what keep the completion decision in the database.
+ *
+ * `tx` MUST be a transaction on the retention-role connection (see getRetentionDb) with the tenant GUCs
+ * set. On an app_server connection every call here fails: app_server has neither the EXECUTE grant nor
+ * DELETE on verification_evidence, which is the whole point.
+ */
+export function createDrizzlePurgeJobStore(tx: DbTx): PurgeJobStore {
+  return {
+    async openPurge(evidenceIds: readonly string[], reason: PurgeReason): Promise<string> {
+      const res = await tx.execute(
+        sql`select app.purge_verification_evidence(${[...evidenceIds]}::uuid[], ${reason}) as job_id`,
+      );
+      const row = purgeRows<{ job_id: string | null }>(res)[0];
+      if (!row?.job_id) throw new Error('purge_verification_evidence returned no job id');
+      return String(row.job_id);
+    },
+
+    async getJob(jobId: string): Promise<PurgeJob | null> {
+      const res = await tx.execute(
+        sql`select id, reason, status, object_count from verification_purge_jobs where id = ${jobId}::uuid`,
+      );
+      const row = purgeRows<{ id: string; reason: string; status: string; object_count: number | string }>(res)[0];
+      if (!row) return null;
+      return {
+        id: String(row.id),
+        reason: row.reason as PurgeReason,
+        status: row.status === 'complete' ? 'complete' : 'open',
+        objectCount: Number(row.object_count),
+      };
+    },
+
+    // Oldest first, so a job that has been waiting longest is drained first and cannot be starved by a
+    // steady arrival of new ones.
+    async listOpenJobIds(limit: number): Promise<string[]> {
+      const res = await tx.execute(
+        sql`select id from verification_purge_jobs where status = 'open' order by created_at asc limit ${limit}`,
+      );
+      return purgeRows<{ id: string }>(res).map((r) => String(r.id));
+    },
+
+    async listPendingObjects(jobId: string): Promise<PurgeJobObject[]> {
+      const res = await tx.execute(
+        sql`select id, object_key, version_id, attempts
+              from verification_purge_job_objects
+             where job_id = ${jobId}::uuid and state <> 'deleted'
+             order by object_key asc`,
+      );
+      return purgeRows<{ id: string; object_key: string; version_id: string | null; attempts: number | string }>(res).map((r) => ({
+        id: String(r.id),
+        objectKey: String(r.object_key),
+        versionId: r.version_id === null ? null : String(r.version_id),
+        attempts: Number(r.attempts),
+      }));
+    },
+
+    async recordObjectDeleted(objectId: string): Promise<boolean> {
+      const res = await tx.execute(
+        sql`select app.record_verification_purge_object_deleted(${objectId}::uuid) as applied`,
+      );
+      const row = purgeRows<{ applied: boolean | string | null }>(res)[0];
+      return row?.applied === true || row?.applied === 't';
+    },
+
+    async recordObjectFailure(objectId: string, error: string): Promise<void> {
+      await tx.execute(
+        sql`select app.record_verification_purge_object_failure(${objectId}::uuid, ${error})`,
+      );
+    },
+  };
 }

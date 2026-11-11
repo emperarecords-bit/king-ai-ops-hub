@@ -20,6 +20,11 @@ import type {
   UploadGrantEventType,
   UploadGrantStore,
   VerificationStore,
+  PurgeJob,
+  PurgeJobObject,
+  PurgeJobStore,
+  PurgeReason,
+  RetentionObjectDeleter,
 } from './ports';
 
 const scope = (orgId: string, projectId: string, ...parts: string[]) => [orgId, projectId, ...parts].join('|');
@@ -357,5 +362,113 @@ export class InMemoryExclusiveArtifactWriter implements ExclusiveArtifactWriter 
         void published;
       },
     };
+  }
+}
+
+/**
+ * VER-002 PR-7 — in-memory purge lifecycle, modelling the SQL semantics closely enough that a unit test
+ * against it proves something about production. Specifically it reproduces:
+ *   - de-duplication of an object key shared by several evidence rows,
+ *   - a failure incrementing `attempts` and leaving the object PENDING (never a terminal state),
+ *   - the job flipping to `complete` ONLY when the outstanding count reaches zero,
+ *   - `recordObjectDeleted` returning false for an unknown or already-confirmed object.
+ * A faithful double, not a convenient one — a double that completes the job eagerly would make the test
+ * assert the opposite of what the database does.
+ */
+export class InMemoryPurgeJobStore implements PurgeJobStore {
+  private readonly jobs = new Map<string, { reason: PurgeReason; status: 'open' | 'complete'; objectCount: number; createdAt: number }>();
+  private readonly objects = new Map<string, { jobId: string; objectKey: string; versionId: string | null; state: 'pending' | 'deleted'; attempts: number; lastError: string | null }>();
+  private seq = 0;
+
+  /** Test seed: the storage keys each evidence id contributes (mirrors evidence.artifacts[].storageKey). */
+  constructor(private readonly evidenceObjects = new Map<string, readonly string[]>()) {}
+
+  seedEvidence(evidenceId: string, objectKeys: readonly string[]): void {
+    this.evidenceObjects.set(evidenceId, objectKeys);
+  }
+
+  async openPurge(evidenceIds: readonly string[], reason: PurgeReason): Promise<string> {
+    if (reason !== 'retention_expiry' && reason !== 'erasure_request') {
+      throw new Error(`purge reason must be retention_expiry or erasure_request (got ${reason})`);
+    }
+    if (evidenceIds.length === 0) throw new Error('purge requires at least one evidence id');
+    const jobId = randomUUID();
+    // DISTINCT across the whole set, exactly like the SQL's `select distinct ... on conflict do nothing`.
+    const keys = [...new Set(evidenceIds.flatMap((id) => this.evidenceObjects.get(id) ?? []))].sort();
+    for (const objectKey of keys) {
+      this.objects.set(randomUUID(), { jobId, objectKey, versionId: null, state: 'pending', attempts: 0, lastError: null });
+    }
+    // A purge referencing no objects has nothing to confirm gone, so it is complete at open.
+    this.jobs.set(jobId, { reason, status: keys.length === 0 ? 'complete' : 'open', objectCount: keys.length, createdAt: ++this.seq });
+    for (const id of evidenceIds) this.evidenceObjects.delete(id);
+    return jobId;
+  }
+
+  async getJob(jobId: string): Promise<PurgeJob | null> {
+    const j = this.jobs.get(jobId);
+    return j ? { id: jobId, reason: j.reason, status: j.status, objectCount: j.objectCount } : null;
+  }
+
+  async listOpenJobIds(limit: number): Promise<string[]> {
+    return [...this.jobs.entries()]
+      .filter(([, j]) => j.status === 'open')
+      .sort((a, b) => a[1].createdAt - b[1].createdAt)
+      .slice(0, limit)
+      .map(([id]) => id);
+  }
+
+  async listPendingObjects(jobId: string): Promise<PurgeJobObject[]> {
+    return [...this.objects.entries()]
+      .filter(([, o]) => o.jobId === jobId && o.state !== 'deleted')
+      .sort((a, b) => a[1].objectKey.localeCompare(b[1].objectKey))
+      .map(([id, o]) => ({ id, objectKey: o.objectKey, versionId: o.versionId, attempts: o.attempts }));
+  }
+
+  async recordObjectDeleted(objectId: string): Promise<boolean> {
+    const o = this.objects.get(objectId);
+    if (!o || o.state === 'deleted') return false; // unknown or already confirmed → idempotent no-op
+    o.state = 'deleted';
+    o.attempts += 1;
+    o.lastError = null;
+    const outstanding = [...this.objects.values()].filter((x) => x.jobId === o.jobId && x.state !== 'deleted').length;
+    if (outstanding === 0) {
+      const j = this.jobs.get(o.jobId);
+      if (j) j.status = 'complete';
+    }
+    return true;
+  }
+
+  async recordObjectFailure(objectId: string, error: string): Promise<void> {
+    const o = this.objects.get(objectId);
+    if (!o || o.state === 'deleted') return;
+    o.attempts += 1;
+    o.lastError = error.slice(0, 2000);
+  }
+
+  /** Test introspection. */
+  objectState(jobId: string): Array<{ objectKey: string; state: string; attempts: number; lastError: string | null }> {
+    return [...this.objects.values()]
+      .filter((o) => o.jobId === jobId)
+      .sort((a, b) => a.objectKey.localeCompare(b.objectKey))
+      .map((o) => ({ objectKey: o.objectKey, state: o.state, attempts: o.attempts, lastError: o.lastError }));
+  }
+}
+
+/** An object deleter that records calls, and can be told to fail a specific key a number of times. */
+export class FakeRetentionObjectDeleter implements RetentionObjectDeleter {
+  readonly calls: Array<{ objectKey: string; versionId: string | null }> = [];
+  private readonly failures = new Map<string, number>();
+
+  failTimes(objectKey: string, times: number): void {
+    this.failures.set(objectKey, times);
+  }
+
+  async delete(objectKey: string, versionId: string | null): Promise<void> {
+    this.calls.push({ objectKey, versionId });
+    const left = this.failures.get(objectKey) ?? 0;
+    if (left > 0) {
+      this.failures.set(objectKey, left - 1);
+      throw new Error(`transient provider failure for ${objectKey}`);
+    }
   }
 }

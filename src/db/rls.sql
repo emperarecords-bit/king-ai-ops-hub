@@ -1609,6 +1609,8 @@ begin
   end if;
 end
 $$;
+-- Append-only audit sink: SELECT for the per-org hash-chain head, INSERT to append. Mirrors purge_agent.
+grant select, insert on audit_logs to verification_retention_agent;
 grant usage on all sequences in schema public to verification_retention_agent;
 
 -- THE APPEND-ONLY EXCEPTION, and why it has to exist.

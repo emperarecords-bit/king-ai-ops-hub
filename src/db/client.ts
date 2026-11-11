@@ -75,6 +75,38 @@ export function getPurgeDb(): Db {
   return cachedPurgeDb;
 }
 
+declare global {
+  var __kingRetentionPool: ReturnType<typeof postgres> | undefined;
+}
+let cachedRetentionDb: Db | null = null;
+
+/** Connection string for the least-privilege `verification_retention_agent` role — the ONLY role that may
+ *  delete verification_evidence, and only through the PR-7 purge lifecycle. Uses RETENTION_DATABASE_URL if
+ *  set, otherwise derives from DATABASE_URL by swapping the role/credentials (same host/database). */
+function retentionConnectionString(): string {
+  if (process.env.RETENTION_DATABASE_URL) return process.env.RETENTION_DATABASE_URL;
+  const base = process.env.DATABASE_URL;
+  if (!base) throw new Error('DATABASE_URL is not set.');
+  const url = new URL(base);
+  url.username = 'verification_retention_agent';
+  url.password = process.env.VERIFICATION_RETENTION_AGENT_PASSWORD ?? 'verification_retention_dev_only';
+  return url.toString();
+}
+
+/** A handle bound to `verification_retention_agent`, for the evidence-purge path ONLY. Kept separate from
+ *  getDb() (app_server) so ordinary application code can never delete evidence: app_server holds neither
+ *  DELETE on verification_evidence nor EXECUTE on app.purge_verification_evidence(). Still RLS-scoped —
+ *  the role is NOBYPASSRLS, so the tenant GUCs must be set or queries return a FALSE EMPTY. */
+export function getRetentionDb(): Db {
+  if (!cachedRetentionDb) {
+    if (!globalThis.__kingRetentionPool) {
+      globalThis.__kingRetentionPool = postgres(retentionConnectionString(), { max: 2, idle_timeout: 30, connect_timeout: 10, prepare: false });
+    }
+    cachedRetentionDb = drizzle(globalThis.__kingRetentionPool, { schema });
+  }
+  return cachedRetentionDb;
+}
+
 /**
  * A MIGRATION-role handle, for tests and deploy scripts ONLY (O-22). The
  * running app must never call this — it exists so test FIXTURES and admin peeks

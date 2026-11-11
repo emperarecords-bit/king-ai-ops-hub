@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { type TenantContext } from '@/types/domain';
-import { getDb, getPurgeDb, type DbTx } from './client';
+import { getDb, getPurgeDb, type DbTx, getRetentionDb } from './client';
 import {
   invalidTenantFields,
   isRlsViolation,
@@ -129,6 +129,37 @@ export async function withPurgeTenant<T>(
  * This is strictly narrower than withOrg/withTenant — use it only for the
  * identity-resolution reads in src/db/system.ts.
  */
+/**
+ * VER-002 PR-7 — the retention boundary. Identical in shape to withPurgeTenant but bound to the
+ * verification_retention_agent connection, which holds the ONLY DELETE grant on verification_evidence
+ * and the ONLY EXECUTE on app.purge_verification_evidence().
+ *
+ * The role is NOBYPASSRLS, so the tenant GUCs below are not decoration: without them every read returns
+ * a FALSE EMPTY rather than an error, which is how a silent "nothing to purge" bug would hide. There is
+ * deliberately no cross-tenant variant — draining several projects means calling this once per project.
+ */
+export async function withRetentionTenant<T>(
+  ctx: TenantContext,
+  fn: (tx: DbTx) => Promise<T>,
+): Promise<T> {
+  assertIdentifiers('withTenant', { userId: ctx.userId, orgId: ctx.orgId, projectId: ctx.projectId });
+  const db = getRetentionDb();
+  try {
+    return await db.transaction(async (tx) => {
+      await tx.execute(sql`
+        select
+          set_config('app.user_id', ${ctx.userId}, true),
+          set_config('app.org_id', ${ctx.orgId}, true),
+          set_config('app.project_id', ${ctx.projectId}, true)
+      `);
+      return fn(tx);
+    });
+  } catch (err) {
+    if (isRlsViolation(err)) logRlsRejection('withTenant', ctx, err);
+    throw err;
+  }
+}
+
 export async function withUser<T>(
   args: { userId: string },
   fn: (tx: DbTx) => Promise<T>,

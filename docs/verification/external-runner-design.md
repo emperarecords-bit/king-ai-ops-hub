@@ -283,6 +283,19 @@ Per-artifact hard cap (proposed **25 MB**, checked before signing and enforced b
 `Content-Length`) and a per-submission aggregate (proposed **100 MB**) reserved atomically (§4.6).
 
 ### 4.6 Atomic aggregate-quota accounting, and in-flight grants
+
+> **SUPERSEDED IN PART BY GATE B** (see `external-runner-implementation-plan.md`, "Gate B — quota
+> reclamation is UNRESOLVED"). The reservation and **finalize** halves of this section stand. The two
+> RELEASE paths below — "Confirmed-absent after a drain window" and the orphan release — do **not**: a
+> drain window is built on an assumed floor throughput, and a client that keeps trickling bytes can hold
+> a PUT open past any window computed that way, so it is not proof an upload cannot still land. Gate B
+> therefore defers ALL timed reclamation until a hard total-upload deadline is demonstrably enforced.
+>
+> PR-6 implements `reserve` + `finalize` ONLY. Until then an un-finalized reservation is held
+> indefinitely or released by an explicit operator action, never by a timer. Quota for bytes that DID
+> land is freed only when the object is deleted via retention (§3.2, PR-7).
+>
+> Implementing the drain-window text below as written would build exactly the thing Gate B forbids.
 Issuing grants must not oversubscribe a project's storage/aggregate cap under concurrency. Reserve
 quota **transactionally** in the DB before returning a grant (a single
 `UPDATE … SET used = used + :n WHERE used + :n <= :cap` that fails atomically when it would exceed
