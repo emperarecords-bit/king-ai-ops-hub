@@ -1,8 +1,13 @@
 # Phase 2 governed control-surface — production release packet (PREP / dry-run)
 
-> **SHIPPED as prod v64 2026-10-11; current prod v78 — historical record.**
-> Preserved as written; nothing below is live guidance. For what actually shipped see
-> `docs/operations/phase2-v64-release-evidence.md` and the current production state.
+> **SHIPPED as prod v64 2026-10-11 — historical record.** Production has since moved well past it:
+> the newest committed release record is **v83** (2026-10-19), and **v79 applied migrations `0084` +
+> `0085`**, so the live database is already beyond this packet’s `0083` endpoint. An earlier revision of
+> this header said "current prod v78"; that was stale, taken from a note written 2026-10-13.
+> These version numbers are the **committed release record, not a live reading** — capture the real
+> release and applied count from the live app before any ceremony, per the `[capture]` rule below.
+> Preserved as written; nothing else here is live guidance. For what actually shipped see
+> `docs/operations/phase2-v64-release-evidence.md`, then the v79 / v82 / v83 release records.
 
 **Status at the time of writing: ceremony preparation only. No production change had been or would be made by this packet.**
 Prepared 2026-10-11 against `main` and live prod reads. The actual release runs later, under the
