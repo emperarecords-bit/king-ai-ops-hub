@@ -7,6 +7,7 @@ import postgres, { type Sql } from 'postgres';
 import {
   type GateConfig,
   type GateDbProbe,
+  DEFAULT_MAX_SNAPSHOT_AGE_MS,
   finalizeMigrationConnection,
   loadReleaseSourceInputs,
   resolveGateEnvironment,
@@ -17,7 +18,6 @@ import {
   DEFAULT_RECEIPT_TRANSPORT_TIMEOUT_MS,
   createHttpsReceiptFetcher,
 } from './backup/receipt-transport';
-import { DEFAULT_MAX_SNAPSHOT_AGE_MS } from './backup/receipt-v2-verify';
 import { ensureAppSchema } from './bootstrap-prerequisite';
 import { verifyBootstrap } from './bootstrap-verify';
 
