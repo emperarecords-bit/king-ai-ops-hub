@@ -8,7 +8,9 @@ import { HEAVY_HOOK_TIMEOUT_MS, HEAVY_TEST_TIMEOUT_MS } from '../support/heavy-t
 // #117: git-blob/DB-heavy test file — bounded timeout headroom under full-suite parallel contention (assertions unchanged).
 vi.setConfig({ testTimeout: HEAVY_TEST_TIMEOUT_MS, hookTimeout: HEAVY_HOOK_TIMEOUT_MS });
 import {
+  type ReleasePins,
   type StagingReceiptInputs,
+  STAGING_PINS,
   produceStagingReceipt,
 } from '../../scripts/backup/sign-staging-receipt';
 import { type ReceiptFetchResult, type ReceiptFetcher } from '../../scripts/backup/receipt-transport';
@@ -49,6 +51,18 @@ const NONCE = 'deadbeefdeadbeefdeadbeefdeadbeef';
 const BASE_URL = 'https://king-ai-ops-hub-receipts-staging.s3.us-east-1.amazonaws.com';
 const HOST = 'king-ai-ops-hub-receipts-staging.s3.us-east-1.amazonaws.com';
 const APPLIED_COUNT = 69;
+
+/**
+ * Pins for the FROZEN 0078 source fixture above. Identical to {@link STAGING_PINS} in every identity field → only
+ * the endpoint/count tripwire is rewound to what that historical tree contains, so this offline publish-CLI fixture
+ * does not move when the live pin is bumped for a new migration. The live pin is asserted against the live tree in
+ * tests/unit/gbackup-sign-staging-receipt.test.ts.
+ */
+const HISTORICAL_STAGING_PINS: ReleasePins = {
+  ...STAGING_PINS,
+  expectedMigrationEndpoint: '0078_silent_ultron',
+  expectedCommittedMigrationCount: 79,
+};
 const EXPECTED_KEY = `v2/staging/king-ai-ops-hub-staging/${NONCE}.json`;
 const EXPECTED_URL = `${BASE_URL}/${EXPECTED_KEY}`;
 const PUBLISH_NOW = () => new Date('2026-08-03T12:00:20.000Z'); // within freshness + before expiry
@@ -76,7 +90,7 @@ function goodInputs(): StagingReceiptInputs {
 
 /** Sign a receipt (ephemeral key) and write it to a temp file; return the file path + the public trust entry JSON. */
 function writeSignedReceipt(basename: string): { receiptFile: string; trustBundleJson: string } {
-  const out = produceStagingReceipt(goodInputs(), kp.privateKey, RUNTIME_DIR);
+  const out = produceStagingReceipt(goodInputs(), kp.privateKey, RUNTIME_DIR, HISTORICAL_STAGING_PINS);
   const receiptFile = join(OUT_DIR, basename);
   writeFileSync(receiptFile, JSON.stringify(out.receipt), 'utf8');
   return { receiptFile, trustBundleJson: JSON.stringify([out.publicTrustEntry]) };
@@ -140,7 +154,7 @@ const SIGNED = writeSignedReceipt('staging-receipt.v2.json');
 describe('publish-receipt CLI — happy path (fake store/fetcher)', () => {
   it('publishes the signed receipt to the exact gate locator and verifies it back', async () => {
     const store = new FakeStore();
-    const r = await runPublishCli(baseEnv(SIGNED.receiptFile, SIGNED.trustBundleJson), process.cwd(), () => {}, { store, fetcher: fetcherFor(store.map), now: PUBLISH_NOW });
+    const r = await runPublishCli(baseEnv(SIGNED.receiptFile, SIGNED.trustBundleJson), process.cwd(), () => {}, { store, fetcher: fetcherFor(store.map), now: PUBLISH_NOW }, HISTORICAL_STAGING_PINS);
     expect(r.status).toBe('created');
     expect(r.url).toBe(EXPECTED_URL);
     expect(r.objectKey).toBe(EXPECTED_KEY);
@@ -151,8 +165,8 @@ describe('publish-receipt CLI — happy path (fake store/fetcher)', () => {
   it('re-publishing the identical receipt is a safe idempotent no-op (never overwrites)', async () => {
     const store = new FakeStore();
     const env = baseEnv(SIGNED.receiptFile, SIGNED.trustBundleJson);
-    await runPublishCli(env, process.cwd(), () => {}, { store, fetcher: fetcherFor(store.map), now: PUBLISH_NOW });
-    const r2 = await runPublishCli(env, process.cwd(), () => {}, { store, fetcher: fetcherFor(store.map), now: PUBLISH_NOW });
+    await runPublishCli(env, process.cwd(), () => {}, { store, fetcher: fetcherFor(store.map), now: PUBLISH_NOW }, HISTORICAL_STAGING_PINS);
+    const r2 = await runPublishCli(env, process.cwd(), () => {}, { store, fetcher: fetcherFor(store.map), now: PUBLISH_NOW }, HISTORICAL_STAGING_PINS);
     expect(r2.status).toBe('already_present_identical');
   }, HEAVY);
 
@@ -160,7 +174,7 @@ describe('publish-receipt CLI — happy path (fake store/fetcher)', () => {
     const store = new FakeStore();
     const evidenceFile = join(OUT_DIR, 'evidence.json');
     const env = { ...baseEnv(SIGNED.receiptFile, SIGNED.trustBundleJson), PUBLISH_EVIDENCE_FILE: evidenceFile };
-    await runPublishCli(env, process.cwd(), () => {}, { store, fetcher: fetcherFor(store.map), now: PUBLISH_NOW });
+    await runPublishCli(env, process.cwd(), () => {}, { store, fetcher: fetcherFor(store.map), now: PUBLISH_NOW }, HISTORICAL_STAGING_PINS);
     const raw = readFileSync(evidenceFile, 'utf8');
     const ev = JSON.parse(raw);
     expect(ev.status).toBe('created');
@@ -180,13 +194,13 @@ describe('publish-receipt CLI — fail-closed', () => {
     const env = baseEnv(SIGNED.receiptFile, SIGNED.trustBundleJson);
     delete env.GBACKUP_RECEIPT_BASE_URL;
     const store = new FakeStore();
-    await expect(runPublishCli(env, process.cwd(), () => {}, { store, fetcher: fetcherFor(store.map), now: PUBLISH_NOW })).rejects.toThrow(/GBACKUP_RECEIPT_BASE_URL/);
+    await expect(runPublishCli(env, process.cwd(), () => {}, { store, fetcher: fetcherFor(store.map), now: PUBLISH_NOW }, HISTORICAL_STAGING_PINS)).rejects.toThrow(/GBACKUP_RECEIPT_BASE_URL/);
   }, HEAVY);
 
   it('throws when RECEIPT_FILE is missing (before any heavy work)', async () => {
     const env = baseEnv(SIGNED.receiptFile, SIGNED.trustBundleJson);
     delete env.RECEIPT_FILE;
-    await expect(runPublishCli(env, process.cwd(), () => {}, { store: new FakeStore() })).rejects.toThrow(/RECEIPT_FILE/);
+    await expect(runPublishCli(env, process.cwd(), () => {}, { store: new FakeStore() }, HISTORICAL_STAGING_PINS)).rejects.toThrow(/RECEIPT_FILE/);
   });
 
   it('refuses a tampered receipt file (verification fails before any write)', async () => {
@@ -196,7 +210,7 @@ describe('publish-receipt CLI — fail-closed', () => {
     writeFileSync(tamperedFile, JSON.stringify(receipt), 'utf8');
     const env = baseEnv(tamperedFile, SIGNED.trustBundleJson);
     const store = new FakeStore();
-    const err = await runPublishCli(env, process.cwd(), () => {}, { store, fetcher: fetcherFor(store.map), now: PUBLISH_NOW }).then(() => null).catch((e) => e);
+    const err = await runPublishCli(env, process.cwd(), () => {}, { store, fetcher: fetcherFor(store.map), now: PUBLISH_NOW }, HISTORICAL_STAGING_PINS).then(() => null).catch((e) => e);
     expect(err).toBeInstanceOf(ReceiptPublishError);
     expect((err as ReceiptPublishError).code.startsWith('local_verify_failed')).toBe(true);
     expect(store.map.size).toBe(0);
@@ -204,6 +218,6 @@ describe('publish-receipt CLI — fail-closed', () => {
 
   it('requires the DEDICATED receipt S3 credential when no store is injected (real path, no network)', async () => {
     // No GBACKUP_RECEIPT_S3_* set and no injected store ⇒ fails building the credential BEFORE any network call.
-    await expect(runPublishCli(baseEnv(SIGNED.receiptFile, SIGNED.trustBundleJson), process.cwd(), () => {}, { now: PUBLISH_NOW })).rejects.toThrow(/GBACKUP_RECEIPT_S3_/);
+    await expect(runPublishCli(baseEnv(SIGNED.receiptFile, SIGNED.trustBundleJson), process.cwd(), () => {}, { now: PUBLISH_NOW }, HISTORICAL_STAGING_PINS)).rejects.toThrow(/GBACKUP_RECEIPT_S3_/);
   }, HEAVY);
 });

@@ -88,9 +88,8 @@ on:
         required: true
         type: string
       applied_count:
-        description: 'Migrations already applied to staging (default 54 = endpoint 0053). Pending = the rest.'
-        required: false
-        default: '54'
+        description: 'Migrations already applied to staging (EXPLICIT; never defaulted - read it from the live DB at ceremony time). Pending = the rest.'
+        required: true
         type: string
       receipt_mode:
         description: 'artifact-only (this PR) never publishes to the HTTPS endpoint.'

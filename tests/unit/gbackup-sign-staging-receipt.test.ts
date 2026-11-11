@@ -7,9 +7,11 @@ import { afterAll, describe, expect, it , vi } from 'vitest';
 import { HEAVY_HOOK_TIMEOUT_MS, HEAVY_TEST_TIMEOUT_MS } from '../support/heavy-timeout';
 // #117: git-blob/DB-heavy test file — bounded timeout headroom under full-suite parallel contention (assertions unchanged).
 vi.setConfig({ testTimeout: HEAVY_TEST_TIMEOUT_MS, hookTimeout: HEAVY_HOOK_TIMEOUT_MS });
-import { runCli } from '../../scripts/ci/sign-staging-receipt';
+import { type RunCliOptions, runCli } from '../../scripts/ci/sign-staging-receipt';
 import {
+  type ReleasePins,
   type StagingReceiptInputs,
+  STAGING_PINS,
   StagingReceiptInputError,
   assertNoPrivateMaterial,
   buildSelfVerifyExpectation,
@@ -18,6 +20,7 @@ import {
   produceStagingReceipt,
 } from '../../scripts/backup/sign-staging-receipt';
 import { receiptV2Schema } from '../../scripts/backup/receipt-v2-schema';
+import { readRuntimeMigrationSet } from '../../scripts/backup/runtime-migration-set';
 import { loadReceiptKeyBundle } from '../../scripts/backup/receipt-key-bundle';
 import { verifyReceiptV2Parsed } from '../../scripts/backup/receipt-v2-verify';
 
@@ -29,9 +32,15 @@ import { verifyReceiptV2Parsed } from '../../scripts/backup/receipt-v2-verify';
 
 const kp = generateKeyPairSync('ed25519');
 // The migration facts are derived from a REAL commit (the portable hash reads git blobs at sourceCommit), so the
-// tests bind the exact reviewed staging target. The staging source identity moved to 0078_silent_ultron / 79
-// committed migrations (the 2026-10-08 pin refresh, matching the Owner Notifications v1 target). A moving HEAD
-// must not redefine it — the exact commit that introduced 0078 (PR1 base) is pinned here.
+// producer tests below run against a FROZEN historical source tree: the exact commit that introduced 0078
+// (0078_silent_ultron / 79 committed migrations). A moving HEAD must not redefine the fixture, so that commit is
+// pinned here and the producer is called with HISTORICAL_STAGING_PINS.
+//
+// Pinning the FIXTURE is correct; what was wrong before 2026-11-11 is that these tests asserted the fixture's
+// endpoint/count through the LIVE STAGING_PINS default. That coupling made a frozen fixture look like a passing
+// pin check, so STAGING_PINS sat at 0078 / 79 while the tree advanced to 0088 / 89 and every staging signing run
+// failed closed in deriveMigrationFacts. The fixture now carries its own pins, and a separate tree-coupled test
+// (mirroring tests/unit/gbackup-production-pins.test.ts) asserts the LIVE pin against the LIVE tree.
 const STAGING_SOURCE_COMMIT = execFileSync(
   'git', ['rev-parse', '1be10f77ab5400b435d36ef05014fffca9f9ab92^{commit}'], { encoding: 'utf8' },
 ).trim();
@@ -53,6 +62,22 @@ afterAll(() => rmSync(STAGING_RUNTIME_DIR, { recursive: true, force: true }));
 // Staging has applied 0000–0068 (69 migrations); 0069–0077 are the pending set. APPLIED_COUNT is an EXPLICIT
 // runtime input (STAGING_PINS.requireExplicitAppliedCount) — never a baked default.
 const STAGING_APPLIED_COUNT = 69;
+
+/**
+ * Pins for the FROZEN 0078 fixture tree above. Identical to {@link STAGING_PINS} in every identity field → only
+ * the endpoint/count tripwire is rewound to what that historical tree actually contains, so these producer tests
+ * never move when the live pin is bumped for a new migration.
+ */
+const HISTORICAL_STAGING_PINS: ReleasePins = {
+  ...STAGING_PINS,
+  expectedMigrationEndpoint: '0078_silent_ultron',
+  expectedCommittedMigrationCount: 79,
+};
+const HISTORICAL_CLI_OPTIONS: RunCliOptions = {
+  pins: HISTORICAL_STAGING_PINS,
+  receiptBasename: 'staging-receipt.v2.json',
+  label: 'staging',
+};
 const EXPECTED_PENDING_TAGS = stagingJournal.entries.slice(STAGING_APPLIED_COUNT).map((e) => e.tag);
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
@@ -78,16 +103,34 @@ function goodInputs(over: Partial<StagingReceiptInputs> = {}): StagingReceiptInp
   };
 }
 
+describe('staging pins — consistency with the repository', () => {
+  const runtime = readRuntimeMigrationSet(process.cwd(), 'drizzle');
+  const sorted = [...runtime.entries].sort((a, b) => a.migrationIndex - b.migrationIndex);
+
+  // The mirror of tests/unit/gbackup-production-pins.test.ts. Without this, STAGING_PINS can fall behind the
+  // committed tree with a fully green suite — which is exactly what happened between 0079 and 0088, and it
+  // blocked staging signing entirely (deriveMigrationFacts rejects an endpoint/count mismatch).
+  it('pins the actual migration endpoint and count (bump STAGING_PINS when adding a migration)', () => {
+    expect(STAGING_PINS.expectedMigrationEndpoint).toBe(sorted[sorted.length - 1]!.migrationTag);
+    expect(STAGING_PINS.expectedCommittedMigrationCount).toBe(sorted.length);
+  });
+
+  it('never bakes an applied-count fallback (staging supplies it explicitly at signing time)', () => {
+    expect(STAGING_PINS.defaultAppliedCount).toBeUndefined();
+    expect(STAGING_PINS.requireExplicitAppliedCount).toBe(true);
+  });
+});
+
 describe('G-Backup staging-receipt producer — happy path (fixture keys)', () => {
   it('signs + self-verifies; pending is exactly 0069–0078 derived from source', () => {
-    const out = produceStagingReceipt(goodInputs(), kp.privateKey, STAGING_RUNTIME_DIR);
+    const out = produceStagingReceipt(goodInputs(), kp.privateKey, STAGING_RUNTIME_DIR, HISTORICAL_STAGING_PINS);
     expect(receiptV2Schema.safeParse(out.receipt).success).toBe(true);
     expect(out.receipt.environment).toBe('staging');
     expect(out.receipt.targetApplication).toBe('king-ai-ops-hub-staging');
     expect(out.receipt.databaseApp).toBe('king-ai-hub-db-staging');
     expect(out.receipt.sourceVolumeId).toBe('vol_4m3kmknl059qpd6v');
-    expect(out.derived.endpointTag).toBe('0078_silent_ultron');
-    expect(out.derived.committedCount).toBe(79);
+    expect(out.derived.endpointTag).toBe(HISTORICAL_STAGING_PINS.expectedMigrationEndpoint);
+    expect(out.derived.committedCount).toBe(HISTORICAL_STAGING_PINS.expectedCommittedMigrationCount);
     expect(out.derived.pendingMigrations.map((p) => p.migrationTag)).toEqual(EXPECTED_PENDING_TAGS);
     // Independently re-verify with the derived public trust.
     const load = loadReceiptKeyBundle([out.publicTrustEntry]);
@@ -125,18 +168,18 @@ describe('G-Backup staging-receipt producer — required-input enforcement + pla
   ];
   for (const [label, over] of cases) {
     it(`rejects ${label}`, () => {
-      expect(() => buildStagingSignedReceipt(goodInputs(over), STAGING_RUNTIME_DIR)).toThrow(StagingReceiptInputError);
+      expect(() => buildStagingSignedReceipt(goodInputs(over), STAGING_RUNTIME_DIR, HISTORICAL_STAGING_PINS)).toThrow(StagingReceiptInputError);
     });
   }
 });
 
 describe('G-Backup staging-receipt producer — hash cross-check + tamper', () => {
   it('rejects an operator-provided portable hash that disagrees with source', () => {
-    expect(() => buildStagingSignedReceipt(goodInputs({ assertPortableMigrationSetHash: 'f'.repeat(64) }), STAGING_RUNTIME_DIR)).toThrow(StagingReceiptInputError);
+    expect(() => buildStagingSignedReceipt(goodInputs({ assertPortableMigrationSetHash: 'f'.repeat(64) }), STAGING_RUNTIME_DIR, HISTORICAL_STAGING_PINS)).toThrow(StagingReceiptInputError);
   });
 
   it('a tampered signature fails verification', () => {
-    const out = produceStagingReceipt(goodInputs(), kp.privateKey, STAGING_RUNTIME_DIR);
+    const out = produceStagingReceipt(goodInputs(), kp.privateKey, STAGING_RUNTIME_DIR, HISTORICAL_STAGING_PINS);
     const flipped = out.receipt.signature[0] === 'A' ? 'B' : 'A';
     const tampered = { ...out.receipt, signature: flipped + out.receipt.signature.slice(1) };
     const load = loadReceiptKeyBundle([out.publicTrustEntry]);
@@ -149,7 +192,7 @@ describe('G-Backup staging-receipt producer — hash cross-check + tamper', () =
   });
 
   it('a receipt signed by a DIFFERENT key is not trusted', () => {
-    const out = produceStagingReceipt(goodInputs(), kp.privateKey, STAGING_RUNTIME_DIR);
+    const out = produceStagingReceipt(goodInputs(), kp.privateKey, STAGING_RUNTIME_DIR, HISTORICAL_STAGING_PINS);
     const other = generateKeyPairSync('ed25519');
     const otherTrust = derivePublicTrustEntry(other.privateKey, out.receipt.keyId);
     const load = loadReceiptKeyBundle([otherTrust]);
@@ -164,7 +207,7 @@ describe('G-Backup staging-receipt producer — hash cross-check + tamper', () =
 
 describe('G-Backup staging-receipt producer — no private material can leak into the artifact', () => {
   it('the receipt, trust bundle, and metadata contain no PRIVATE KEY material', () => {
-    const out = produceStagingReceipt(goodInputs(), kp.privateKey, STAGING_RUNTIME_DIR);
+    const out = produceStagingReceipt(goodInputs(), kp.privateKey, STAGING_RUNTIME_DIR, HISTORICAL_STAGING_PINS);
     for (const [label, v] of [
       ['receipt', out.receipt],
       ['trustEntry', out.publicTrustEntry],
@@ -210,7 +253,7 @@ describe('G-Backup staging-receipt CLI (fixture key via env) — writes only pub
   it('writes the 3 public files, none containing PRIVATE KEY material', () => {
     const dir = mkdtempSync(join(tmpdir(), 'staging-receipt-'));
     try {
-      runCli(baseEnv(dir), process.cwd(), () => {});
+      runCli(baseEnv(dir), process.cwd(), () => {}, HISTORICAL_CLI_OPTIONS);
       const files = readdirSync(dir).sort();
       expect(files).toEqual(['staging-receipt.v2.json', 'trust-bundle.public.json', 'verification-metadata.json']);
       for (const f of files) {
@@ -230,7 +273,7 @@ describe('G-Backup staging-receipt CLI (fixture key via env) — writes only pub
     try {
       const env = baseEnv(dir);
       delete env.APPLIED_COUNT;
-      expect(() => runCli(env, process.cwd(), () => {})).toThrow(/APPLIED_COUNT/);
+      expect(() => runCli(env, process.cwd(), () => {}, HISTORICAL_CLI_OPTIONS)).toThrow(/APPLIED_COUNT/);
       expect(readdirSync(dir)).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -242,7 +285,7 @@ describe('G-Backup staging-receipt CLI (fixture key via env) — writes only pub
     try {
       const env = baseEnv(dir);
       delete env.GBACKUP_SIGNING_KEY_PEM_B64;
-      expect(() => runCli(env, process.cwd(), () => {})).toThrow(/signing key/);
+      expect(() => runCli(env, process.cwd(), () => {}, HISTORICAL_CLI_OPTIONS)).toThrow(/signing key/);
       expect(readdirSync(dir)).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -252,7 +295,7 @@ describe('G-Backup staging-receipt CLI (fixture key via env) — writes only pub
   it('rejects a placeholder source commit from env (fails closed)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'staging-receipt-'));
     try {
-      expect(() => runCli({ ...baseEnv(dir), SOURCE_COMMIT: 'UNKNOWN' }, process.cwd(), () => {})).toThrow();
+      expect(() => runCli({ ...baseEnv(dir), SOURCE_COMMIT: 'UNKNOWN' }, process.cwd(), () => {}, HISTORICAL_CLI_OPTIONS)).toThrow();
       expect(readdirSync(dir)).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
