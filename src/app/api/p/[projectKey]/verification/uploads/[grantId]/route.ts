@@ -5,7 +5,7 @@ import { serverEnv } from '@/lib/env.server';
 import { withRunner } from '@/db/tenant';
 import type { VerificationCaller } from '@/types/domain';
 import { redeemUploadGrant, type RedeemRejectionCode } from '@/domain/verification';
-import { createDrizzleUploadGrantStore } from '@/domain/verification/drizzle-store';
+import { createDrizzleUploadGrantStore, createDrizzleQuotaStore } from '@/domain/verification/drizzle-store';
 import { exclusiveArtifactWriter, objectStoreArtifactStore } from '@/domain/verification/runtime-adapters';
 
 /**
@@ -93,6 +93,8 @@ export async function PUT(
             grants: createDrizzleUploadGrantStore(tx),
             writer,
             artifacts: objectStoreArtifactStore(runner),
+            // PR-6: on completion the reservation becomes committed usage. The total charged is unchanged.
+            quota: createDrizzleQuotaStore(tx),
           },
           runner,
           grantId,

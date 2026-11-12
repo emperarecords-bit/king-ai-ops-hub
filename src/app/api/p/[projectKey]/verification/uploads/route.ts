@@ -5,7 +5,7 @@ import { serverEnv } from '@/lib/env.server';
 import { withRunner } from '@/db/tenant';
 import type { VerificationCaller } from '@/types/domain';
 import { requestUploadGrant, type GrantRequestRejectionCode, type UploadGrant } from '@/domain/verification';
-import { createDrizzleUploadGrantStore, createDrizzleVerificationStore } from '@/domain/verification/drizzle-store';
+import { createDrizzleUploadGrantStore, createDrizzleVerificationStore, createDrizzleQuotaStore } from '@/domain/verification/drizzle-store';
 
 /**
  * POST — request an artifact UPLOAD grant (VER-002 PR-4, mechanism only; disabled by default).
@@ -45,6 +45,10 @@ const STATUS: Record<GrantRequestRejectionCode, number> = {
   catalog_unpinned: 409,
   path_not_required: 400,
   grant_conflict: 409,
+  // 507 Insufficient Storage (RFC 4918) is the precise answer for an AGGREGATE cap: the request is
+  // well-formed and the artifact is within the per-artifact limit, the project simply has no room. A 400
+  // would tell the runner to change its request, which is wrong — nothing about the request is invalid.
+  quota_exceeded: 507,
 };
 
 export async function POST(
@@ -86,7 +90,8 @@ export async function POST(
   try {
     const outcome = await withRunner(runner, (tx) =>
       requestUploadGrant(
-        { store: createDrizzleVerificationStore(tx), grants: createDrizzleUploadGrantStore(tx) },
+        // PR-6: the aggregate cap is enforced here, on the live runner path.
+        { store: createDrizzleVerificationStore(tx), grants: createDrizzleUploadGrantStore(tx), quota: createDrizzleQuotaStore(tx) },
         runner,
         parsed.data,
       ),

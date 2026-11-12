@@ -22,9 +22,11 @@ import type {
   UploadGrant,
   UploadGrantStore,
   VerificationStore,
+  QuotaStore,
 } from './ports';
 import { UnsupportedExclusiveWriteError } from './ports';
 import { assertCanonicalTenantKey } from './tenant-key';
+import { finalizeUpload, releaseUnusedReservation, reserveForGrant } from './quota';
 
 /** Per-artifact byte cap (25 MiB), enforced WHILE streaming. */
 export const PER_ARTIFACT_CAP_BYTES = 25 * 1024 * 1024;
@@ -67,7 +69,9 @@ export type GrantRequestRejectionCode =
   | 'unknown_request'
   | 'catalog_unpinned'
   | 'path_not_required'
-  | 'grant_conflict';
+  | 'grant_conflict'
+  // VER-002 PR-6: the project's aggregate cap would be exceeded. An expected 4xx answer, not a fault.
+  | 'quota_exceeded';
 
 export interface GrantRequestOutcome {
   /** true = a new grant was created; false = an identical grant already existed (idempotent). */
@@ -79,6 +83,14 @@ export interface GrantRequestOutcome {
 export interface RequestGrantDeps {
   readonly store: Pick<VerificationStore, 'getRequest'>;
   readonly grants: UploadGrantStore;
+  /**
+   * VER-002 PR-6. OPTIONAL: when absent, no quota is reserved and behaviour is exactly PR-4's. That is
+   * deliberate — enabling an aggregate cap should be a decision a caller makes, not something this PR
+   * imposes on every existing call site the moment it merges.
+   */
+  readonly quota?: QuotaStore;
+  /** Overrides the cap seeded on a tenant's first reservation. */
+  readonly quotaCapBytes?: number;
   readonly now?: () => Date;
   readonly ttlMs?: number;
   readonly maxUploadMs?: number;
@@ -158,9 +170,27 @@ export async function requestUploadGrant(
     expiresAt: new Date(now.getTime() + (deps.ttlMs ?? DEFAULT_GRANT_TTL_MS)),
     maxUploadMs: deps.maxUploadMs ?? DEFAULT_MAX_UPLOAD_MS,
   };
+  // 6. PR-6: reserve the bytes BEFORE the grant exists. The order matters in both directions — the
+  //    dedup check above already returned for an identical re-request, so this cannot charge twice, and
+  //    reserving before the insert means a full project never gets a grant it could not have used.
+  //    §4.6's conditional UPDATE is the serialization point, so concurrent issuance cannot oversubscribe.
+  if (deps.quota && input.declaredSize > 0) {
+    const reserved = await reserveForGrant({ quota: deps.quota, ...(deps.quotaCapBytes === undefined ? {} : { quotaCapBytes: deps.quotaCapBytes }) }, input.declaredSize);
+    if (!reserved.ok) {
+      return gReject('quota_exceeded', `project storage quota exceeded: ${input.declaredSize} byte(s) would not fit`);
+    }
+  }
+
   const { grant, inserted } = await deps.grants.insertGrant(ctx.orgId, ctx.projectId, ctx.userId ?? null, newGrant);
   if (inserted) return { created: true, grant, rejection: null };
-  // Lost a concurrent create race — return the WINNER if identical, else conflict.
+
+  // Lost a concurrent create race — so the reservation above belongs to a grant that was never created.
+  // Give it back. This is the ONLY release path and it is a same-transaction correction, not the timed
+  // reclamation Gate B forbids: no grant exists, so no bytes can ever land against those reserved bytes.
+  if (deps.quota && input.declaredSize > 0) {
+    await releaseUnusedReservation({ quota: deps.quota }, input.declaredSize);
+  }
+  // Return the WINNER if identical, else conflict.
   return declarationEquals(grant, input) ? { created: false, grant, rejection: null } : grantConflict();
 }
 
@@ -189,6 +219,8 @@ export interface RedeemDeps {
   readonly grants: UploadGrantStore;
   readonly writer: ExclusiveArtifactWriter;
   readonly artifacts: StoredArtifactStore;
+  /** VER-002 PR-6. OPTIONAL, as on issuance: absent means no quota accounting. */
+  readonly quota?: QuotaStore;
   readonly now?: () => Date;
   readonly perArtifactCapBytes?: number;
 }
@@ -226,6 +258,13 @@ export async function redeemUploadGrant(
 
   const complete = async (): Promise<void> => {
     await deps.grants.appendEvent(ctx.orgId, ctx.projectId, grant.id, 'uploaded', null);
+    // PR-6: the bytes have landed, so the reservation becomes committed usage. The TOTAL charged against
+    // the cap does not change — finalize frees nothing; only retention deleting the object does. Placed
+    // here rather than in the route because this is the one point where completion is recorded, and the
+    // early isUploaded() return above plus the partial unique index make it idempotent.
+    if (deps.quota && grant.declaredSize > 0) {
+      await finalizeUpload({ quota: deps.quota }, grant.declaredSize);
+    }
   };
   const failEvent = async (detail: string): Promise<void> => {
     await deps.grants.appendEvent(ctx.orgId, ctx.projectId, grant.id, 'redemption_failed', detail);

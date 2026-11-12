@@ -27,6 +27,8 @@ import type {
   PurgeJobObject,
   PurgeJobStore,
   PurgeReason,
+  QuotaStore,
+  QuotaUsage,
 } from './ports';
 import type { TaskVerificationStatus } from './types';
 
@@ -494,6 +496,49 @@ export function createDrizzlePurgeJobStore(tx: DbTx): PurgeJobStore {
       await tx.execute(
         sql`select app.record_verification_purge_object_failure(${objectId}::uuid, ${error})`,
       );
+    },
+  };
+}
+
+// -- VER-002 PR-6: aggregate storage quota -----------------------------------
+
+/**
+ * The quota counter over Postgres. Every mutation goes through a SECURITY DEFINER function owned by
+ * `verification_quota_agent`; `app_server` holds EXECUTE on reserve/release/finalize and SELECT on the
+ * table, and nothing else — it cannot raise the cap, decrement a counter, or call refund.
+ */
+export function createDrizzleQuotaStore(tx: DbTx): QuotaStore {
+  return {
+    async reserve(bytes: number, defaultCapBytes: number): Promise<boolean> {
+      const res = await tx.execute(
+        sql`select app.reserve_verification_quota(${bytes}::bigint, ${defaultCapBytes}::bigint) as ok`,
+      );
+      const row = purgeRows<{ ok: boolean | string | null }>(res)[0];
+      return row?.ok === true || row?.ok === 't';
+    },
+
+    async release(bytes: number): Promise<void> {
+      await tx.execute(sql`select app.release_verification_quota_reservation(${bytes}::bigint)`);
+    },
+
+    async finalize(bytes: number): Promise<boolean> {
+      const res = await tx.execute(sql`select app.finalize_verification_quota(${bytes}::bigint) as ok`);
+      const row = purgeRows<{ ok: boolean | string | null }>(res)[0];
+      return row?.ok === true || row?.ok === 't';
+    },
+
+    async usage(): Promise<QuotaUsage | null> {
+      const res = await tx.execute(
+        sql`select cap_bytes, reserved_bytes, committed_bytes from verification_storage_quota
+             where org_id = app.current_org_id() and project_id = app.current_project_id()`,
+      );
+      const row = purgeRows<{ cap_bytes: number | string; reserved_bytes: number | string; committed_bytes: number | string }>(res)[0];
+      if (!row) return null;
+      return {
+        capBytes: Number(row.cap_bytes),
+        reservedBytes: Number(row.reserved_bytes),
+        committedBytes: Number(row.committed_bytes),
+      };
     },
   };
 }
