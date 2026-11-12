@@ -84,8 +84,8 @@ export const STAGING_PINS: ReleasePins = {
   // at 0078 / 79 and silently blocked every staging signing run from 0079 onward.
   // The actual staging APPLIED_COUNT is NOT baked here — staging must pass it as an explicit runtime input
   // (requireExplicitAppliedCount), so the signer never presumes staging is already migrated to some prefix.
-  expectedMigrationEndpoint: '0088_ops_chat_usage',
-  expectedCommittedMigrationCount: 89,
+  expectedMigrationEndpoint: '0089_verification_purge_jobs',
+  expectedCommittedMigrationCount: 90,
   requireExplicitAppliedCount: true,
 } as const;
 

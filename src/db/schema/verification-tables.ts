@@ -236,3 +236,93 @@ export const verificationUploadGrantEvents = pgTable(
       .where(sql`event_type = 'uploaded'`),
   ],
 );
+
+/**
+ * VER-002 PR-7 — the recoverable retention lifecycle (docs/verification/external-runner-design.md §3.2).
+ *
+ * Immutable is not eternal. PR-1 made `verification_evidence` genuinely append-only and flipped its
+ * parents to RESTRICT, which closed the deletion path entirely: a project holding evidence currently
+ * cannot be deleted at all. This is the sanctioned way back, and it is deliberately NOT a cascade.
+ *
+ * The ordering is the whole point. `app.purge_verification_evidence()` records the job and its exact
+ * object identifiers in the SAME transaction that removes the evidence references, so the keys to clean
+ * up are durably committed BEFORE the only pointer to them disappears. A crash immediately afterwards
+ * loses nothing: the worker resumes from the recorded list.
+ *
+ * Unlike every other table in this module these two are NOT append-only — the worker must mark objects
+ * `deleted` as it confirms each one, and must be able to record a failed attempt and retry. src/db/rls.sql
+ * therefore grants UPDATE to the retention role ONLY, leaves `app_server` with SELECT alone, and gives
+ * the DELETE grant on `verification_evidence` exclusively to that role.
+ */
+export const verificationPurgeJobs = pgTable(
+  'verification_purge_jobs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'restrict' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'restrict' }),
+    /** 'retention_expiry' (age-based policy) | 'erasure_request' (explicit, tenant-offboarding). */
+    reason: text('reason').notNull(),
+    /** The authorizing human, when there is one. NULL for an automated age-based expiry. */
+    requestedBy: uuid('requested_by').references(() => profiles.id, { onDelete: 'set null' }),
+    /** 'open' until EVERY listed object is confirmed gone, then 'complete'. Never complete early. */
+    status: text('status').notNull().default('open'),
+    /** How many objects this job must account for; the completion check compares against confirmed deletes. */
+    objectCount: bigint('object_count', { mode: 'number' }).notNull(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    createdAt,
+  },
+  (t) => [
+    unique('verification_purge_jobs_tenant_id_uq').on(t.orgId, t.projectId, t.id),
+    // The worker's claim query: open jobs, oldest first.
+    index('verification_purge_jobs_open_idx').on(t.status, t.createdAt),
+  ],
+);
+
+/**
+ * VER-002 PR-7 — one row per object a purge job must delete, with its own retry state.
+ *
+ * Why a child table rather than a JSON list on the job: §3.2 requires that each object be marked deleted
+ * individually, that transient failures be RETRIED, and that a job count as complete only once every
+ * listed object is confirmed gone. Per-object rows make "resume exactly where the crash left off" a
+ * primary-key lookup instead of a read-modify-write over a blob.
+ *
+ * `versionId` is NULL for conditional-create keys (deleted outright) and set for pinned versions, which
+ * may only be removed once any Object-Lock retention has lapsed. The uniqueness is on (job, object key)
+ * rather than including `versionId`, because Postgres treats NULLs as distinct and a nullable column in
+ * a UNIQUE constraint would silently permit duplicate pending rows for the same key.
+ */
+export const verificationPurgeJobObjects = pgTable(
+  'verification_purge_job_objects',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'restrict' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'restrict' }),
+    jobId: uuid('job_id')
+      .notNull()
+      .references(() => verificationPurgeJobs.id, { onDelete: 'restrict' }),
+    /** The exact storage key recorded before the evidence reference was removed. */
+    objectKey: text('object_key').notNull(),
+    /** Pinned version to delete, or NULL for a conditional-create key removed outright. */
+    versionId: text('version_id'),
+    /** 'pending' | 'deleted'. There is no 'failed' terminal state — a failure is a retry, not an end. */
+    state: text('state').notNull().default('pending'),
+    attempts: bigint('attempts', { mode: 'number' }).notNull().default(0),
+    lastError: text('last_error'),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+    createdAt,
+  },
+  (t) => [
+    unique('verification_purge_job_objects_job_key_uq').on(t.jobId, t.objectKey),
+    // The worker's per-job scan for outstanding objects.
+    index('verification_purge_job_objects_pending_idx').on(t.state, t.jobId),
+  ],
+);
+

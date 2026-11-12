@@ -23,8 +23,8 @@ export const PRODUCTION_PINS: ReleasePins = {
   // run_jobs / runs + immutability trigger).
   // Bumped 2026-10-25 (0088 ops_chat_usage — per-turn Ops Chat tokens/web searches/cost, user-scoped, append-only;
   // a new table only, no change to existing tables).
-  expectedMigrationEndpoint: '0088_ops_chat_usage',
-  expectedCommittedMigrationCount: 89,
+  expectedMigrationEndpoint: '0089_verification_purge_jobs',
+  expectedCommittedMigrationCount: 90,
   /**
    * Production REQUIRES an explicit APPLIED_COUNT at signing time and never falls back to a baked default. The
    * previous `defaultAppliedCount: 68` was a stale assumption (production has since applied through 0078) and, if

@@ -11,8 +11,11 @@ import { LocalObjectStore } from '@/domain/documents/local-object-store';
 import { S3ObjectStore } from '@/domain/documents/s3-object-store';
 import { serverEnv } from '@/lib/env.server';
 import type { TenantContext } from '@/types/domain';
-import type { ExclusiveArtifactWriter, RunnerSecretSource, StageOptions, StagedArtifact, StoredArtifactStore } from './ports';
+import type { ExclusiveArtifactWriter, RunnerSecretSource, StageOptions, StagedArtifact, StoredArtifactStore, RetentionObjectDeleter } from './ports';
 import { UnsupportedExclusiveWriteError } from './ports';
+import type { RetentionAuditSink } from './retention';
+import { writeAudit } from '@/domain/audit/audit';
+import type { DbTx } from '@/db/client';
 import { PER_ARTIFACT_CAP_BYTES } from './upload-grant';
 import { assertCanonicalTenantKey, tenantPrefix } from './tenant-key';
 
@@ -280,5 +283,59 @@ export function envRunnerSecretSource(): RunnerSecretSource {
       if (!master || master.length < 32) return null;
       return createHmac('sha256', master).update(`verification-runner:v1:${orgId}:${projectId}`).digest('hex');
     },
+  };
+}
+
+// -- VER-002 PR-7: retention / purge lifecycle wiring ------------------------
+
+/**
+ * Deletes a purge job's objects through the EXISTING, reviewed ObjectStore port rather than adding new
+ * provider surface — `ObjectStore.delete(key)` already exists and is exercised by the document purge.
+ *
+ * FAIL CLOSED on a version id. `ObjectStore.delete` addresses a key, not a version, so if a purge job
+ * ever carries a non-null `versionId` this refuses instead of deleting the key's CURRENT version — which
+ * would destroy the wrong bytes and still leave the pinned version live. version_id is always NULL today
+ * (SubmittedArtifact records no version and PR-4 issues conditional-create keys), so this is a guard for
+ * the day that changes, not dead code: a refusal surfaces as a retryable failure and the object stays
+ * pending, which is the correct outcome for "I cannot safely delete this".
+ */
+export function objectStoreRetentionDeleter(store: ObjectStore): RetentionObjectDeleter {
+  return {
+    async delete(objectKey: string, versionId: string | null): Promise<void> {
+      if (versionId !== null) {
+        throw new Error(
+          `versioned deletion is not supported by the ObjectStore port (key=${objectKey}, versionId=${versionId}); ` +
+            'refusing rather than deleting the current version',
+        );
+      }
+      try {
+        await store.delete(objectKey);
+      } catch (e) {
+        // Already gone is success: the job's goal is "confirmed absent", not "I performed a delete".
+        if (e instanceof ObjectNotFoundError) return;
+        throw e;
+      }
+    },
+  };
+}
+
+/** The default deleter, bound to the configured object store. */
+export async function defaultRetentionObjectDeleter(): Promise<RetentionObjectDeleter> {
+  return objectStoreRetentionDeleter(await getObjectStore());
+}
+
+/**
+ * Routes the lifecycle's audit events into the real append-only chain. Kept out of retention.ts so that
+ * module stays DB-free and testable; the chain's prev_hash/row_hash is computed by writeAudit, which is
+ * why the purge SQL deliberately does not try to append audit rows itself.
+ */
+export function retentionAuditSink(tx: DbTx, ctx: TenantContext): RetentionAuditSink {
+  return async (event) => {
+    await writeAudit(tx, { orgId: ctx.orgId, projectId: ctx.projectId, userId: ctx.userId }, {
+      action: event.action,
+      entityType: 'verification_purge_job',
+      entityId: event.entityId,
+      detail: event.detail,
+    });
   };
 }

@@ -197,3 +197,55 @@ export interface IngestDeps {
   /** Max age of a submission's signed timestamp before it is rejected as expired (default 10 min). */
   readonly maxSubmissionAgeMs?: number;
 }
+
+// -- VER-002 PR-7: recoverable retention / purge lifecycle --------------------
+// docs/verification/external-runner-design.md §3.2. The sanctioned way back from PR-1's RESTRICT FKs.
+
+/** Why a purge was opened. Mirrors the validation inside app.purge_verification_evidence(). */
+export type PurgeReason = 'retention_expiry' | 'erasure_request';
+
+/** One object a job must see confirmed gone before the job can complete. */
+export interface PurgeJobObject {
+  readonly id: string;
+  readonly objectKey: string;
+  /** A pinned version to delete, or null for a conditional-create key removed outright. */
+  readonly versionId: string | null;
+  /** How many attempts this object has already had. A failure increments it; it never terminates. */
+  readonly attempts: number;
+}
+
+export interface PurgeJob {
+  readonly id: string;
+  readonly reason: PurgeReason;
+  readonly status: 'open' | 'complete';
+  readonly objectCount: number;
+}
+
+/**
+ * The durable side of the purge lifecycle.
+ *
+ * Every method is TENANT-SCOPED, and that is a design constraint rather than a convenience: the
+ * retention role is NOBYPASSRLS, so a query issued without the tenant GUCs set comes back a FALSE EMPTY
+ * instead of failing. There is deliberately no cross-tenant sweep — draining several projects means
+ * iterating them and establishing the tenant context for each.
+ *
+ * Note what is NOT here: nothing can mark a job complete. That decision belongs to the database, which
+ * flips the job only when the outstanding object count reaches zero, so a worker cannot close a job while
+ * objects are still live.
+ */
+export interface PurgeJobStore {
+  /** Opens a purge: records the job + its exact object keys and removes the evidence references, in ONE transaction. */
+  openPurge(evidenceIds: readonly string[], reason: PurgeReason): Promise<string>;
+  getJob(jobId: string): Promise<PurgeJob | null>;
+  listOpenJobIds(limit: number): Promise<string[]>;
+  listPendingObjects(jobId: string): Promise<PurgeJobObject[]>;
+  /** True when this call transitioned the object; false if it was unknown, foreign, or already confirmed. */
+  recordObjectDeleted(objectId: string): Promise<boolean>;
+  /** Records a transient failure. The object STAYS pending so the next sweep retries it. */
+  recordObjectFailure(objectId: string, error: string): Promise<void>;
+}
+
+/** Deletes the object itself. Separate from the store so the DB lifecycle is testable without S3. */
+export interface RetentionObjectDeleter {
+  delete(objectKey: string, versionId: string | null): Promise<void>;
+}
