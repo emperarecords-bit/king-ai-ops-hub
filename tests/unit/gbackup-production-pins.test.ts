@@ -1,7 +1,7 @@
 import { execSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import { describe, expect, it , vi } from 'vitest';
-import { HEAVY_HOOK_TIMEOUT_MS, HEAVY_TEST_TIMEOUT_MS } from '../support/heavy-timeout';
+import { GIT_BLOB_WALK_TIMEOUT_MS, HEAVY_HOOK_TIMEOUT_MS, HEAVY_TEST_TIMEOUT_MS } from '../support/heavy-timeout';
 // #117: git-blob/DB-heavy test file — bounded timeout headroom under full-suite parallel contention (assertions unchanged).
 vi.setConfig({ testTimeout: HEAVY_TEST_TIMEOUT_MS, hookTimeout: HEAVY_HOOK_TIMEOUT_MS });
 import { PRODUCTION_PINS } from '../../scripts/backup/production-pins';
@@ -27,7 +27,6 @@ import { inputsFromEnv } from '../../scripts/ci/sign-staging-receipt';
  *     production receipt (`production_rejected`) — the pre-Gate-3 exclusion is the default, not a memory.
  */
 
-const HEAVY_TIMEOUT = 60_000; // portable git-blob manifest + runtime hashing over 61 migrations is disk/git-bound
 // Production REQUIRES an explicit APPLIED_COUNT (no baked default) — see PRODUCTION_PINS.requireExplicitAppliedCount.
 // The real production applied count at this release is 79 (through 0078_silent_ultron), confirmed from the live DB
 // at ceremony time; the end-to-end signing test below uses it as the explicit runtime input.
@@ -82,7 +81,7 @@ describe('production pins — consistency with the repository', () => {
 describe('production pins — the shared producer signs + self-verifies a production receipt', () => {
   const head = execSync('git rev-parse HEAD', { encoding: 'utf8' }).trim();
 
-  it('produces a verified production-environment receipt over the real source with an ephemeral key', { timeout: HEAVY_TIMEOUT }, () => {
+  it('produces a verified production-environment receipt over the real source with an ephemeral key', { timeout: GIT_BLOB_WALK_TIMEOUT_MS }, () => {
     const { privateKey } = generateKeyPairSync('ed25519');
     const out = produceStagingReceipt(makeInputs(head, 'ab', 'vs_testpins0001'), privateKey, process.cwd(), PRODUCTION_PINS);
 
@@ -99,7 +98,7 @@ describe('production pins — the shared producer signs + self-verifies a produc
     expect(out.publicTrustEntry.purpose).toBe('deployment_backup_receipt');
   });
 
-  it('the verifier still rejects a production receipt when the explicit opt-in flag is absent (fail-closed default)', { timeout: HEAVY_TIMEOUT }, () => {
+  it('the verifier still rejects a production receipt when the explicit opt-in flag is absent (fail-closed default)', { timeout: GIT_BLOB_WALK_TIMEOUT_MS }, () => {
     const { privateKey } = generateKeyPairSync('ed25519');
     const inputs = makeInputs(head, 'cd', 'vs_testpins0002');
     const out = produceStagingReceipt(inputs, privateKey, process.cwd(), PRODUCTION_PINS);
