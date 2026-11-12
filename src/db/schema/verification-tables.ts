@@ -12,7 +12,7 @@
  * append-only/immutability triggers are applied separately by src/db/rls.sql after
  * migrations (guarded by to_regclass), as with every other tenant table.
  */
-import { bigint, boolean, index, jsonb, pgTable, text, timestamp, unique, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { bigint, boolean, check, index, jsonb, pgTable, primaryKey, text, timestamp, unique, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { organizations, profiles, projects, tasks } from './tables';
 import type { ArtifactAvailability, CheckResult, RejectionCode, SubmittedArtifact } from '@/types/verification';
@@ -254,6 +254,56 @@ export const verificationUploadGrantEvents = pgTable(
  * therefore grants UPDATE to the retention role ONLY, leaves `app_server` with SELECT alone, and gives
  * the DELETE grant on `verification_evidence` exclusively to that role.
  */
+/**
+ * VER-002 PR-6 — the aggregate storage quota, one row per tenant (design §4.6).
+ *
+ * This row IS the serialization point. Issuing grants must not oversubscribe a project under concurrency,
+ * and the way §4.6 specifies that is a single conditional UPDATE that fails atomically rather than a
+ * read-then-write: `set reserved_bytes = reserved_bytes + n where reserved_bytes + committed_bytes + n <=
+ * cap_bytes`. Zero rows updated means "would exceed the cap" — there is no window between the check and
+ * the increment because they are the same statement.
+ *
+ * TWO COUNTERS, NOT ONE, and the distinction is the whole of Gate B. `reserved_bytes` is bytes that may
+ * still land; `committed_bytes` is bytes that have landed and now occupy storage. Finalize moves a grant
+ * from the first to the second and **changes the total not at all** — finalize frees nothing. Quota for
+ * landed bytes is released only when the object is actually deleted, which is retention's job (§3.2).
+ *
+ * WHAT IS DELIBERATELY ABSENT: any path that releases a reservation on a timer or on URL expiry. S3
+ * evaluates a presigned URL's expiry at request START, so a PUT begun just before expiry can keep
+ * writing afterwards; releasing then would let those bytes exceed the cap. Gate B defers all timed
+ * reclamation until a hard total-upload deadline is demonstrably enforced, so an un-finalized
+ * reservation is held until it is finalized or an operator acts. See the SUPERSEDED IN PART BY GATE B
+ * admonition on §4.6 — its "confirmed-absent after a drain window" text is retracted, not implemented.
+ */
+export const verificationStorageQuota = pgTable(
+  'verification_storage_quota',
+  {
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'restrict' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'restrict' }),
+    /** The aggregate cap for this project, in bytes. Seeded on first reserve from the configured default. */
+    capBytes: bigint('cap_bytes', { mode: 'number' }).notNull(),
+    /** Bytes that may still land: granted but not yet finalized. Never released by a timer. */
+    reservedBytes: bigint('reserved_bytes', { mode: 'number' }).notNull().default(0),
+    /** Bytes that HAVE landed and occupy storage. Freed only by retention deleting the object. */
+    committedBytes: bigint('committed_bytes', { mode: 'number' }).notNull().default(0),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().default(sql`now()`),
+    createdAt,
+  },
+  (t) => [
+    // One row per tenant, and it is the row every reservation contends on.
+    primaryKey({ columns: [t.orgId, t.projectId] }),
+    // Belt for the arithmetic: a bug that drove either counter negative would silently hand out free
+    // quota, so the database refuses it outright rather than trusting the application's clamping.
+    check('verification_storage_quota_reserved_nonneg', sql`reserved_bytes >= 0`),
+    check('verification_storage_quota_committed_nonneg', sql`committed_bytes >= 0`),
+    check('verification_storage_quota_cap_nonneg', sql`cap_bytes >= 0`),
+  ],
+);
+
 export const verificationPurgeJobs = pgTable(
   'verification_purge_jobs',
   {
@@ -312,6 +362,17 @@ export const verificationPurgeJobObjects = pgTable(
     objectKey: text('object_key').notNull(),
     /** Pinned version to delete, or NULL for a conditional-create key removed outright. */
     versionId: text('version_id'),
+    /**
+     * VER-002 PR-6 ↔ PR-7 SEAM. Committed bytes to return to the quota when this object is confirmed
+     * gone. Resolved at purge time from the object's own upload GRANT (declared_size), NOT from the
+     * evidence artifact's sizeBytes, and 0 when no grant matches.
+     *
+     * Why the grant and not the artifact: committed_bytes was CREDITED from the grant's declared_size at
+     * finalize, so refunding anything else would drift the counter. Evidence can also reference an object
+     * that never went through a grant at all (a pre-PR-4 row, or a direct ingest), and refunding bytes
+     * that were never charged would hand out free quota. 0 is the correct refund for "never charged".
+     */
+    quotaBytes: bigint('quota_bytes', { mode: 'number' }).notNull().default(0),
     /** 'pending' | 'deleted'. There is no 'failed' terminal state — a failure is a retry, not an end. */
     state: text('state').notNull().default('pending'),
     attempts: bigint('attempts', { mode: 'number' }).notNull().default(0),

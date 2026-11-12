@@ -1317,6 +1317,10 @@ create constraint trigger trading_risk_checks_tenant_trg after insert or update 
 -- tables are applied. Same strict tenant predicate (org_id + project_id GUCs).
 do $$
 begin
+  if to_regclass('public.verification_upload_grants') is not null then
+    -- PR-6 seam: resolve each purged object's refundable byte count from its grant. Read-only.
+    grant select on verification_upload_grants to verification_retention_agent;
+  end if;
   if to_regclass('public.verification_requests') is not null then
     -- The verification CONTRACT is immutable: the app role may INSERT (create) and SELECT (read) only.
     -- Revoking UPDATE/DELETE prevents silent alteration of an existing contract at the grant layer
@@ -1602,6 +1606,10 @@ begin
     revoke delete on verification_evidence from app_server;
     grant select, delete on verification_evidence to verification_retention_agent;
   end if;
+  if to_regclass('public.verification_upload_grants') is not null then
+    -- PR-6 seam: resolve each purged object's refundable byte count from its grant. Read-only.
+    grant select on verification_upload_grants to verification_retention_agent;
+  end if;
   if to_regclass('public.verification_requests') is not null then
     -- Read-only: the retention function reads the contract to scope a purge; requests are removed only
     -- by the child-up offboarding order (§3.2), never as a side effect of an evidence purge.
@@ -1701,20 +1709,31 @@ begin
   --    column exists for when versioned objects appear; §3.2's "object keys AND versionIds" is met as
   --    far as the evidence record can currently express it.
   --    The jsonb field is "storageKey" (camelCase, as the app stores it) — NOT storage_key.
+  --    PR-6 SEAM: quota_bytes is the committed amount to refund when this object is confirmed gone, and
+  --    it comes from the object's own upload GRANT, not from the evidence artifact. committed_bytes was
+  --    CREDITED from declared_size at finalize, so refunding any other number would drift the counter;
+  --    evidence can also reference an object that never went through a grant (pre-PR-4, or direct
+  --    ingest), and refunding bytes that were never charged would hand out free quota. coalesce(...,0) is
+  --    the correct refund for "never charged". DISTINCT ON keeps one row per key even if two grants
+  --    somehow share it, so a refund can never be double-counted.
   insert into public.verification_purge_job_objects
-    (org_id, project_id, job_id, object_key, version_id, state, attempts)
-  select distinct
-    e.org_id, e.project_id, v_job_id, a."storageKey", null::text, 'pending', 0
+    (org_id, project_id, job_id, object_key, version_id, state, attempts, quota_bytes)
+  select distinct on (a."storageKey")
+    e.org_id, e.project_id, v_job_id, a."storageKey", null::text, 'pending', 0,
+    coalesce(g.declared_size, 0)
   from public.verification_evidence e
     -- jsonb_typeof guard: jsonb_to_recordset RAISES on a non-array, so a single malformed artifacts
     -- payload would otherwise abort the entire purge. A bad row contributes no keys instead.
     cross join lateral jsonb_to_recordset(case when jsonb_typeof(e.artifacts) = 'array' then e.artifacts else '[]'::jsonb end)
       as a("storageKey" text)
+    left join public.verification_upload_grants g
+      on g.org_id = e.org_id and g.project_id = e.project_id and g.object_key = a."storageKey"
   where e.id = any(p_evidence_ids)
     and e.org_id = app.current_org_id()
     and e.project_id = app.current_project_id()
     and a."storageKey" is not null
     and a."storageKey" <> ''
+  order by a."storageKey", g.declared_size desc nulls last
   on conflict (job_id, object_key) do nothing;
 
   select count(*) into v_count
@@ -1750,6 +1769,7 @@ language plpgsql security definer set search_path = pg_catalog as $fn$
 declare
   v_job_id uuid;
   v_outstanding bigint;
+  v_refund bigint;
 begin
   update public.verification_purge_job_objects
      set state = 'deleted',
@@ -1760,7 +1780,7 @@ begin
      and org_id = app.current_org_id()
      and project_id = app.current_project_id()
      and state <> 'deleted'
-  returning job_id into v_job_id;
+  returning job_id, quota_bytes into v_job_id, v_refund;
 
   if v_job_id is null then
     return false;  -- unknown, foreign, or already-confirmed object: idempotent no-op
@@ -1769,6 +1789,15 @@ begin
   select count(*) into v_outstanding
   from public.verification_purge_job_objects
   where job_id = v_job_id and state <> 'deleted';
+
+  -- PR-6: the object is now provably gone, so its committed bytes stop occupying storage and go back to
+  -- the tenant's quota. This is the ONLY place committed_bytes ever decreases, and it is driven by the
+  -- same single-row state transition above (guarded by `state <> 'deleted'`), so a re-confirmation
+  -- refunds nothing. It is NOT the timed reclamation Gate B forbids: nothing here is released on a
+  -- clock or on URL expiry — the object has been confirmed absent.
+  if v_refund > 0 then
+    perform app.refund_verification_quota(v_refund);
+  end if;
 
   if v_outstanding = 0 then
     update public.verification_purge_jobs
@@ -1801,3 +1830,174 @@ $fn$;
 alter function app.record_verification_purge_object_failure(uuid, text) owner to verification_retention_agent;
 revoke all on function app.record_verification_purge_object_failure(uuid, text) from public;
 grant execute on function app.record_verification_purge_object_failure(uuid, text) to verification_retention_agent;
+
+-- ─────────────────── VER-002 PR-6: aggregate storage quota (reserve + finalize) ───────────────────
+-- Design §4.6, as corrected by Gate B. The quota row is the single serialization point: reservations
+-- contend on one row per tenant via a conditional UPDATE that fails atomically, so concurrent grant
+-- issuance cannot oversubscribe a project.
+--
+-- A narrowly-privileged owner role, mirroring verification_key_reader (PR-2). NOLOGIN: nothing ever
+-- connects as it. BYPASSRLS so the DEFINER functions below can maintain the counter row while the
+-- functions themselves derive the tenant from the transaction GUCs — never from a parameter.
+--
+-- app_server gets EXECUTE on the reserve/release/finalize functions and SELECT on the table (so a UI can
+-- show usage) and NOTHING else. That is the point: a compromised or buggy request handler cannot raise
+-- cap_bytes, cannot decrement a counter, and cannot mint quota — it can only ask for a reservation and be
+-- told no.
+do $$
+begin
+  if not exists (select from pg_roles where rolname = 'verification_quota_agent') then
+    create role verification_quota_agent nologin nosuperuser bypassrls;
+  end if;
+  alter role verification_quota_agent nologin nosuperuser bypassrls nocreatedb nocreaterole;
+end
+$$;
+grant usage, create on schema app to verification_quota_agent;
+grant usage on schema public to verification_quota_agent;
+grant execute on function app.current_user_id(), app.current_org_id(), app.current_project_id() to verification_quota_agent;
+
+do $$
+begin
+  if to_regclass('public.verification_storage_quota') is not null then
+    revoke all on verification_storage_quota from app_server;
+    -- Read-only for the app: usage can be displayed, never adjusted.
+    grant select on verification_storage_quota to app_server;
+    grant select, insert, update on verification_storage_quota to verification_quota_agent;
+    alter table verification_storage_quota enable row level security;
+    alter table verification_storage_quota force row level security;
+    drop policy if exists verification_storage_quota_tenant on verification_storage_quota;
+    execute
+      'create policy verification_storage_quota_tenant on verification_storage_quota
+         using (org_id = app.current_org_id() and project_id = app.current_project_id())
+         with check (org_id = app.current_org_id() and project_id = app.current_project_id())';
+  end if;
+end
+$$;
+
+-- RESERVE. The whole of §4.6 in one statement: increment only if the result still fits under the cap.
+-- Returns true when the reservation was taken, false when it would exceed the cap. There is no window
+-- between the test and the increment because they are the same UPDATE, so N concurrent callers serialize
+-- on the row and at most the ones that fit succeed.
+--
+-- The row is seeded on first use with the caller-supplied default cap, so enabling quota does not require
+-- a backfill and PR-4's existing grant path keeps working.
+create or replace function app.reserve_verification_quota(p_bytes bigint, p_default_cap_bytes bigint)
+returns boolean
+language plpgsql security definer set search_path = pg_catalog as $fn$
+declare
+  v_updated int;
+begin
+  if p_bytes is null or p_bytes < 0 then
+    raise exception 'reserve_verification_quota: bytes must be >= 0 (got %)', p_bytes using errcode = 'raise_exception';
+  end if;
+  if p_default_cap_bytes is null or p_default_cap_bytes < 0 then
+    raise exception 'reserve_verification_quota: default cap must be >= 0' using errcode = 'raise_exception';
+  end if;
+  if p_bytes = 0 then
+    return true;  -- a zero-byte artifact consumes no quota; nothing to serialize on
+  end if;
+
+  insert into public.verification_storage_quota (org_id, project_id, cap_bytes)
+  values (app.current_org_id(), app.current_project_id(), p_default_cap_bytes)
+  on conflict (org_id, project_id) do nothing;
+
+  update public.verification_storage_quota
+     set reserved_bytes = reserved_bytes + p_bytes,
+         updated_at = now()
+   where org_id = app.current_org_id()
+     and project_id = app.current_project_id()
+     and reserved_bytes + committed_bytes + p_bytes <= cap_bytes;
+  get diagnostics v_updated = row_count;
+  return v_updated = 1;
+end
+$fn$;
+alter function app.reserve_verification_quota(bigint, bigint) owner to verification_quota_agent;
+revoke all on function app.reserve_verification_quota(bigint, bigint) from public;
+grant execute on function app.reserve_verification_quota(bigint, bigint) to app_server;
+
+-- RELEASE A RESERVATION THAT WAS NEVER ATTACHED TO A GRANT.
+--
+-- Read this before assuming it violates Gate B, because it does not. Gate B forbids releasing a
+-- reservation for a grant that EXISTS and whose bytes might still land. This undoes a reservation taken
+-- moments earlier in the SAME transaction when the grant insert turned out to be a de-duplicated hit, so
+-- no new grant was created and no bytes can ever land against it. Without this, re-requesting an
+-- identical grant would silently consume quota every time.
+--
+-- It is deliberately not reachable on any other path: there is no timer, no expiry hook, and no caller
+-- outside the grant-issuance transaction.
+create or replace function app.release_verification_quota_reservation(p_bytes bigint)
+returns void
+language plpgsql security definer set search_path = pg_catalog as $fn$
+begin
+  if p_bytes is null or p_bytes <= 0 then
+    return;
+  end if;
+  update public.verification_storage_quota
+     set reserved_bytes = greatest(0, reserved_bytes - p_bytes),
+         updated_at = now()
+   where org_id = app.current_org_id()
+     and project_id = app.current_project_id();
+end
+$fn$;
+alter function app.release_verification_quota_reservation(bigint) owner to verification_quota_agent;
+revoke all on function app.release_verification_quota_reservation(bigint) from public;
+grant execute on function app.release_verification_quota_reservation(bigint) to app_server;
+
+-- FINALIZE. Moves bytes from reserved to committed and CHANGES THE TOTAL NOT AT ALL. The object now
+-- occupies storage and keeps counting against the cap; finalize frees nothing. This is the single most
+-- misread line of §4.6, so the arithmetic is deliberately symmetric and the test asserts the total.
+--
+-- Returns false when there was not enough reserved to move, which means the caller is finalizing
+-- something it never reserved (a double-finalize, or a grant from before quota was enabled). It does NOT
+-- invent committed bytes in that case.
+create or replace function app.finalize_verification_quota(p_bytes bigint)
+returns boolean
+language plpgsql security definer set search_path = pg_catalog as $fn$
+declare
+  v_updated int;
+begin
+  if p_bytes is null or p_bytes < 0 then
+    raise exception 'finalize_verification_quota: bytes must be >= 0 (got %)', p_bytes using errcode = 'raise_exception';
+  end if;
+  if p_bytes = 0 then
+    return true;
+  end if;
+  update public.verification_storage_quota
+     set reserved_bytes = reserved_bytes - p_bytes,
+         committed_bytes = committed_bytes + p_bytes,
+         updated_at = now()
+   where org_id = app.current_org_id()
+     and project_id = app.current_project_id()
+     and reserved_bytes >= p_bytes;
+  get diagnostics v_updated = row_count;
+  return v_updated = 1;
+end
+$fn$;
+alter function app.finalize_verification_quota(bigint) owner to verification_quota_agent;
+revoke all on function app.finalize_verification_quota(bigint) from public;
+grant execute on function app.finalize_verification_quota(bigint) to app_server;
+
+-- REFUND. The ONLY path by which committed_bytes ever decreases, and it is reachable ONLY from PR-7's
+-- confirmed-deletion function — app_server is deliberately NOT granted execute, so no request handler can
+-- return quota to itself. The bytes are given back because the object has been confirmed absent, not
+-- because a clock expired.
+create or replace function app.refund_verification_quota(p_bytes bigint)
+returns void
+language plpgsql security definer set search_path = pg_catalog as $fn$
+begin
+  if p_bytes is null or p_bytes <= 0 then
+    return;
+  end if;
+  -- greatest(0, …) is defence in depth: the committed_bytes >= 0 CHECK would refuse a negative outright,
+  -- and failing a purge confirmation over an accounting drift would be the wrong trade — the object IS
+  -- gone, and refusing here would strand the purge job open forever.
+  update public.verification_storage_quota
+     set committed_bytes = greatest(0, committed_bytes - p_bytes),
+         updated_at = now()
+   where org_id = app.current_org_id()
+     and project_id = app.current_project_id();
+end
+$fn$;
+alter function app.refund_verification_quota(bigint) owner to verification_quota_agent;
+revoke all on function app.refund_verification_quota(bigint) from public;
+grant execute on function app.refund_verification_quota(bigint) to verification_retention_agent;
