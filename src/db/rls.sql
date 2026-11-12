@@ -1317,10 +1317,6 @@ create constraint trigger trading_risk_checks_tenant_trg after insert or update 
 -- tables are applied. Same strict tenant predicate (org_id + project_id GUCs).
 do $$
 begin
-  if to_regclass('public.verification_upload_grants') is not null then
-    -- PR-6 seam: resolve each purged object's refundable byte count from its grant. Read-only.
-    grant select on verification_upload_grants to verification_retention_agent;
-  end if;
   if to_regclass('public.verification_requests') is not null then
     -- The verification CONTRACT is immutable: the app role may INSERT (create) and SELECT (read) only.
     -- Revoking UPDATE/DELETE prevents silent alteration of an existing contract at the grant layer
