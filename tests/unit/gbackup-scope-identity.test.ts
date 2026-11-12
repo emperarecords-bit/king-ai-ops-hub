@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { describe, expect, it , vi } from 'vitest';
-import { HEAVY_HOOK_TIMEOUT_MS, HEAVY_TEST_TIMEOUT_MS } from '../support/heavy-timeout';
+import { GIT_BLOB_WALK_TIMEOUT_MS, HEAVY_HOOK_TIMEOUT_MS, HEAVY_TEST_TIMEOUT_MS } from '../support/heavy-timeout';
 // #117: git-blob/DB-heavy test file — bounded timeout headroom under full-suite parallel contention (assertions unchanged).
 vi.setConfig({ testTimeout: HEAVY_TEST_TIMEOUT_MS, hookTimeout: HEAVY_HOOK_TIMEOUT_MS });
 import { canonicalizeV1 } from '@/lib/canonical';
@@ -71,7 +71,7 @@ describe('source-manifest repository identity is a canonical constant, matched e
     expect(() => buildSourceManifestFromGit('HEAD', 'drizzle', 'origin')).toThrow(MigrationReadError);
     expect(() => buildSourceManifestFromGit('HEAD', 'drizzle', 'someone-else/king-ai-ops-hub')).toThrow(MigrationReadError);
     expect(() => buildSourceManifestFromGit('HEAD', 'drizzle', 'https://github.com/emperarecords-bit/king-ai-ops-hub')).toThrow(MigrationReadError);
-  }, 15_000);
+  }, GIT_BLOB_WALK_TIMEOUT_MS);
 });
 
 describe('finalized inactive 0004 draft', () => {

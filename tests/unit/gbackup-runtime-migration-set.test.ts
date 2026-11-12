@@ -1,5 +1,5 @@
 import { describe, expect, it , vi } from 'vitest';
-import { HEAVY_HOOK_TIMEOUT_MS, HEAVY_TEST_TIMEOUT_MS } from '../support/heavy-timeout';
+import { GIT_BLOB_WALK_TIMEOUT_MS, HEAVY_HOOK_TIMEOUT_MS, HEAVY_TEST_TIMEOUT_MS } from '../support/heavy-timeout';
 // #117: git-blob/DB-heavy test file — bounded timeout headroom under full-suite parallel contention (assertions unchanged).
 vi.setConfig({ testTimeout: HEAVY_TEST_TIMEOUT_MS, hookTimeout: HEAVY_HOOK_TIMEOUT_MS });
 import { buildSourceManifestFromGit } from '../../scripts/backup/source-manifest';
@@ -48,5 +48,5 @@ describe('G-Backup-B1 runtime migration-set hash', () => {
     expect(runtime.entries.length).toBeGreaterThan(0);
     const portable = buildSourceManifestFromGit('HEAD', 'drizzle').sourceMigrationSetHash;
     expect(runtime.runtimeMigrationSetHash).not.toBe(portable); // two distinct, non-conflated hashes
-  }, 15_000);
+  }, GIT_BLOB_WALK_TIMEOUT_MS);
 });

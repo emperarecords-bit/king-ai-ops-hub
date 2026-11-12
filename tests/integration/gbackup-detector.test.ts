@@ -5,7 +5,7 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { HEAVY_HOOK_TIMEOUT_MS, HEAVY_TEST_TIMEOUT_MS } from '../support/heavy-timeout';
+import { GIT_BLOB_WALK_TIMEOUT_MS, HEAVY_HOOK_TIMEOUT_MS, HEAVY_TEST_TIMEOUT_MS } from '../support/heavy-timeout';
 import { EXPECTED_DRIZZLE_VERSION, computeExpectedMigrations, installedDrizzleVersion } from '../../scripts/backup/migration-hash';
 // #117: git-blob/DB-heavy integration file (buildSourceManifestFromGit + migrate) — bounded timeout headroom under
 // full-suite parallel contention (assertions unchanged). This completes PR #126, which patched the fast
@@ -78,7 +78,7 @@ describe('G-Backup-A hash mirror — drizzle equivalence + portable source manif
     expect(r.unknownHistoricalMismatches).toBe(0);
     expect(r.unknownDatabaseDivergences).toBe(0);
     expect(r.variantDetails.map((v) => v.idx).sort((a, b) => a - b)).toEqual([4, 53]);
-  });
+  }, GIT_BLOB_WALK_TIMEOUT_MS);
 });
 
 // ---------------------------------------------------------------------------

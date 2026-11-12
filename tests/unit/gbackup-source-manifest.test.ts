@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it , vi } from 'vitest';
-import { HEAVY_HOOK_TIMEOUT_MS, HEAVY_TEST_TIMEOUT_MS } from '../support/heavy-timeout';
+import { GIT_BLOB_WALK_TIMEOUT_MS, HEAVY_HOOK_TIMEOUT_MS, HEAVY_TEST_TIMEOUT_MS } from '../support/heavy-timeout';
 // #117: git-blob/DB-heavy test file — bounded timeout headroom under full-suite parallel contention (assertions unchanged).
 vi.setConfig({ testTimeout: HEAVY_TEST_TIMEOUT_MS, hookTimeout: HEAVY_HOOK_TIMEOUT_MS });
 import { MigrationReadError } from '../../scripts/backup/migration-hash';
@@ -33,7 +33,7 @@ describe('G-Backup-A portable source manifest (Git-blob identity)', () => {
     // Building at the same commit twice is identical regardless of local checkout line endings.
     const again = buildSourceManifestFromGit('HEAD', 'drizzle');
     expect(again.sourceMigrationSetHash).toBe(manifest.sourceMigrationSetHash);
-  });
+  }, GIT_BLOB_WALK_TIMEOUT_MS);
 
   it('serialize → parse round-trips and re-verifies the set-hash', () => {
     const s = serializeSourceManifest(manifest);
