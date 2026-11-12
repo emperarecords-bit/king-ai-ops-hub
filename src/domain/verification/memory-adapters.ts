@@ -25,6 +25,8 @@ import type {
   PurgeJobStore,
   PurgeReason,
   RetentionObjectDeleter,
+  QuotaStore,
+  QuotaUsage,
 } from './ports';
 
 const scope = (orgId: string, projectId: string, ...parts: string[]) => [orgId, projectId, ...parts].join('|');
@@ -470,5 +472,53 @@ export class FakeRetentionObjectDeleter implements RetentionObjectDeleter {
       this.failures.set(objectKey, left - 1);
       throw new Error(`transient provider failure for ${objectKey}`);
     }
+  }
+}
+
+/**
+ * VER-002 PR-6 — in-memory quota, faithful to the SQL rather than convenient. In particular it
+ * reproduces the two properties a convenient fake would get wrong:
+ *   - reserve refuses at the cap and leaves the counters untouched on refusal, and
+ *   - finalize moves reserved → committed WITHOUT changing the total charged (finalize frees nothing).
+ * There is no timer and no expiry hook, because the real one has none either (Gate B).
+ */
+export class InMemoryQuotaStore implements QuotaStore {
+  private cap: number | null = null;
+  private reserved = 0;
+  private committed = 0;
+
+  constructor(private readonly capOverride?: number) {}
+
+  async reserve(bytes: number, defaultCapBytes: number): Promise<boolean> {
+    if (bytes < 0) throw new Error('reserve: bytes must be >= 0');
+    if (bytes === 0) return true;
+    if (this.cap === null) this.cap = this.capOverride ?? defaultCapBytes; // seeded on first use
+    if (this.reserved + this.committed + bytes > this.cap) return false; // refusal changes nothing
+    this.reserved += bytes;
+    return true;
+  }
+
+  async release(bytes: number): Promise<void> {
+    if (bytes <= 0) return;
+    this.reserved = Math.max(0, this.reserved - bytes);
+  }
+
+  async finalize(bytes: number): Promise<boolean> {
+    if (bytes < 0) throw new Error('finalize: bytes must be >= 0');
+    if (bytes === 0) return true;
+    if (this.reserved < bytes) return false; // nothing reserved to move; invent no committed bytes
+    this.reserved -= bytes;
+    this.committed += bytes;
+    return true;
+  }
+
+  async usage(): Promise<QuotaUsage | null> {
+    if (this.cap === null) return null;
+    return { capBytes: this.cap, reservedBytes: this.reserved, committedBytes: this.committed };
+  }
+
+  /** Test-only: the refund PR-7 performs when an object is confirmed gone. */
+  refund(bytes: number): void {
+    this.committed = Math.max(0, this.committed - bytes);
   }
 }

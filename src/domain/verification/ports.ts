@@ -249,3 +249,35 @@ export interface PurgeJobStore {
 export interface RetentionObjectDeleter {
   delete(objectKey: string, versionId: string | null): Promise<void>;
 }
+
+// -- VER-002 PR-6: aggregate storage quota -----------------------------------
+// Design §4.6 as corrected by Gate B. Tenant-scoped like everything else here: the quota row is keyed by
+// (org, project) and reached only with the tenant GUCs set.
+
+export interface QuotaUsage {
+  readonly capBytes: number;
+  /** Bytes that may still land: granted, not yet finalized. Never released by a timer. */
+  readonly reservedBytes: number;
+  /** Bytes that HAVE landed. Freed only when retention deletes the object. */
+  readonly committedBytes: number;
+}
+
+/**
+ * The quota counter. Note what is absent: nothing here raises the cap, and nothing refunds committed
+ * bytes. Refunds are reachable only from PR-7's confirmed-deletion path, under the retention role, so a
+ * request handler cannot return quota to itself.
+ */
+export interface QuotaStore {
+  /**
+   * Atomically reserve `bytes` if the result still fits under the cap, seeding the tenant's row with
+   * `defaultCapBytes` on first use. True = reserved, false = would exceed the cap. This is one
+   * conditional UPDATE, so there is no read-then-write race: concurrent callers serialize on the row.
+   */
+  reserve(bytes: number, defaultCapBytes: number): Promise<boolean>;
+  /** Undo a reservation whose grant was never created (same-transaction correction, NOT reclamation). */
+  release(bytes: number): Promise<void>;
+  /** Move bytes reserved -> committed. The TOTAL charged is unchanged: finalize frees nothing. */
+  finalize(bytes: number): Promise<boolean>;
+  /** Read-only, for display and for tests to assert the arithmetic. */
+  usage(): Promise<QuotaUsage | null>;
+}

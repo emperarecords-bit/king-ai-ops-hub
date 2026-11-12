@@ -24,6 +24,10 @@ export * from './artifacts-availability';
 export * from './ports';
 export * from './ingest';
 export * from './upload-grant';
+// VER-002 PR-7 retention lifecycle / PR-6 aggregate quota. (retention was reachable only by relative
+// path when PR-7 landed; exporting both keeps the public surface consistent.)
+export * from './retention';
+export * from './quota';
 export * from './approval-details';
 export * from './view';
 export * from './memory-adapters';
