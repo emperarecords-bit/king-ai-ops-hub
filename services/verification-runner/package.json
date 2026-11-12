@@ -1,0 +1,12 @@
+{
+  "name": "king-verification-runner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "VER-002 PR-8 — reference external runner: out-of-tree execution harness + attestation client for the Hub's verification contracts.",
+  "type": "module",
+  "bin": { "king-verification-runner": "./src/cli.ts" },
+  "scripts": {
+    "harness": "tsx src/cli.ts harness",
+    "attest": "tsx src/cli.ts attest"
+  }
+}
