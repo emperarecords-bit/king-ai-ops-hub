@@ -42,6 +42,10 @@ const AUTH = { userId: 'u1', projects: PROJECTS, orgRoles: new Map([['o1', 'owne
 beforeEach(() => {
   vi.clearAllMocks();
   process.env.ACCURATEBIDS_SIGHT_PROJECT_KEYS = 'empera,member-ws';
+  // Connected now means listed AND holding a usable token (accuratebids-tokens.ts): each
+  // workspace reaches its own AccurateBids contractor account, so a listed workspace with no
+  // token is deliberately NOT connected. No allowlist here, so the shared token covers both.
+  process.env.ACCURATEBIDS_SERVICE_TOKEN = 'test-service-token';
   h.fetchAccurateBidsRecords.mockResolvedValue({
     quotes: [{ id: QUOTE, job_name: 'Condenser swap', customer_name: 'Pat', status: 'draft', grand_total: 4200, has_email: true }],
     invoices: [

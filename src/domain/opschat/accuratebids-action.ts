@@ -16,6 +16,7 @@ import {
   accurateBidsSendPayloadSchema,
 } from '@/domain/execution/accuratebids-quote-executor';
 import { sightDepsFromEnv, sightEnabledKeys, type AccurateBidsSightDeps } from '@/domain/integrations/accuratebids-sight';
+import { hasServiceToken } from '@/domain/integrations/accuratebids-tokens';
 
 /**
  * Ops Chat → AccurateBids bridge (owner directive 2026-10-19: "do the quotes … do the invoice …
@@ -59,9 +60,16 @@ export function parseAccurateBidsOpsChatPayload(input: unknown): AccurateBidsOps
   return r.data as AccurateBidsOpsChatPayload;
 }
 
-/** Is this workspace connected to the owner's AccurateBids account? */
+/**
+ * Is this workspace connected to an AccurateBids account?
+ *
+ * Both halves are required: named in ACCURATEBIDS_SIGHT_PROJECT_KEYS, AND holding a token it is
+ * entitled to use. A workspace listed without a usable token reads as not connected, so Ops Chat
+ * says so up front instead of drafting a quote that the executor refuses — or, worse, one that
+ * defaults onto another contractor's account. See accuratebids-tokens.ts.
+ */
 export function accurateBidsEnabledFor(projectKey: string, env: Record<string, string | undefined> = process.env): boolean {
-  return sightEnabledKeys(env).includes(projectKey);
+  return sightEnabledKeys(env).includes(projectKey) && hasServiceToken(projectKey, env);
 }
 
 /** The one-line summary stored on the approval (what the owner confirmed). */
@@ -147,8 +155,15 @@ export interface AccurateBidsRecords {
 
 const pick = (o: Record<string, unknown>, keys: readonly string[]) => Object.fromEntries(keys.filter((k) => k in o).map((k) => [k, o[k]]));
 
-/** The owner's newest quotes and invoices (with ids) from hub-snapshot. Read-only; null when unavailable. */
-export async function fetchAccurateBidsRecords(deps: AccurateBidsSightDeps = sightDepsFromEnv()): Promise<AccurateBidsRecords | null> {
+/**
+ * This workspace's newest quotes and invoices (with ids) from hub-snapshot. Read-only; null when
+ * unavailable. `projectKey` selects whose book is returned — omit it only where no workspace is
+ * in hand, since the shared token then decides, which is what per-workspace routing exists to end.
+ */
+export async function fetchAccurateBidsRecords(
+  projectKey?: string,
+  deps: AccurateBidsSightDeps = sightDepsFromEnv(projectKey),
+): Promise<AccurateBidsRecords | null> {
   if (!deps.snapshotUrl || !deps.serviceToken) return null;
   try {
     const res = await (deps.fetcher ?? fetch)(deps.snapshotUrl, {

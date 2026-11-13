@@ -36,7 +36,7 @@ describe('accuratebids sight', () => {
       'empera-air-conditioning-and-heating',
       'accuratebids-com',
     ]);
-    expect(sightDepsFromEnv({}).snapshotUrl).toBeUndefined();
+    expect(sightDepsFromEnv(undefined, {}).snapshotUrl).toBeUndefined();
   });
 
   it('formats the briefing with pipeline, money, deposits, and open balances', () => {

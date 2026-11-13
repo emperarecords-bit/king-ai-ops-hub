@@ -1,7 +1,7 @@
 import 'server-only';
 import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { approvals, auditLogs, tasks } from '@/db/schema';
+import { approvals, auditLogs, projects, tasks } from '@/db/schema';
 import { type DbTx } from '@/db/client';
 import { acquireAuditWriteLock, writeAudit } from '@/domain/audit/audit';
 import { getGitHubClient } from '@/domain/github/client';
@@ -13,6 +13,7 @@ import { getVercelMutationClient } from '@/domain/vercel/client';
 import { listVercelProjectLinks } from '@/domain/vercel/links';
 import { VercelMutationExecutor } from '@/domain/vercel/mutation-executor';
 import { canonicalJson } from '@/orchestration/actions';
+import { resolveServiceToken, type ResolvedServiceToken } from '@/domain/integrations/accuratebids-tokens';
 import { sha256Hex } from '@/lib/crypto';
 import { type TenantContext } from '@/types/domain';
 import {
@@ -92,6 +93,31 @@ const ALLOWED_RISKS = new Set(['reversible_internal_write', 'external_reversible
 const noop = new NoopDryRunExecutor();
 
 /**
+ * Which AccurateBids contractor account THIS approval's workspace bills.
+ *
+ * Resolved inside the dispatch transaction because the workspace is a property of the action, not
+ * of the process: Hill Street Construction and Empera Air Conditioning share one deployment and
+ * must reach different AccurateBids accounts. AccurateBids identifies the contractor from the
+ * bearer token alone, so an unresolvable workspace returns 'none' and the executor refuses —
+ * falling back to the shared token would file the work under whichever contractor owns it, which
+ * is precisely the misrouting this exists to prevent. The lookup is tenant-scoped like every other
+ * read here, so an RLS-empty result is indistinguishable from a missing row, and both refuse.
+ */
+async function loadAccurateBidsToken(tx: DbTx, ctx: TenantContext): Promise<ResolvedServiceToken> {
+  try {
+    const rows = await tx
+      .select({ key: projects.key })
+      .from(projects)
+      .where(eq(projects.id, ctx.projectId))
+      .limit(1);
+    const key = rows[0]?.key;
+    return key ? resolveServiceToken(key) : { token: undefined, source: 'none' };
+  } catch {
+    return { token: undefined, source: 'none' };
+  }
+}
+
+/**
  * Resolve the executor for an action type. The registry is deliberately explicit — an action type
  * with no entry here can never execute, whatever the payload claims.
  */
@@ -100,7 +126,12 @@ function resolveExecutor(tx: DbTx, ctx: TenantContext, actionType: string): Exec
     return new GitPrExecutor({ client: getGitHubClient(), loadLinks: () => listRepoLinks(tx, ctx) });
   }
   if (actionType === 'org_delegation') return new OrgDelegationExecutor({ tx, ctx });
-  if (actionType === 'external_http') return new AccurateBidsQuoteExecutor(accurateBidsDepsFromEnv());
+  if (actionType === 'external_http') {
+    return new AccurateBidsQuoteExecutor({
+      ...accurateBidsDepsFromEnv(),
+      loadServiceToken: () => loadAccurateBidsToken(tx, ctx),
+    });
+  }
   if (actionType === 'supabase_deploy') {
     return new SupabaseDeployExecutor({
       github: getGitHubClient(),

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { accurateBidsCapabilityContext } from '@/domain/opschat/accuratebids-capabilities';
+import { accurateBidsEnabledFor } from '@/domain/opschat/accuratebids-action';
 
 /**
  * Turn-start AccurateBids capabilities: derived from configuration presence only (never values),
@@ -53,5 +54,39 @@ describe('accurateBidsCapabilityContext', () => {
   it('no service token → nothing is available (every call would be refused)', () => {
     const t = accurateBidsCapabilityContext({ ...FULL, ACCURATEBIDS_SERVICE_TOKEN: '' })!;
     expect(t).not.toMatch(/: AVAILABLE/);
+  });
+
+  /**
+   * Hill Street Construction (owner direction 2026-11-13) is a second contractor account sharing
+   * this deployment. Listing it before its token exists must not make Ops Chat offer to quote for
+   * it: the action would be refused at execution, and the failure mode it guards against — the
+   * work quietly billing Empera's account — is the reason the whole change exists.
+   */
+  const TWO = {
+    ...FULL,
+    ACCURATEBIDS_SIGHT_PROJECT_KEYS: 'empera-air-conditioning-and-heating, empera-home-improvement',
+    ACCURATEBIDS_DEFAULT_TOKEN_KEYS: 'empera-air-conditioning-and-heating',
+  };
+
+  it('a listed workspace with no usable token is named as NOT connected', () => {
+    const t = accurateBidsCapabilityContext(TWO)!;
+    expect(t).toMatch(/Connected workspace key\(s\): empera-air-conditioning-and-heating\./);
+    expect(t).toMatch(/Listed but NOT connected yet: empera-home-improvement/);
+    expect(t).toMatch(/do not route their work through a connected workspace/);
+    expect(accurateBidsEnabledFor('empera-home-improvement', TWO)).toBe(false);
+    expect(accurateBidsEnabledFor('empera-air-conditioning-and-heating', TWO)).toBe(true);
+  });
+
+  it('setting its own token moves it to connected, and never prints the value', () => {
+    const wired = { ...TWO, ACCURATEBIDS_SERVICE_TOKEN__EMPERA_HOME_IMPROVEMENT: 'hill-street-token' };
+    const t = accurateBidsCapabilityContext(wired)!;
+    expect(t).toMatch(/Connected workspace key\(s\): empera-air-conditioning-and-heating, empera-home-improvement/);
+    expect(t).not.toMatch(/NOT connected yet/);
+    expect(t).not.toContain('hill-street-token');
+    expect(accurateBidsEnabledFor('empera-home-improvement', wired)).toBe(true);
+  });
+
+  it('a workspace not listed at all stays off, token or no token', () => {
+    expect(accurateBidsEnabledFor('kodisnap', { ...TWO, ACCURATEBIDS_SERVICE_TOKEN__KODISNAP: 'x' })).toBe(false);
   });
 });

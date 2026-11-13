@@ -1,4 +1,5 @@
 import { sightEnabledKeys } from '@/domain/integrations/accuratebids-sight';
+import { hasServiceToken } from '@/domain/integrations/accuratebids-tokens';
 
 /**
  * What Ops Chat can do in AccurateBids RIGHT NOW, stated at the start of every turn.
@@ -16,12 +17,17 @@ import { sightEnabledKeys } from '@/domain/integrations/accuratebids-sight';
 export function accurateBidsCapabilityContext(env: Record<string, string | undefined> = process.env): string | null {
   const keys = sightEnabledKeys(env);
   if (keys.length === 0) return null;
-  const token = Boolean(env.ACCURATEBIDS_SERVICE_TOKEN);
+  // A workspace is connected only if it also holds a token it may use: each workspace reaches its
+  // OWN AccurateBids account, and one listed without a token would otherwise look available here
+  // and then be refused at execution — or silently bill another contractor. See accuratebids-tokens.ts.
+  const connected = keys.filter((k) => hasServiceToken(k, env));
+  const pending = keys.filter((k) => !hasServiceToken(k, env));
+  const token = connected.length > 0;
   const on = (url: string | undefined) => (token && Boolean(url) ? 'AVAILABLE' : 'NOT CONFIGURED in this release');
   const send = on(env.ACCURATEBIDS_SEND_URL);
   const lines = [
     `=== ACCURATEBIDS CAPABILITIES (current release — authoritative for this turn) ===`,
-    `Connected workspace key(s): ${keys.join(', ')}. Every action below is a confirm card; nothing happens until the owner clicks Confirm.`,
+    `Connected workspace key(s): ${connected.join(', ') || 'none yet'}. Each one acts as its own AccurateBids contractor account — never mix their records. Every action below is a confirm card; nothing happens until the owner clicks Confirm.`,
     `- Draft a quote (propose_accuratebids_quote): ${on(env.ACCURATEBIDS_QUOTE_URL)}.`,
     `- Create an invoice, from a quote or direct (propose_accuratebids_invoice): ${on(env.ACCURATEBIDS_INVOICE_URL)}.`,
     `- Email an invoice, a payment reminder, or a quote to the customer (propose_accuratebids_send): ${send}.`,
@@ -29,6 +35,11 @@ export function accurateBidsCapabilityContext(env: Record<string, string | undef
   if (send === 'AVAILABLE') {
     lines.push(
       `  - Invoice with NO email on file (has_email false): SUPPORTED. Take the customer's address from the owner, from one they already typed in this chat, or from a document they uploaded here (say which file - the card shows the address either way); ask only if none of those has it. Pass it as customer_email — on Confirm it is saved to that invoice and the invoice is emailed. An address already on file is never replaced; a quote's email must be added in AccurateBids.`,
+    );
+  }
+  if (pending.length > 0) {
+    lines.push(
+      `Listed but NOT connected yet: ${pending.join(', ')}. Their AccurateBids account is not wired to this server, so quotes, invoices and sends for them would be refused. Say that plainly if asked — do not route their work through a connected workspace.`,
     );
   }
   lines.push(

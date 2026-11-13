@@ -2,6 +2,11 @@ import { z } from 'zod';
 import { sha256Hex } from '@/lib/crypto';
 import { canonicalJson } from '@/orchestration/actions';
 import {
+  NO_TOKEN_FOR_WORKSPACE,
+  resolveServiceToken,
+  type ResolvedServiceToken,
+} from '@/domain/integrations/accuratebids-tokens';
+import {
   type Executor,
   type ExecutorAction,
   type ExecutorCapability,
@@ -177,17 +182,30 @@ export interface AccurateBidsQuoteExecutorDeps {
   readonly sendUrl?: string | undefined;
   /** The machine service token AccurateBids minted for the hub. Never a human login. */
   readonly serviceToken: string | undefined;
+  /**
+   * Resolve the token for THIS action's workspace, at execute time.
+   *
+   * AccurateBids resolves the contractor account from the bearer token alone, so this is the one
+   * thing deciding whose books an invoice lands in. It is a loader rather than a value because the
+   * workspace is only known per action (dispatch looks its key up in the same transaction), and it
+   * follows the loader idiom the sibling executors already use for per-project config. Absent, the
+   * flat `serviceToken` is used — which is what every existing test and call site does.
+   */
+  readonly loadServiceToken?: () => Promise<ResolvedServiceToken>;
   readonly fetcher?: typeof fetch;
   readonly now?: () => Date;
 }
 
-export function accurateBidsDepsFromEnv(env: Record<string, string | undefined> = process.env): AccurateBidsQuoteExecutorDeps {
+export function accurateBidsDepsFromEnv(
+  projectKey?: string,
+  env: Record<string, string | undefined> = process.env,
+): AccurateBidsQuoteExecutorDeps {
   return {
     endpointUrl: env.ACCURATEBIDS_QUOTE_URL,
     replyUrl: env.ACCURATEBIDS_REPLY_URL,
     invoiceUrl: env.ACCURATEBIDS_INVOICE_URL,
     sendUrl: env.ACCURATEBIDS_SEND_URL,
-    serviceToken: env.ACCURATEBIDS_SERVICE_TOKEN,
+    serviceToken: resolveServiceToken(projectKey, env).token,
   };
 }
 
@@ -230,12 +248,24 @@ export class AccurateBidsQuoteExecutor implements Executor {
       return result('blocked', 'Payload integrity re-verification failed at the executor.', null);
     }
 
+    // WHOSE AccurateBids account this action bills, resolved once for every branch below. The
+    // token IS the contractor identity on the AccurateBids side, so a wrong or defaulted token
+    // silently files a workspace's quote or invoice under another contractor. 'none' means we
+    // could not establish the workspace's entitlement — refuse rather than guess.
+    const resolvedToken = this.deps.loadServiceToken
+      ? await this.deps.loadServiceToken()
+      : ({ token: this.deps.serviceToken, source: 'default' } as const);
+    if (resolvedToken.source === 'none') {
+      return result('blocked', NO_TOKEN_FOR_WORKSPACE, null);
+    }
+    const serviceToken = resolvedToken.token;
+
     // Email Desk: an approved support-inquiry reply routes to its own endpoint.
     const kindPeek = (action.payload as Record<string, unknown>).kind;
 
     // Customer send (invoice / reminder / quote) — routes to hub-send, keyed by the approval.
     if (kindPeek === 'accuratebids_send') {
-      return this.executeSend(action, result);
+      return this.executeSend(action, result, serviceToken);
     }
     if (kindPeek === 'accuratebids_reply') {
       const replyParsed = accurateBidsReplyPayloadSchema.safeParse(action.payload);
@@ -243,7 +273,7 @@ export class AccurateBidsQuoteExecutor implements Executor {
         const issues = replyParsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
         return result('blocked', `accuratebids_reply payload is not executable: ${issues}`, null);
       }
-      if (!this.deps.replyUrl || !this.deps.serviceToken) {
+      if (!this.deps.replyUrl || !serviceToken) {
         return result('blocked', 'The AccurateBids Email Desk is not configured on this server.', null);
       }
       const rp = replyParsed.data;
@@ -255,7 +285,7 @@ export class AccurateBidsQuoteExecutor implements Executor {
         const fetcher = this.deps.fetcher ?? fetch;
         const res = await fetcher(this.deps.replyUrl, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${this.deps.serviceToken}`, 'Content-Type': 'application/json' },
+          headers: { Authorization: `Bearer ${serviceToken}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ request_id: rp.request_id, reply_text: rp.reply_text }),
           signal: AbortSignal.timeout(15_000),
         });
@@ -291,7 +321,7 @@ export class AccurateBidsQuoteExecutor implements Executor {
         const issues = invParsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
         return result('blocked', `accuratebids_invoice payload is not executable: ${issues}`, null);
       }
-      if (!this.deps.invoiceUrl || !this.deps.serviceToken) {
+      if (!this.deps.invoiceUrl || !serviceToken) {
         return result('blocked', 'AccurateBids invoicing is not configured on this server.', null);
       }
       const inv = invParsed.data;
@@ -310,7 +340,7 @@ export class AccurateBidsQuoteExecutor implements Executor {
         const fetcher = this.deps.fetcher ?? fetch;
         const res = await fetcher(this.deps.invoiceUrl, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${this.deps.serviceToken}`, 'Content-Type': 'application/json' },
+          headers: { Authorization: `Bearer ${serviceToken}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(invBody),
           signal: AbortSignal.timeout(15_000),
         });
@@ -355,7 +385,7 @@ export class AccurateBidsQuoteExecutor implements Executor {
       );
     }
     const payload = parsed.data;
-    if (!this.deps.endpointUrl || !this.deps.serviceToken) {
+    if (!this.deps.endpointUrl || !serviceToken) {
       return result('blocked', 'The AccurateBids connection is not configured on this server.', null);
     }
 
@@ -378,7 +408,7 @@ export class AccurateBidsQuoteExecutor implements Executor {
       const res = await fetcher(this.deps.endpointUrl, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${this.deps.serviceToken}`,
+          Authorization: `Bearer ${serviceToken}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(body),
@@ -429,13 +459,15 @@ export class AccurateBidsQuoteExecutor implements Executor {
       preview: Record<string, unknown> | null,
       opts?: { reconciliation?: ExecutorResult['reconciliation']; retryAllowed?: boolean },
     ) => ExecutorResult,
+    /** Already resolved for this action's workspace by execute() — never re-read from deps. */
+    serviceToken: string | undefined,
   ): Promise<ExecutorResult> {
     const parsed = accurateBidsSendPayloadSchema.safeParse(action.payload);
     if (!parsed.success) {
       const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
       return result('blocked', `accuratebids_send payload is not executable: ${issues}`, null);
     }
-    if (!this.deps.sendUrl || !this.deps.serviceToken) {
+    if (!this.deps.sendUrl || !serviceToken) {
       return result('blocked', 'Sending to customers through AccurateBids is not configured on this server.', null);
     }
     const p = parsed.data;
@@ -458,7 +490,7 @@ export class AccurateBidsQuoteExecutor implements Executor {
       const fetcher = this.deps.fetcher ?? fetch;
       const res = await fetcher(this.deps.sendUrl, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${this.deps.serviceToken}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${serviceToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           kind: p.send,
           ...(p.send === 'quote' ? { quote_id: p.quote_id } : { invoice_id: p.invoice_id }),
