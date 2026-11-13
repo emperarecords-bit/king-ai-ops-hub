@@ -111,3 +111,28 @@ describe('Ops Chat page — loads the conversation and its pending turn from the
     expect(PAGE).toMatch(/pendingTurn=\{pendingTurn\}/);
   });
 });
+
+describe('Ops Chat composer — camera and file pickers stay SEPARATE inputs', () => {
+  /**
+   * Field use (owner request 2026-11-13). `capture` must never be added to the 📎 picker: on iOS and
+   * Android it narrows that picker to the live camera, so PDFs and existing photos can no longer be
+   * chosen. Two inputs give one-tap snapping AND document/library uploads. This guard exists because
+   * merging them back into one input looks like a tidy-up and silently costs the owner PDF uploads.
+   */
+  it('the ATTACHMENT_ACCEPT picker has no capture attribute', () => {
+    const picker = body(CLIENT, 'ref={fileInputRef}', '/>');
+    expect(picker).toContain('accept={ATTACHMENT_ACCEPT}');
+    expect(picker).not.toContain('capture');
+  });
+
+  it('the camera input is image-only, rear-facing, and the only capture in the file', () => {
+    const camera = body(CLIENT, 'ref={cameraInputRef}', '/>');
+    expect(camera).toContain('accept="image/*"');
+    expect(camera).toContain('capture="environment"');
+    expect((CLIENT.match(/capture="environment"/g) ?? []).length).toBe(1);
+  });
+
+  it('both inputs feed the same upload path, so the server validates camera photos identically', () => {
+    expect((CLIENT.match(/void addFiles\(e\.target\.files\);/g) ?? []).length).toBe(2);
+  });
+});

@@ -900,6 +900,10 @@ export function OpsChatClient({
   // Files uploaded into this conversation for the NEXT send (uploaded immediately, sent with the message).
   const [composerFiles, setComposerFiles] = useState<ComposerFile[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Field use (owner request 2026-11-13): a SEPARATE camera input. `capture` must never go on the 📎
+  // picker — on iOS/Android it narrows that picker to the camera and blocks choosing a PDF or an
+  // existing photo. Two inputs keep one-tap snapping AND full library/document uploads.
+  const cameraInputRef = useRef<HTMLInputElement>(null);
   const [streaming, setStreaming] = useState(false);
   const [toolActivity, setToolActivity] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1798,6 +1802,29 @@ export function OpsChatClient({
               className="rounded border border-[var(--border)] px-2 py-1 text-sm hover:opacity-80 disabled:opacity-40"
             >
               📎
+            </button>
+            <input
+              ref={cameraInputRef}
+              type="file"
+              multiple
+              accept="image/*"
+              capture="environment"
+              className="hidden"
+              onChange={(e) => {
+                void addFiles(e.target.files);
+                e.target.value = '';
+              }}
+            />
+            <button
+              type="button"
+              data-testid="attach-camera"
+              aria-label="Take a photo"
+              title="Take a photo with the rear camera"
+              disabled={streaming || !!pending || uploading}
+              onClick={() => cameraInputRef.current?.click()}
+              className="rounded border border-[var(--border)] px-2 py-1 text-sm hover:opacity-80 disabled:opacity-40"
+            >
+              📷
             </button>
             {dictation.supported ? (
               <button

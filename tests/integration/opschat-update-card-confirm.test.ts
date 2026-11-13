@@ -14,6 +14,10 @@ import { agents, memberships, opsChatProposals, organizations, ownerQuestions, p
  * DB (only the session guard is stubbed: requireUser/requireTenant return the seeded owner). The card froze the
  * original task's latest run + post-run decisions when prepared; if the job changed before the owner confirms, the
  * card must go STALE with a plain reason and NOTHING may be created.
+ *
+ * ONE exception (owner request 2026-11-13): decisions ADDED since the card was prepared are folded in instead of
+ * refused — the instructions are rebuilt in the confirming transaction so the run carries all of them. A decision
+ * that DISAPPEARED, a re-run, or an already-confirmed sibling card all still make it stale (cases 1, 3, withdrawn).
  */
 
 const h = vi.hoisted(() => ({ ctx: null as unknown as { userId: string; orgId: string; projectId: string; orgRole: string; projectRole: string } }));
@@ -121,14 +125,24 @@ describe.skipIf(!available)('update card — confirm-time freshness (real confir
     expect(await cardRow(cardId)).toMatchObject({ state: 'stale' });
   });
 
-  it('2. ONE more owner answer after the card was prepared → stale, nothing created', async () => {
+  it('2. ONE more owner answer after the card was prepared → confirms, and the LATE answer is folded into the run', async () => {
+    // Owner request 2026-11-13: this used to go stale, which made the documented flow self-defeating — the
+    // prompt tells Ops Chat to record decisions in the SAME reply that prepares the card. An addition is now
+    // folded in by rebuilding the instructions at confirm time, so the run carries the late answer too.
     const s = await scenario('answer');
     const cardId = await s.store();
     await db.insert(ownerQuestions).values({ orgId: owner.orgId, projectId: owner.projectId, taskId: s.taskId, runId: s.runId, agentId, question: 'Blocker 3?', status: 'answered', answer: 'Late answer', answeredBy: owner.userId, answeredAt: new Date() });
     const r = await confirm(cardId);
-    expect(r.json.state).toBe('stale');
-    expect(r.json.error).toMatch(/no longer current.*decisions after the card was prepared/);
-    expect(await tasksFromCard(cardId)).toHaveLength(0);
+    expect(r).toMatchObject({ status: 200, json: { state: 'done' } });
+    // Reported, so the reply can tell the owner the run differs from the card they read.
+    expect((r.json as { executed: { addedDecisions: number } }).executed.addedDecisions).toBe(1);
+    const made = await tasksFromCard(cardId);
+    expect(made).toHaveLength(1);
+    const input = (await db.select({ input: tasks.input }).from(tasks).where(eq(tasks.id, made[0]!.id)))[0]!.input;
+    // The card froze Answers 1-2; the rebuilt instructions carry all three, not the frozen subset.
+    expect(input).toContain('Answer 1');
+    expect(input).toContain('Answer 2');
+    expect(input).toContain('Late answer');
   });
 
   it('3. another update card for the same task already CONFIRMED → this one goes stale, nothing created', async () => {
