@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server';
+import { safeNext } from '@/lib/safe-next';
 import { createServerClient } from '@supabase/ssr';
 
 /**
@@ -114,8 +115,14 @@ export async function middleware(request: NextRequest) {
       );
     }
     const redirect = request.nextUrl.clone();
+    // Carry the REQUESTED destination through sign-in. Without this the path is thrown away and
+    // login lands on a hardcoded page — which silently defeated the PWA's start_url (/ops): every
+    // cold launch from the home screen bounced through /login and came back somewhere else.
+    // safeNext() rejects off-origin and loop-inducing values, so only a real in-app path survives.
+    const wanted = safeNext(`${pathname}${request.nextUrl.search}`, '');
     redirect.pathname = '/login';
     redirect.search = '';
+    if (wanted !== '' && wanted !== '/') redirect.searchParams.set('next', wanted);
     const redirectResponse = NextResponse.redirect(redirect);
     redirectResponse.headers.set('content-security-policy', csp);
     return redirectResponse;

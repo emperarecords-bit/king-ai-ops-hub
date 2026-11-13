@@ -5,7 +5,7 @@ import { signIn, signUp, type AuthFormState } from './actions';
 
 const initialState: AuthFormState = { error: null };
 
-export function LoginForm() {
+export function LoginForm({ next }: { next: string }) {
   const [mode, setMode] = useState<'sign-in' | 'sign-up'>('sign-in');
   const [state, formAction, pending] = useActionState(
     mode === 'sign-in' ? signIn : signUp,
@@ -14,6 +14,9 @@ export function LoginForm() {
 
   return (
     <form action={formAction} className="space-y-4">
+      {/* Where to land after auth. Already validated server-side by safeNext(); the action
+          re-validates the submitted value, since a hidden field is attacker-editable. */}
+      <input type="hidden" name="next" value={next} />
       {/* Segmented mode switch — sign-up must be discoverable at a glance,
           not a footnote (Sprint 3 M3 UX fix; the owner missed the old link). */}
       <div

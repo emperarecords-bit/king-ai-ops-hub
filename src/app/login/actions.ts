@@ -3,6 +3,7 @@
 import { redirect } from 'next/navigation';
 import { z } from 'zod';
 import { createSupabaseServerClient } from '@/domain/auth/supabase';
+import { safeNext } from '@/lib/safe-next';
 
 const credentialsSchema = z.object({
   email: z.string().email('Enter a valid email address.'),
@@ -28,7 +29,10 @@ export async function signIn(_prev: AuthFormState, formData: FormData): Promise<
     // Uniform message: no user-enumeration oracle.
     return { error: 'Sign-in failed. Check your email and password.' };
   }
-  redirect('/projects');
+  // Return the owner WHERE THEY WERE HEADED (middleware put it in the form's hidden `next`),
+  // defaulting chat-first. Hardcoding /projects here is what made the PWA always open the
+  // dashboard no matter what start_url asked for.
+  redirect(safeNext(formData.get('next')));
 }
 
 export async function signUp(_prev: AuthFormState, formData: FormData): Promise<AuthFormState> {
@@ -45,7 +49,7 @@ export async function signUp(_prev: AuthFormState, formData: FormData): Promise<
   if (error) {
     return { error: 'Sign-up failed. Try a different email or a stronger password.' };
   }
-  redirect('/projects');
+  redirect(safeNext(formData.get('next')));
 }
 
 export async function signOut(): Promise<void> {
