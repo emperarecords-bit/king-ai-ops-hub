@@ -105,7 +105,7 @@ describe('AccurateBidsQuoteExecutor', () => {
     expect(result.outcome).toBe('blocked');
     expect(result.message).toMatch(/not configured/i);
     expect(calls).toHaveLength(0);
-    expect(accurateBidsDepsFromEnv({}).endpointUrl).toBeUndefined();
+    expect(accurateBidsDepsFromEnv(undefined, {}).endpointUrl).toBeUndefined();
   });
 
   it('4xx refusal is failed+retryable; 5xx and network faults are ambiguous with reconciliation', async () => {
@@ -125,5 +125,52 @@ describe('AccurateBidsQuoteExecutor', () => {
     const r3 = await network.ex.execute(action(PAYLOAD));
     expect(r3.outcome).toBe('ambiguous');
     expect(r3.reconciliation).toBe('required');
+  });
+});
+
+/**
+ * Per-workspace routing (owner direction 2026-11-13). AccurateBids resolves the contractor from
+ * the bearer token alone, so the token decides whose books a quote or invoice lands in. Hill
+ * Street Construction billing Roosevelt Island work to Empera Air Conditioning's account is the
+ * bug; a quiet fallback to the shared token would bring it back invisibly.
+ */
+describe('AccurateBidsQuoteExecutor — which contractor account it bills', () => {
+  it('sends the workspace own token in place of the flat deps token', async () => {
+    const { ex, calls } = executor(() => ok({ success: true, quote_id: 'q-9' }), {
+      serviceToken: 'empera-tok',
+      loadServiceToken: async () => ({ token: 'hill-tok', source: 'per-project' as const }),
+    });
+    const result = await ex.execute(action(PAYLOAD));
+    expect(result.outcome).toBe('succeeded');
+    expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe('Bearer hill-tok');
+  });
+
+  it('REFUSES when the workspace is not entitled, rather than billing whoever the shared token is', async () => {
+    const { ex, calls } = executor(() => ok({ success: true }), {
+      serviceToken: 'empera-tok',
+      loadServiceToken: async () => ({ token: undefined, source: 'none' as const }),
+    });
+    const result = await ex.execute(action(PAYLOAD));
+    expect(result.outcome).toBe('blocked');
+    expect(result.message).toMatch(/no AccurateBids account of its own/i);
+    expect(result.message).not.toContain('empera-tok');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('that refusal covers a customer send too, not only quote drafting', async () => {
+    const { ex, calls } = executor(() => ok({ success: true }), {
+      sendUrl: 'https://example.supabase.co/functions/v1/hub-send',
+      serviceToken: 'empera-tok',
+      loadServiceToken: async () => ({ token: undefined, source: 'none' as const }),
+    });
+    const result = await ex.execute(action({ kind: 'accuratebids_send', send: 'invoice', invoice_id: 'inv-1' }));
+    expect(result.outcome).toBe('blocked');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('with no loader the flat deps token is still used — untouched call sites do not change', async () => {
+    const { ex, calls } = executor(() => ok({ success: true, quote_id: 'q-1' }));
+    await ex.execute(action(PAYLOAD));
+    expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe('Bearer test-token');
   });
 });

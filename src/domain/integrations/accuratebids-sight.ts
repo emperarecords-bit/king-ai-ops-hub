@@ -1,12 +1,15 @@
 import 'server-only';
+import { resolveServiceToken } from './accuratebids-tokens';
 
 /**
  * AccurateBids sight (owner, 2026-08-17: "so empera air conditioning still cant access
  * accuratebids info" — now they can, read-only): workspaces named in
  * ACCURATEBIDS_SIGHT_PROJECT_KEYS get a live snapshot of the owner's real AccurateBids book
  * (quote pipeline, recent quotes, invoices with paid amounts and balances) injected into every
- * run as HUB_STATE. The endpoint (hub-snapshot) writes nothing and is pinned server-side to the
- * owner's contractor account; failures degrade to "no snapshot", never a failed run.
+ * run as HUB_STATE. The endpoint (hub-snapshot) writes nothing, and resolves WHICH contractor's
+ * book to return from the bearer token — so passing the workspace's key here is what keeps Hill
+ * Street reading its own book rather than Empera's. Failures degrade to "no snapshot", never a
+ * failed run; see accuratebids-tokens.ts for how a workspace's token is chosen.
  */
 
 export interface AccurateBidsSightDeps {
@@ -15,8 +18,18 @@ export interface AccurateBidsSightDeps {
   readonly fetcher?: typeof fetch;
 }
 
-export function sightDepsFromEnv(env: Record<string, string | undefined> = process.env): AccurateBidsSightDeps {
-  return { snapshotUrl: env.ACCURATEBIDS_SNAPSHOT_URL, serviceToken: env.ACCURATEBIDS_SERVICE_TOKEN };
+/**
+ * Read config for one workspace. Omitting `projectKey` keeps the shared token (callers that have
+ * no workspace in hand); passing it resolves that workspace's own contractor account.
+ */
+export function sightDepsFromEnv(
+  projectKey?: string,
+  env: Record<string, string | undefined> = process.env,
+): AccurateBidsSightDeps {
+  return {
+    snapshotUrl: env.ACCURATEBIDS_SNAPSHOT_URL,
+    serviceToken: resolveServiceToken(projectKey, env).token,
+  };
 }
 
 /** Project keys whose runs carry the snapshot. Unset means the feature is off everywhere. */

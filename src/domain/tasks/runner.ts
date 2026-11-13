@@ -30,7 +30,7 @@ import { createTextArtifact } from '@/domain/artifacts/artifacts';
 import { assembleOrgBriefing, listDelegationTargets, resolveHqProjectKey } from '@/domain/org/briefing';
 import { assembleTeamBriefing } from '@/domain/tasks/team-briefing';
 import { assemblePortfolioBriefing } from '@/domain/portfolio/portfolio';
-import { assembleAccurateBidsSight, sightEnabledKeys } from '@/domain/integrations/accuratebids-sight';
+import { assembleAccurateBidsSight, sightDepsFromEnv, sightEnabledKeys } from '@/domain/integrations/accuratebids-sight';
 import { createOwnerQuestions } from '@/domain/questions/questions';
 import { enqueueNotificationSafe } from '@/domain/notifications/enqueue';
 import { buildOpsChatRunNoticeSafe } from '@/domain/opschat/run-notice';
@@ -1301,9 +1301,11 @@ async function executeAndFinalize(
       const projRows = await withTenant(ctx, (tx) =>
         tx.select({ key: projects.key }).from(projects).where(eq(projects.id, ctx.projectId)).limit(1),
       );
-      if (projRows[0] && sightKeys.includes(projRows[0].key)) {
+      const projectKey = projRows[0]?.key;
+      if (projectKey && sightKeys.includes(projectKey)) {
         // A focused owner task never sees the actionable Email Desk (see run-context-scope.ts).
-        accurateBidsSight = await assembleAccurateBidsSight(undefined, {
+        // The key picks WHOSE AccurateBids book this is — Hill Street must never be shown Empera's.
+        accurateBidsSight = await assembleAccurateBidsSight(sightDepsFromEnv(projectKey), {
           includeEmailDesk: includesEmailDesk(runContextScope(task)),
         });
       }
