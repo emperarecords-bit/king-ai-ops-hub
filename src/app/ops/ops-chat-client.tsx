@@ -286,6 +286,8 @@ interface CardResult {
   newDeploymentId?: string | null;
   productionDeploymentId?: string | null;
   productionChanged?: boolean | null;
+  /** Update cards: decisions recorded AFTER the card was prepared that were folded into the run. */
+  addedDecisions?: number | null;
 }
 
 function resultOf(executed: Record<string, unknown> | null | undefined): CardResult | undefined {
@@ -307,6 +309,7 @@ function resultOf(executed: Record<string, unknown> | null | undefined): CardRes
     newDeploymentId: str('newDeploymentId'),
     productionDeploymentId: str('productionDeploymentId'),
     productionChanged: typeof executed.productionChanged === 'boolean' ? executed.productionChanged : null,
+    addedDecisions: num('addedDecisions'),
   };
 }
 
@@ -1376,6 +1379,14 @@ export function OpsChatClient({
                     ) : card.state === 'done' ? (
                       <div className="flex flex-col gap-1">
                         <p className="text-sm text-[var(--success,#6bbf73)]">{doneLabel(p, result)}</p>
+                        {result?.addedDecisions ? (
+                          // The run carries MORE than the card showed: decisions recorded between preparing it and
+                          // confirming it were folded in. Say so, or the owner never learns the two differ.
+                          <p className="text-xs text-[var(--muted)]">
+                            Also included {result.addedDecisions} decision{result.addedDecisions === 1 ? '' : 's'} you recorded after this card was
+                            prepared.
+                          </p>
+                        ) : null}
                         {p.kind === 'github_pr' && result?.prUrl ? (
                           <a
                             href={result.prUrl}
