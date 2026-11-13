@@ -286,6 +286,8 @@ interface CardResult {
   newDeploymentId?: string | null;
   productionDeploymentId?: string | null;
   productionChanged?: boolean | null;
+  /** Update cards: decisions recorded AFTER the card was prepared that were folded into the run. */
+  addedDecisions?: number | null;
 }
 
 function resultOf(executed: Record<string, unknown> | null | undefined): CardResult | undefined {
@@ -307,6 +309,7 @@ function resultOf(executed: Record<string, unknown> | null | undefined): CardRes
     newDeploymentId: str('newDeploymentId'),
     productionDeploymentId: str('productionDeploymentId'),
     productionChanged: typeof executed.productionChanged === 'boolean' ? executed.productionChanged : null,
+    addedDecisions: num('addedDecisions'),
   };
 }
 
@@ -900,6 +903,10 @@ export function OpsChatClient({
   // Files uploaded into this conversation for the NEXT send (uploaded immediately, sent with the message).
   const [composerFiles, setComposerFiles] = useState<ComposerFile[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Field use (owner request 2026-11-13): a SEPARATE camera input. `capture` must never go on the 📎
+  // picker — on iOS/Android it narrows that picker to the camera and blocks choosing a PDF or an
+  // existing photo. Two inputs keep one-tap snapping AND full library/document uploads.
+  const cameraInputRef = useRef<HTMLInputElement>(null);
   const [streaming, setStreaming] = useState(false);
   const [toolActivity, setToolActivity] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1372,6 +1379,14 @@ export function OpsChatClient({
                     ) : card.state === 'done' ? (
                       <div className="flex flex-col gap-1">
                         <p className="text-sm text-[var(--success,#6bbf73)]">{doneLabel(p, result)}</p>
+                        {result?.addedDecisions ? (
+                          // The run carries MORE than the card showed: decisions recorded between preparing it and
+                          // confirming it were folded in. Say so, or the owner never learns the two differ.
+                          <p className="text-xs text-[var(--muted)]">
+                            Also included {result.addedDecisions} decision{result.addedDecisions === 1 ? '' : 's'} you recorded after this card was
+                            prepared.
+                          </p>
+                        ) : null}
                         {p.kind === 'github_pr' && result?.prUrl ? (
                           <a
                             href={result.prUrl}
@@ -1798,6 +1813,29 @@ export function OpsChatClient({
               className="rounded border border-[var(--border)] px-2 py-1 text-sm hover:opacity-80 disabled:opacity-40"
             >
               📎
+            </button>
+            <input
+              ref={cameraInputRef}
+              type="file"
+              multiple
+              accept="image/*"
+              capture="environment"
+              className="hidden"
+              onChange={(e) => {
+                void addFiles(e.target.files);
+                e.target.value = '';
+              }}
+            />
+            <button
+              type="button"
+              data-testid="attach-camera"
+              aria-label="Take a photo"
+              title="Take a photo with the rear camera"
+              disabled={streaming || !!pending || uploading}
+              onClick={() => cameraInputRef.current?.click()}
+              className="rounded border border-[var(--border)] px-2 py-1 text-sm hover:opacity-80 disabled:opacity-40"
+            >
+              📷
             </button>
             {dictation.supported ? (
               <button

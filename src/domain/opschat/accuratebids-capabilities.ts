@@ -28,7 +28,7 @@ export function accurateBidsCapabilityContext(env: Record<string, string | undef
   ];
   if (send === 'AVAILABLE') {
     lines.push(
-      `  - Invoice with NO email on file (has_email false): SUPPORTED. Ask the owner for the customer's address (or use one they already typed to you in this chat) and pass it as customer_email — on Confirm it is saved to that invoice and the invoice is emailed. An address already on file is never replaced; a quote's email must be added in AccurateBids.`,
+      `  - Invoice with NO email on file (has_email false): SUPPORTED. Take the customer's address from the owner, from one they already typed in this chat, or from a document they uploaded here (say which file - the card shows the address either way); ask only if none of those has it. Pass it as customer_email — on Confirm it is saved to that invoice and the invoice is emailed. An address already on file is never replaced; a quote's email must be added in AccurateBids.`,
     );
   }
   lines.push(

@@ -29,8 +29,12 @@ describe('accurateBidsCapabilityContext', () => {
     expect(t).toMatch(/propose_accuratebids_invoice\): AVAILABLE/);
     expect(t).toMatch(/propose_accuratebids_send\): AVAILABLE/);
     expect(t).toMatch(/Invoice with NO email on file \(has_email false\): SUPPORTED/);
-    expect(t).toMatch(/pass it as customer_email/);
+    expect(t).toMatch(/[Pp]ass it as customer_email/);
     expect(t).toMatch(/never replaced/);
+    // Owner request 2026-11-13 (field use): the address may be read out of a document the owner uploaded,
+    // not only typed by them — and the file must be named so the owner can catch a wrong one on the card.
+    expect(t).toMatch(/from a document they uploaded here/);
+    expect(t).toMatch(/say which file/);
     expect(t).toMatch(/earlier in this conversation said .* unavailable .* out of date/);
   });
 

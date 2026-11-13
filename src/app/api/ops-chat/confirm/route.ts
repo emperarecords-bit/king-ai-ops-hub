@@ -342,10 +342,13 @@ async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext, p
         // P5c-2: an update card is only started if the job is still exactly as the card froze it (same run, same
         // decisions, not already updated) — checked in THIS transaction, serialized per original task. Otherwise the
         // card goes stale with a plain reason and nothing is created.
-        if (body.updateOf) await assertUpdateCardCurrent(tx, ctx, body.updateOf);
+        // Decisions ADDED since the card was prepared are folded in rather than refused (see
+        // assertUpdateCardCurrent): it returns rebuilt instructions so the run carries every one of the owner's
+        // answers. Anything else about the job having changed still throws and the card goes stale.
+        const refresh = body.updateOf ? await assertUpdateCardCurrent(tx, ctx, body.updateOf) : null;
         const id = await createTask(tx, ctx, {
           title: body.title,
-          input: body.instructions,
+          input: refresh?.instructions ?? body.instructions,
           providerSelection: agent.provider,
           // Review policy: with a reviewer on the card the run is reviewed; without one the card already told
           // the owner the result is an UNREVIEWED DRAFT (the run records review_outcome=required_unmet).
@@ -361,9 +364,17 @@ async function runAction(body: z.infer<typeof ActionBody>, ctx: TenantContext, p
         });
         // …and queued its first attempt, so the first run is traceable to this card too.
         const enq = await enqueueRun(tx, ctx, id, 'interactive', { opsChatProposalId: proposalId });
-        return { id, jobId: enq.jobId };
+        return { id, jobId: enq.jobId, addedDecisions: refresh?.addedDecisions ?? 0 };
       });
-      return { taskId: created.id, jobId: created.jobId, agentName: agent.name, reviewerName: reviewer?.name ?? null };
+      return {
+        taskId: created.id,
+        jobId: created.jobId,
+        agentName: agent.name,
+        reviewerName: reviewer?.name ?? null,
+        // >0 ⇒ the owner recorded these after the card was prepared and they were folded into the run. Surfaced
+        // so the reply can say so plainly rather than the run quietly differing from the card the owner read.
+        addedDecisions: created.addedDecisions,
+      };
     }
     case 'rerun_task': {
       // A re-run is a real NEW attempt or an explicit refusal — never a job drained with no run while the card

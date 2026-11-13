@@ -43,7 +43,7 @@ const confirm = async (proposalId: string) =>
   (await (await POST(new Request('http://localhost/api/ops-chat/confirm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ proposalId, intent: 'confirm' }) }))).json()) as {
     state: string;
     error?: string;
-    executed?: { taskId: string };
+    executed?: { taskId: string; addedDecisions?: number };
   };
 
 /** Seed the prod shape under a unique title suffix: task A (older run, 1 answer), task B (newer run, 3 answers). */
@@ -168,15 +168,22 @@ describe.skipIf(!available)('P5c-2b — one job dispatched twice (the production
     expect(await db.select({ id: tasks.id }).from(tasks).where(eq(tasks.opsChatProposalId, stored.cardId))).toHaveLength(0);
   });
 
-  it('…and a new answer on the OTHER duplicate after the card was prepared → stale, nothing started', async () => {
+  it('…but a new ANSWER on the OTHER duplicate is FOLDED IN, not refused (the whole point is carrying them all)', async () => {
+    // Owner request 2026-11-13. This used to go stale. A late answer is not a stale basis — it is more of the
+    // owner's answers, and carrying ALL of them across BOTH duplicates is exactly what P5c-2b exists to do (see
+    // this file's header). Contrast the test above: a new RUN on a duplicate still goes stale, because then the
+    // frozen result really is obsolete. New run ⇒ stale; new decision ⇒ fold it in.
     const job = await seedJob('t3');
     const ts = toolset();
     JSON.parse(await ts.runTool({ name: 'propose_update_task', input: { project: rec.key, task: job.B.id } }));
     const stored = await storeCard(ts.getProposals()[0]);
     await db.insert(ownerQuestions).values({ orgId: owner.orgId, projectId: owner.projectId, taskId: job.A.id, runId: job.A.run, agentId, question: 'Late question?', status: 'answered', answer: 'late', answeredBy: owner.userId, answeredAt: new Date() });
     const r = await confirm(stored.cardId);
-    expect(r.state).toBe('stale');
-    expect(r.error).toMatch(/decisions after the card was prepared/);
+    expect(r.state).toBe('done');
+    expect(r.executed!.addedDecisions).toBe(1);
+    // The substantive property: the late answer recorded on the OTHER duplicate reaches the new run.
+    const input = (await db.select({ input: tasks.input }).from(tasks).where(eq(tasks.id, r.executed!.taskId)))[0]!.input;
+    expect(input).toContain('late');
   });
 
   // Regression (Hub prod, 2026-10-22): the update card carried the REJECTED 1,400 lb draft but not the APPROVED

@@ -234,13 +234,30 @@ export const UPDATE_CARD_NOT_CURRENT =
  * Confirm only when, re-read NOW in the confirming transaction:
  *   - the task still exists, and EVERY task of the job still has exactly the latest run the card froze (no re-run of
  *     any of them; no duplicate added or removed);
- *   - the post-run decisions across the job are EXACTLY the card's (none added since; none disappeared);
+ *   - every post-run decision the card froze is STILL there (none disappeared or changed);
  *   - no other update task has already superseded ANY task of the job.
  * Serialized per JOB (workspace + normalized title) with a transaction-scoped advisory lock, so two update cards for
  * the same job — even prepared from different duplicate tasks — cannot both pass. Throws AppError('conflict') → the
  * card becomes `stale` with the plain reason; nothing starts.
+ *
+ * ADDED decisions are NOT a conflict (owner request 2026-11-13). The prompt tells Ops Chat to call
+ * propose_record_decision in the SAME reply that prepares the card, so the owner recording one more answer
+ * before tapping Confirm — the documented flow — used to kill their own card with "the owner made decisions
+ * after the card was prepared". It cannot simply be ignored either: the card's instructions were built from
+ * the frozen set, so starting it unchanged would run WITHOUT the new answers, which is the exact drift this
+ * check exists to stop. So a purely ADDITIVE change REBUILDS the instructions here, inside the confirming
+ * transaction and after every other check has passed, and reports how many were folded in. A decision that
+ * DISAPPEARED or changed still fails, and so does a legacy card with no `decisionIds` (nothing identifies
+ * what it froze, so an addition cannot be told from a substitution).
  */
-export async function assertUpdateCardCurrent(tx: DbTx, ctx: TenantContext, u: UpdateOf): Promise<void> {
+export interface UpdateCardRefresh {
+  /** Decisions recorded after the card was prepared and now folded into the run. 0 ⇒ nothing changed. */
+  readonly addedDecisions: number;
+  /** Instructions rebuilt to include them; null when nothing was added and the card's own text stands. */
+  readonly instructions: string | null;
+}
+
+export async function assertUpdateCardCurrent(tx: DbTx, ctx: TenantContext, u: UpdateOf): Promise<UpdateCardRefresh> {
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`ops_chat_update_job:${ctx.projectId}:${normalizeJobTitle(u.taskTitle)}`}))`);
   const fail = (why: string): never => {
     throw new AppError('conflict', `${UPDATE_CARD_NOT_CURRENT} (${why})`);
@@ -254,8 +271,18 @@ export async function assertUpdateCardCurrent(tx: DbTx, ctx: TenantContext, u: U
   }
   const now = basis!.decisions.map((d) => d.id).sort();
   const frozen = u.decisionIds ? [...u.decisionIds].sort() : null;
-  const same = frozen ? frozen.length === now.length && frozen.every((id, i) => id === now[i]) : now.length === u.decisions;
-  if (!same) fail('the owner made decisions after the card was prepared');
+  // How many decisions appeared since the card was prepared. Counted here, folded in at the end — only once
+  // every other check has confirmed the rest of the job is untouched.
+  let addedDecisions = 0;
+  if (frozen) {
+    const present = new Set(now);
+    const gone = frozen.filter((id) => !present.has(id));
+    if (gone.length > 0) fail('a decision this card was built from is no longer recorded');
+    addedDecisions = now.length - frozen.length; // frozen ⊆ now and ids are unique, so this is the count added
+  } else if (now.length !== u.decisions) {
+    // Legacy card: only a COUNT was frozen, so an addition is indistinguishable from a substitution.
+    fail('the owner made decisions after the card was prepared');
+  }
   if (u.approvedIds) {
     const nowApproved = (basis!.approved ?? []).map((a) => a.id).sort().join(',');
     if (nowApproved !== [...u.approvedIds].sort().join(',')) fail('the owner approved a result of this job after the card was prepared');
@@ -267,6 +294,14 @@ export async function assertUpdateCardCurrent(tx: DbTx, ctx: TenantContext, u: U
   const states = await loadTaskStates(tx, ctx, basis!.siblings.map((s) => s.taskId));
   const sup = states.find((st) => st.supersededBy)?.supersededBy;
   if (sup) fail(`it was already updated by task "${sup.title}"`);
+
+  if (addedDecisions === 0) return { addedDecisions: 0, instructions: null };
+  // Purely additive: rebuild from the basis just re-read in THIS transaction so the run carries every one of
+  // the owner's decisions, not the subset the card froze. The caps still apply — if the additions push the job
+  // past what one card can carry verbatim, refuse rather than silently drop any of it (the #175 invariant).
+  const rebuilt = buildUpdateInstructions(basis!);
+  if (!rebuilt.ok) fail(`${addedDecisions} decision(s) were recorded after the card was prepared and no longer fit one update card`);
+  return { addedDecisions, instructions: (rebuilt as { ok: true; instructions: string }).instructions };
 }
 
 const iso = (d: Date | null) => (d ? `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC` : 'unknown time');

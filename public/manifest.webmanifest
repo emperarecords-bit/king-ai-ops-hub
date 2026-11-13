@@ -3,7 +3,7 @@
   "short_name": "King Hub",
   "description": "Your businesses, run by your AI staff. Chat with employees, okay their work.",
   "id": "/",
-  "start_url": "/inbox",
+  "start_url": "/ops",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
