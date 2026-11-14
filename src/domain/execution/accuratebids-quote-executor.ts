@@ -64,6 +64,18 @@ export const accurateBidsQuotePayloadSchema = z
       .optional(),
     markup_percent: z.number().min(0).max(100).optional(),
     tax_percent: z.number().min(0).max(30).optional(),
+    /**
+     * Optional per-document trading name — the LETTERHEAD only ("draft THIS job as Hill Street
+     * Construction"). AccurateBids resolves the contractor from the bearer token and ignores the
+     * body for identity, so this can never move a quote onto another company's books.
+     *
+     * A quote is created as a DRAFT, so nothing is frozen yet: this is what the quote will be
+     * pinned to when it is sent, which is why hub-quote echoes it back as `will_bill_as` rather
+     * than as a settled letterhead.
+     *
+     * Trimmed and non-empty on purpose — see the invoice schema below for why a blank is refused.
+     */
+    company_name_override: z.string().trim().min(1).max(200).optional(),
   })
   .strict();
 
@@ -118,6 +130,23 @@ export const accurateBidsInvoicePayloadSchema = z
     tax_percent: z.number().min(0).max(30).optional(),
     due_days: z.number().int().min(1).max(365).optional(),
     notes: z.string().max(2000).optional(),
+    /**
+     * Optional per-document trading name — the LETTERHEAD only. AccurateBids resolves the
+     * contractor from the bearer token and ignores the body for identity, so this can never move
+     * an invoice onto another company's books; it only changes the name printed at the top.
+     *
+     * On a DIRECT invoice there is nothing to inherit, so this is what the freeze trigger pins.
+     *
+     * On a FROM-QUOTE invoice, explicit beats inherited: hub-invoice drops the name inherited
+     * from the quote and re-pins the invoice to this one. That is deliberate on their side and a
+     * real consequence on ours — the invoice will then NOT match the letterhead on the quote the
+     * customer is already holding. Only set it on a from-quote invoice when that is the intent.
+     *
+     * Trimmed and non-empty on purpose: AccurateBids maps a blank string to null, which means
+     * "use the profile name" — the opposite of what an owner who confirmed a card showing a blank
+     * "Bill as" intended. Refuse it here rather than silently invert it.
+     */
+    company_name_override: z.string().trim().min(1).max(200).optional(),
   })
   .strict()
   .refine(
@@ -169,6 +198,31 @@ export type AccurateBidsSendPayload = z.infer<typeof accurateBidsSendPayloadSche
 /** The hub-send idempotency key for an approval: one approval = at most one email. */
 export function accurateBidsSendKey(approvalId: string): string {
   return `hub:${approvalId}`;
+}
+
+/**
+ * What to append to a success message about the company name a document was issued under.
+ *
+ * `reported` is what AccurateBids read back: `will_bill_as` on a draft quote (nothing is frozen
+ * yet, so it is the name the quote WILL be sent under) or `billed_as` on an invoice (the settled
+ * letterhead, read off the row after the freeze trigger ran). `asked` is what the owner confirmed,
+ * or null when they named no trading name and the profile name applies.
+ *
+ * A disagreement between the two is reported loudly rather than swallowed. Quietly succeeding
+ * under a company name other than the one the owner confirmed is the only way this field can do
+ * real damage — the customer receives paperwork headed with the wrong business — so it must never
+ * read as a clean success.
+ */
+export function letterheadNote(
+  asked: string | null,
+  reported: string | null,
+  verb: 'billed as' | 'will be sent under',
+): string {
+  if (asked && reported !== asked) {
+    return ` NOTE: you asked for "${asked}" but AccurateBids reports "${reported ?? 'your profile name'}" — check the document in AccurateBids before it goes to the customer.`;
+  }
+  if (!reported) return '';
+  return ` ${verb[0]!.toUpperCase()}${verb.slice(1)} "${reported}".`;
 }
 
 export interface AccurateBidsQuoteExecutorDeps {
@@ -331,6 +385,7 @@ export class AccurateBidsQuoteExecutor implements Executor {
         customerName: inv.customer_name ?? null,
         jobName: inv.job_name ?? null,
         lineItemCount: inv.line_items?.length ?? 0,
+        companyNameOverride: inv.company_name_override ?? null,
       };
       if (action.mode === 'dry_run') {
         return result('not_executed', 'Dry run only. Would create the invoice in AccurateBids.', { ...invPlan, wouldExecute: true });
@@ -363,10 +418,15 @@ export class AccurateBidsQuoteExecutor implements Executor {
         }
         const invoiceNumber = typeof parsedBody.invoice_number === 'string' ? parsedBody.invoice_number : null;
         const amount = parsedBody.amount;
+        // The letterhead the customer will actually see. hub-invoice reads it back off the row
+        // AFTER the freeze trigger ran, so it is the settled value rather than merely what we
+        // asked for — which is the whole reason to report it instead of echoing the request.
+        const billedAs = typeof parsedBody.billed_as === 'string' ? parsedBody.billed_as : null;
         return result(
           'succeeded',
-          `Invoice ${invoiceNumber ?? ''}${amount != null ? ` ($${amount})` : ''} created in AccurateBids (not yet sent to the customer — ask Ops Chat to send it, or send it from the app).`,
-          { ...invPlan, invoiceId: parsedBody.invoice_id ?? null, invoiceNumber, amount: amount ?? null },
+          `Invoice ${invoiceNumber ?? ''}${amount != null ? ` ($${amount})` : ''} created in AccurateBids (not yet sent to the customer — ask Ops Chat to send it, or send it from the app).` +
+            letterheadNote(inv.company_name_override ?? null, billedAs, 'billed as'),
+          { ...invPlan, invoiceId: parsedBody.invoice_id ?? null, invoiceNumber, amount: amount ?? null, billedAs },
         );
       } catch (err) {
         const detail = err instanceof Error ? err.message : 'unknown error';
@@ -396,6 +456,7 @@ export class AccurateBidsQuoteExecutor implements Executor {
       materialCount: payload.materials?.length ?? 0,
       laborCount: payload.labor?.length ?? 0,
       chargeCount: payload.additional_charges?.length ?? 0,
+      companyNameOverride: payload.company_name_override ?? null,
     };
 
     if (action.mode === 'dry_run') {
@@ -433,10 +494,14 @@ export class AccurateBidsQuoteExecutor implements Executor {
       const quoteId = typeof parsedBody.quote_id === 'string' ? parsedBody.quote_id : null;
       const url = typeof parsedBody.url === 'string' ? parsedBody.url : null;
       const grandTotal = parsedBody.grand_total;
+      // A draft is not frozen, so this is the name the quote WILL be sent under rather than a
+      // settled letterhead; null means "your profile name as it stands at send time".
+      const willBillAs = typeof parsedBody.will_bill_as === 'string' ? parsedBody.will_bill_as : null;
       return result(
         'succeeded',
-        `Draft quote "${payload.job_name}" created in AccurateBids${grandTotal != null ? ` ($${grandTotal})` : ''} (not yet sent to the customer — review it, then ask Ops Chat to send it or send it from the app).`,
-        { ...plan, quoteId, quoteUrl: url, grandTotal: grandTotal ?? null },
+        `Draft quote "${payload.job_name}" created in AccurateBids${grandTotal != null ? ` ($${grandTotal})` : ''} (not yet sent to the customer — review it, then ask Ops Chat to send it or send it from the app).` +
+          letterheadNote(payload.company_name_override ?? null, willBillAs, 'will be sent under'),
+        { ...plan, quoteId, quoteUrl: url, grandTotal: grandTotal ?? null, willBillAs },
       );
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'unknown error';
