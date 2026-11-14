@@ -103,6 +103,12 @@ export default tseslint.config(
   {
     ignores: [
       '.next/**',
+      // Claude Code worktrees live here: full checkouts with their own node_modules
+      // and Next.js build output. CI never sees them (fresh checkout has no
+      // .claude/worktrees), so linting them is pure local noise that buries real findings.
+      '.claude/**',
+      // Any nested Next.js build output, wherever a checkout sits.
+      '**/.next/**',
       'node_modules/**',
       'drizzle/**',
       'playwright-report/**',
