@@ -248,7 +248,7 @@ type Proposal =
       riskClass: string;
     }
   | {
-      kind: 'accuratebids_quote' | 'accuratebids_invoice' | 'accuratebids_send';
+      kind: 'accuratebids_quote' | 'accuratebids_invoice' | 'accuratebids_send' | 'accuratebids_contact_patch';
       projectKey: string;
       workspaceName: string;
       summary: string;
@@ -382,6 +382,7 @@ const TOOL_LABEL: Record<string, string> = {
   propose_accuratebids_quote: 'preparing the quote',
   propose_accuratebids_invoice: 'preparing the invoice',
   propose_accuratebids_send: 'preparing the email',
+  propose_accuratebids_contact_patch: 'preparing the contact correction',
   list_agents: 'listing the agents',
   propose_answer_question: 'preparing the answer',
   propose_decide_approval: 'preparing the decision',
@@ -540,6 +541,10 @@ function doneLabel(p: Proposal, result?: CardResult): string {
       return '✓ Invoice created in AccurateBids.';
     case 'accuratebids_send':
       return `✓ ${abSendWhat(p)[0]!.toUpperCase()}${abSendWhat(p).slice(1)} emailed to the customer.`;
+    case 'accuratebids_contact_patch':
+      // Deliberately not "✓ Updated": AccurateBids reports whether anything actually differed, and
+      // the executor's own message carries that. This line only confirms the call landed.
+      return "✓ Contact details saved on the draft quote (nothing emailed).";
   }
 }
 /** "3 answers and 4 decisions" for a batch card. */
@@ -583,6 +588,8 @@ function headerLabel(p: Proposal): string {
       return 'Confirm — create a real unpaid invoice in AccurateBids (not sent yet)';
     case 'accuratebids_send':
       return `Confirm — EMAIL the ${abSendWhat(p)} to the customer`;
+    case 'accuratebids_contact_patch':
+      return "Confirm — overwrite the customer's contact details on a draft quote";
   }
 }
 function confirmLabel(p: Proposal): string {
@@ -619,6 +626,8 @@ function confirmLabel(p: Proposal): string {
       return 'Confirm & create invoice';
     case 'accuratebids_send':
       return 'Confirm & email customer';
+    case 'accuratebids_contact_patch':
+      return 'Confirm & overwrite';
   }
 }
 
@@ -1364,7 +1373,11 @@ export function OpsChatClient({
                     id={card.proposalId ? `card-${card.proposalId}` : undefined}
                     className="mt-3 rounded-md border border-[var(--accent)] bg-[var(--surface-raised,rgba(120,160,255,0.06))] p-3"
                   >
-                    {card.state === 'done' && (p.kind === 'accuratebids_quote' || p.kind === 'accuratebids_invoice' || p.kind === 'accuratebids_send') ? (
+                    {card.state === 'done' &&
+                    (p.kind === 'accuratebids_quote' ||
+                      p.kind === 'accuratebids_invoice' ||
+                      p.kind === 'accuratebids_send' ||
+                      p.kind === 'accuratebids_contact_patch') ? (
                       // AccurateBids: show the executor's REAL outcome — never a green ✓ for a blocked / failed / unconfirmed send.
                       <div className="flex flex-col gap-1">
                         {result?.outcome === 'succeeded' ? (
@@ -1632,13 +1645,18 @@ export function OpsChatClient({
                               Risk: {p.riskClass.replace(/_/g, ' ')} · Side effect: deploys the function&apos;s exact bytes at that commit SHA to the live project (refused unless the project + repo are linked, the source path has files, and the entrypoint is present). Rollback: redeploy the prior source SHA. Recovery: a server error mid-deploy is marked ambiguous for reconciliation, never auto-retried.
                             </p>
                           </div>
-                        ) : p.kind === 'accuratebids_quote' || p.kind === 'accuratebids_invoice' || p.kind === 'accuratebids_send' ? (
+                        ) : p.kind === 'accuratebids_quote' ||
+                          p.kind === 'accuratebids_invoice' ||
+                          p.kind === 'accuratebids_send' ||
+                          p.kind === 'accuratebids_contact_patch' ? (
                           <div className="mt-1 flex flex-col gap-0.5 text-sm">
                             <p className="whitespace-pre-wrap">{p.summary}</p>
                             {p.kind === 'accuratebids_quote' && suggestedCount(p.pricing) > 0 ? <PriceSourcesBlock pricing={p.pricing!} /> : null}
                             {p.content ? <ApprovalContentBlock content={p.content} /> : null}
                             <p className="mt-1 text-xs text-[var(--muted)]">
-                              {p.kind === 'accuratebids_send'
+                              {p.kind === 'accuratebids_contact_patch'
+                                ? "Overwrites the customer's email and/or phone on that DRAFT quote — whatever is on it now is replaced, and the Hub cannot show you the current value. Nothing is emailed and the quote stays a draft. Already sent? AccurateBids will refuse it."
+                                : p.kind === 'accuratebids_send'
                                 ? 'Emails the customer through AccurateBids (its own email with the pay / approve link). Sent at most once — a retry never emails twice.'
                                 : p.kind === 'accuratebids_invoice'
                                   ? 'Creates a real unpaid invoice in your AccurateBids account. It is NOT emailed to the customer until you confirm a send. A quote can only be invoiced once.'

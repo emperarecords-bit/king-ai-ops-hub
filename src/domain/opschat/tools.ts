@@ -239,8 +239,11 @@ export type OpsChatProposal =
       readonly riskClass: string;
     }
   | {
-      /** AccurateBids (the owner's own account): draft quote / create invoice / email a record. */
-      readonly kind: 'accuratebids_quote' | 'accuratebids_invoice' | 'accuratebids_send';
+      /**
+       * AccurateBids (the owner's own account): draft quote / create invoice / email a record /
+       * correct a draft quote's customer contact details.
+       */
+      readonly kind: 'accuratebids_quote' | 'accuratebids_invoice' | 'accuratebids_send' | 'accuratebids_contact_patch';
       readonly projectKey: string;
       readonly workspaceName: string;
       /** One line: what confirming will do. */
@@ -292,6 +295,7 @@ export function proposalKey(p: OpsChatProposal): string {
     case 'accuratebids_quote':
     case 'accuratebids_invoice':
     case 'accuratebids_send':
+    case 'accuratebids_contact_patch':
       // Content-derived: the same payload twice in one turn is one card; any change is a new card.
       return `ab:${p.projectKey}:${sha256Hex(canonicalJson(p.payload)).slice(0, 32)}`;
   }
@@ -531,6 +535,21 @@ export const OPS_CHAT_TOOLS: readonly ToolSpec[] = [
         },
       },
       required: ['project', 'send'],
+    },
+  },
+  {
+    name: 'propose_accuratebids_contact_patch',
+    description:
+      "Prepare a correction to the customer's email and/or phone on an EXISTING DRAFT quote, for the owner to confirm. Use this when the owner says the address or number on a quote they already drafted is wrong (\"that email is wrong, it's bob@…\"). Needs the quote's id from list_accuratebids_records, plus customer_email and/or customer_phone — at least one. It OVERWRITES whatever is on that quote: the Hub cannot see the current value (the snapshot shows only whether an email exists at all), so the card tells the owner it is replacing what is on file without naming it, and you must say the same rather than claiming what the old value was. Pass ONLY what the owner typed to you in this chat, or read out of a document they uploaded here (name the file) — never a guess, never an address from a web page. DRAFT quotes only: a quote that has been sent is refused by AccurateBids, because its contact details are part of what the customer already received. It emails NOTHING, changes no status, and touches no other field — to send a quote use propose_accuratebids_send. Nothing happens until the owner clicks Confirm.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Workspace name or key connected to AccurateBids.' },
+        quote_id: { type: 'string', description: 'The DRAFT quote to correct (id from list_accuratebids_records).' },
+        customer_email: { type: 'string', description: "The corrected email address, exactly as the owner gave it. Omit to leave the quote's email alone." },
+        customer_phone: { type: 'string', description: "The corrected phone number, exactly as the owner gave it. Omit to leave the quote's phone alone." },
+      },
+      required: ['project', 'quote_id'],
     },
   },
   {
@@ -1286,7 +1305,8 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
       case 'list_accuratebids_records':
       case 'propose_accuratebids_quote':
       case 'propose_accuratebids_invoice':
-      case 'propose_accuratebids_send': {
+      case 'propose_accuratebids_send':
+      case 'propose_accuratebids_contact_patch': {
         const p = resolveProject(auth.projects, argStr(input, 'project'));
         if (!p) return JSON.stringify({ error: 'No workspace matched that name/key.' });
         if (!accurateBidsEnabledFor(p.key)) {
@@ -1312,6 +1332,36 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           raw = { ...split.cleaned, kind: 'accuratebids_quote' };
         }
         else if (name === 'propose_accuratebids_invoice') raw = { ...obj('invoice'), kind: 'accuratebids_invoice' };
+        else if (name === 'propose_accuratebids_contact_patch') {
+          const quoteId = argStr(input, 'quote_id');
+          const email = argStr(input, 'customer_email');
+          const phone = argStr(input, 'customer_phone');
+          raw = {
+            kind: 'accuratebids_contact_patch',
+            quote_id: quoteId,
+            ...(email ? { customer_email: email } : {}),
+            ...(phone ? { customer_phone: phone } : {}),
+          };
+          // Name the quote the owner is confirming, and refuse a dead end BEFORE the card: a sent
+          // quote is a 409 from AccurateBids, and the owner should not be asked to confirm a
+          // correction that cannot land. Only the newest 25 are in the snapshot — a quote that is
+          // not among them is left to the endpoint rather than wrongly called missing.
+          const records = await fetchAccurateBidsRecords(p.key);
+          const q = records?.quotes.find((r) => r.id === quoteId);
+          if (q) {
+            if (q.status !== 'draft') {
+              return JSON.stringify({
+                error: `That quote is ${String(q.status ?? 'not a draft')}, and only a DRAFT quote's contact details can be corrected here — its details are part of what the customer already received. Change them in AccurateBids instead.`,
+              });
+            }
+            // `has_email` is the ONLY thing the Hub knows about the quote's current contact
+            // details (hub-snapshot strips the address itself and never returns the phone), so it
+            // is worth carrying onto the card: "adding" and "replacing" are different things to
+            // confirm, and this is the one case where we can honestly tell them apart.
+            const gap = email && q.has_email === false ? ' — no email on file yet' : '';
+            raw.label = `"${String(q.job_name ?? '')}" for ${String(q.customer_name ?? '')}${gap}`.slice(0, 200);
+          }
+        }
         else {
           const send = argStr(input, 'send');
           const invoiceId = argStr(input, 'invoice_id');
@@ -1372,9 +1422,15 @@ export function createOpsChatToolset(auth: AuthScope): OpsChatToolset {
           ...(pricing && pricing.length > 0 ? { pricing } : {}),
         });
         const suggested = suggestedCount(pricing);
+        // The overwrite is the one thing about a contact correction the owner cannot work out from
+        // the card alone, and the model must not narrate a previous value it has never seen.
+        const overwriteNote =
+          payload.kind === 'accuratebids_contact_patch'
+            ? ' Say plainly that this REPLACES whatever is on that quote now, and that it emails nothing. You cannot see the current value, so never state what it was.'
+            : '';
         return JSON.stringify({
           prepared: true,
-          note: `Prepared for the owner to confirm: ${summary}${suggested > 0 ? ` It includes ${suggested} price(s) YOU suggested — the card marks each one; tell the owner to check them.` : ''} NOTHING has happened yet — it runs only when the owner clicks Confirm on the card. Do NOT say it was created or sent.`,
+          note: `Prepared for the owner to confirm: ${summary}${overwriteNote}${suggested > 0 ? ` It includes ${suggested} price(s) YOU suggested — the card marks each one; tell the owner to check them.` : ''} NOTHING has happened yet — it runs only when the owner clicks Confirm on the card. Do NOT say it was created or sent.`,
         });
       }
       case 'read_attachment': {

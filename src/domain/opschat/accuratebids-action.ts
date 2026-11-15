@@ -11,6 +11,7 @@ import { createTask, setTaskStatus } from '@/domain/tasks/tasks';
 import { decideApproval } from '@/domain/approvals/approvals';
 import { executeApprovedIfEligible, type ApprovalExecutionOutcome } from '@/domain/execution/execute-on-approval';
 import {
+  accurateBidsContactPatchPayloadSchema,
   accurateBidsInvoicePayloadSchema,
   accurateBidsQuotePayloadSchema,
   accurateBidsSendPayloadSchema,
@@ -39,9 +40,10 @@ const APPROVAL_WINDOW_MS = 10 * 60 * 1000;
 export type AccurateBidsOpsChatPayload =
   | z.infer<typeof accurateBidsQuotePayloadSchema>
   | z.infer<typeof accurateBidsInvoicePayloadSchema>
-  | z.infer<typeof accurateBidsSendPayloadSchema>;
+  | z.infer<typeof accurateBidsSendPayloadSchema>
+  | z.infer<typeof accurateBidsContactPatchPayloadSchema>;
 
-/** Parse a stored/proposed payload into exactly one of the three executable AccurateBids kinds. */
+/** Parse a stored/proposed payload into exactly one of the four executable AccurateBids kinds. */
 export function parseAccurateBidsOpsChatPayload(input: unknown): AccurateBidsOpsChatPayload {
   const kind = input && typeof input === 'object' ? (input as Record<string, unknown>).kind : undefined;
   const schema =
@@ -51,8 +53,10 @@ export function parseAccurateBidsOpsChatPayload(input: unknown): AccurateBidsOps
         ? accurateBidsInvoicePayloadSchema
         : kind === 'accuratebids_send'
           ? accurateBidsSendPayloadSchema
-          : null;
-  if (!schema) throw new AppError('validation', 'Not an AccurateBids quote, invoice, or send.');
+          : kind === 'accuratebids_contact_patch'
+            ? accurateBidsContactPatchPayloadSchema
+            : null;
+  if (!schema) throw new AppError('validation', 'Not an AccurateBids quote, invoice, send, or contact correction.');
   const r = schema.safeParse(input);
   if (!r.success) {
     throw new AppError('validation', `Invalid AccurateBids ${String(kind).replace('accuratebids_', '')}: ${r.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}`);
@@ -82,6 +86,16 @@ export function summarizeAccurateBidsPayload(p: AccurateBidsOpsChatPayload): str
     if (p.quote_id) return `Create an AccurateBids invoice from quote ${p.quote_id} (a real unpaid invoice; not sent to the customer).`;
     const total = (p.line_items ?? []).reduce((s, l) => s + l.qty * l.unit_price, 0);
     return `Create an AccurateBids invoice "${p.job_name}" for ${p.customer_name} — ${money(total)} before tax (a real unpaid invoice; not sent to the customer).`;
+  }
+  if (p.kind === 'accuratebids_contact_patch') {
+    // Names the fields and the NEW values, never a before/after: the Hub cannot see what is on the
+    // quote now (hub-snapshot exposes only `has_email`, and no phone at all), so "replacing
+    // whatever is on file" is the strongest true claim this summary can make.
+    const parts = [
+      p.customer_email ? `email to ${p.customer_email}` : null,
+      p.customer_phone ? `phone to ${p.customer_phone}` : null,
+    ].filter((x): x is string => x !== null);
+    return `Set the customer's ${parts.join(' and ')} on draft quote ${p.label ?? p.quote_id}, replacing whatever is on file (nothing is emailed to the customer).`;
   }
   const what = p.send === 'quote' ? 'quote' : p.send === 'invoice_reminder' ? 'payment reminder for invoice' : 'invoice';
   if (p.customer_email) {

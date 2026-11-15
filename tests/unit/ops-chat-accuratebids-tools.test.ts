@@ -9,7 +9,10 @@ import type * as BridgeNs from '@/domain/opschat/accuratebids-action';
  */
 
 type Bridge = typeof BridgeNs;
-type AbProposal = Extract<OpsChatProposal, { kind: 'accuratebids_quote' | 'accuratebids_invoice' | 'accuratebids_send' }>;
+type AbProposal = Extract<
+  OpsChatProposal,
+  { kind: 'accuratebids_quote' | 'accuratebids_invoice' | 'accuratebids_send' | 'accuratebids_contact_patch' }
+>;
 
 const h = vi.hoisted(() => ({
   withTenant: vi.fn(),
@@ -31,6 +34,8 @@ const INV = '4c5e2a92-fa7c-49db-b9fd-8eb31cb8b901';
 const INV_PAID = '5d6f3b03-0b8d-4aec-8a0e-9fc42dc0c902';
 const INV_NOMAIL = '6e7a4c14-1c9e-4bfd-9b1f-a0d53ed1da03';
 const QUOTE = '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d';
+const QUOTE_SENT = '8b7c6d5e-4f3a-4b2c-9d1e-0f9a8b7c6d5e';
+const QUOTE_NOMAIL = '7c6d5e4f-3a2b-4c1d-8e0f-9a8b7c6d5e4f';
 
 const PROJECTS = [
   { projectId: 'p-em', orgId: 'o1', key: 'empera', name: 'Empera A/C', description: '', projectRole: 'admin' as const },
@@ -47,7 +52,11 @@ beforeEach(() => {
   // token is deliberately NOT connected. No allowlist here, so the shared token covers both.
   process.env.ACCURATEBIDS_SERVICE_TOKEN = 'test-service-token';
   h.fetchAccurateBidsRecords.mockResolvedValue({
-    quotes: [{ id: QUOTE, job_name: 'Condenser swap', customer_name: 'Pat', status: 'draft', grand_total: 4200, has_email: true }],
+    quotes: [
+      { id: QUOTE, job_name: 'Condenser swap', customer_name: 'Pat', status: 'draft', grand_total: 4200, has_email: true },
+      { id: QUOTE_SENT, job_name: 'Rooftop unit', customer_name: 'Lee', status: 'sent', grand_total: 9100, has_email: true },
+      { id: QUOTE_NOMAIL, job_name: 'Attic ductwork', customer_name: 'Sam', status: 'draft', grand_total: 2300, has_email: false },
+    ],
     invoices: [
       { id: INV, invoice_number: 'INV-123456', customer_name: 'Pat', status: 'unpaid', amount: 1200, balance_due: 1200, has_email: true },
       { id: INV_PAID, invoice_number: 'INV-222222', customer_name: 'Lee', status: 'paid', amount: 500, balance_due: 0, has_email: true },
@@ -210,5 +219,111 @@ describe('AccurateBids quote — suggested prices are labelled, never smuggled i
       quote: { job_name: 'X', customer_name: 'Y', materials: [{ description: 'Z', quantity: 1, unit_cost: 1, source: 'estimate', url: 'https://evil.example' }] },
     });
     expect(out.error).toMatch(/Invalid/);
+  });
+});
+
+/**
+ * Correcting a draft quote's contact details. The snapshot is the only thing the Hub knows about
+ * the quote, so it is used for exactly two honest purposes: naming the record on the card, and
+ * refusing a quote that is no longer a draft BEFORE the owner is asked to confirm a change that
+ * AccurateBids would reject anyway. It is never used to claim what the old contact value was —
+ * the snapshot does not carry it.
+ */
+describe('propose_accuratebids_contact_patch — prepares a correction, overwrite stated plainly', () => {
+  it('records a card naming the quote, and corrects NOTHING by itself', async () => {
+    const { out, proposals } = await run('propose_accuratebids_contact_patch', {
+      project: 'empera',
+      quote_id: QUOTE,
+      customer_email: 'pat@example.com',
+    });
+    expect(out.prepared).toBe(true);
+    expect(out.note).toMatch(/NOTHING has happened yet/);
+    // The model is told not to narrate a value it cannot see.
+    expect(out.note).toMatch(/REPLACES whatever is on that quote now/);
+    expect(out.note).toMatch(/never state what it was/);
+    expect(proposals).toHaveLength(1);
+    const p = proposals[0]! as AbProposal;
+    expect(p.kind).toBe('accuratebids_contact_patch');
+    expect(p.payload).toEqual({
+      kind: 'accuratebids_contact_patch',
+      quote_id: QUOTE,
+      customer_email: 'pat@example.com',
+      label: '"Condenser swap" for Pat',
+    });
+    expect(p.summary).toMatch(/replacing whatever is on file/);
+    expect(p.content.title).toMatch(/overwrites what is on file/);
+    expect(h.executeAccurateBidsFromOpsChat).not.toHaveBeenCalled();
+  });
+
+  it('refuses a quote that is no longer a draft, up front', async () => {
+    const { out, proposals } = await run('propose_accuratebids_contact_patch', {
+      project: 'empera',
+      quote_id: QUOTE_SENT,
+      customer_email: 'lee@example.com',
+    });
+    expect(out.error).toMatch(/sent/);
+    expect(out.error).toMatch(/only a DRAFT quote/);
+    // No card at all: the owner is never asked to confirm something that cannot land.
+    expect(proposals).toHaveLength(0);
+  });
+
+  it('says so on the card when the quote has no email yet — adding is not replacing', async () => {
+    const { proposals } = await run('propose_accuratebids_contact_patch', {
+      project: 'empera',
+      quote_id: QUOTE_NOMAIL,
+      customer_email: 'sam@example.com',
+    });
+    const p = proposals[0]! as AbProposal;
+    expect(p.payload.label).toBe('"Attic ductwork" for Sam — no email on file yet');
+  });
+
+  it('does not claim a missing email when only the phone is being corrected', async () => {
+    const { proposals } = await run('propose_accuratebids_contact_patch', {
+      project: 'empera',
+      quote_id: QUOTE_NOMAIL,
+      customer_phone: '555-010-9988',
+    });
+    expect((proposals[0]! as AbProposal).payload.label).toBe('"Attic ductwork" for Sam');
+  });
+
+  it('still prepares a correction for a quote older than the snapshot window', async () => {
+    const older = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
+    const { out, proposals } = await run('propose_accuratebids_contact_patch', {
+      project: 'empera',
+      quote_id: older,
+      customer_email: 'pat@example.com',
+    });
+    expect(out.prepared).toBe(true);
+    const p = proposals[0]! as AbProposal;
+    // No label: the Hub cannot name a quote it has not seen, and it does not guess one.
+    expect('label' in p.payload).toBe(false);
+    expect(p.summary).toContain(older);
+  });
+
+  it('refuses a patch with neither field, and one with a bad address', async () => {
+    expect((await run('propose_accuratebids_contact_patch', { project: 'empera', quote_id: QUOTE })).out.error).toMatch(
+      /customer_email, customer_phone, or both/,
+    );
+    expect(
+      (await run('propose_accuratebids_contact_patch', { project: 'empera', quote_id: QUOTE, customer_email: 'not-an-address' })).out.error,
+    ).toMatch(/plain email address/);
+  });
+
+  it('is admin-only, like every other AccurateBids card', async () => {
+    const { out } = await run('propose_accuratebids_contact_patch', {
+      project: 'member-ws',
+      quote_id: QUOTE,
+      customer_email: 'pat@example.com',
+    });
+    expect(out.error).toMatch(/admin/);
+  });
+
+  it('is refused for a workspace that is not connected to AccurateBids', async () => {
+    const { out } = await run('propose_accuratebids_contact_patch', {
+      project: 'stressprobe',
+      quote_id: QUOTE,
+      customer_email: 'pat@example.com',
+    });
+    expect(out.error).toMatch(/not connected to AccurateBids/);
   });
 });

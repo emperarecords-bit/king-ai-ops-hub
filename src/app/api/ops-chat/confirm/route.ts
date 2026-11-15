@@ -197,7 +197,7 @@ const ActionBody = z.discriminatedUnion('action', [
   z.object({
     action: z.literal('execute_accuratebids'),
     // The stored proposal kind — must match the payload's own kind (checked in runAction).
-    kind: z.enum(['accuratebids_quote', 'accuratebids_invoice', 'accuratebids_send']),
+    kind: z.enum(['accuratebids_quote', 'accuratebids_invoice', 'accuratebids_send', 'accuratebids_contact_patch']),
     projectKey: z.string().min(1),
     // The exact executor payload the owner saw; re-validated per kind by the bridge.
     payload: z.record(z.string(), z.unknown()),
@@ -222,6 +222,7 @@ const KIND_TO_ACTION: Record<string, z.infer<typeof ActionBody>['action']> = {
   accuratebids_quote: 'execute_accuratebids',
   accuratebids_invoice: 'execute_accuratebids',
   accuratebids_send: 'execute_accuratebids',
+  accuratebids_contact_patch: 'execute_accuratebids',
 };
 
 function statusFor(err: unknown): number {
