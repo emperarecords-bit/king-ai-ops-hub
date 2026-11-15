@@ -200,6 +200,17 @@ function lineList(v: unknown, fmt: (x: Record<string, unknown>) => string): stri
 
 function renderQuoteOrInvoice(p: Record<string, unknown>, kind: 'quote' | 'invoice'): ApprovalContentView {
   const b = new Builder();
+  // Letterhead. The owner is confirming which business name the customer sees at the top of the
+  // document, so it is never left implicit — a company name that only exists inside the payload is
+  // one the owner did not actually approve. Absent, the field is omitted and the profile name
+  // applies, which is the status quo this card has always described.
+  //
+  // On a FROM-QUOTE invoice an explicit override deliberately re-pins the invoice away from the
+  // name frozen on the quote, so the invoice will NOT match the quote the customer is already
+  // holding. That is the one consequence of this field the owner cannot work out from the rest of
+  // the card, so it is spelled out here rather than left to the endpoint's comments.
+  const billAs = firstStr(p, ['company_name_override']);
+  const repinsFromQuote = billAs !== null && kind === 'invoice' && firstStr(p, ['quote_id']) !== null;
   b.field('Customer', firstStr(p, ['customer_name']))
     .field('Customer email', firstStr(p, ['customer_email']))
     .field('Customer phone', firstStr(p, ['customer_phone']))
@@ -207,6 +218,16 @@ function renderQuoteOrInvoice(p: Record<string, unknown>, kind: 'quote' | 'invoi
     .field('Address', firstStr(p, ['job_address']))
     .field('Job type', firstStr(p, ['job_type']))
     .field('From quote', firstStr(p, ['quote_id']))
+    .field(
+      'Bill as',
+      billAs === null
+        ? null
+        : repinsFromQuote
+          ? // Kept short on purpose: a 200-char trading name plus this note still fits inside
+            // MAX_FIELD_CHARS, so the warning can never be the part that gets truncated away.
+            `${billAs} — re-pins this invoice; will NOT match the quote's letterhead`
+          : billAs,
+    )
     .field('Markup %', firstStr(p, ['markup_percent']))
     .field('Tax %', firstStr(p, ['tax_percent']))
     .field('Due (days)', firstStr(p, ['due_days']));
