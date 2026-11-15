@@ -201,6 +201,73 @@ export function accurateBidsSendKey(approvalId: string): string {
 }
 
 /**
+ * Correcting the customer's contact details on an EXISTING DRAFT quote — hub-quote's second
+ * action (`action: "patch_contact"`, live in AccurateBids production since hub-quote v7).
+ *
+ * WHY THIS IS A SEPARATE KIND and not a field on the quote payload: it targets a quote that
+ * already exists. Everything else in this file creates a record; this one amends one.
+ *
+ * WHAT IT CANNOT DO, by construction on the AccurateBids side:
+ *   - It SENDS NOTHING. No email, no SMS, no status change — that is the entire reason the
+ *     endpoint exists, since `hub-send` could only save an address by emailing at the same time.
+ *   - DRAFT ONLY. A sent quote's contact details are part of what the customer already received,
+ *     so AccurateBids refuses one with a 409 rather than quietly skipping it.
+ *   - It cannot reach another company's quote: the contractor comes from the bearer token and the
+ *     quote lookup is scoped to it, so an id from the wrong account reads as 404 / not found.
+ *
+ * WHAT IT DOES DO, and the owner must see it on the card: it OVERWRITES whatever address or
+ * number is on file. That is deliberate upstream — a correction path that cannot overwrite cannot
+ * fix a typo, which is the only reason it exists — but the Hub has no way to show the owner the
+ * value being replaced. `hub-snapshot` deliberately strips `customer_email` (it exposes only
+ * `has_email`) and never returns `customer_phone` at all, so the old value is not ours to read.
+ * The confirm card therefore says "replacing whatever is on file" rather than naming it, and the
+ * executor reports what AccurateBids has AFTERWARDS plus its `changed` list, which is the only
+ * honest account of what actually moved.
+ *
+ * CLEARING IS NOT SUPPORTED on either side: an absent field is left alone, and a blank one is
+ * refused here (and 400s there) rather than wiping a contact detail because a payload carried an
+ * empty string.
+ *
+ * NO IDEMPOTENCY KEY, unlike `accuratebids_send`: setting a field to the same value twice is the
+ * same state, and `changed: []` reports a no-op honestly, so a retry is harmless by construction
+ * rather than by bookkeeping.
+ */
+export const accurateBidsContactPatchPayloadSchema = z
+  .object({
+    kind: z.literal('accuratebids_contact_patch'),
+    /** The existing DRAFT quote to correct. */
+    quote_id: z.string().uuid(),
+    /**
+     * The corrected address. Validated against the same rule hub-send uses, which is stricter than
+     * hub-quote's own check, so anything accepted here is accepted there — never the reverse.
+     */
+    customer_email: z
+      .string()
+      .trim()
+      .max(200)
+      .regex(ACCURATEBIDS_EMAIL_RE, 'must be one plain email address')
+      .optional(),
+    /**
+     * The corrected number. Formatting is the customer's business, but AccurateBids requires at
+     * least 7 digits — mirrored here so a non-number is refused before the request is made.
+     */
+    customer_phone: z
+      .string()
+      .trim()
+      .max(40)
+      .refine((v) => (v.match(/\d/g) ?? []).length >= 7, 'must contain at least 7 digits')
+      .optional(),
+    /** Display only (what the owner confirmed) — the endpoint re-reads the quote itself. */
+    label: z.string().max(200).optional(),
+  })
+  .strict()
+  .refine((p) => p.customer_email !== undefined || p.customer_phone !== undefined, {
+    message: 'Provide customer_email, customer_phone, or both.',
+  });
+
+export type AccurateBidsContactPatchPayload = z.infer<typeof accurateBidsContactPatchPayloadSchema>;
+
+/**
  * What to append to a success message about the company name a document was issued under.
  *
  * `reported` is what AccurateBids read back: `will_bill_as` on a draft quote (nothing is frozen
@@ -320,6 +387,12 @@ export class AccurateBidsQuoteExecutor implements Executor {
     // Customer send (invoice / reminder / quote) — routes to hub-send, keyed by the approval.
     if (kindPeek === 'accuratebids_send') {
       return this.executeSend(action, result, serviceToken);
+    }
+
+    // Contact correction on an existing DRAFT quote — hub-quote's `patch_contact` action. Same
+    // endpoint as drafting, so it is configured (or not) together with it.
+    if (kindPeek === 'accuratebids_contact_patch') {
+      return this.executeContactPatch(action, result, serviceToken);
     }
     if (kindPeek === 'accuratebids_reply') {
       const replyParsed = accurateBidsReplyPayloadSchema.safeParse(action.payload);
@@ -591,6 +664,126 @@ export class AccurateBidsQuoteExecutor implements Executor {
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'unknown error';
       return result('ambiguous', `Could not confirm whether the ${what} was emailed (${detail}). Check the customer's email log in AccurateBids before retrying.`, plan, { reconciliation: 'required' });
+    }
+  }
+
+  /**
+   * Correct `customer_email` / `customer_phone` on ONE existing DRAFT quote through hub-quote's
+   * `patch_contact` action. Emails nothing, changes no status, and touches no other field.
+   *
+   * Outcome mapping follows the send lane's rule — honest over tidy. A refusal that means the
+   * quote cannot be amended (gone, not ours, no longer a draft, or it moved mid-write) is
+   * `blocked`: a retry of the same payload would be refused the same way, so it needs a new
+   * decision rather than another attempt. Anything that could have written without confirming is
+   * `ambiguous`, and there a retry IS safe — the patch is idempotent — which the message says.
+   */
+  private async executeContactPatch(
+    action: ExecutorAction,
+    result: (
+      outcome: ExecutorResult['outcome'],
+      message: string,
+      preview: Record<string, unknown> | null,
+      opts?: { reconciliation?: ExecutorResult['reconciliation']; retryAllowed?: boolean },
+    ) => ExecutorResult,
+    /** Already resolved for this action's workspace by execute() — never re-read from deps. */
+    serviceToken: string | undefined,
+  ): Promise<ExecutorResult> {
+    const parsed = accurateBidsContactPatchPayloadSchema.safeParse(action.payload);
+    if (!parsed.success) {
+      const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+      return result('blocked', `accuratebids_contact_patch payload is not executable: ${issues}`, null);
+    }
+    if (!this.deps.endpointUrl || !serviceToken) {
+      return result('blocked', 'The AccurateBids connection is not configured on this server.', null);
+    }
+    const p = parsed.data;
+    const asked: string[] = [
+      ...(p.customer_email !== undefined ? ['customer_email'] : []),
+      ...(p.customer_phone !== undefined ? ['customer_phone'] : []),
+    ];
+    const human = (f: string) => (f === 'customer_email' ? 'email' : 'phone');
+    const askedWords = asked.map(human).join(' and ');
+    // The plan (audit) records WHICH fields the owner asked to set, never the values — the same
+    // posture as the send lane. The address is already in the approval payload the owner
+    // confirmed and hash-pinned; copying the customer's contact details into a second row buys
+    // nothing. `changed` below is field NAMES for the same reason.
+    const plan = {
+      kind: p.kind,
+      quoteId: p.quote_id,
+      label: p.label ?? null,
+      fields: asked,
+      sendsNothing: true,
+    };
+    if (action.mode === 'dry_run') {
+      return result('not_executed', `Dry run only. Would correct the customer's ${askedWords} on that draft quote. Nothing would be emailed.`, {
+        ...plan,
+        wouldExecute: true,
+      });
+    }
+    try {
+      const fetcher = this.deps.fetcher ?? fetch;
+      const res = await fetcher(this.deps.endpointUrl, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${serviceToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'patch_contact',
+          quote_id: p.quote_id,
+          ...(p.customer_email !== undefined ? { customer_email: p.customer_email } : {}),
+          ...(p.customer_phone !== undefined ? { customer_phone: p.customer_phone } : {}),
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      const text = await res.text();
+      let body: Record<string, unknown> = {};
+      try {
+        body = JSON.parse(text) as Record<string, unknown>;
+      } catch {
+        // Non-JSON body; the status carries the verdict.
+      }
+      const detail = typeof body.error === 'string' ? body.error : `HTTP ${res.status}`;
+      if (res.ok && body.success === true) {
+        // What AccurateBids says actually differed — the authoritative account of the write, and
+        // the only way a no-op can be reported as a no-op instead of a silent success.
+        const changed = Array.isArray(body.changed) ? body.changed.filter((f): f is string => typeof f === 'string') : [];
+        // Read back off the row, so this is what the quote now holds rather than what we asked for.
+        const nowEmail = typeof body.customer_email === 'string' && body.customer_email ? body.customer_email : null;
+        const nowPhone = typeof body.customer_phone === 'string' && body.customer_phone ? body.customer_phone : null;
+        const onFile = [nowEmail ? `email ${nowEmail}` : null, nowPhone ? `phone ${nowPhone}` : null]
+          .filter((x): x is string => x !== null)
+          .join(', ');
+        const didChange =
+          changed.length === 0
+            ? `That draft quote already had exactly that ${askedWords} — nothing changed.`
+            : `Updated the customer's ${changed.map(human).join(' and ')} on that draft quote.`;
+        return result('succeeded', `${didChange}${onFile ? ` It now has ${onFile}.` : ''} Nothing was emailed to the customer.`, {
+          ...plan,
+          changed,
+          // hub-quote states this explicitly in its response; recorded rather than assumed.
+          sent: body.sent === true,
+        });
+      }
+      if (res.status >= 500) {
+        return result(
+          'ambiguous',
+          `Could not confirm the correction (${detail}). Open that quote in AccurateBids to see the customer's details as they now stand — nothing was emailed either way, and re-sending the same correction is harmless.`,
+          plan,
+          { reconciliation: 'required' },
+        );
+      }
+      if (res.status === 400 || res.status === 404 || res.status === 409) {
+        // 404: gone, or another company's quote (indistinguishable on purpose). 409: no longer a
+        // draft, or it moved between the read and the write — in both cases nothing was written.
+        return result('blocked', `That quote's contact details were not changed: ${detail}`, plan);
+      }
+      return result('failed', `That quote's contact details were not changed: ${detail}`, plan, { retryAllowed: true });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unknown error';
+      return result(
+        'ambiguous',
+        `Could not confirm the correction (${detail}). Open that quote in AccurateBids to see the customer's details as they now stand — nothing was emailed either way, and re-sending the same correction is harmless.`,
+        plan,
+        { reconciliation: 'required' },
+      );
     }
   }
 

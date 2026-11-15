@@ -264,6 +264,45 @@ function renderSend(p: Record<string, unknown>): ApprovalContentView {
   );
 }
 
+/**
+ * Correcting the customer's contact details on an existing DRAFT quote.
+ *
+ * The one thing this card has to get across is that it OVERWRITES. Every other AccurateBids card
+ * describes something being created; this one replaces a value the owner may be relying on, and
+ * the Hub genuinely cannot show them what it is replacing — `hub-snapshot` strips
+ * `customer_email` (exposing only `has_email`) and never returns `customer_phone` at all. So the
+ * card states the overwrite plainly and says the current value is not visible here, rather than
+ * implying a before/after it cannot produce. The body carries it as well as the fields, so the
+ * warning survives even if the field list is ever capped.
+ */
+function renderContactPatch(p: Record<string, unknown>): ApprovalContentView {
+  const b = new Builder();
+  const email = firstStr(p, ['customer_email']);
+  const phone = firstStr(p, ['customer_phone']);
+  const which = [email !== null ? 'email' : null, phone !== null ? 'phone' : null]
+    .filter((x): x is string => x !== null)
+    .join(' and ');
+  b.field('Quote', firstStr(p, ['label']))
+    .field('Quote id', firstStr(p, ['quote_id']))
+    // Shown in full: these are the exact values the owner is confirming will be written.
+    .field('New email', email)
+    .field('New phone', phone)
+    // "whatever … it has now" on purpose: the quote may have a value, or none at all, and the Hub
+    // cannot tell which. Wording that implied either would be a claim it cannot support.
+    .field('Replaces', `whatever ${which} the quote has now — not visible to the Hub`);
+  const body = [
+    `This OVERWRITES the customer's ${which} on this DRAFT quote with the value${which.includes('and') ? 's' : ''} above, whatever is on it now.`,
+    'The current value is not visible to the Hub — open the quote in AccurateBids first if you need to see what it is replacing.',
+    '',
+    'Nothing is emailed to the customer and the quote stays a draft. Only a draft can be corrected this way; if it has already been sent, AccurateBids refuses the change.',
+  ].join('\n');
+  return b.build(
+    'quote',
+    "Correct the customer's contact details on an AccurateBids DRAFT quote (overwrites what is on file; emails nothing)",
+    cap(scrub(body, b.acc), MAX_BODY_CHARS, b.acc),
+  );
+}
+
 function renderHttp(p: Record<string, unknown>): ApprovalContentView {
   const b = new Builder();
   b.field('Method', (firstStr(p, ['method']) ?? 'unspecified').toUpperCase()).field(
@@ -318,6 +357,7 @@ export function renderApprovalContent(actionType: string, payload: unknown): App
     if (p.kind === 'accuratebids_quote') return withPre(renderQuoteOrInvoice(p, 'quote'));
     if (p.kind === 'accuratebids_invoice') return withPre(renderQuoteOrInvoice(p, 'invoice'));
     if (p.kind === 'accuratebids_send') return withPre(renderSend(p));
+    if (p.kind === 'accuratebids_contact_patch') return withPre(renderContactPatch(p));
     return withPre(renderHttp(p));
   }
   return withPre(renderJson(p, actionType));
